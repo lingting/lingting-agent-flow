@@ -26,6 +26,14 @@ const testUser = "tester"
 // testPassword 是测试 SSH 服务的登录密码。
 const testPassword = "test-password"
 
+// testServerOptions 控制测试 SSH 服务的行为。
+type testServerOptions struct {
+	// AuthorizedKey 非空时只接受该公钥认证；为空时接受任意公钥。
+	AuthorizedKey ssh.PublicKey
+	// RejectPassword 为 true 时拒绝密码认证，用于验证只接受私钥的场景。
+	RejectPassword bool
+}
+
 // testServer 是本地测试用 SSH/SFTP 服务端。
 //
 // 它只用于测试：真实握手、真实认证、真实主机密钥校验与真实 SFTP 传输，
@@ -35,30 +43,51 @@ type testServer struct {
 	listener net.Listener
 	hostKey  ssh.Signer
 	config   *ssh.ServerConfig
+	options  testServerOptions
 
-	mu       sync.Mutex
+	mu sync.Mutex
+	// sessions 是当前活动的会话通道数量，用于验证资源释放。
 	sessions int
-	closed   bool
-	done     chan struct{}
+	// connections 是当前活动的 SSH 连接数量。
+	connections int
+	// executing 是当前正在执行命令的会话数量，用于验证取消一个命令不影响其他调用。
+	executing int
+	// maxExecuting 是观察到的并发执行命令数量峰值。
+	maxExecuting int
+	closed       bool
+	done         chan struct{}
 }
 
 // newTestServer 启动一个本地测试 SSH 服务。
 func newTestServer(t *testing.T) *testServer {
 	t.Helper()
-	server := &testServer{t: t, done: make(chan struct{})}
+	return newTestServerWithOptions(t, testServerOptions{})
+}
+
+// newTestServerWithOptions 按指定选项启动一个本地测试 SSH 服务。
+func newTestServerWithOptions(t *testing.T, options testServerOptions) *testServer {
+	t.Helper()
+	server := &testServer{t: t, done: make(chan struct{}), options: options}
 	server.hostKey = generateHostKey(t)
 	server.config = &ssh.ServerConfig{
 		PasswordCallback: func(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
+			if options.RejectPassword {
+				return nil, errors.New("认证失败")
+			}
 			if conn.User() == testUser && string(password) == testPassword {
 				return nil, nil
 			}
 			return nil, errors.New("认证失败")
 		},
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			if conn.User() == testUser {
-				return nil, nil
+			if conn.User() != testUser {
+				return nil, errors.New("认证失败")
 			}
-			return nil, errors.New("认证失败")
+			if options.AuthorizedKey != nil &&
+				string(options.AuthorizedKey.Marshal()) != string(key.Marshal()) {
+				return nil, errors.New("认证失败")
+			}
+			return nil, nil
 		},
 	}
 	server.config.AddHostKey(server.hostKey)
@@ -125,8 +154,8 @@ func (s *testServer) handleConn(raw net.Conn) {
 		_ = serverConn.Close()
 	}()
 	go ssh.DiscardRequests(requests)
-	s.trackSession(1)
-	defer s.trackSession(-1)
+	s.trackConnection(1)
+	defer s.trackConnection(-1)
 	for newChannel := range channels {
 		go s.handleChannel(newChannel)
 	}
@@ -139,11 +168,49 @@ func (s *testServer) trackSession(delta int) {
 	s.sessions += delta
 }
 
+// trackConnection 记录当前活动的 SSH 连接数。
+func (s *testServer) trackConnection(delta int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.connections += delta
+}
+
 // activeSessions 返回当前活动会话数。
 func (s *testServer) activeSessions() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.sessions
+}
+
+// activeConnections 返回当前活动的 SSH 连接数。
+func (s *testServer) activeConnections() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.connections
+}
+
+// beginExec 记录一个开始执行的命令会话。
+func (s *testServer) beginExec() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.executing++
+	if s.executing > s.maxExecuting {
+		s.maxExecuting = s.executing
+	}
+}
+
+// endExec 记录一个执行结束的命令会话。
+func (s *testServer) endExec() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.executing--
+}
+
+// executingPeak 返回观察到的并发执行命令数量峰值。
+func (s *testServer) executingPeak() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.maxExecuting
 }
 
 // handleChannel 按通道类型分派处理。
@@ -159,25 +226,35 @@ func (s *testServer) handleChannel(newChannel ssh.NewChannel) {
 }
 
 // handleSession 处理会话通道：支持 exec 与 sftp 子系统。
+//
+// exec 在独立 goroutine 中执行，使主循环能够继续处理 signal 请求；
+// 客户端关闭会话通道时请求循环结束，长命令通过 closed 通道感知并结束。
 func (s *testServer) handleSession(newChannel ssh.NewChannel) {
 	channel, requests, err := newChannel.Accept()
 	if err != nil {
 		return
 	}
+	closed := make(chan struct{})
 	defer func() {
+		close(closed)
 		_ = channel.Close()
 	}()
+	s.trackSession(1)
+	defer s.trackSession(-1)
 	for request := range requests {
 		switch request.Type {
 		case "exec":
-			// exec 必须同步执行并在结束后关闭通道，否则客户端会一直等待会话结束。
-			s.handleExec(channel, request)
-			return
+			// 回放 exit-status 前不能关闭通道，因此把执行放到独立 goroutine，
+			// 并让请求循环继续处理 signal 与关闭事件。
+			_ = request.Reply(true, nil)
+			go s.handleExec(channel, request, closed)
 		case "subsystem":
 			if !s.handleSubsystem(channel, request) {
 				return
 			}
+			return
 		case "signal":
+			// 测试服务不真正转发信号：客户端中断命令依赖关闭会话通道。
 			_ = request.Reply(true, nil)
 		case "env", "pty-req":
 			_ = request.Reply(true, nil)
@@ -195,20 +272,31 @@ type execRequest struct {
 // handleExec 执行一条受控的测试命令。
 //
 // 只支持测试所需的固定命令，避免在测试里实现完整的 shell。
-func (s *testServer) handleExec(channel ssh.Channel, request *ssh.Request) {
+func (s *testServer) handleExec(
+	channel ssh.Channel,
+	request *ssh.Request,
+	closed <-chan struct{},
+) {
 	var payload execRequest
 	if err := ssh.Unmarshal(request.Payload, &payload); err != nil {
-		_ = request.Reply(false, nil)
 		return
 	}
-	_ = request.Reply(true, nil)
-	code := s.runCommand(channel, payload.Command)
+	// exec 请求已在 handleSession 中回复，这里只执行命令并回放退出状态。
+	s.beginExec()
+	code := s.runCommand(channel, payload.Command, closed)
+	s.endExec()
 	status := struct{ Status uint32 }{Status: uint32(code)}
 	_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(&status))
+	// 命令结束后必须关闭通道，客户端才会认为会话已结束并返回 Wait。
+	_ = channel.Close()
 }
 
 // runCommand 执行受支持的测试命令并返回退出码。
-func (s *testServer) runCommand(channel ssh.Channel, command string) int {
+func (s *testServer) runCommand(
+	channel ssh.Channel,
+	command string,
+	closed <-chan struct{},
+) int {
 	fields := strings.Fields(command)
 	if len(fields) == 0 {
 		return 1
@@ -234,7 +322,29 @@ func (s *testServer) runCommand(channel ssh.Channel, command string) int {
 		_, _ = channel.Write([]byte(strings.Repeat("x", 64*1024)))
 		return 0
 	case "slow":
-		time.Sleep(5 * time.Second)
+		// 客户端关闭会话后立即结束，用于验证取消与超时确实关闭了远程会话，
+		// 而不是只让本地停止等待。
+		select {
+		case <-time.After(5 * time.Second):
+		case <-closed:
+		}
+		return 0
+	case "exit":
+		if len(fields) < 2 {
+			return 1
+		}
+		code, err := strconv.Atoi(fields[1])
+		if err != nil {
+			return 1
+		}
+		_, _ = channel.Write([]byte("exiting\n"))
+		return code
+	case "sleepy":
+		// 与 slow 相同，但用于并发场景下观察多个命令是否同时在执行。
+		select {
+		case <-time.After(400 * time.Millisecond):
+		case <-closed:
+		}
 		return 0
 	default:
 		_, _ = channel.Stderr().Write([]byte("unknown command\n"))

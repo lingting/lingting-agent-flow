@@ -17,6 +17,7 @@ tests/
 │   ├── config/         # 配置加载与校验
 │   ├── domain/         # 领域模型与状态迁移
 │   ├── process/        # 子进程监管
+│   ├── ssh/            # SSH 主机密钥、认证配置、路径与结果状态
 │   ├── store/          # SQLite 仓储与数据库约束
 │   └── testkit/        # testkit 自身的测试
 ├── integration/
@@ -55,6 +56,8 @@ go test -count=1 -v -p 8 -parallel 8 ./tests/...
 
 # 竞态检测
 go test -race -count=1 ./tests/unit/...
+# 竞态检测（SSH 连接管理与并发操作，需要真实协议交互）
+go test -race -count=1 ./tests/integration/local/ssh/...
 ```
 
 并发由 Go 测试工具负责：`-p` 控制同时运行的测试包数量，`-parallel` 控制单个包内
@@ -73,6 +76,23 @@ TEST_ARTIFACT_DIR=<绝对路径>
 
 测试结束只关闭数据库连接、子进程与监听端口，**不删除任何测试产物**，便于检查失败
 现场。需要清理时由开发者手动删除 `lingting-agent-flow-tests` 下的历史目录。
+
+## SSH 测试分层
+
+| 目录 | 内容 | 外部依赖 |
+|---|---|---|
+| `tests/unit/ssh/` | 主机密钥指纹与结论、认证配置、私钥路径、参数转义、远程路径、结果状态 | 无 |
+| `tests/integration/local/ssh/` | 本机真实 SSH 握手与认证、远程命令执行、取消与超时、SFTP 传输、工作空间解析、并发与资源释放 | 无（测试内启动服务端） |
+| `tests/integration/ssh/` | 真实远程 Linux 机器上的认证、命令状态、超时、SFTP 与工作空间 | 环境变量指定的 SSH 目标 |
+
+本机集成测试使用 `golang.org/x/crypto/ssh` 启动真实的服务端进程内实例，并配合
+`github.com/pkg/sftp` 的服务端实现，因此主机密钥校验、密码/私钥/Agent 认证、
+SFTP 上传下载与远程命令执行都经过真实协议交互，但不访问外网。
+
+SSH Agent 用例在测试工作空间中创建 Unix 套接字并提供 Agent 协议服务；平台不支持
+Unix 套接字时该用例输出 `WARN [SKIP]` 并跳过，其余用例仍会执行。
+
+所有 SSH 测试都禁止关闭主机密钥校验，禁止自动接受未知主机密钥。
 
 ## 环境变量
 

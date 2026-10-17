@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -518,4 +519,205 @@ func writeTestPrivateKey(t *testing.T) string {
 		t.Fatalf("写入测试私钥失败: %v", err)
 	}
 	return path
+}
+
+// TestHostTrustRequiresVerifiedFingerprint 校验非交互环境不会自动信任未知主机密钥。
+func TestHostTrustRequiresVerifiedFingerprint(t *testing.T) {
+	t.Parallel()
+	configPath := hostConfig(t)
+	host, port := startSSHHandshakeServer(t)
+	if code, _, stderr := run(
+		t,
+		"host", "add",
+		"--config", configPath,
+		"--id", "node-trust",
+		"--host", host,
+		"--port", fmt.Sprint(port),
+		"--user", "deploy",
+	); code != 0 {
+		t.Fatalf("新增节点应成功，错误: %s", stderr)
+	}
+	// 未给出 --fingerprint 与 --yes 时必须拒绝写入信任记录。
+	code, _, stderr := run(t, "host", "trust", "node-trust", "--config", configPath)
+	if code == 0 {
+		t.Fatal("缺少核验指纹时不得写入信任记录")
+	}
+	if !strings.Contains(stderr, "指纹") {
+		t.Fatalf("错误信息应说明缺少核验指纹，实际: %s", stderr)
+	}
+	// 给出与真实服务端不符的指纹时同样必须拒绝。
+	code, _, stderr = run(
+		t,
+		"host", "trust", "node-trust",
+		"--config", configPath,
+		"--fingerprint", "SHA256:not-the-real-fingerprint",
+		"--yes",
+	)
+	if code == 0 {
+		t.Fatal("指纹不一致时不得写入信任记录")
+	}
+	if !strings.Contains(stderr, "探测主机密钥失败") && !strings.Contains(stderr, "指纹") {
+		t.Fatalf("错误信息应说明探测或指纹问题，实际: %s", stderr)
+	}
+}
+
+// TestHostWorkspaceRequiresCredentials 校验非交互环境缺少凭据时立即失败。
+func TestHostWorkspaceRequiresCredentials(t *testing.T) {
+	t.Parallel()
+	configPath := hostConfig(t)
+	if code, _, stderr := run(
+		t,
+		"host", "add",
+		"--config", configPath,
+		"--id", "node-workspace",
+		"--host", "127.0.0.1",
+		"--port", "1",
+		"--user", "deploy",
+		"--auth", "password",
+	); code != 0 {
+		t.Fatalf("新增节点应成功，错误: %s", stderr)
+	}
+	code, _, stderr := run(t, "host", "workspace", "node-workspace", "--config", configPath)
+	if code == 0 {
+		t.Fatal("缺少凭据时应返回非零退出码")
+	}
+	if !strings.Contains(stderr, "没有可用的凭据") {
+		t.Fatalf("错误信息应说明缺少凭据，实际: %s", stderr)
+	}
+}
+
+// TestHostDownloadAcceptsMaxBytesFlag 校验下载命令暴露大小上限参数。
+func TestHostDownloadAcceptsMaxBytesFlag(t *testing.T) {
+	t.Parallel()
+	code, stdout, stderr := run(t, "host", "transfer", "download", "--help")
+	if code != 0 {
+		t.Fatalf("download --help 应成功，实际退出码 %d，错误: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "--max-bytes") {
+		t.Fatalf("帮助输出应包含 --max-bytes，实际: %s", stdout)
+	}
+}
+
+// startSSHHandshakeServer 启动一个只完成 SSH 握手的最小服务端。
+//
+// 它用于验证主机密钥探测与信任流程：服务端提供真实的主机密钥，但不接受任何
+// 身份认证，因此客户端只会取得主机密钥指纹而不会建立已认证连接。
+func startSSHHandshakeServer(t *testing.T) (string, int) {
+	t.Helper()
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("生成主机密钥失败: %v", err)
+	}
+	signer, err := ssh.NewSignerFromKey(privateKey)
+	if err != nil {
+		t.Fatalf("构造主机密钥签名器失败: %v", err)
+	}
+	config := &ssh.ServerConfig{
+		PasswordCallback: func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error) {
+			return nil, errors.New("拒绝认证")
+		},
+	}
+	config.AddHostKey(signer)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("启动测试 SSH 服务失败: %v", err)
+	}
+	t.Cleanup(func() {
+		if closeErr := listener.Close(); closeErr != nil {
+			t.Logf("关闭测试 SSH 监听失败: %v", closeErr)
+		}
+	})
+	go func() {
+		for {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer func() {
+					_ = conn.Close()
+				}()
+				_, _, _, handshakeErr := ssh.NewServerConn(conn, config)
+				if handshakeErr != nil {
+					return
+				}
+			}(conn)
+		}
+	}()
+	address, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("监听地址类型不符: %T", listener.Addr())
+	}
+	return address.IP.String(), address.Port
+}
+
+// TestHostTrustRecordsVerifiedFingerprint 校验核验指纹后可以写入信任记录。
+func TestHostTrustRecordsVerifiedFingerprint(t *testing.T) {
+	t.Parallel()
+	configPath := hostConfig(t)
+	host, port := startSSHHandshakeServer(t)
+	if code, _, stderr := run(
+		t,
+		"host", "add",
+		"--config", configPath,
+		"--id", "node-trust-ok",
+		"--host", host,
+		"--port", fmt.Sprint(port),
+		"--user", "deploy",
+	); code != 0 {
+		t.Fatalf("新增节点应成功，错误: %s", stderr)
+	}
+	// 先探测取得服务端实际指纹。
+	code, stdout, stderr := run(t, "host", "trust", "node-trust-ok", "--config", configPath)
+	if code == 0 {
+		t.Fatal("未确认时不得写入信任记录")
+	}
+	if !strings.Contains(stdout, "SHA256:") {
+		t.Fatalf("探测输出应展示 SHA-256 指纹，实际 stdout: %q，stderr: %s", stdout, stderr)
+	}
+	fingerprint := extractFingerprint(t, stdout)
+	// 使用探测到的指纹显式确认后应当写入成功。
+	code, stdout, stderr = run(
+		t,
+		"host", "trust", "node-trust-ok",
+		"--config", configPath,
+		"--fingerprint", fingerprint,
+		"--yes",
+	)
+	if code != 0 {
+		t.Fatalf("核验指纹后应写入信任记录，实际退出码 %d，stdout: %s，stderr: %s", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "已记录主机密钥信任") {
+		t.Fatalf("输出应说明信任已记录，实际: %s", stdout)
+	}
+	// 再次写入应提示已受信任而不是重复追加。
+	code, _, stderr = run(
+		t,
+		"host", "trust", "node-trust-ok",
+		"--config", configPath,
+		"--fingerprint", fingerprint,
+		"--yes",
+	)
+	if code == 0 {
+		t.Fatal("已受信任的主机密钥不应重复写入")
+	}
+	if !strings.Contains(stderr, "已在信任记录中") {
+		t.Fatalf("错误信息应说明已受信任，实际: %s", stderr)
+	}
+}
+
+// extractFingerprint 从输出中提取 SHA-256 指纹。
+func extractFingerprint(t *testing.T, output string) string {
+	t.Helper()
+	const prefix = "SHA256:"
+	index := strings.Index(output, prefix)
+	if index < 0 {
+		t.Fatalf("输出中找不到指纹: %s", output)
+	}
+	rest := output[index:]
+	end := strings.IndexAny(rest, " \r\n\t")
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
 }

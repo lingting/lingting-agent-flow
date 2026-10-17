@@ -271,6 +271,7 @@ func newHostDownloadCommand(a *app.App) *cobra.Command {
 	var flags credentialFlags
 	var overwrite bool
 	var createParent bool
+	var maxBytes int64
 	command := &cobra.Command{
 		Use:   "download <id> <remote> <local>",
 		Short: "下载远程文件到本机路径",
@@ -287,9 +288,10 @@ func newHostDownloadCommand(a *app.App) *cobra.Command {
 					return err
 				}
 				err = service.DownloadFile(ctx, args[0], args[1], args[2], app.TransferOptions{
-					Credentials:  provider,
-					Overwrite:    overwrite,
-					CreateParent: createParent,
+					Credentials:      provider,
+					Overwrite:        overwrite,
+					CreateParent:     createParent,
+					MaxDownloadBytes: maxBytes,
 				})
 				if err != nil {
 					return err
@@ -302,6 +304,12 @@ func newHostDownloadCommand(a *app.App) *cobra.Command {
 	addCredentialFlags(&flags, command)
 	command.Flags().BoolVar(&overwrite, "overwrite", false, "允许覆盖已存在的本机文件")
 	command.Flags().BoolVar(&createParent, "create-parent", false, "按需递归创建本机父目录")
+	command.Flags().Int64Var(
+		&maxBytes,
+		"max-bytes",
+		0,
+		"允许下载的远程文件大小上限（字节），0 表示不限制",
+	)
 	return command
 }
 
@@ -462,9 +470,16 @@ func withSSHService(
 }
 
 // sshOptionsFrom 从应用配置推导 SSH 服务参数。
+//
+// 配置只提供路径与超时，凭据仍然只由命令行在连接时于内存中提供。
 func sshOptionsFrom(cfg *config.Config) app.SSHOptions {
 	if cfg == nil {
 		return app.SSHOptions{}
 	}
-	return app.SSHOptions{DatabasePath: cfg.Storage.DatabasePath}
+	return app.SSHOptions{
+		KnownHostsPath: cfg.SSH.KnownHostsPath,
+		StorePath:      cfg.SSH.KnownHostsStorePath,
+		DatabasePath:   cfg.Storage.DatabasePath,
+		ConnectTimeout: time.Duration(cfg.SSH.ConnectTimeoutSeconds) * time.Second,
+	}
 }

@@ -36,6 +36,7 @@ test-e2e:
 
 test-race:
 	go test -race -count=1 ./tests/unit/...
+	go test -race -count=1 ./tests/integration/local/ssh/...
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/agentflow

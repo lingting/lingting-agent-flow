@@ -294,9 +294,27 @@ func (s *SSHService) ProbeHostKey(ctx context.Context, id string) (HostKeyProbe,
 	if err != nil {
 		return HostKeyProbe{}, fmt.Errorf("探测主机密钥失败: %w", err)
 	}
-	info, err := s.dialer.ProbeHostKey(ctx, endpoint)
-	if err != nil {
-		return HostKeyProbe{Host: host, Info: info}, fmt.Errorf("探测主机密钥失败: %w", err)
+	info, probeErr := s.dialer.ProbeHostKey(ctx, endpoint)
+	// 主机密钥未知或不一致时握手会被拒绝，但此时已经取得服务端实际密钥；
+	// 这正是需要向用户展示指纹并请求确认的场景，因此不能直接返回错误。
+	if probeErr != nil {
+		code := sshclient.ErrorCodeOf(probeErr)
+		switch code {
+		case sshclient.CodeHostKeyUnknown,
+			sshclient.CodeHostKeyMismatch,
+			sshclient.CodeHostKeyRevoked:
+		default:
+			return HostKeyProbe{Host: host, Info: info}, fmt.Errorf(
+				"探测主机密钥失败: %w",
+				probeErr,
+			)
+		}
+		if info.Fingerprint == "" {
+			return HostKeyProbe{Host: host, Info: info}, fmt.Errorf(
+				"探测主机密钥失败: %w",
+				probeErr,
+			)
+		}
 	}
 	check, checkErr := s.hostKeys.Check(endpoint.Host, endpoint.Port, info.PublicKey())
 	probe := HostKeyProbe{
@@ -465,6 +483,8 @@ type TransferOptions struct {
 	Overwrite bool
 	// CreateParent 表示自动创建目标文件的父目录。
 	CreateParent bool
+	// MaxDownloadBytes 限制下载允许的远程文件大小，零值表示不限制。
+	MaxDownloadBytes int64
 }
 
 // UploadFile 通过 SFTP 上传本机文件到远程路径。
@@ -493,6 +513,7 @@ func (s *SSHService) DownloadFile(
 		return transfer.Download(ctx, remotePath, localPath, sshclient.DownloadOptions{
 			Overwrite:    options.Overwrite,
 			CreateParent: options.CreateParent,
+			MaxBytes:     options.MaxDownloadBytes,
 		})
 	})
 }

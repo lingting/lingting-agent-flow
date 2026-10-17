@@ -184,10 +184,11 @@ func (s *KnownHostsStore) Check(host string, port int, key ssh.PublicKey) (HostK
 			err,
 		)
 	}
-	address := knownhosts.Normalize(presented.Address())
-	// knownhosts 在 address 为空时会回落到 remote.String()，因此这里显式给出目标地址，
-	// 避免因传入 nil 地址而 panic。
-	checkErr := callback(address, &knownHostsAddr{address: presented.Address()}, key)
+	// 校验回调要求 address 是 host:port 形式：knownhosts.Normalize 在端口为 22 时
+	// 会去掉端口，直接传入会导致其内部的 SplitHostPort 失败，因此这里传入未规范化
+	// 的地址；只有写入记录时才使用 Normalize 得到 known_hosts 的书写形式。
+	address := presented.Address()
+	checkErr := callback(address, &knownHostsAddr{address: address}, key)
 	if checkErr == nil {
 		return HostKeyCheck{Verdict: VerdictTrusted, Presented: presented}, nil
 	}

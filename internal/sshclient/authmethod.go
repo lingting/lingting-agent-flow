@@ -66,19 +66,15 @@ func buildPasswordAuth(ctx context.Context, provider CredentialProvider) (authRe
 // buildPrivateKeyAuth 构造私钥文件认证。
 //
 // 私钥文件只被读取，不会被复制或修改；受口令保护的私钥需要提供器给出 passphrase。
+// 路径会先规范化为本机绝对路径，避免把私钥复制到工作空间或依赖当前工作目录。
 func buildPrivateKeyAuth(
 	ctx context.Context,
 	config AuthConfig,
 	provider CredentialProvider,
 ) (authResult, error) {
-	path := strings.TrimSpace(config.PrivateKeyPath)
-	if path == "" {
-		return authResult{}, newConnectError(
-			CodeInvalidConfig,
-			"",
-			"私钥认证必须指定私钥文件路径",
-			nil,
-		)
+	path, err := NormalizePrivateKeyPath(config.PrivateKeyPath)
+	if err != nil {
+		return authResult{}, err
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

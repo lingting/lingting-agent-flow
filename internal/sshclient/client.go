@@ -31,15 +31,16 @@ type Endpoint struct {
 
 // Client 表示一条已经完成主机密钥验证与身份认证的 SSH 连接。
 //
-// 调用方必须在使用结束后调用 Close 释放连接；Client 不保证并发安全，
-// 同一连接上的命令执行与文件传输应当串行或由调用方自行加锁。
+// 调用方必须在使用结束后调用 Close 释放连接。Client 允许并发使用：每次 Run
+// 使用独立的远程会话，取消或超时只关闭该次会话，不影响同一连接上的其他调用；
+// Close 会关闭整条连接，因此不应与仍在进行的操作并发调用。
 type Client interface {
 	// Endpoint 返回本次连接的目标。
 	Endpoint() Endpoint
 	// Run 执行远程命令并返回退出码与输出。
 	//
-	// 非零退出码通过 CommandResult.ExitCode 表达，不视为传输层错误；
-	// error 只在无法执行命令、连接断开、超时或取消时返回。
+	// 非零退出码通过 CommandResult.ExitCode 与 CommandStatusExitError 表达，
+	// 不视为传输层错误；error 只在无法执行命令、连接断开、超时或取消时返回。
 	Run(ctx context.Context, command string, options RunOptions) (CommandResult, error)
 	// SFTP 打开一个新的 SFTP 子系统通道。
 	//
@@ -50,10 +51,37 @@ type Client interface {
 	Close() error
 }
 
+// CommandStatus 是远程命令的结果状态。
+//
+// 只凭退出码无法区分"命令以非零码正常结束"与"命令被取消、超时或连接中断"，
+// 因此结果状态独立于退出码表达。
+type CommandStatus string
+
+// 远程命令结果状态取值。
+const (
+	// CommandStatusSucceeded 表示命令以退出码 0 正常结束。
+	CommandStatusSucceeded CommandStatus = "succeeded"
+	// CommandStatusExitError 表示命令正常结束但退出码非零。
+	CommandStatusExitError CommandStatus = "exit_error"
+	// CommandStatusTimeout 表示命令因超时被中断。
+	CommandStatusTimeout CommandStatus = "timeout"
+	// CommandStatusCancelled 表示命令因调用方取消被中断。
+	CommandStatusCancelled CommandStatus = "cancelled"
+	// CommandStatusConnectionError 表示会话创建失败、连接中断或未取得退出码。
+	CommandStatusConnectionError CommandStatus = "connection_error"
+)
+
+// String 返回结果状态的字符串形式。
+func (s CommandStatus) String() string {
+	return string(s)
+}
+
 // CommandResult 是远程命令的执行结果。
 type CommandResult struct {
 	// Command 是实际执行的命令字符串。
 	Command string
+	// Status 是结果状态，能区分成功、非零退出、超时、取消与连接中断。
+	Status CommandStatus
 	// ExitCode 是远程进程的退出码；未能取得退出码时为 -1。
 	ExitCode int
 	// Stdout 是标准输出内容，超过上限时只保留前缀。
@@ -66,16 +94,39 @@ type CommandResult struct {
 	StderrTruncated bool
 	// Duration 是命令执行耗时。
 	Duration time.Duration
+	// TerminationConfirmed 表示是否确认远程命令已经结束。
+	//
+	// 正常结束时为 true；超时或取消时本端已关闭会话通道，但 SSH 协议不保证
+	// 远程进程一定被终止，因此该字段为 false，调用方不得据此认为远程进程已退出。
+	TerminationConfirmed bool
 }
 
-// Succeeded 判断命令是否以退出码 0 结束。
+// Succeeded 判断命令是否以退出码 0 正常结束。
+//
+// 超时、取消与连接中断一律不算成功，即使已经收到部分标准输出。
 func (r CommandResult) Succeeded() bool {
+	switch r.Status {
+	case CommandStatusTimeout, CommandStatusCancelled, CommandStatusConnectionError:
+		return false
+	}
 	return r.ExitCode == 0
+}
+
+// TimedOut 判断命令是否因超时被中断。
+func (r CommandResult) TimedOut() bool {
+	return r.Status == CommandStatusTimeout
+}
+
+// Cancelled 判断命令是否因调用方取消被中断。
+func (r CommandResult) Cancelled() bool {
+	return r.Status == CommandStatusCancelled
 }
 
 // RunOptions 约束一次远程命令执行。
 type RunOptions struct {
 	// Timeout 是本次执行的超时时间，零值表示只受 ctx 限制。
+	//
+	// 超时会中断远程命令并关闭对应会话，不影响同一连接上的其他操作。
 	Timeout time.Duration
 	// MaxOutputBytes 是标准输出与标准错误各自保留的字节上限。
 	//

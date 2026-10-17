@@ -20,12 +20,43 @@ var ErrRemotePathExists = fmt.Errorf("sshclient: 远程目标已存在")
 // ErrLocalPathExists 表示本机目标已存在且调用方要求不覆盖。
 var ErrLocalPathExists = fmt.Errorf("sshclient: 本机目标已存在")
 
+// ErrRemoteSizeExceeded 表示远程文件超过调用方允许的大小上限。
+var ErrRemoteSizeExceeded = fmt.Errorf("sshclient: 远程文件超过允许的大小上限")
+
+// ErrUnsupportedRemoteType 表示远程路径类型不允许执行当前操作。
+var ErrUnsupportedRemoteType = fmt.Errorf("sshclient: 远程路径类型不受支持")
+
+// FileKind 是远程路径的类型。
+//
+// 上传与删除等操作必须区分普通文件、目录、符号链接与其他类型，
+// 不能只依赖"不是目录"这一条判断。
+type FileKind string
+
+// 远程路径类型取值。
+const (
+	// FileKindRegular 表示普通文件。
+	FileKindRegular FileKind = "regular"
+	// FileKindDirectory 表示目录。
+	FileKindDirectory FileKind = "directory"
+	// FileKindSymlink 表示符号链接。
+	FileKindSymlink FileKind = "symlink"
+	// FileKindOther 表示设备、管道、套接字等其他类型。
+	FileKindOther FileKind = "other"
+)
+
+// String 返回远程路径类型的字符串形式。
+func (k FileKind) String() string {
+	return string(k)
+}
+
 // FileInfo 是远程文件或目录的属性快照。
 type FileInfo struct {
 	// Path 是规范化后的远程绝对路径。
 	Path string
 	// Name 是路径的最后一段。
 	Name string
+	// Kind 是路径类型。
+	Kind FileKind
 	// Size 是文件字节数，目录为 0。
 	Size int64
 	// Mode 是 POSIX 权限位。
@@ -36,6 +67,8 @@ type FileInfo struct {
 	IsDir bool
 	// IsRegular 表示是否为普通文件。
 	IsRegular bool
+	// IsSymlink 表示是否为符号链接。
+	IsSymlink bool
 }
 
 // FileTransfer 是远程文件操作层。
@@ -49,13 +82,15 @@ type FileTransfer interface {
 	Download(ctx context.Context, remotePath, localPath string, options DownloadOptions) error
 	// MkdirAll 递归创建远程目录。
 	MkdirAll(ctx context.Context, remotePath string) error
-	// Stat 返回远程文件或目录的属性。
+	// Stat 返回远程文件或目录的属性（跟随符号链接）。
 	Stat(ctx context.Context, remotePath string) (FileInfo, error)
+	// Lstat 返回远程路径自身的属性（不跟随符号链接）。
+	Lstat(ctx context.Context, remotePath string) (FileInfo, error)
 	// ReadDir 列出远程目录内容，按名称升序返回。
 	ReadDir(ctx context.Context, remotePath string) ([]FileInfo, error)
 	// Rename 重命名远程文件或目录。
 	Rename(ctx context.Context, oldPath, newPath string) error
-	// Remove 删除远程文件，目标不存在时返回错误。
+	// Remove 删除远程文件，目标不存在或不是普通文件时返回错误。
 	Remove(ctx context.Context, remotePath string) error
 	// Close 关闭 SFTP 通道。
 	Close() error
@@ -81,6 +116,11 @@ type DownloadOptions struct {
 	Mode os.FileMode
 	// CreateParent 表示自动递归创建本机父目录。
 	CreateParent bool
+	// MaxBytes 限制允许下载的远程文件大小，零值表示不限制。
+	//
+	// 远程文件大小在传输前即可通过属性得知，超过上限时直接返回
+	// ErrRemoteSizeExceeded，不产生任何本机文件。
+	MaxBytes int64
 }
 
 // transfer 是 FileTransfer 的实现。
@@ -151,8 +191,18 @@ func (t *transfer) MkdirAll(ctx context.Context, remotePath string) error {
 	return nil
 }
 
-// Stat 返回远程文件或目录的属性。
+// Stat 返回远程文件或目录的属性，符号链接会被跟随。
 func (t *transfer) Stat(ctx context.Context, remotePath string) (FileInfo, error) {
+	return t.stat(ctx, remotePath, false)
+}
+
+// Lstat 返回远程路径自身的属性，不跟随符号链接。
+func (t *transfer) Lstat(ctx context.Context, remotePath string) (FileInfo, error) {
+	return t.stat(ctx, remotePath, true)
+}
+
+// stat 读取远程路径属性，按需选择是否跟随符号链接。
+func (t *transfer) stat(ctx context.Context, remotePath string, followLink bool) (FileInfo, error) {
 	if err := t.ensureOpen(); err != nil {
 		return FileInfo{}, err
 	}
@@ -163,11 +213,19 @@ func (t *transfer) Stat(ctx context.Context, remotePath string) (FileInfo, error
 	if err := ctxErr(ctx); err != nil {
 		return FileInfo{}, err
 	}
-	info, err := t.client.Stat(target)
+	info, err := t.statPath(target, followLink)
 	if err != nil {
 		return FileInfo{}, fmt.Errorf("sshclient: 读取远程文件属性失败: %s: %w", target, err)
 	}
 	return toFileInfo(target, info), nil
+}
+
+// statPath 调用底层 SFTP Stat 或 Lstat。
+func (t *transfer) statPath(target string, followLink bool) (os.FileInfo, error) {
+	if followLink {
+		return t.client.Stat(target)
+	}
+	return t.client.Lstat(target)
 }
 
 // ReadDir 列出远程目录内容。
@@ -222,7 +280,8 @@ func (t *transfer) Rename(ctx context.Context, oldPath, newPath string) error {
 
 // Remove 删除远程文件。
 //
-// 目录不会被删除：删除目录需要显式递归，属于后续更高层的操作。
+// 只有普通文件会被删除：目录需要显式递归，属于后续更高层的操作；
+// 符号链接与其他类型文件一律拒绝，避免误删指向别处的链接目标。
 func (t *transfer) Remove(ctx context.Context, remotePath string) error {
 	if err := t.ensureOpen(); err != nil {
 		return err
@@ -234,12 +293,19 @@ func (t *transfer) Remove(ctx context.Context, remotePath string) error {
 	if err := ctxErr(ctx); err != nil {
 		return err
 	}
-	info, err := t.client.Stat(target)
+	// 用 Lstat 判断类型：跟随链接后再删除会误删链接指向的文件。
+	info, err := t.client.Lstat(target)
 	if err != nil {
 		return fmt.Errorf("sshclient: 删除远程文件失败: %s: %w", target, err)
 	}
-	if info.IsDir() {
-		return fmt.Errorf("sshclient: 删除远程文件失败: %s 是目录", target)
+	kind := fileKindOf(info)
+	if kind != FileKindRegular {
+		return fmt.Errorf(
+			"%w: 删除远程文件失败: %s 是 %s",
+			ErrUnsupportedRemoteType,
+			target,
+			kindLabel(kind),
+		)
 	}
 	if err := t.client.Remove(target); err != nil {
 		return fmt.Errorf("sshclient: 删除远程文件失败: %s: %w", target, err)
@@ -249,8 +315,10 @@ func (t *transfer) Remove(ctx context.Context, remotePath string) error {
 
 // Upload 上传本机文件到远程路径。
 //
-// 上传先写入同目录下的临时文件，校验写入结果后原子重命名到目标路径，
-// 因此失败或中断时不会留下内容不完整的最终文件。
+// 上传先写入同目录下的临时文件，校验写入字节数与关闭结果后再提交到目标路径，
+// 因此失败或中断时不会留下内容不完整的最终文件。提交优先使用
+// posix-rename@openssh.com 扩展实现原子替换；服务端不支持该扩展时退化为
+// "删除旧文件后重命名"，此时替换不是原子的，调用方需要自行承担短暂的不一致窗口。
 func (t *transfer) Upload(
 	ctx context.Context,
 	localPath, remotePath string,
@@ -276,6 +344,9 @@ func (t *transfer) Upload(
 	}
 	if info.IsDir() {
 		return fmt.Errorf("sshclient: 上传失败: 本机路径 %s 是目录", source)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("sshclient: 上传失败: 本机路径 %s 不是普通文件", source)
 	}
 	if !options.Overwrite {
 		exists, err := t.remoteExists(target)
@@ -323,11 +394,15 @@ func (t *transfer) copyLocalToRemote(
 	defer func() {
 		_ = local.Close()
 	}()
+	expected, err := local.Stat()
+	if err != nil {
+		return fmt.Errorf("sshclient: 读取本机文件属性失败: %s: %w", source, err)
+	}
 	remote, err := t.client.OpenFile(remotePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
 		return fmt.Errorf("sshclient: 创建远程临时文件失败: %s: %w", remotePath, err)
 	}
-	writeErr := copyWithContext(ctx, remote, local)
+	written, writeErr := copyWithContext(ctx, remote, local)
 	// 关键写入错误必须先于关闭错误返回：关闭失败时也可能丢失数据。
 	closeErr := remote.Close()
 	if writeErr != nil {
@@ -336,24 +411,57 @@ func (t *transfer) copyLocalToRemote(
 	if closeErr != nil {
 		return fmt.Errorf("sshclient: 关闭远程临时文件失败: %s: %w", remotePath, closeErr)
 	}
+	if written != expected.Size() {
+		return fmt.Errorf(
+			"sshclient: 上传文件失败: %s -> %s: 写入字节数 %d 与本机文件大小 %d 不一致",
+			source,
+			remotePath,
+			written,
+			expected.Size(),
+		)
+	}
+	// 重新读取远程属性，确认写入结果与预期一致。
+	remoteInfo, err := t.client.Stat(remotePath)
+	if err != nil {
+		return fmt.Errorf("sshclient: 校验远程临时文件失败: %s: %w", remotePath, err)
+	}
+	if remoteInfo.Size() != expected.Size() {
+		return fmt.Errorf(
+			"sshclient: 校验远程临时文件失败: %s: 远程大小 %d 与本机大小 %d 不一致",
+			remotePath,
+			remoteInfo.Size(),
+			expected.Size(),
+		)
+	}
 	if err := t.client.Chmod(remotePath, mode); err != nil {
 		return fmt.Errorf("sshclient: 设置远程文件权限失败: %s: %w", remotePath, err)
 	}
 	return nil
 }
 
-// commitTemp 把临时文件原子重命名到最终目标。
+// commitTemp 把临时文件提交到最终目标。
 func (t *transfer) commitTemp(tempPath, target string, overwrite bool) error {
-	if overwrite {
-		// 目标已存在时直接重命名会失败，先删除旧文件。
-		exists, err := t.remoteExists(target)
-		if err != nil {
-			return err
+	if !overwrite {
+		// 未声明覆盖时用普通重命名，目标已存在会由服务端拒绝，不会静默替换。
+		if err := t.client.Rename(tempPath, target); err != nil {
+			return fmt.Errorf("sshclient: 提交远程文件失败: %s -> %s: %w", tempPath, target, err)
 		}
-		if exists {
-			if err := t.client.Remove(target); err != nil {
-				return fmt.Errorf("sshclient: 替换远程文件失败: %s: %w", target, err)
-			}
+		return nil
+	}
+	// 优先使用 posix-rename 扩展：它在服务端以原子方式替换目标。
+	if err := t.client.PosixRename(tempPath, target); err == nil {
+		return nil
+	} else if !isSFTPUnsupported(err) {
+		return fmt.Errorf("sshclient: 提交远程文件失败: %s -> %s: %w", tempPath, target, err)
+	}
+	// 服务端不支持原子替换：先删除旧文件再重命名，此时替换不是原子的。
+	exists, err := t.remoteExists(target)
+	if err != nil {
+		return err
+	}
+	if exists {
+		if err := t.client.Remove(target); err != nil {
+			return fmt.Errorf("sshclient: 替换远程文件失败: %s: %w", target, err)
 		}
 	}
 	if err := t.client.Rename(tempPath, target); err != nil {
@@ -364,7 +472,8 @@ func (t *transfer) commitTemp(tempPath, target string, overwrite bool) error {
 
 // Download 下载远程文件到本机路径。
 //
-// 下载先写入同目录下的本机临时文件，成功后再原子重命名到目标路径。
+// 下载先写入同目录下的本机临时文件，成功后再原子重命名到目标路径，
+// 因此失败或中断时不会留下内容不完整的最终文件。
 func (t *transfer) Download(
 	ctx context.Context,
 	remotePath, localPath string,
@@ -388,8 +497,23 @@ func (t *transfer) Download(
 	if err != nil {
 		return fmt.Errorf("sshclient: 读取远程文件属性失败: %s: %w", source, err)
 	}
-	if info.IsDir() {
-		return fmt.Errorf("sshclient: 下载失败: 远程路径 %s 是目录", source)
+	kind := fileKindOf(info)
+	if kind != FileKindRegular {
+		return fmt.Errorf(
+			"%w: 下载失败: 远程路径 %s 是 %s",
+			ErrUnsupportedRemoteType,
+			source,
+			kindLabel(kind),
+		)
+	}
+	if options.MaxBytes > 0 && info.Size() > options.MaxBytes {
+		return fmt.Errorf(
+			"%w: 下载失败: %s 大小 %d 字节超过上限 %d 字节",
+			ErrRemoteSizeExceeded,
+			source,
+			info.Size(),
+			options.MaxBytes,
+		)
 	}
 	if !options.Overwrite {
 		if _, err := os.Stat(target); err == nil {
@@ -411,7 +535,7 @@ func (t *transfer) Download(
 	if err != nil {
 		return err
 	}
-	if err := t.copyRemoteToLocal(ctx, source, tempPath); err != nil {
+	if err := t.copyRemoteToLocal(ctx, source, tempPath, info.Size(), options.MaxBytes); err != nil {
 		removeQuietly(tempPath)
 		return err
 	}
@@ -427,7 +551,15 @@ func (t *transfer) Download(
 }
 
 // copyRemoteToLocal 把远程文件写入本机临时文件。
-func (t *transfer) copyRemoteToLocal(ctx context.Context, source, localPath string) error {
+//
+// expectedSize 是传输前读取到的远程文件大小；写入字节数与之不一致时视为传输失败，
+// 不会把不完整内容提交为最终文件。
+func (t *transfer) copyRemoteToLocal(
+	ctx context.Context,
+	source, localPath string,
+	expectedSize int64,
+	maxBytes int64,
+) error {
 	remote, err := t.client.Open(source)
 	if err != nil {
 		return fmt.Errorf("sshclient: 打开远程文件失败: %s: %w", source, err)
@@ -439,7 +571,7 @@ func (t *transfer) copyRemoteToLocal(ctx context.Context, source, localPath stri
 	if err != nil {
 		return fmt.Errorf("sshclient: 创建本机临时文件失败: %s: %w", localPath, err)
 	}
-	writeErr := copyWithContext(ctx, local, remote)
+	written, writeErr := copyWithLimit(ctx, local, remote, maxBytes)
 	syncErr := local.Sync()
 	closeErr := local.Close()
 	if writeErr != nil {
@@ -450,6 +582,15 @@ func (t *transfer) copyRemoteToLocal(ctx context.Context, source, localPath stri
 	}
 	if closeErr != nil {
 		return fmt.Errorf("sshclient: 关闭本机临时文件失败: %s: %w", localPath, closeErr)
+	}
+	if written != expectedSize {
+		return fmt.Errorf(
+			"sshclient: 下载文件失败: %s -> %s: 写入字节数 %d 与远程文件大小 %d 不一致",
+			source,
+			localPath,
+			written,
+			expectedSize,
+		)
 	}
 	return nil
 }
@@ -502,27 +643,42 @@ func removeQuietly(target string) {
 }
 
 // copyWithContext 在复制过程中响应取消，返回复制字节数。
-func copyWithContext(ctx context.Context, destination io.Writer, source io.Reader) error {
-	if ctx == nil {
-		_, err := io.Copy(destination, source)
-		return err
-	}
+func copyWithContext(ctx context.Context, destination io.Writer, source io.Reader) (int64, error) {
+	return copyWithLimit(ctx, destination, source, 0)
+}
+
+// copyWithLimit 在复制过程中响应取消并可选限制字节数，返回复制字节数。
+//
+// limit 为 0 表示不限制；超过限制时返回 ErrRemoteSizeExceeded，
+// 由调用方清理已经写入的临时文件。
+func copyWithLimit(
+	ctx context.Context,
+	destination io.Writer,
+	source io.Reader,
+	limit int64,
+) (int64, error) {
 	buffer := make([]byte, 32*1024)
+	var total int64
 	for {
-		if err := ctx.Err(); err != nil {
-			return err
+		if err := ctxErr(ctx); err != nil {
+			return total, err
 		}
 		read, readErr := source.Read(buffer)
 		if read > 0 {
-			if _, writeErr := destination.Write(buffer[:read]); writeErr != nil {
-				return writeErr
+			if limit > 0 && total+int64(read) > limit {
+				return total, ErrRemoteSizeExceeded
+			}
+			written, writeErr := destination.Write(buffer[:read])
+			total += int64(written)
+			if writeErr != nil {
+				return total, writeErr
 			}
 		}
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
-				return nil
+				return total, nil
 			}
-			return readErr
+			return total, readErr
 		}
 	}
 }
@@ -542,19 +698,66 @@ func isSFTPNotExist(err error) bool {
 	return false
 }
 
+// isSFTPUnsupported 判断错误是否表示服务端不支持该 SFTP 操作。
+func isSFTPUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	var statusErr *sftp.StatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.FxCode() == sftp.ErrSSHFxOpUnsupported
+	}
+	return false
+}
+
 // toFileInfo 把 SFTP 文件属性转换为 FileInfo。
 func toFileInfo(target string, info os.FileInfo) FileInfo {
 	if info == nil {
 		return FileInfo{Path: target, Name: path.Base(target)}
 	}
+	kind := fileKindOf(info)
 	return FileInfo{
 		Path:      target,
 		Name:      info.Name(),
+		Kind:      kind,
 		Size:      info.Size(),
 		Mode:      info.Mode().Perm(),
 		ModTime:   info.ModTime(),
-		IsDir:     info.IsDir(),
-		IsRegular: info.Mode().IsRegular(),
+		IsDir:     kind == FileKindDirectory,
+		IsRegular: kind == FileKindRegular,
+		IsSymlink: kind == FileKindSymlink,
+	}
+}
+
+// fileKindOf 判断文件属性对应的远程路径类型。
+func fileKindOf(info os.FileInfo) FileKind {
+	if info == nil {
+		return FileKindOther
+	}
+	mode := info.Mode()
+	switch {
+	case mode&os.ModeSymlink != 0:
+		return FileKindSymlink
+	case mode.IsDir():
+		return FileKindDirectory
+	case mode.IsRegular():
+		return FileKindRegular
+	default:
+		return FileKindOther
+	}
+}
+
+// kindLabel 返回远程路径类型的中文说明。
+func kindLabel(kind FileKind) string {
+	switch kind {
+	case FileKindRegular:
+		return "普通文件"
+	case FileKindDirectory:
+		return "目录"
+	case FileKindSymlink:
+		return "符号链接"
+	default:
+		return "特殊文件"
 	}
 }
 

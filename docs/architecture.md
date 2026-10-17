@@ -2,7 +2,7 @@
 
 本文件描述 AgentFlow 的架构边界与依赖方向，用于判断“新代码应该放在哪里”以及“哪些依赖不允许出现”。
 
-> 下文的架构图为**目标架构**，仅说明分层意图。当前代码实现了 CLI 骨架、配置加载与校验、日志封装、SQLite 数据层、执行节点管理与 SSH 服务探测，图中调度、Agent 执行与 UI 部分尚未实现。
+> 下文的架构图为**目标架构**，仅说明分层意图。当前代码实现了 CLI 骨架、配置加载与校验、日志封装、SQLite 数据层、执行节点管理、SSH 服务探测与完整的 SSH 连接层（主机密钥校验、身份认证、远程命令执行与 SFTP 传输），图中调度、Agent 执行与 UI 部分尚未实现。
 
 ## 目标架构
 
@@ -45,7 +45,7 @@ internal/gitworktree/     任务工作区创建、检查与清理（未实现）
 internal/storage/         存储接口与统一存储错误
 internal/storage/sqlite/  数据库连接、迁移与仓储实现
 internal/sshprobe/        SSH 端点探测：TCP 可达性与协议标识校验
-internal/sshclient/       已认证 SSH 客户端接口边界（当前无实现）
+internal/sshclient/        SSH 连接层：主机密钥校验、身份认证、远程执行与 SFTP 传输
 internal/events/          内部事件定义与事件总线（未实现）
 internal/httpapi/         HTTP 路由、处理器与 SSE（未实现）
 web/ui/                   React + TypeScript 前端（未实现）
@@ -53,7 +53,8 @@ configs/                  示例配置
 migrations/               迁移说明（实际迁移脚本在 internal/storage/sqlite/migrations/）
 docs/                     架构与开发文档
 tests/unit/               快速单元测试（不依赖真实 Pi、SSH 或网络）
-tests/integration/local/  本机集成测试（数据库全链路、模拟 SSH/SFTP、TCP 探测）
+tests/unit/ssh/           SSH 连接层单元测试（主机密钥、认证配置、路径与结果状态）
+tests/integration/local/  本机集成测试（数据库全链路、进程内 SSH/SFTP 服务端、TCP 探测）
 tests/integration/pi/     需要本机真实 Pi CLI 的集成测试
 tests/integration/ssh/    需要真实远程机器的集成测试
 tests/e2e/                端到端测试（CLI 完整操作路径）
@@ -96,19 +97,23 @@ cmd
 ## 当前实现的分层
 
 ```text
-cmd/agentflow → cli → app → config / logging / storage / sshprobe
+cmd/agentflow → cli → app → config / logging / storage / sshprobe / sshclient
                           ↘ domain
 ```
 
 - `main.go` 只注入构建信息、处理信号并返回退出码。
-- `cli` 只做参数解析、结果输出与退出码转换，不包含校验规则。
-- `app` 组装配置与日志，并把配置校验编排成一次应用服务调用；同时负责把配置中的角色转换为存储层的初始化定义。
+- `cli` 只做参数解析、结果输出与退出码转换，不包含校验规则；凭据输入（隐藏输入、
+  标准输入读取）也只在命令层发生，转换后立即交给 `sshclient` 的凭据提供器。
+- `app` 组装配置与日志，并把配置校验编排成一次应用服务调用；同时负责把配置中的角色转换为存储层的初始化定义，以及把节点配置转换为 SSH 连接目标与认证配置。
 - `config` 负责 YAML 解析、未知字段拒绝与字段级校验。
 - `logging` 封装 `log/slog`，日志统一输出到标准错误流。
 - `storage` 只定义接口与存储错误，不依赖具体驱动；`storage/sqlite` 实现连接、迁移与各实体仓储。
 - `sshprobe` 只做网络与协议标识探测，不进行身份认证，不依赖 `cli` 或 `storage`。
-- `sshclient` 只声明认证配置、凭据提供器与客户端工厂的接口边界；当前只有返回
-  `ErrNotImplemented` 的 `UnsupportedFactory`，不存在任何可用的认证实现。
+- `sshclient` 提供 SSH 连接层，内部按职责分为：凭据提供器（`CredentialProvider`）、
+  主机密钥信任（`HostKeyStore` / `KnownHostsStore`）、连接管理（`Dialer` / `Client`）、
+  远程执行（`Run` 与 `CommandResult`）、SFTP 传输（`FileTransfer`）与远程工作空间
+  （`ResolveHome` / `ResolveWorkspace` / `EnsureWorkspace`）。它不依赖 `cli`、`storage`
+  或 `app`，业务代码通过接口注入依赖，不在各处直接创建 SSH 客户端。
 
 ## 领域模型边界
 
@@ -127,8 +132,10 @@ cmd/agentflow → cli → app → config / logging / storage / sshprobe
 - 重试必须产生新的 Attempt 与新的 Session，历史记录只追加不覆盖。
 - 状态只能通过 `Transition`（或实体自身的结束方法）变更，不允许直接赋值绕过校验。
 - 角色名称由用户自由命名，工作流只依据角色类型识别职责。
-- `ExecutionHost` 只保存连接目标与远程工作空间，不保存密码、私钥或认证类型；认证方式在
-  后续阶段单独设计，避免数据模型过早绑定某一种认证方式。
+- `ExecutionHost` 只保存连接目标、认证方式种类、本机私钥文件路径、远程工作空间与主机密钥
+  信任信息，**不保存任何凭据材料**；密码与私钥口令只能通过内存中的凭据提供器在连接时提供。
+- `AuthMethod` 只描述认证方式种类（`agent`、`private_key`、`password`），与具体凭据内容解耦，
+  便于后续接入系统密钥链或其他凭据存储而不改动数据模型。
 
 ## 配置与领域的关系
 
@@ -159,8 +166,15 @@ cmd/agentflow → cli → app → config / logging / storage / sshprobe
   传输文件或管理远程 Docker。
 - 两者不得合并：探测成功不得被当作认证成功，也不得据此开放远程操作路径。
 - 探测结果中的 `Authenticated` 恒为 `false`，用于阻止调用方误判。
-- 主机密钥校验不得被关闭；`AuthConfig.KnownHostsPath` 为空时实现方必须拒绝连接，而不是
-  跳过校验。
+- 主机密钥校验不得被关闭：`NewDialer` 未收到 `HostKeyStore` 时直接拒绝构造，不存在
+  "跳过校验"的开关，也不允许用 `ssh.InsecureIgnoreHostKey()` 作为产品默认策略。
+- 主机密钥的读取来源（用户 `known_hosts`）与写入目标（AgentFlow 自己的记录文件）分离：
+  用户既有文件只读，新记录以独占锁 + 临时文件 + 原子重命名写入，避免并发写坏记录。
+- 凭据边界：`CredentialProvider` 只负责在连接时提供材料，`Credential.Clear` 在使用后清零
+  内存；密码、私钥口令与私钥原文不得进入数据库、配置文件、命令行参数或日志。
+- 远程命令执行以结构化命令描述（程序名 + 参数数组）构造，参数统一经过 POSIX Shell 转义，
+  禁止把用户输入直接拼接进命令字符串。
+- 超时与取消只关闭对应的远程会话，不关闭整条连接，避免一个命令影响同连接上的其他操作。
 - 日志中不得出现密码、私钥或其他凭据材料。
 
 ## 工作区边界
@@ -168,7 +182,9 @@ cmd/agentflow → cli → app → config / logging / storage / sshprobe
 - 每个 Task 拥有独立 Git Worktree，同任务多步骤共享该工作区。
 - 未经明确配置，不得自动删除包含未提交代码的工作区。
 - 执行节点的远程工作空间默认 `~/.lingting/agentflow`，`~` 指远程 SSH 登录用户的 Home；
-  路径遵循 POSIX 语义，当前阶段只保存配置，不创建也不检查远程目录。
+  路径遵循 POSIX 语义。SFTP 不会展开 `~`，因此必须先通过已认证连接取得远程 Home，再把
+  配置解析为远程绝对路径；目录创建只在解析出的工作空间路径内进行，且必须显式授权。
+  本阶段不创建项目配置、Dockerfile 或容器目录结构。
 
 ## 安全边界
 

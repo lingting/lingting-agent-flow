@@ -34,6 +34,7 @@ type Config struct {
 	Storage   StorageConfig   `yaml:"storage"`
 	Workspace WorkspaceConfig `yaml:"workspace"`
 	Scheduler SchedulerConfig `yaml:"scheduler"`
+	SSH       SSHConfig       `yaml:"ssh"`
 	Roles     []RoleConfig    `yaml:"roles"`
 }
 
@@ -57,6 +58,23 @@ type WorkspaceConfig struct {
 type SchedulerConfig struct {
 	MaxConcurrentTasks int `yaml:"max_concurrent_tasks"`
 	MaxRetriesPerStep  int `yaml:"max_retries_per_step"`
+}
+
+// SSHConfig 描述 SSH 连接层的非机密配置。
+//
+// 这里只保存文件路径与超时，不保存任何凭据：密码与私钥口令只能在连接时
+// 通过内存中的凭据提供器传入。
+type SSHConfig struct {
+	// KnownHostsPath 是额外的只读 known_hosts 文件路径。
+	//
+	// 为空时复用本机用户 OpenSSH 的 known_hosts；该文件只读取，不会被修改。
+	KnownHostsPath string `yaml:"known_hosts_path"`
+	// KnownHostsStorePath 是 AgentFlow 自己写入主机密钥信任记录的文件路径。
+	//
+	// 为空时放在数据库文件所在目录下的 known_hosts。
+	KnownHostsStorePath string `yaml:"known_hosts_store_path"`
+	// ConnectTimeoutSeconds 是 TCP 连接与 SSH 认证的超时秒数，零值使用默认值。
+	ConnectTimeoutSeconds int `yaml:"connect_timeout_seconds"`
 }
 
 // RoleConfig 描述一个角色。
@@ -121,6 +139,7 @@ func (c *Config) Validate() error {
 	c.Storage.validate(&problems)
 	c.Workspace.validate(&problems)
 	c.Scheduler.validate(&problems)
+	c.SSH.validate(&problems)
 	c.validateRoles(&problems)
 	if problems.empty() {
 		return nil
@@ -163,6 +182,30 @@ func (s SchedulerConfig) validate(problems *issues) {
 	}
 	if s.MaxRetriesPerStep < 0 {
 		problems.add("scheduler.max_retries_per_step", "不得为负数")
+	}
+}
+
+// validate 校验 SSH 连接层配置。
+//
+// 这里只检查路径与超时的书写形式；known_hosts 文件是否存在由连接阶段判断，
+// 因此允许首次使用时尚未创建 AgentFlow 自己的记录文件。
+func (s SSHConfig) validate(problems *issues) {
+	for field, value := range map[string]string{
+		"ssh.known_hosts_path":       s.KnownHostsPath,
+		"ssh.known_hosts_store_path": s.KnownHostsStorePath,
+	} {
+		if value == "" {
+			continue
+		}
+		for _, char := range value {
+			if char == 0 || char == '\n' || char == '\r' {
+				problems.add(field, "不能包含控制字符")
+				break
+			}
+		}
+	}
+	if s.ConnectTimeoutSeconds < 0 {
+		problems.add("ssh.connect_timeout_seconds", "不得为负数")
 	}
 }
 

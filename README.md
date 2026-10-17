@@ -6,9 +6,9 @@ AgentFlow 是一个使用 Go 编写的本地优先 AI 编码工作流编排器�
 
 ## 当前开发阶段
 
-AgentFlow 处于**执行节点接入阶段**。当前仓库包含工程骨架、可运行的 CLI、配置加载与校验、结构化日志封装、SQLite 数据模型与版本化迁移，以及执行节点管理与 SSH 服务探测。
+AgentFlow 处于**执行节点接入阶段**。当前仓库包含工程骨架、可运行的 CLI、配置加载与校验、结构化日志封装、SQLite 数据模型与版本化迁移，以及执行节点管理与完整的 SSH 连接层。
 
-执行节点目前只支持配置管理与 SSH 服务可达性探测，**没有任何 SSH 身份认证方式**，因此不具备远程登录、远程命令执行、文件传输或 Docker 管理能力。调度、Agent 执行与 Web UI 尚未实现。文档只会在对应能力落地后才声明其可用。
+执行节点已支持完整的 SSH 身份认证（SSH Agent、本机私钥、内存密码）、严格的主机密钥校验、带超时与取消的远程命令执行、SFTP 文件传输，以及远程 Home 与工作空间解析。**Docker 环境、远程代码仓库操作与工作流引擎尚未实现**。文档只会在对应能力落地后才声明其可用。
 
 ## 第一版功能范围
 
@@ -24,6 +24,11 @@ AgentFlow 处于**执行节点接入阶段**。当前仓库包含工程骨架、
 - 存储接口与事务边界：`storage.Store` / `storage.Tx` 提供跨实体原子更新，错误可按类别判断。
 - 执行节点管理：`agentflow host` 命令组支持新增、列出、查看、设置默认与删除执行节点，节点保存在 SQLite 的 `execution_hosts` 表中。
 - SSH 服务探测：`agentflow host probe` 使用 Go 代码建立 TCP 连接并校验服务端 SSH 协议标识，不依赖本机 `ssh` 命令，也不执行身份认证。
+- SSH 身份认证：支持 SSH Agent、本机私钥（含加密私钥口令）与内存密码三种方式；密码与私钥口令只在连接时于内存中传递，不写入数据库、日志或命令行参数。
+- 主机密钥校验：复用 OpenSSH `known_hosts` 并维护 AgentFlow 自己的信任记录文件；未知主机必须核验 SHA-256 指纹后显式信任，已信任密钥发生变化时拒绝连接，禁止跳过校验。
+- 远程命令执行：返回退出码、标准输出、标准错误、耗时与结果状态，区分成功、非零退出、超时、取消与连接中断；输出超过上限时标记截断，取消与超时只关闭对应会话而不影响同连接的其他操作。
+- SFTP 文件操作：创建目录、属性查询（含符号链接识别）、目录列举、上传、下载、重命名与删除；上传先写同目录临时文件并校验字节数，覆盖提交优先使用 `posix-rename` 原子替换；下载支持大小上限，失败不留下最终文件。
+- 远程 Home 与工作空间：通过已认证连接解析远程登录用户 Home，把 `~/.lingting/agentflow` 或自定义路径解析为远程绝对路径，并检查存在性与可写性。
 
 第一版目标（尚未实现）：
 
@@ -43,6 +48,8 @@ AgentFlow 处于**执行节点接入阶段**。当前仓库包含工程骨架、
 - `log/slog`（日志）
 - `database/sql` + `modernc.org/sqlite`（持久化，纯 Go 驱动，不依赖 CGO）
 - Go 标准库 `net`、`context`（SSH 端点探测）
+- `golang.org/x/crypto/ssh`（SSH 握手、主机密钥校验与身份认证）
+- `github.com/pkg/sftp`（SFTP 文件传输）
 - Go 标准库 `testing`（测试）
 - Makefile（构建入口）
 
@@ -85,6 +92,13 @@ go run ./cmd/agentflow --help
 
 # 校验示例配置
 ./bin/agentflow config validate --config configs/example.yaml
+
+# 执行节点：配置、认证、主机密钥与远程工作空间
+./bin/agentflow host add --id node-a --host 192.0.2.10 --user deploy --auth agent
+./bin/agentflow host probe node-a     # 只探测 TCP 与 SSH 协议标识
+./bin/agentflow host trust node-a     # 探测并展示主机密钥指纹
+./bin/agentflow host test node-a      # 完整 SSH 身份认证
+./bin/agentflow host workspace node-a # 解析远程 Home 与工作空间
 ```
 
 配置路径规则：
@@ -103,8 +117,9 @@ go run ./cmd/agentflow --help
 
 ## 执行节点管理
 
-执行节点是通过 SSH 管理的远程 Linux 机器。当前版本只保存连接目标与远程工作空间配置，
-并提供 SSH 服务可达性探测。
+执行节点是通过 SSH 管理的远程 Linux 机器。AgentFlow 控制程序运行在本机，通过 SSH 连接
+远程节点；节点记录只保存连接目标、认证方式种类、本机私钥文件路径与远程工作空间配置，
+**不保存密码、私钥原文或私钥口令**。
 
 `host` 命令组复用 `config validate` 的配置加载流程，因此同样接受 `--config`；
 未指定时读取 `configs/agentflow.yaml`，数据库路径取自该配置的 `storage.database_path`。
@@ -123,9 +138,22 @@ go run ./cmd/agentflow --help
 | `--port` | SSH 端口，默认 `22`，取值范围 1-65535 |
 | `--user` | SSH 登录用户名，必填 |
 | `--workspace` | 远程工作空间路径，默认 `~/.lingting/agentflow` |
+| `--auth` | 认证方式，`agent`（默认）、`private_key` 或 `password` |
+| `--key` | 本机私钥文件路径，仅 `--auth private_key` 时使用，且该方式必填 |
 | `--default` | 同时设为默认执行节点 |
 
 该命令只写入本机数据库，**不会**连接目标机器、不会创建远程目录，也不代表可以登录。
+该命令不接受密码或私钥口令，凭据只在连接时于内存中提供。
+
+### 修改执行节点
+
+```bash
+./bin/agentflow host update node-build-01 --port 2222
+./bin/agentflow host update node-build-01 --auth private_key --key ~/.ssh/id_ed25519
+```
+
+只修改显式给出的参数，未给出的配置保持原值。切换认证方式时需要同时给出该方式所需的
+参数，例如 `--auth private_key --key ...`。该命令同样不执行登录，也不接受密码或口令。
 
 ### 列出与查看
 
@@ -134,7 +162,8 @@ go run ./cmd/agentflow --help
 ./bin/agentflow host show node-build-01
 ```
 
-`host list` 输出标识、名称、地址、用户名、工作空间、默认标记与启用状态。
+`host list` 输出标识、名称、地址、用户名、认证方式、工作空间、默认标记与启用状态。
+`host show` 额外显示私钥文件路径、主机密钥算法与指纹、信任时间以及最近一次连接结果。
 
 ### 设置默认节点
 
@@ -145,6 +174,106 @@ go run ./cmd/agentflow --help
 默认节点在单个事务内切换，数据库保证最多只有一个默认节点。节点不存在或已被禁用时
 返回明确错误。
 
+### SSH 身份认证
+
+三种认证方式都通过统一的凭据接口在连接时提供材料，凭据不落盘、不进数据库、不进日志：
+
+| 认证方式 | 凭据来源 | 说明 |
+|---|---|---|
+| `agent` | 系统 SSH Agent（`SSH_AUTH_SOCK`） | 默认方式，不在配置中保存任何机密材料 |
+| `private_key` | 节点配置中的本机私钥文件路径 | 支持加密私钥，口令在连接时提供 |
+| `password` | 调用方在内存中提供 | 默认不持久化 |
+
+凭据输入方式（`host test`、`host workspace`、`host transfer`）：
+
+- `--password-stdin`：从标准输入读取一行密码。
+- `--passphrase-stdin`：从标准输入读取一行私钥口令。
+- `--ask-pass`：在交互式终端中强制使用隐藏输入。
+
+**非交互环境不会挂起等待输入**：没有可用凭据时立即返回「没有可用的凭据」，
+并提示可用的输入参数。
+
+### 主机密钥校验
+
+主机密钥校验不可关闭，也不存在"跳过校验"的开关。
+
+- 校验时同时读取本机用户 OpenSSH 的 `known_hosts` 与 AgentFlow 自己的信任记录文件；
+  只读的 `known_hosts` 不会被修改，新记录只写入 AgentFlow 的记录文件。
+- 未知主机的连接**必须失败**，并展示算法与 SHA-256 指纹；只有在用户核验指纹并显式
+  确认后才会写入信任记录。
+- 已信任的主机提供不同密钥时立即拒绝连接，并同时展示当前指纹与已信任指纹，不会自动
+  覆盖旧记录。
+
+```bash
+# 只探测主机密钥并展示指纹与信任状态（不执行身份认证）
+./bin/agentflow host trust node-build-01
+
+# 核验指纹后显式写入信任记录（非交互执行必须显式给出 --yes）
+./bin/agentflow host trust node-build-01 \
+  --fingerprint SHA256:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
+  --yes
+```
+
+`--fingerprint` 必须与用户实际核验过的指纹一致；命令会重新探测服务端密钥并在指纹不符时
+拒绝写入。
+
+### 测试 SSH 认证连接
+
+```bash
+./bin/agentflow host test node-build-01
+./bin/agentflow host test node-build-01 --check-workspace
+./bin/agentflow host test node-build-01 --create-workspace --timeout 30s
+```
+
+该命令执行完整的身份认证，而不是只探测 TCP 可达性。成功后输出认证状态、远程用户、
+远程 Home 与（可选）工作空间路径；失败时按阶段给出可行动的提示：
+
+| 结果类别 | 含义 |
+|---|---|
+| `invalid_config` | 节点配置或认证配置非法 |
+| `unreachable` | DNS 解析或 TCP 连接失败 |
+| `handshake_failed` | TCP 已连接但 SSH 协议握手失败 |
+| `host_key_unknown` | 主机密钥未知，需要核验指纹后信任 |
+| `host_key_mismatch` | 主机密钥与已信任记录不一致 |
+| `host_key_revoked` | 主机密钥已被标记为吊销 |
+| `auth_failed` | 登录认证被拒绝 |
+| `no_credential` | 没有可用的凭据 |
+| `private_key_error` | 私钥文件不存在、格式不支持或口令错误 |
+| `agent_unavailable` | SSH Agent 不可用或没有身份 |
+| `timeout` | 连接或认证超时 |
+| `cancelled` | 调用被取消 |
+
+最近一次连接结果会写入节点记录（只保存结果类别，不保存错误详情与凭据）。
+
+### 解析远程工作空间
+
+```bash
+./bin/agentflow host workspace node-build-01
+./bin/agentflow host workspace node-build-01 --create
+```
+
+该命令通过已认证连接取得远程登录用户的 Home，把节点配置的工作空间解析为远程绝对路径，
+并检查目录是否存在与可写。未指定 `--create` 时不会创建目录；创建只发生在解析出的工作
+空间路径内，不会切换到 `/tmp`、`/root` 等其他目录。输出包含配置值、远程 Home、解析后的
+绝对路径、存在/创建/可写状态。
+
+### SFTP 文件传输（诊断命令）
+
+```bash
+./bin/agentflow host transfer upload node-build-01 ./local.txt /srv/agentflow/remote.txt
+./bin/agentflow host transfer download node-build-01 /srv/agentflow/remote.txt ./local.txt
+./bin/agentflow host transfer download node-build-01 /srv/agentflow/remote.txt ./local.txt \
+  --max-bytes 1048576
+```
+
+这两个子命令用于验证 SSH/SFTP 基础能力，**不代表项目代码同步已经开始**。
+
+- 远程路径必须是 Linux 绝对路径，不允许包含 `..` 段。
+- 上传先写入同目录临时文件，校验写入字节数与远程文件大小后再提交；覆盖需要显式给出
+  `--overwrite`，提交优先使用 `posix-rename` 原子替换，服务端不支持时退化为删除后重命名。
+- 下载先写入本机同目录临时文件，成功后才重命名到目标路径；默认不覆盖已存在的本机文件，
+  默认权限为 `0600`；`--max-bytes` 可限制允许下载的文件大小，超限时不产生本机文件。
+- 删除接口只删除普通文件，不会删除目录，也不会删除符号链接。
 ### 探测 SSH 服务
 
 ```bash
@@ -172,10 +301,10 @@ go run ./cmd/agentflow --help
 ### SSH 探测与 SSH 登录的区别
 
 - **探测**只验证网络可达性与 SSH 服务协议标识，**不做任何身份认证**。
-- 探测成功不等于登录成功，也不代表远程 Linux 环境已经验证通过。
-- 当前版本没有密码、私钥或 SSH Agent 认证，因此无法执行远程命令或传输文件。
-- 后续加入认证能力时，认证配置与凭据通过 `internal/sshclient` 的 `CredentialProvider`
-  与 `ClientFactory` 注入，执行节点管理业务不需要改动。
+- **认证连接**（`host test`、`host workspace`、`host transfer`）才执行主机密钥校验与身份
+  认证，是唯一可以执行远程命令与文件传输的路径。
+- 探测成功不等于登录成功，也不代表远程 Linux 环境已经验证通过；探测结果中的认证状态
+  恒为未认证，用于阻止调用方误判。
 
 ### 远程工作空间路径
 
@@ -183,8 +312,8 @@ go run ./cmd/agentflow --help
 - `~` 指**远程 SSH 登录用户的 Home**，不是本机用户的 Home。
 - 路径遵循 POSIX 语义，必须使用 `/`，可以是以 `/` 开头的绝对路径或以 `~/` 开头的路径。
 - 不接受根目录 `/`、`~` 本身、相对路径、`\` 分隔符、连续 `//` 与 `..` 上级引用。
-- 当前阶段只保存配置，不创建也不检查远程目录；后续远程操作应由远程用户环境解析该路径
-  并转换为绝对路径，涉及目录创建与删除时还必须再做路径安全检查。
+- `host add` 只保存配置；`host workspace` 才会通过已认证连接解析远程 Home 并转换为绝对
+  路径。目录创建只发生在解析出的工作空间路径内，且必须显式给出 `--create`。
 
 ### 删除节点
 
@@ -206,6 +335,9 @@ go run ./cmd/agentflow --help
 | `workspace.worktree_root` | 任务工作区根目录，不能为空 |
 | `scheduler.max_concurrent_tasks` | 同时执行的任务上限，必须大于 0 |
 | `scheduler.max_retries_per_step` | 单个步骤最大重试次数，不得为负数 |
+| `ssh.known_hosts_path` | 额外的只读 `known_hosts` 文件；留空时复用本机用户 OpenSSH 的 `known_hosts` |
+| `ssh.known_hosts_store_path` | AgentFlow 自己写入主机密钥信任记录的文件；留空时放在数据库文件所在目录下的 `known_hosts` |
+| `ssh.connect_timeout_seconds` | TCP 连接与 SSH 认证的超时秒数，`0` 表示使用默认值，不得为负数 |
 | `roles[].id` | 角色标识，不能为空且必须唯一 |
 | `roles[].name` | 角色名称，可自由命名，不能为空 |
 | `roles[].type` | 角色类型，只能是 `planner`、`developer`、`validator` |
@@ -218,6 +350,8 @@ go run ./cmd/agentflow --help
 
 `tools_policy` 当前只是配置声明，用于后续阶段定义角色权限，**并不代表 Pi 已经执行了对应限制**。
 
+`ssh` 段只保存路径与超时，**不保存任何凭据**；密码与私钥口令只能在连接时通过内存中的凭据
+提供器传入。
 ## 数据库
 
 ### 文件位置
@@ -262,7 +396,7 @@ storage:
 | `sessions` | 每次 Agent 会话的元数据 | 可空 `step_id` / `attempt_id` 支持任务级会话；关联 Attempt 时必须给出 `step_id` |
 | `verification_results` | 每次验证的结构化结果 | `passed` 只能为 0/1；失败必须带失败摘要；只追加，不覆盖历史 |
 | `events` | 工作流关键事件 | 自增主键；只追加写入；`(task_id, id)` 联合索引支持任务时间线查询 |
-| `execution_hosts` | 通过 SSH 管理的执行节点 | `port` 限定 1-65535；`is_default` / `enabled` 只能为 0/1；部分唯一索引保证最多一个默认节点；**不保存任何凭据字段** |
+| `execution_hosts` | 通过 SSH 管理的执行节点 | `port` 限定 1-65535；`is_default` / `enabled` 只能为 0/1；`auth_method` 限定 `agent`/`private_key`/`password`；私钥认证必须给出 `private_key_path`；指纹必须以 `SHA256:` 开头；`last_connect_error` 只保存稳定分类代码；部分唯一索引保证最多一个默认节点；**不保存任何凭据字段** |
 | `schema_migrations` | 迁移版本记录 | `version` 主键，记录迁移名与应用时间 |
 
 通用约定：
@@ -298,7 +432,7 @@ make test-local   # 本机集成测试
 make test-pi      # 真实 Pi 集成测试
 make test-ssh     # 真实 SSH 集成测试
 make test-e2e     # CLI 端到端测试
-make test-race    # 单元测试竞态检测
+make test-race    # 竞态检测（单元测试与 SSH 连接层）
 make build        # 构建 bin/agentflow
 make run          # 直接运行
 make check        # fmt-check + vet + build
@@ -314,13 +448,19 @@ go test -count=1 -v ./tests/integration/pi/...                      # 真实 Pi
 go test -count=1 -v ./tests/integration/ssh/...                     # 真实 SSH
 go test -count=1 -v ./tests/e2e/...                                 # CLI 端到端
 go test -count=1 -v -p 8 -parallel 8 ./tests/...                    # 全部
-go test -race -count=1 ./tests/unit/...                             # 竞态检测
+go test -race -count=1 ./tests/unit/...                             # 竞态检测（单元测试）
+go test -race -count=1 ./tests/integration/local/ssh/...            # 竞态检测（SSH 连接与并发）
 ```
 
 每次测试入口启动时在系统临时目录下创建随机工作空间，数据库、Session、日志与生成文件
 全部落在其中，并把绝对路径输出为 `TEST_ARTIFACT_DIR`。测试结束只关闭运行时资源，
 **不删除测试产物**，便于检查失败现场。快速单元测试与本机集成测试不访问真实模型或远程
 网络；本机没有 `pi` 时真实 Pi 用例输出警告并跳过。
+
+SSH 连接层按三层覆盖：`tests/unit/ssh/`（主机密钥、认证配置、路径与结果状态，不启动
+服务端）、`tests/integration/local/ssh/`（进程内启动真实 SSH/SFTP 服务端，覆盖认证、
+命令执行、取消与超时、SFTP 传输、并发与资源释放）、`tests/integration/ssh/`（真实远程
+机器，需要 `AGENTFLOW_TEST_SSH_HOST` 与 `AGENTFLOW_TEST_SSH_USER`，缺失时警告并跳过）。
 
 测试分类、环境变量与编写约定见 [tests/README.md](tests/README.md)。
 
@@ -338,8 +478,8 @@ go test -race -count=1 ./tests/unit/...                             # 竞态检�
 - HTTP API 与 Web UI。
 - 多 Agent Provider 与分布式执行。
 - 角色管理 CLI 与 Web 页面（当前只有存储层的角色初始化与增删改查接口）。
-- SSH 身份认证（密码、私钥、SSH Agent），因此也没有已认证的远程命令执行与 SFTP 文件传输。
-- 远程工作空间初始化、远程 Docker 检测、镜像构建与容器管理。
+- 远程 Docker 检测、Dockerfile 版本化、镜像构建与容器生命周期管理。
+- 远程代码仓库操作与项目代码同步。
 - 在远程容器内执行 Pi Agent。
 
 ## 安全与风险提示
@@ -350,8 +490,15 @@ AgentFlow 的最终形态会**执行外部程序并修改项目文件**，请注
 - 请使用相互隔离的工作区，并配置合理的 Agent 权限；提示词不是权限边界。
 - 审查任何可能修改或删除数据的操作，尤其是工作区清理与 Git 操作。
 - 不要在配置或仓库中保存真实 API Key；模型凭据由 Pi 及其 Provider 管理。
-- 执行节点表只保存连接目标与工作空间，不保存密码、私钥或任何认证材料。
+- 执行节点表只保存连接目标、认证方式种类、本机私钥文件路径与工作空间，**不保存密码、
+  私钥原文或私钥口令**；私钥文件只被读取，不会被复制到工作空间或远程机器。
+- 主机密钥校验不可关闭。未知主机必须核验 SHA-256 指纹后显式信任，已信任密钥发生变化时
+  连接会被拒绝；不要为了让连接"先跑通"而手工删除信任记录。
 - `host probe` 只验证 SSH 服务可达性，**不代表已经登录成功或远程环境已验证**。
+- 远程命令超时或取消时，AgentFlow 会关闭对应会话通道，但 SSH 协议不保证远程进程一定
+  已终止；结果中的终止确认标志为 false 时，不要假定远程进程已经退出。
+- SFTP 上传覆盖优先使用 `posix-rename` 原子替换；服务端不支持该扩展时会退化为"删除旧
+  文件后重命名"，此时替换不是原子的，请避免在关键文件上依赖强原子性。
 - 本地 HTTP 服务在实现后将默认只监听 `127.0.0.1`，且不存储模型凭据。
 
 ## 许可证

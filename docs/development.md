@@ -32,7 +32,7 @@ make test-local   # 本机集成测试
 make test-pi      # 真实 Pi 集成测试
 make test-ssh     # 真实 SSH 集成测试
 make test-e2e     # CLI 端到端测试
-make test-race    # 单元测试竞态检测
+make test-race    # 竞态检测（单元测试与 SSH 连接层）
 make build        # 构建 bin/agentflow
 make run          # go run ./cmd/agentflow
 make check        # fmt-check + vet + build
@@ -57,11 +57,14 @@ go test -count=1 -v ./tests/integration/pi/...                      # 真实 Pi
 go test -count=1 -v ./tests/integration/ssh/...                     # 真实 SSH
 go test -count=1 -v ./tests/e2e/...                                 # CLI 端到端
 go test -count=1 -v -p 8 -parallel 8 ./tests/...                    # 全部
-go test -race -count=1 ./tests/unit/...                             # 竞态检测
+go test -race -count=1 ./tests/unit/...                             # 竞态检测（单元测试）
+go test -race -count=1 ./tests/integration/local/ssh/...            # 竞态检测（SSH 连接与并发）
 ```
 
 真实 Pi 与真实 SSH 入口在依赖缺失时输出 `WARN [SKIP]` 并跳过；本机集成测试与快速单元
-测试只使用本机回环地址上的模拟服务，不依赖真实 SSH 服务器、外部网络或模型凭据。
+测试只使用本机回环地址上的服务，不依赖真实 SSH 服务器、外部网络或模型凭据。本机 SSH/SFTP
+集成测试在进程内启动真实服务端，因此主机密钥校验、认证、命令执行与文件传输都经过真实协议
+交互；SSH Agent 用例依赖 Unix 套接字，平台不支持时单独跳过。
 
 `make build` 会通过 `-ldflags -X` 注入 `version`、`commit`、`buildDate`；直接 `go build` 时三者取默认的开发值 `dev` / `none` / `unknown`。可以用环境变量覆盖版本号：
 
@@ -82,11 +85,24 @@ make build VERSION=0.1.0
 ./bin/agentflow host show node-a
 ./bin/agentflow host set-default node-a
 ./bin/agentflow host probe node-a
+./bin/agentflow host update node-a --port 2222
+./bin/agentflow host trust node-a
+./bin/agentflow host test node-a
+./bin/agentflow host workspace node-a --create
+./bin/agentflow host transfer upload node-a ./local.txt /srv/agentflow/remote.txt
 ./bin/agentflow host remove node-a
 ```
 
-`host` 命令组同样接受 `--config`，未指定时读取 `configs/agentflow.yaml`。`host probe`
-只验证 TCP 可达性与 SSH 协议标识，不执行身份认证。
+`host` 命令组同样接受 `--config`，未指定时读取 `configs/agentflow.yaml`。
+
+命令边界要分清：
+
+- `host probe` 只验证 TCP 可达性与 SSH 协议标识，**不执行身份认证**。
+- `host trust` 只探测主机密钥并展示指纹，写入信任记录必须显式给出已核验的 `--fingerprint`
+  与非交互场景的 `--yes`。
+- `host test`、`host workspace`、`host transfer` 执行完整的主机密钥校验与身份认证，是唯一
+  可以执行远程命令与文件传输的路径。凭据通过 `--password-stdin`、`--passphrase-stdin` 或
+  交互式 `--ask-pass` 提供，非交互环境缺少凭据时立即失败而不是等待输入。
 
 `config validate` 未指定 `--config` 时读取 `configs/agentflow.yaml`；该文件不存在视为错误，不会回退到内置默认值。
 
@@ -135,6 +151,12 @@ make build VERSION=0.1.0
 - 真实 Pi 测试默认使用模型 `group/free`，可用 `AGENTFLOW_TEST_PI_MODEL` 覆盖；本机没有
   `pi` 时输出 `WARN [SKIP]` 并跳过。真实 SSH 测试通过 `AGENTFLOW_TEST_SSH_*` 获取目标，
   缺少必需目标时跳过，配置完整但连接、认证或主机密钥校验失败时必须失败。
+- SSH 连接层按三层覆盖：`tests/unit/ssh/` 放纯逻辑单元测试，`tests/integration/local/ssh/`
+  在进程内启动真实 SSH/SFTP 服务端，`tests/integration/ssh/` 面向真实远程机器。本机集成测试
+  不得要求用户预先启动服务，也不得用"配置解析正确"代替真实握手、认证与传输验证。
+- 取消与超时的用例必须验证远程会话确实被关闭（例如断言服务端活动会话数归零），不能只验证
+  本端停止等待。
+- 禁止通过关闭主机密钥校验或自动接受未知主机密钥让测试通过。
 - 未经明确授权不运行测试、不创建测试代码与临时验证脚本，也不通过“测试后删除”的方式绕过该限制。
 - 数据库 schema 变更必须同时在 `internal/storage/sqlite/migrations/` 提交新迁移脚本。
 - 涉及跨实体状态更新时，必须通过 `storage.WithTx` 在单个事务内完成。
@@ -145,6 +167,18 @@ make build VERSION=0.1.0
 - 协议字段以官方文档与当前安装版本为准，不凭记忆猜测。
 - 新增交互路径时同时实现成功路径、失败路径与取消路径。
 
+## 与 SSH 交互的注意事项
+
+- 主机密钥校验不得关闭：`NewDialer` 必须拿到 `HostKeyStore`，未知或不匹配一律拒绝。
+- 凭据只在内存中传递，用完调用 `Credential.Clear()`；不得把密码、口令或私钥内容写入
+  错误信息、日志、数据库或命令行参数。
+- 远程命令必须用 `ShellCommand` 构造（程序名 + 参数数组 + 逐参数转义），禁止拼接用户输入。
+- 取消与超时不仅要停止本端等待，还要关闭远程会话通道并释放本端 goroutine；无法确认远程
+  进程已终止时，必须在结果中如实标记，不能声称命令已终止。
+- SFTP 上传与下载都使用同目录临时文件 + 校验 + 重命名，失败时清理临时文件但不得留下最终
+  文件；覆盖需要调用方显式声明。
+- 远程路径只使用 POSIX 规则（`NormalizeRemotePath`），不得把本机 `filepath` 语义套用到远程
+  路径，也不得用字符串前缀判断目录包含关系。
 ## 提交约定
 
 - 提交信息使用简体中文，一行标题说明改动的目的。

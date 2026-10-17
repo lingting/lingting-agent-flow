@@ -166,3 +166,134 @@ func TestRealSSHRejectsUntrustedHostKey(t *testing.T) {
 		t.Fatalf("错误类别应为 host key unknown，实际: %s: %v", code, dialErr)
 	}
 }
+
+// TestRealSSHCommandStatus 验证真实远程命令的退出码与结果状态。
+func TestRealSSHCommandStatus(t *testing.T) {
+	t.Parallel()
+	target := loadTarget(t)
+	ws := newWorkspace(t)
+	connection := dial(t, ws, target)
+
+	ctx, cancel := context.WithTimeout(context.Background(), remoteOpTimeout)
+	defer cancel()
+	// 非零退出码是远程命令的正常结果，不应作为传输层错误返回。
+	exitErr, err := connection.Client.Run(ctx, "exit 3", sshclient.RunOptions{})
+	if err != nil {
+		t.Fatalf("非零退出码不应作为传输错误返回: %v", err)
+	}
+	if exitErr.Status != sshclient.CommandStatusExitError {
+		t.Fatalf("状态应为 exit_error，实际: %s", exitErr.Status)
+	}
+	if exitErr.ExitCode != 3 {
+		t.Fatalf("退出码不符: %d", exitErr.ExitCode)
+	}
+	if exitErr.Succeeded() {
+		t.Fatal("非零退出码不得判定为成功")
+	}
+	// 标准输出与标准错误必须分别收集。
+	streams, err := connection.Client.Run(
+		ctx,
+		`printf out; printf err 1>&2`,
+		sshclient.RunOptions{},
+	)
+	if err != nil {
+		t.Fatalf("执行远程命令失败: %v", err)
+	}
+	if strings.TrimSpace(streams.Stdout) != "out" {
+		t.Fatalf("标准输出不符: %q", streams.Stdout)
+	}
+	if strings.TrimSpace(streams.Stderr) != "err" {
+		t.Fatalf("标准错误不符: %q", streams.Stderr)
+	}
+}
+
+// TestRealSSHCommandTimeout 验证超时会中断真实远程命令并释放会话。
+func TestRealSSHCommandTimeout(t *testing.T) {
+	t.Parallel()
+	target := loadTarget(t)
+	ws := newWorkspace(t)
+	connection := dial(t, ws, target)
+
+	started := time.Now()
+	result, err := connection.Client.Run(context.Background(), "sleep 30", sshclient.RunOptions{
+		Timeout: 2 * time.Second,
+	})
+	if err == nil {
+		t.Fatal("超时应当返回错误")
+	}
+	if result.Status != sshclient.CommandStatusTimeout {
+		t.Fatalf("状态应为 timeout，实际: %s", result.Status)
+	}
+	if elapsed := time.Since(started); elapsed > remoteOpTimeout {
+		t.Fatalf("超时应当及时返回，实际耗时: %s", elapsed)
+	}
+	// 超时后同一连接仍应可用。
+	follow, err := connection.Client.Run(
+		context.Background(),
+		"true",
+		sshclient.RunOptions{Timeout: remoteOpTimeout},
+	)
+	if err != nil {
+		t.Fatalf("超时后同一连接仍应可用: %v", err)
+	}
+	if !follow.Succeeded() {
+		t.Fatalf("后续命令应当成功: %+v", follow)
+	}
+}
+
+// TestRealSSHDownloadSizeLimit 验证真实远程下载的大小上限。
+func TestRealSSHDownloadSizeLimit(t *testing.T) {
+	t.Parallel()
+	target := loadTarget(t)
+	ws := newWorkspace(t)
+	connection := dial(t, ws, target)
+
+	ctx, cancel := context.WithTimeout(context.Background(), remoteOpTimeout)
+	defer cancel()
+	home, err := sshclient.ResolveHome(ctx, connection.Client, remoteOpTimeout)
+	if err != nil {
+		t.Fatalf("解析远程 Home 失败: %v", err)
+	}
+	remoteRoot := path.Join(home, "agentflow-tests", randomSuffix(t))
+	remoteDir, err := sshclient.EnsureWorkspace(ctx, connection.Client, remoteRoot, true)
+	if err != nil {
+		t.Fatalf("创建远程测试目录失败: %v", err)
+	}
+	t.Logf("REMOTE_TEST_DIR=%s", remoteDir.Root)
+
+	transfer, err := connection.Client.SFTP()
+	if err != nil {
+		t.Fatalf("打开 SFTP 通道失败: %v", err)
+	}
+	defer func() {
+		if closeErr := transfer.Close(); closeErr != nil {
+			t.Errorf("关闭 SFTP 通道失败: %v", closeErr)
+		}
+	}()
+
+	localFile := ws.Path("large.txt")
+	if err := os.WriteFile(localFile, []byte(strings.Repeat("l", 8192)), 0o600); err != nil {
+		t.Fatalf("写入本地上传文件失败: %v", err)
+	}
+	remoteFile := path.Join(remoteDir.Root, "large.txt")
+	if err := transfer.Upload(ctx, localFile, remoteFile, sshclient.UploadOptions{
+		Overwrite: true,
+	}); err != nil {
+		t.Fatalf("上传文件失败: %v", err)
+	}
+	info, err := transfer.Stat(ctx, remoteFile)
+	if err != nil {
+		t.Fatalf("读取远程文件属性失败: %v", err)
+	}
+	if info.Kind != sshclient.FileKindRegular {
+		t.Fatalf("远程目标应为普通文件: %+v", info)
+	}
+	downloadTarget := ws.Path("limited.txt")
+	err = transfer.Download(ctx, remoteFile, downloadTarget, sshclient.DownloadOptions{MaxBytes: 1024})
+	if err == nil {
+		t.Fatal("超过上限的下载应当失败")
+	}
+	if _, statErr := os.Stat(downloadTarget); statErr == nil {
+		t.Fatal("超限下载不应留下最终文件")
+	}
+}
