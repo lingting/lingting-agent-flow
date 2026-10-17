@@ -13,6 +13,7 @@ import (
 // 需要跨实体原子更新时使用 DB.WithTx。
 type dbStore struct {
 	roleStore
+	executionHostStore
 	requirementStore
 	taskStore
 	stepStore
@@ -25,6 +26,7 @@ type dbStore struct {
 // txStore 把事务上的各实体仓储组合成 storage.Tx。
 type txStore struct {
 	roleStore
+	executionHostStore
 	requirementStore
 	taskStore
 	stepStore
@@ -38,28 +40,30 @@ type txStore struct {
 func newDBStore(db *sql.DB) *dbStore {
 	pool := sqlPool{db: db}
 	return &dbStore{
-		roleStore:         roleStore{q: pool},
-		requirementStore:  requirementStore{q: pool},
-		taskStore:         taskStore{q: pool},
-		stepStore:         stepStore{q: pool},
-		attemptStore:      attemptStore{q: pool},
-		sessionStore:      sessionStore{q: pool},
-		verificationStore: verificationStore{q: pool},
-		eventStore:        eventStore{q: pool},
+		roleStore:          roleStore{q: pool},
+		executionHostStore: executionHostStore{q: pool},
+		requirementStore:   requirementStore{q: pool},
+		taskStore:          taskStore{q: pool},
+		stepStore:          stepStore{q: pool},
+		attemptStore:       attemptStore{q: pool},
+		sessionStore:       sessionStore{q: pool},
+		verificationStore:  verificationStore{q: pool},
+		eventStore:         eventStore{q: pool},
 	}
 }
 
 // newTxStore 构造事务仓储，全部实体共享同一个事务连接。
 func newTxStore(tx *sql.Tx) *txStore {
 	return &txStore{
-		roleStore:         roleStore{q: tx},
-		requirementStore:  requirementStore{q: tx},
-		taskStore:         taskStore{q: tx},
-		stepStore:         stepStore{q: tx},
-		attemptStore:      attemptStore{q: tx},
-		sessionStore:      sessionStore{q: tx},
-		verificationStore: verificationStore{q: tx},
-		eventStore:        eventStore{q: tx},
+		roleStore:          roleStore{q: tx},
+		executionHostStore: executionHostStore{q: tx},
+		requirementStore:   requirementStore{q: tx},
+		taskStore:          taskStore{q: tx},
+		stepStore:          stepStore{q: tx},
+		attemptStore:       attemptStore{q: tx},
+		sessionStore:       sessionStore{q: tx},
+		verificationStore:  verificationStore{q: tx},
+		eventStore:         eventStore{q: tx},
 	}
 }
 

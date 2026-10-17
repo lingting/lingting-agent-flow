@@ -14,6 +14,11 @@ import (
 	"github.com/lingting/agentflow/internal/storage/sqlite"
 )
 
+// expectedSchemaVersion 是当前程序内置迁移的最新版本号。
+//
+// 该常量与 migrations 目录中的脚本数量保持一致，新增迁移时必须同步更新。
+const expectedSchemaVersion = 2
+
 // TestPersistentWorkflowLifecycle 覆盖一次完整的持久化链路：
 // 迁移 → 角色初始化 → 需求与任务 → 计划 → 尝试 → 会话 → 验证 → 事件 → 重启恢复。
 func TestPersistentWorkflowLifecycle(t *testing.T) {
@@ -271,7 +276,7 @@ func TestPersistentWorkflowLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取 schema 版本失败: %v", err)
 	}
-	if version != 1 {
+	if version != expectedSchemaVersion {
 		t.Fatalf("schema 版本不符: %d", version)
 	}
 

@@ -6,9 +6,9 @@ AgentFlow 是一个使用 Go 编写的本地优先 AI 编码工作流编排器�
 
 ## 当前开发阶段
 
-AgentFlow 处于**数据层落地阶段**。当前仓库包含工程骨架、可运行的 CLI、配置加载与校验、结构化日志封装，以及 SQLite 数据模型、版本化迁移与仓储实现。
+AgentFlow 处于**执行节点接入阶段**。当前仓库包含工程骨架、可运行的 CLI、配置加载与校验、结构化日志封装、SQLite 数据模型与版本化迁移，以及执行节点管理与 SSH 服务探测。
 
-调度、Agent 执行与 Web UI 尚未实现。文档只会在对应能力落地后才声明其可用。
+执行节点目前只支持配置管理与 SSH 服务可达性探测，**没有任何 SSH 身份认证方式**，因此不具备远程登录、远程命令执行、文件传输或 Docker 管理能力。调度、Agent 执行与 Web UI 尚未实现。文档只会在对应能力落地后才声明其可用。
 
 ## 第一版功能范围
 
@@ -22,6 +22,8 @@ AgentFlow 处于**数据层落地阶段**。当前仓库包含工程骨架、可
 - SQLite 持久化：`roles`、`requirements`、`tasks`、`steps`、`attempts`、`sessions`、`verification_results`、`events` 八张核心表。
 - 版本化迁移：SQL 脚本通过 `embed` 嵌入程序，启动时按版本顺序自动执行，已应用版本记录在 `schema_migrations`。
 - 存储接口与事务边界：`storage.Store` / `storage.Tx` 提供跨实体原子更新，错误可按类别判断。
+- 执行节点管理：`agentflow host` 命令组支持新增、列出、查看、设置默认与删除执行节点，节点保存在 SQLite 的 `execution_hosts` 表中。
+- SSH 服务探测：`agentflow host probe` 使用 Go 代码建立 TCP 连接并校验服务端 SSH 协议标识，不依赖本机 `ssh` 命令，也不执行身份认证。
 
 第一版目标（尚未实现）：
 
@@ -40,6 +42,7 @@ AgentFlow 处于**数据层落地阶段**。当前仓库包含工程骨架、可
 - `gopkg.in/yaml.v3`（配置）
 - `log/slog`（日志）
 - `database/sql` + `modernc.org/sqlite`（持久化，纯 Go 驱动，不依赖 CGO）
+- Go 标准库 `net`、`context`（SSH 端点探测）
 - Go 标准库 `testing`（测试）
 - Makefile（构建入口）
 
@@ -95,6 +98,99 @@ go run ./cmd/agentflow --help
   - scheduler.max_concurrent_tasks: 必须大于 0
   - roles[0].type: Role.type: 不支持的角色类型 reviewer
 ```
+
+## 执行节点管理
+
+执行节点是通过 SSH 管理的远程 Linux 机器。当前版本只保存连接目标与远程工作空间配置，
+并提供 SSH 服务可达性探测。
+
+`host` 命令组复用 `config validate` 的配置加载流程，因此同样接受 `--config`；
+未指定时读取 `configs/agentflow.yaml`，数据库路径取自该配置的 `storage.database_path`。
+
+### 新增执行节点
+
+```bash
+./bin/agentflow host add   --id node-build-01   --name 构建节点   --host 192.0.2.10   --port 22   --user deploy   --workspace "~/.lingting/agentflow"   --default
+```
+
+| 参数 | 说明 |
+|---|---|
+| `--id` | 节点标识，省略时自动生成 |
+| `--name` | 节点名称，省略时使用 `--host` 的值 |
+| `--host` | IP 地址或主机名，必填；只写地址，不写端口 |
+| `--port` | SSH 端口，默认 `22`，取值范围 1-65535 |
+| `--user` | SSH 登录用户名，必填 |
+| `--workspace` | 远程工作空间路径，默认 `~/.lingting/agentflow` |
+| `--default` | 同时设为默认执行节点 |
+
+该命令只写入本机数据库，**不会**连接目标机器、不会创建远程目录，也不代表可以登录。
+
+### 列出与查看
+
+```bash
+./bin/agentflow host list
+./bin/agentflow host show node-build-01
+```
+
+`host list` 输出标识、名称、地址、用户名、工作空间、默认标记与启用状态。
+
+### 设置默认节点
+
+```bash
+./bin/agentflow host set-default node-build-01
+```
+
+默认节点在单个事务内切换，数据库保证最多只有一个默认节点。节点不存在或已被禁用时
+返回明确错误。
+
+### 探测 SSH 服务
+
+```bash
+./bin/agentflow host probe node-build-01
+```
+
+探测由 Go 代码完成（`net` + `context`），不执行本机的 `ssh`、`scp` 等命令。它会：
+
+1. 校验主机地址、端口与超时配置；
+2. 建立 TCP 连接；
+3. 等待并校验服务端 SSH 协议标识（RFC 4253，形如 `SSH-2.0-OpenSSH_9.6`）；
+4. 记录耗时并关闭连接。
+
+输出区分四类结果：
+
+| 结果类别 | 含义 |
+|---|---|
+| `unreachable` | 地址不可达，例如连接被拒绝或域名无法解析 |
+| `timeout` | 连接或读取协议标识超时 |
+| `not_ssh` | 端口可连接，但未返回有效的 SSH 协议标识 |
+| `ok` | 已识别到有效 SSH 协议标识 |
+
+成功时输出固定说明：`SSH 服务可达，协议标识有效；尚未执行身份认证。`
+
+### SSH 探测与 SSH 登录的区别
+
+- **探测**只验证网络可达性与 SSH 服务协议标识，**不做任何身份认证**。
+- 探测成功不等于登录成功，也不代表远程 Linux 环境已经验证通过。
+- 当前版本没有密码、私钥或 SSH Agent 认证，因此无法执行远程命令或传输文件。
+- 后续加入认证能力时，认证配置与凭据通过 `internal/sshclient` 的 `CredentialProvider`
+  与 `ClientFactory` 注入，执行节点管理业务不需要改动。
+
+### 远程工作空间路径
+
+- 默认值为 `~/.lingting/agentflow`。
+- `~` 指**远程 SSH 登录用户的 Home**，不是本机用户的 Home。
+- 路径遵循 POSIX 语义，必须使用 `/`，可以是以 `/` 开头的绝对路径或以 `~/` 开头的路径。
+- 不接受根目录 `/`、`~` 本身、相对路径、`\` 分隔符、连续 `//` 与 `..` 上级引用。
+- 当前阶段只保存配置，不创建也不检查远程目录；后续远程操作应由远程用户环境解析该路径
+  并转换为绝对路径，涉及目录创建与删除时还必须再做路径安全检查。
+
+### 删除节点
+
+```bash
+./bin/agentflow host remove node-build-01
+```
+
+只删除本机数据库中的节点配置，**不会**删除远程工作空间或远程 Docker 资源。
 
 ## 配置文件说明
 
@@ -164,6 +260,7 @@ storage:
 | `sessions` | 每次 Agent 会话的元数据 | 可空 `step_id` / `attempt_id` 支持任务级会话；关联 Attempt 时必须给出 `step_id` |
 | `verification_results` | 每次验证的结构化结果 | `passed` 只能为 0/1；失败必须带失败摘要；只追加，不覆盖历史 |
 | `events` | 工作流关键事件 | 自增主键；只追加写入；`(task_id, id)` 联合索引支持任务时间线查询 |
+| `execution_hosts` | 通过 SSH 管理的执行节点 | `port` 限定 1-65535；`is_default` / `enabled` 只能为 0/1；部分唯一索引保证最多一个默认节点；**不保存任何凭据字段** |
 | `schema_migrations` | 迁移版本记录 | `version` 主键，记录迁移名与应用时间 |
 
 通用约定：
@@ -180,6 +277,7 @@ storage:
 - `storage.Store`：各实体的读写方法与 `WithTx`、`Close`。
 - `storage.Tx`：事务内可用的同一组实体方法。
 - `storage.RoleSeeder`：角色初始化入口，仅在 `roles` 为空时导入，不覆盖已有角色。
+- `storage.ExecutionHostStore`：执行节点读写与 `SetDefaultExecutionHost`，默认节点切换在单个事务内完成。
 - 错误通过 `errors.Is` 判断：`ErrNotFound`、`ErrConflict`、`ErrForeignKey`、`ErrInvalidData`、
   `ErrBusy`、`ErrUnsupportedSchema`。
 
@@ -203,7 +301,11 @@ make check        # fmt + vet + test + build
 ```bash
 go test ./internal/storage/...        # 迁移、实体读写、约束、事务与恢复
 go test -race ./internal/storage/...  # 并发写入与事务竞争
+go test ./internal/sshprobe/...       # SSH 探测：本地模拟服务、超时、取消与资源释放
+go test ./internal/cli/...            # CLI 命令行为
 ```
+
+SSH 探测测试使用本地回环地址上的模拟 TCP 服务，不依赖真实 SSH 服务器或任何凭据。
 
 开发环境、代码风格与提交约定见 [docs/development.md](docs/development.md)，分层与依赖方向见 [docs/architecture.md](docs/architecture.md)。
 
@@ -219,6 +321,9 @@ go test -race ./internal/storage/...  # 并发写入与事务竞争
 - HTTP API 与 Web UI。
 - 多 Agent Provider 与分布式执行。
 - 角色管理 CLI 与 Web 页面（当前只有存储层的角色初始化与增删改查接口）。
+- SSH 身份认证（密码、私钥、SSH Agent），因此也没有已认证的远程命令执行与 SFTP 文件传输。
+- 远程工作空间初始化、远程 Docker 检测、镜像构建与容器管理。
+- 在远程容器内执行 Pi Agent。
 
 ## 安全与风险提示
 
@@ -228,6 +333,8 @@ AgentFlow 的最终形态会**执行外部程序并修改项目文件**，请注
 - 请使用相互隔离的工作区，并配置合理的 Agent 权限；提示词不是权限边界。
 - 审查任何可能修改或删除数据的操作，尤其是工作区清理与 Git 操作。
 - 不要在配置或仓库中保存真实 API Key；模型凭据由 Pi 及其 Provider 管理。
+- 执行节点表只保存连接目标与工作空间，不保存密码、私钥或任何认证材料。
+- `host probe` 只验证 SSH 服务可达性，**不代表已经登录成功或远程环境已验证**。
 - 本地 HTTP 服务在实现后将默认只监听 `127.0.0.1`，且不存储模型凭据。
 
 ## 许可证

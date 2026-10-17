@@ -45,7 +45,11 @@ go build -o bin/agentflow ./cmd/agentflow
 ```bash
 go test ./internal/storage/...        # 迁移、实体读写、约束与事务
 go test -race ./internal/storage/...  # 并发写入与事务竞争
+go test ./internal/sshprobe/...       # SSH 探测：本地模拟服务、超时、取消与资源释放
+go test ./internal/cli/...            # CLI 命令行为
 ```
+
+SSH 探测测试使用本地回环地址上的模拟 TCP 服务，不依赖真实 SSH 服务器、外部网络或任何凭据。
 
 `make build` 会通过 `-ldflags -X` 注入 `version`、`commit`、`buildDate`；直接 `go build` 时三者取默认的开发值 `dev` / `none` / `unknown`。可以用环境变量覆盖版本号：
 
@@ -60,7 +64,17 @@ make build VERSION=0.1.0
 ./bin/agentflow --version
 ./bin/agentflow version
 ./bin/agentflow config validate --config configs/example.yaml
+
+./bin/agentflow host add --id node-a --host 192.0.2.10 --user deploy --default
+./bin/agentflow host list
+./bin/agentflow host show node-a
+./bin/agentflow host set-default node-a
+./bin/agentflow host probe node-a
+./bin/agentflow host remove node-a
 ```
+
+`host` 命令组同样接受 `--config`，未指定时读取 `configs/agentflow.yaml`。`host probe`
+只验证 TCP 可达性与 SSH 协议标识，不执行身份认证。
 
 `config validate` 未指定 `--config` 时读取 `configs/agentflow.yaml`；该文件不存在视为错误，不会回退到内置默认值。
 

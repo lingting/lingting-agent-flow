@@ -6,15 +6,20 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage"
 )
 
-// expectedTables 是第一版迁移应当创建的业务表。
+// latestSchemaVersion 是当前程序内置迁移的最新版本号。
+const latestSchemaVersion = 2
+
+// expectedTables 是迁移应当创建的业务表。
 var expectedTables = []string{
 	"attempts",
 	"events",
+	"execution_hosts",
 	"requirements",
 	"roles",
 	"sessions",
@@ -47,18 +52,23 @@ func TestMigrateRecordsVersions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取 schema 版本失败: %v", err)
 	}
-	if version != 1 {
-		t.Fatalf("schema 版本不符: 期望 1，实际 %d", version)
+	if version != latestSchemaVersion {
+		t.Fatalf("schema 版本不符: 期望 %d，实际 %d", latestSchemaVersion, version)
 	}
 	statuses, err := db.MigrationStatuses(ctx)
 	if err != nil {
 		t.Fatalf("读取迁移状态失败: %v", err)
 	}
-	if len(statuses) != 1 || !statuses[0].Applied {
-		t.Fatalf("迁移状态不符: %+v", statuses)
+	if len(statuses) != latestSchemaVersion {
+		t.Fatalf("迁移数量不符: %d", len(statuses))
 	}
-	if statuses[0].AppliedAt <= 0 {
-		t.Fatalf("迁移应用时间应当为正数: %d", statuses[0].AppliedAt)
+	for _, status := range statuses {
+		if !status.Applied {
+			t.Fatalf("迁移 %04d 应当已应用: %+v", status.Version, status)
+		}
+		if status.AppliedAt <= 0 {
+			t.Fatalf("迁移应用时间应当为正数: %d", status.AppliedAt)
+		}
 	}
 }
 
@@ -76,7 +86,7 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取 schema 版本失败: %v", err)
 	}
-	if version != 1 {
+	if version != latestSchemaVersion {
 		t.Fatalf("重复迁移后版本不符: %d", version)
 	}
 	roles, err := second.ListRoles(ctx)
@@ -85,6 +95,68 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	}
 	if len(roles) != 1 || roles[0].ID != role.ID {
 		t.Fatalf("重复迁移破坏了已有数据: %+v", roles)
+	}
+	// 迁移后应当可以在同一个数据库上继续读写执行节点。
+	host, err := domain.NewExecutionHost("", "迁移节点", "10.0.0.1", 0, "deploy", "", time.Now())
+	if err != nil {
+		t.Fatalf("构造执行节点失败: %v", err)
+	}
+	if err := second.CreateExecutionHost(ctx, host); err != nil {
+		t.Fatalf("迁移后写入执行节点失败: %v", err)
+	}
+	if _, err := second.GetExecutionHost(ctx, host.ID); err != nil {
+		t.Fatalf("迁移后读取执行节点失败: %v", err)
+	}
+}
+
+func TestMigrateUpgradesExistingDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agentflow.db")
+	db := openTestDB(t, path)
+	ctx := testContext(t)
+	role := mustRole(t, db, domain.RoleTypeDeveloper, "开发工程师")
+	requirement := mustRequirement(t, db)
+	task := mustTask(t, db, requirement.ID)
+	// 模拟旧版本数据库：删除新增的表与对应迁移记录，重新打开后应自动补建。
+	if _, err := db.sql.ExecContext(ctx, `DROP TABLE execution_hosts`); err != nil {
+		t.Fatalf("删除执行节点表失败: %v", err)
+	}
+	if _, err := db.sql.ExecContext(
+		ctx,
+		`DELETE FROM `+migrationTable+` WHERE version = 2`,
+	); err != nil {
+		t.Fatalf("删除迁移记录失败: %v", err)
+	}
+	if version, err := db.SchemaVersion(ctx); err != nil || version != 1 {
+		t.Fatalf("模拟旧库版本失败: %d, %v", version, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("关闭数据库失败: %v", err)
+	}
+
+	upgraded := openTestDB(t, path)
+	version, err := upgraded.SchemaVersion(ctx)
+	if err != nil {
+		t.Fatalf("读取 schema 版本失败: %v", err)
+	}
+	if version != latestSchemaVersion {
+		t.Fatalf("升级后版本不符: %d", version)
+	}
+	host, err := domain.NewExecutionHost("", "迁移节点", "10.0.0.1", 0, "deploy", "", time.Now())
+	if err != nil {
+		t.Fatalf("构造执行节点失败: %v", err)
+	}
+	if err := upgraded.CreateExecutionHost(ctx, host); err != nil {
+		t.Fatalf("升级后写入执行节点失败: %v", err)
+	}
+	if _, err := upgraded.GetRole(ctx, role.ID); err != nil {
+		t.Fatalf("升级破坏了已有角色: %v", err)
+	}
+	loaded, err := upgraded.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("升级破坏了已有任务: %v", err)
+	}
+	if loaded.ID != task.ID {
+		t.Fatalf("升级后任务不符: %+v", loaded)
 	}
 }
 
@@ -103,7 +175,7 @@ func TestMigrateFailureDoesNotRecordVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取 schema 版本失败: %v", err)
 	}
-	if version != 1 {
+	if version != latestSchemaVersion {
 		t.Fatalf("失败的迁移不应记录版本，实际版本: %d", version)
 	}
 	tables, err := listTables(ctx, db)

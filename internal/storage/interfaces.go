@@ -50,6 +50,24 @@ type RoleStore interface {
 	ListRoles(ctx context.Context) ([]domain.Role, error)
 }
 
+// ExecutionHostStore 保存通过 SSH 管理的执行节点。
+//
+// 接口只表达存储需求：默认节点的唯一性由数据库约束保证，切换默认节点必须通过
+// SetDefaultExecutionHost 在单个事务内完成，不能先查询再分两次写入。
+type ExecutionHostStore interface {
+	CreateExecutionHost(ctx context.Context, host domain.ExecutionHost) error
+	// UpdateExecutionHost 按主键更新节点配置，is_default 与 enabled 也随记录一起写入。
+	UpdateExecutionHost(ctx context.Context, host domain.ExecutionHost) error
+	// DeleteExecutionHost 删除节点配置，不删除远程工作空间或远程资源。
+	DeleteExecutionHost(ctx context.Context, id domain.ID) error
+	GetExecutionHost(ctx context.Context, id domain.ID) (*domain.ExecutionHost, error)
+	ListExecutionHosts(ctx context.Context) ([]domain.ExecutionHost, error)
+	// SetDefaultExecutionHost 在单个事务内清除原默认节点并设置新的默认节点。
+	SetDefaultExecutionHost(ctx context.Context, id domain.ID) error
+	// GetDefaultExecutionHost 返回当前默认节点，没有默认节点时返回 storage.ErrNotFound。
+	GetDefaultExecutionHost(ctx context.Context) (*domain.ExecutionHost, error)
+}
+
 // RequirementFilter 约束需求查询条件，零值表示不限制。
 type RequirementFilter struct {
 	// Statuses 限制需求状态，为空表示不限制。
@@ -153,6 +171,7 @@ type RoleSeeder interface {
 // 通过 WithTx 取得，事务的提交与回滚由存储层管理，调用方不直接持有事务对象。
 type Tx interface {
 	RoleStore
+	ExecutionHostStore
 	RequirementStore
 	TaskStore
 	StepStore
