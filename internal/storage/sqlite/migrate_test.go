@@ -13,7 +13,7 @@ import (
 )
 
 // latestSchemaVersion 是当前程序内置迁移的最新版本号。
-const latestSchemaVersion = 3
+const latestSchemaVersion = 4
 
 // expectedTables 是迁移应当创建的业务表。
 var expectedTables = []string{
@@ -138,7 +138,7 @@ func TestMigrateUpgradesExistingDatabase(t *testing.T) {
 	}
 	if _, err := db.sql.ExecContext(
 		ctx,
-		`DELETE FROM `+migrationTable+` WHERE version IN (2, 3)`,
+		`DELETE FROM `+migrationTable+` WHERE version IN (2, 3, 4)`,
 	); err != nil {
 		t.Fatalf("删除迁移记录失败: %v", err)
 	}

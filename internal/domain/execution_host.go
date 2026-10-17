@@ -21,20 +21,38 @@ const (
 )
 
 // ExecutionHost 是一台通过 SSH 管理的远程 Linux 执行节点。
+// ExecutionHost 是一台通过 SSH 管理的远程 Linux 执行节点。
 //
-// 本模型只保存连接目标与工作空间配置，不保存密码、私钥或任何认证材料：
-// 认证方式在后续阶段单独设计，避免数据模型过早绑定某一种认证方式。
+// 本模型只保存连接目标、认证方式种类与工作空间配置，不保存密码、私钥原文或
+// 私钥口令：认证材料只能通过内存中的凭据提供器在连接时提供。私钥认证只保存
+// 本机私钥文件路径，AgentFlow 不会复制或修改该文件。
 type ExecutionHost struct {
-	ID            ID        `json:"id"`
-	Name          string    `json:"name"`
-	Host          string    `json:"host"`
-	Port          int       `json:"port"`
-	Username      string    `json:"username"`
-	WorkspaceRoot string    `json:"workspace_root"`
-	IsDefault     bool      `json:"is_default"`
-	Enabled       bool      `json:"enabled"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID            ID     `json:"id"`
+	Name          string `json:"name"`
+	Host          string `json:"host"`
+	Port          int    `json:"port"`
+	Username      string `json:"username"`
+	WorkspaceRoot string `json:"workspace_root"`
+	IsDefault     bool   `json:"is_default"`
+	Enabled       bool   `json:"enabled"`
+	// AuthMethod 是认证方式，取值见 AuthMethod 常量。
+	AuthMethod AuthMethod `json:"auth_method"`
+	// PrivateKeyPath 是本机私钥文件路径，仅私钥认证使用。
+	PrivateKeyPath string `json:"private_key_path,omitempty"`
+	// HostKeyAlgorithm 是已确认信任的主机密钥算法。
+	HostKeyAlgorithm string `json:"host_key_algorithm,omitempty"`
+	// HostKeyFingerprint 是已确认信任的主机密钥 SHA-256 指纹。
+	HostKeyFingerprint string `json:"host_key_fingerprint,omitempty"`
+	// HostKeyTrustedAt 是主机密钥被确认信任的时间，未信任时为空。
+	HostKeyTrustedAt *time.Time `json:"host_key_trusted_at,omitempty"`
+	// LastConnectStatus 是最近一次连接测试的结果类别。
+	LastConnectStatus ConnectStatus `json:"last_connect_status"`
+	// LastConnectError 是最近一次连接失败的分类代码，不包含敏感内容。
+	LastConnectError string `json:"last_connect_error,omitempty"`
+	// LastConnectedAt 是最近一次连接测试的时间，未测试时为空。
+	LastConnectedAt *time.Time `json:"last_connected_at,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 // NewExecutionHost 创建并校验执行节点。
@@ -47,6 +65,7 @@ func NewExecutionHost(
 	port int,
 	username, workspaceRoot string,
 	at time.Time,
+	options ...HostOption,
 ) (ExecutionHost, error) {
 	if id.IsEmpty() {
 		id = NewID()
@@ -63,8 +82,15 @@ func NewExecutionHost(
 		Username:      strings.TrimSpace(username),
 		WorkspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		Enabled:       true,
-		CreatedAt:     createdAt,
-		UpdatedAt:     createdAt,
+		// 未指定认证方式时使用 SSH Agent：它不需要在配置中保存任何机密材料。
+		AuthMethod: AuthMethodAgent,
+		CreatedAt:  createdAt,
+		UpdatedAt:  createdAt,
+	}
+	for _, option := range options {
+		if option != nil {
+			option(&entity)
+		}
 	}
 	if err := entity.Validate(); err != nil {
 		return ExecutionHost{}, err
@@ -89,7 +115,54 @@ func (h ExecutionHost) Validate() error {
 	if err := validateSSHUsername(h.Username); err != nil {
 		return err
 	}
-	return validateWorkspaceRoot(h.WorkspaceRoot)
+	if err := validateWorkspaceRoot(h.WorkspaceRoot); err != nil {
+		return err
+	}
+	if err := validateAuthConfig(h); err != nil {
+		return err
+	}
+	if err := validateHostKeyFingerprint(h.HostKeyFingerprint); err != nil {
+		return err
+	}
+	if err := h.LastConnectStatus.Validate(); err != nil {
+		return err
+	}
+	return validateConnectErrorCode(h.LastConnectError)
+}
+
+// RecordConnectResult 记录最近一次连接测试的结果。
+//
+// errorCode 应当是稳定的分类代码（例如 host_key_unknown、auth_failed），
+// 而不是包含主机名、用户名或凭据的完整错误消息。
+func (h *ExecutionHost) RecordConnectResult(status ConnectStatus, errorCode string, at time.Time) error {
+	if err := status.Validate(); err != nil {
+		return err
+	}
+	if err := validateConnectErrorCode(errorCode); err != nil {
+		return err
+	}
+	if status == ConnectStatusSuccess {
+		errorCode = ""
+	}
+	recordedAt := normalizeTime(at)
+	h.LastConnectStatus = status
+	h.LastConnectError = errorCode
+	h.LastConnectedAt = &recordedAt
+	h.UpdatedAt = recordedAt
+	return nil
+}
+
+// TrustHostKey 记录用户确认信任的主机密钥信息。
+func (h *ExecutionHost) TrustHostKey(algorithm, fingerprint string, at time.Time) error {
+	if err := validateHostKeyFingerprint(fingerprint); err != nil {
+		return err
+	}
+	trustedAt := normalizeTime(at)
+	h.HostKeyAlgorithm = strings.TrimSpace(algorithm)
+	h.HostKeyFingerprint = strings.TrimSpace(fingerprint)
+	h.HostKeyTrustedAt = &trustedAt
+	h.UpdatedAt = trustedAt
+	return nil
 }
 
 // Address 返回 SSH 连接使用的 host:port 形式地址，IPv6 会自动加方括号。

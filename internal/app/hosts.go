@@ -40,6 +40,7 @@ func NewExecutionHostService(
 }
 
 // CreateExecutionHostRequest 是新增执行节点的输入。
+// CreateExecutionHostRequest 是新增执行节点的输入。
 type CreateExecutionHostRequest struct {
 	// ID 是节点标识，为空时自动生成。
 	ID string
@@ -53,6 +54,10 @@ type CreateExecutionHostRequest struct {
 	Username string
 	// WorkspaceRoot 是远程工作空间路径，为空时使用默认值。
 	WorkspaceRoot string
+	// AuthMethod 是认证方式，为空时使用 SSH Agent。
+	AuthMethod domain.AuthMethod
+	// PrivateKeyPath 是本机私钥文件路径，仅私钥认证使用。
+	PrivateKeyPath string
 	// Default 表示是否同时设为默认节点。
 	Default bool
 }
@@ -69,6 +74,10 @@ func (s *ExecutionHostService) Create(
 	if name == "" {
 		name = strings.TrimSpace(request.Host)
 	}
+	method := request.AuthMethod
+	if method == "" {
+		method = domain.AuthMethodAgent
+	}
 	host, err := domain.NewExecutionHost(
 		domain.ID(strings.TrimSpace(request.ID)),
 		name,
@@ -77,6 +86,7 @@ func (s *ExecutionHostService) Create(
 		request.Username,
 		request.WorkspaceRoot,
 		time.Now(),
+		domain.WithAuth(method, request.PrivateKeyPath),
 	)
 	if err != nil {
 		return domain.ExecutionHost{}, fmt.Errorf("新增执行节点失败: %w", err)
@@ -116,6 +126,10 @@ type UpdateExecutionHostRequest struct {
 	Username *string
 	// WorkspaceRoot 是新的远程工作空间路径。
 	WorkspaceRoot *string
+	// AuthMethod 是新的认证方式。
+	AuthMethod *domain.AuthMethod
+	// PrivateKeyPath 是新的本机私钥文件路径。
+	PrivateKeyPath *string
 	// Enabled 控制节点是否允许使用。
 	Enabled *bool
 	// Default 控制节点是否成为默认节点。
@@ -179,6 +193,12 @@ func applyHostChanges(host *domain.ExecutionHost, request UpdateExecutionHostReq
 	}
 	if request.WorkspaceRoot != nil {
 		host.WorkspaceRoot = strings.TrimSpace(*request.WorkspaceRoot)
+	}
+	if request.AuthMethod != nil {
+		host.AuthMethod = *request.AuthMethod
+	}
+	if request.PrivateKeyPath != nil {
+		host.PrivateKeyPath = strings.TrimSpace(*request.PrivateKeyPath)
 	}
 	if request.Enabled != nil {
 		host.Enabled = *request.Enabled

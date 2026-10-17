@@ -2,15 +2,22 @@ package app_test
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/pem"
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/logging"
+	"github.com/lingting/agentflow/internal/sshclient"
 	"github.com/lingting/agentflow/internal/storage"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
 )
@@ -382,4 +389,208 @@ func TestProbeExecutionHostMissing(t *testing.T) {
 	if !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("应当返回记录不存在，实际: %v", err)
 	}
+}
+
+// newSSHService 在临时目录中打开数据库并构造 SSH 服务。
+func newSSHService(t *testing.T) (*app.SSHService, storage.Store) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	dir := t.TempDir()
+	databasePath := filepath.Join(dir, "agentflow.db")
+	db, err := sqlite.Open(ctx, sqlite.Options{Path: databasePath})
+	if err != nil {
+		t.Fatalf("打开测试数据库失败: %v", err)
+	}
+	t.Cleanup(func() {
+		if closeErr := db.Close(); closeErr != nil {
+			t.Errorf("关闭测试数据库失败: %v", closeErr)
+		}
+	})
+	logger, err := logging.New(nopWriter{}, logging.LevelError)
+	if err != nil {
+		t.Fatalf("构造日志器失败: %v", err)
+	}
+	service, err := app.NewSSHService(db, logger, app.SSHOptions{
+		KnownHostsPath: filepath.Join(dir, "known_hosts"),
+		StorePath:      filepath.Join(dir, "agentflow_known_hosts"),
+	})
+	if err != nil {
+		t.Fatalf("构造 SSH 服务失败: %v", err)
+	}
+	return service, db
+}
+
+// mustHost 写入一个测试执行节点并返回其标识。
+func mustHost(t *testing.T, store storage.Store, request app.CreateExecutionHostRequest) domain.ID {
+	t.Helper()
+	ctx := testContext(t)
+	method := request.AuthMethod
+	if method == "" {
+		method = domain.AuthMethodAgent
+	}
+	host, err := domain.NewExecutionHost(
+		domain.ID(request.ID),
+		request.Name,
+		request.Host,
+		request.Port,
+		request.Username,
+		request.WorkspaceRoot,
+		time.Now(),
+		domain.WithAuth(method, request.PrivateKeyPath),
+	)
+	if err != nil {
+		t.Fatalf("构造执行节点失败: %v", err)
+	}
+	if err := store.CreateExecutionHost(ctx, host); err != nil {
+		t.Fatalf("写入执行节点失败: %v", err)
+	}
+	return host.ID
+}
+
+// TestSSHServiceRejectsMissingStore 验证缺少存储时构造失败。
+func TestSSHServiceRejectsMissingStore(t *testing.T) {
+	if _, err := app.NewSSHService(nil, nil, app.SSHOptions{}); err == nil {
+		t.Fatal("缺少存储时应当返回错误")
+	}
+}
+
+// TestSSHServiceKnownHostsStorePath 验证主机密钥记录路径可被诊断输出。
+func TestSSHServiceKnownHostsStorePath(t *testing.T) {
+	service, _ := newSSHService(t)
+	if service.KnownHostsStorePath() == "" {
+		t.Fatal("应当给出主机密钥记录路径")
+	}
+}
+
+// TestTestConnectionUnreachable 验证连接测试报告 TCP 不可达并记录结果。
+func TestTestConnectionUnreachable(t *testing.T) {
+	service, store := newSSHService(t)
+	ctx := testContext(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("启动测试监听失败: %v", err)
+	}
+	address, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("监听地址类型不符: %T", listener.Addr())
+	}
+	port := address.Port
+	if closeErr := listener.Close(); closeErr != nil {
+		t.Fatalf("关闭测试监听失败: %v", closeErr)
+	}
+	id := mustHost(t, store, app.CreateExecutionHostRequest{
+		ID:             "node-unreachable",
+		Name:           "不可达节点",
+		Host:           address.IP.String(),
+		Port:           port,
+		Username:       "deploy",
+		AuthMethod:     domain.AuthMethodPrivateKey,
+		PrivateKeyPath: writeTestPrivateKey(t),
+	})
+	result, testErr := service.TestConnection(ctx, id.String(), app.TestConnectionOptions{})
+	if testErr == nil {
+		t.Fatal("不可达地址应当返回错误")
+	}
+	if result.Authenticated {
+		t.Fatal("不可达时不应标记为已认证")
+	}
+	if result.Code != sshclient.CodeUnreachable {
+		t.Fatalf("结果类别应为 unreachable，实际: %s", result.Code)
+	}
+	reloaded, err := store.GetExecutionHost(ctx, id)
+	if err != nil {
+		t.Fatalf("读取执行节点失败: %v", err)
+	}
+	if reloaded.LastConnectStatus != domain.ConnectStatusFailed {
+		t.Fatalf("应当记录连接失败，实际: %s", reloaded.LastConnectStatus)
+	}
+	if reloaded.LastConnectError != sshclient.CodeUnreachable.String() {
+		t.Fatalf("应当记录错误类别，实际: %s", reloaded.LastConnectError)
+	}
+}
+
+// TestTestConnectionRejectsDisabledHost 验证禁用节点不能被测试。
+func TestTestConnectionRejectsDisabledHost(t *testing.T) {
+	service, store := newSSHService(t)
+	ctx := testContext(t)
+	id := mustHost(t, store, app.CreateExecutionHostRequest{
+		ID: "node-disabled", Name: "禁用节点", Host: "10.0.0.31", Username: "deploy",
+	})
+	host, err := store.GetExecutionHost(ctx, id)
+	if err != nil {
+		t.Fatalf("读取执行节点失败: %v", err)
+	}
+	host.Enabled = false
+	if err := store.UpdateExecutionHost(ctx, *host); err != nil {
+		t.Fatalf("更新执行节点失败: %v", err)
+	}
+	if _, testErr := service.TestConnection(ctx, id.String(), app.TestConnectionOptions{}); testErr == nil {
+		t.Fatal("禁用节点应当返回错误")
+	}
+	if _, connectErr := service.Connect(ctx, id.String(), nil); connectErr == nil {
+		t.Fatal("禁用节点不应允许建立连接")
+	}
+}
+
+// TestTestConnectionMissingHost 验证节点不存在时返回记录不存在。
+func TestTestConnectionMissingHost(t *testing.T) {
+	service, _ := newSSHService(t)
+	_, err := service.TestConnection(
+		testContext(t),
+		domain.NewID().String(),
+		app.TestConnectionOptions{},
+	)
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("应当返回记录不存在，实际: %v", err)
+	}
+}
+
+// TestEnsureWorkspaceMissingHost 验证工作空间检查要求节点存在。
+func TestEnsureWorkspaceMissingHost(t *testing.T) {
+	service, _ := newSSHService(t)
+	_, err := service.EnsureWorkspace(testContext(t), domain.NewID().String(), nil, false)
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("应当返回记录不存在，实际: %v", err)
+	}
+}
+
+// TestTrustHostKeyRequiresFingerprint 验证未给出指纹时拒绝记录信任。
+func TestTrustHostKeyRequiresFingerprint(t *testing.T) {
+	service, store := newSSHService(t)
+	id := mustHost(t, store, app.CreateExecutionHostRequest{
+		ID: "node-trust", Name: "信任节点", Host: "10.0.0.32", Username: "deploy",
+	})
+	if _, err := service.TrustHostKey(testContext(t), id.String(), "  "); err == nil {
+		t.Fatal("缺少指纹时应当返回错误")
+	}
+}
+
+// TestProbeHostKeyMissingHost 验证主机密钥探测要求节点存在。
+func TestProbeHostKeyMissingHost(t *testing.T) {
+	service, _ := newSSHService(t)
+	if _, err := service.ProbeHostKey(testContext(t), domain.NewID().String()); !errors.Is(
+		err,
+		storage.ErrNotFound,
+	) {
+		t.Fatalf("应当返回记录不存在，实际: %v", err)
+	}
+}
+
+// writeTestPrivateKey 生成一个测试用未加密私钥并返回其路径。
+func writeTestPrivateKey(t *testing.T) string {
+	t.Helper()
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("生成测试密钥失败: %v", err)
+	}
+	block, err := ssh.MarshalPrivateKey(privateKey, "agentflow-test")
+	if err != nil {
+		t.Fatalf("编码测试私钥失败: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "id_test")
+	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
+		t.Fatalf("写入测试私钥失败: %v", err)
+	}
+	return path
 }

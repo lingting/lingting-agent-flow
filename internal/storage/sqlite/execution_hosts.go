@@ -11,7 +11,12 @@ import (
 
 // executionHostColumns 是执行节点表的完整列顺序。
 const executionHostColumns = `id, name, host, port, username, workspace_root,
-	is_default, enabled, created_at, updated_at`
+	is_default, enabled, auth_method, private_key_path, host_key_algorithm,
+	host_key_fingerprint, host_key_trusted_at, last_connect_status,
+	last_connect_error, last_connected_at, created_at, updated_at`
+
+// executionHostInsertCount 是写入执行节点时的参数个数。
+const executionHostInsertCount = 18
 
 // executionHostStore 实现 storage.ExecutionHostStore。
 type executionHostStore struct {
@@ -29,22 +34,9 @@ func (s executionHostStore) CreateExecutionHost(
 	if err := host.Validate(); err != nil {
 		return err
 	}
-	const statement = `INSERT INTO execution_hosts (` + executionHostColumns + `)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := s.q.ExecContext(
-		ctx,
-		statement,
-		toIDParam(host.ID),
-		host.Name,
-		host.Host,
-		host.Port,
-		host.Username,
-		host.WorkspaceRoot,
-		toBoolInt(host.IsDefault),
-		toBoolInt(host.Enabled),
-		toMillis(host.CreatedAt),
-		toMillis(host.UpdatedAt),
-	)
+	statement := `INSERT INTO execution_hosts (` + executionHostColumns + `)
+		VALUES (` + placeholders(executionHostInsertCount) + `)`
+	_, err := s.q.ExecContext(ctx, statement, executionHostArgs(host)...)
 	if err != nil {
 		return wrapError("写入执行节点", err)
 	}
@@ -64,7 +56,10 @@ func (s executionHostStore) UpdateExecutionHost(
 	const statement = `
 UPDATE execution_hosts SET
 	name = ?, host = ?, port = ?, username = ?, workspace_root = ?,
-	is_default = ?, enabled = ?, updated_at = ?
+	is_default = ?, enabled = ?, auth_method = ?, private_key_path = ?,
+	host_key_algorithm = ?, host_key_fingerprint = ?, host_key_trusted_at = ?,
+	last_connect_status = ?, last_connect_error = ?, last_connected_at = ?,
+	updated_at = ?
 WHERE id = ?`
 	result, err := s.q.ExecContext(
 		ctx,
@@ -76,6 +71,14 @@ WHERE id = ?`
 		host.WorkspaceRoot,
 		toBoolInt(host.IsDefault),
 		toBoolInt(host.Enabled),
+		host.AuthMethod.String(),
+		nullIfBlank(host.PrivateKeyPath),
+		nullIfBlank(host.HostKeyAlgorithm),
+		nullIfBlank(host.HostKeyFingerprint),
+		toMillisPtr(host.HostKeyTrustedAt),
+		nullIfBlank(host.LastConnectStatus.String()),
+		nullIfBlank(host.LastConnectError),
+		toMillisPtr(host.LastConnectedAt),
 		toMillis(host.UpdatedAt),
 		toIDParam(host.ID),
 	)
@@ -83,6 +86,32 @@ WHERE id = ?`
 		return wrapError("更新执行节点", err)
 	}
 	return ensureAffected(result, "执行节点", host.ID)
+}
+
+// executionHostArgs 构造写入执行节点时的参数列表。
+//
+// 顺序必须与 executionHostColumns 完全一致。
+func executionHostArgs(host domain.ExecutionHost) []any {
+	return []any{
+		toIDParam(host.ID),
+		host.Name,
+		host.Host,
+		host.Port,
+		host.Username,
+		host.WorkspaceRoot,
+		toBoolInt(host.IsDefault),
+		toBoolInt(host.Enabled),
+		host.AuthMethod.String(),
+		nullIfBlank(host.PrivateKeyPath),
+		nullIfBlank(host.HostKeyAlgorithm),
+		nullIfBlank(host.HostKeyFingerprint),
+		toMillisPtr(host.HostKeyTrustedAt),
+		nullIfBlank(host.LastConnectStatus.String()),
+		nullIfBlank(host.LastConnectError),
+		toMillisPtr(host.LastConnectedAt),
+		toMillis(host.CreatedAt),
+		toMillis(host.UpdatedAt),
+	}
 }
 
 // DeleteExecutionHost 删除执行节点配置。
@@ -205,12 +234,20 @@ func (s executionHostStore) GetDefaultExecutionHost(
 // scanExecutionHost 从一行结果读取执行节点。
 func scanExecutionHost(row scanner) (*domain.ExecutionHost, error) {
 	var (
-		host      domain.ExecutionHost
-		rawID     string
-		isDefault int
-		enabled   int
-		createdAt int64
-		updatedAt int64
+		host             domain.ExecutionHost
+		rawID            string
+		isDefault        int
+		enabled          int
+		authMethod       string
+		privateKeyPath   sql.NullString
+		hostKeyAlgorithm sql.NullString
+		hostKeyPrint     sql.NullString
+		hostKeyTrustedAt sql.NullInt64
+		connectStatus    sql.NullString
+		connectError     sql.NullString
+		connectedAt      sql.NullInt64
+		createdAt        int64
+		updatedAt        int64
 	)
 	err := row.Scan(
 		&rawID,
@@ -221,6 +258,14 @@ func scanExecutionHost(row scanner) (*domain.ExecutionHost, error) {
 		&host.WorkspaceRoot,
 		&isDefault,
 		&enabled,
+		&authMethod,
+		&privateKeyPath,
+		&hostKeyAlgorithm,
+		&hostKeyPrint,
+		&hostKeyTrustedAt,
+		&connectStatus,
+		&connectError,
+		&connectedAt,
 		&createdAt,
 		&updatedAt,
 	)
@@ -230,6 +275,14 @@ func scanExecutionHost(row scanner) (*domain.ExecutionHost, error) {
 	host.ID = domain.ID(rawID)
 	host.IsDefault = fromBoolInt(isDefault)
 	host.Enabled = fromBoolInt(enabled)
+	host.AuthMethod = domain.AuthMethod(authMethod)
+	host.PrivateKeyPath = privateKeyPath.String
+	host.HostKeyAlgorithm = hostKeyAlgorithm.String
+	host.HostKeyFingerprint = hostKeyPrint.String
+	host.HostKeyTrustedAt = fromMillisPtr(hostKeyTrustedAt)
+	host.LastConnectStatus = domain.ConnectStatus(connectStatus.String)
+	host.LastConnectError = connectError.String
+	host.LastConnectedAt = fromMillisPtr(connectedAt)
 	host.CreatedAt = fromMillis(createdAt)
 	host.UpdatedAt = fromMillis(updatedAt)
 	return &host, nil

@@ -279,3 +279,13 @@ func sqlNullString(value string) sql.NullString {
 	}
 	return sql.NullString{String: value, Valid: true}
 }
+
+// nullIfBlank 把空字符串转换为 NULL，用于可选文本列。
+//
+// 与 sqlNullString 不同，这里保留调用方传入的原始值，只把空白视为未设置。
+func nullIfBlank(value string) any {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
+}

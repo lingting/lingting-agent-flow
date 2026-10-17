@@ -336,3 +336,125 @@ func TestExecutionHostStoresNoCredentialColumns(t *testing.T) {
 		}
 	}
 }
+
+// TestExecutionHostAuthFieldsRoundTrip 验证认证与连接结果字段可以完整往返。
+func TestExecutionHostAuthFieldsRoundTrip(t *testing.T) {
+	db := newTestDB(t)
+	ctx := testContext(t)
+	entity, err := domain.NewExecutionHost(
+		"",
+		"私钥节点",
+		"10.0.0.12",
+		2222,
+		"deploy",
+		"/srv/agentflow",
+		time.Now(),
+		domain.WithAuth(domain.AuthMethodPrivateKey, "/home/deploy/.ssh/id_ed25519"),
+	)
+	if err != nil {
+		t.Fatalf("构造执行节点失败: %v", err)
+	}
+	if err := db.CreateExecutionHost(ctx, entity); err != nil {
+		t.Fatalf("写入执行节点失败: %v", err)
+	}
+	loaded, err := db.GetExecutionHost(ctx, entity.ID)
+	if err != nil {
+		t.Fatalf("读取执行节点失败: %v", err)
+	}
+	if loaded.AuthMethod != domain.AuthMethodPrivateKey {
+		t.Fatalf("认证方式不符: %s", loaded.AuthMethod)
+	}
+	if loaded.PrivateKeyPath != "/home/deploy/.ssh/id_ed25519" {
+		t.Fatalf("私钥路径不符: %s", loaded.PrivateKeyPath)
+	}
+	if loaded.HostKeyTrustedAt != nil || loaded.LastConnectedAt != nil {
+		t.Fatalf("未信任与未连接时时间应为空: %+v", loaded)
+	}
+	if loaded.LastConnectStatus != domain.ConnectStatusUnknown {
+		t.Fatalf("未连接时状态应为空: %s", loaded.LastConnectStatus)
+	}
+	if err := loaded.TrustHostKey("ssh-ed25519", "SHA256:abc", time.Now()); err != nil {
+		t.Fatalf("记录主机密钥信任失败: %v", err)
+	}
+	if err := loaded.RecordConnectResult(domain.ConnectStatusFailed, "auth_failed", time.Now()); err != nil {
+		t.Fatalf("记录连接结果失败: %v", err)
+	}
+	if err := db.UpdateExecutionHost(ctx, *loaded); err != nil {
+		t.Fatalf("更新执行节点失败: %v", err)
+	}
+	reloaded, err := db.GetExecutionHost(ctx, entity.ID)
+	if err != nil {
+		t.Fatalf("重新读取执行节点失败: %v", err)
+	}
+	if reloaded.HostKeyAlgorithm != "ssh-ed25519" || reloaded.HostKeyFingerprint != "SHA256:abc" {
+		t.Fatalf("主机密钥信任信息不符: %+v", reloaded)
+	}
+	if reloaded.HostKeyTrustedAt == nil {
+		t.Fatal("应当保存主机密钥信任时间")
+	}
+	if reloaded.LastConnectStatus != domain.ConnectStatusFailed ||
+		reloaded.LastConnectError != "auth_failed" {
+		t.Fatalf("连接结果不符: %+v", reloaded)
+	}
+	if reloaded.LastConnectedAt == nil {
+		t.Fatal("应当保存最近连接时间")
+	}
+}
+
+// TestExecutionHostPrivateKeyRequiresPath 验证数据库层面拒绝缺少私钥路径的记录。
+func TestExecutionHostPrivateKeyRequiresPath(t *testing.T) {
+	db := newTestDB(t)
+	ctx := testContext(t)
+	entity, err := domain.NewExecutionHost("", "节点", "10.0.0.13", 0, "deploy", "", time.Now())
+	if err != nil {
+		t.Fatalf("构造执行节点失败: %v", err)
+	}
+	if err := db.CreateExecutionHost(ctx, entity); err != nil {
+		t.Fatalf("写入执行节点失败: %v", err)
+	}
+	// 绕过领域校验，直接验证数据库触发器约束。
+	_, err = db.sql.ExecContext(
+		ctx,
+		`UPDATE execution_hosts SET auth_method = 'private_key', private_key_path = NULL WHERE id = ?`,
+		entity.ID.String(),
+	)
+	if err == nil {
+		t.Fatal("私钥认证缺少私钥路径时应当被数据库拒绝")
+	}
+}
+
+// TestExecutionHostRejectsPlaintextSecretColumns 验证表中不存在任何凭据列。
+func TestExecutionHostRejectsPlaintextSecretColumns(t *testing.T) {
+	db := newTestDB(t)
+	ctx := testContext(t)
+	rows, err := db.sql.QueryContext(ctx, `SELECT name FROM pragma_table_info('execution_hosts')`)
+	if err != nil {
+		t.Fatalf("读取表结构失败: %v", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+	forbidden := map[string]struct{}{
+		"password":    {},
+		"passphrase":  {},
+		"private_key": {},
+		"secret":      {},
+		"credential":  {},
+	}
+	columns := make([]string, 0, 24)
+	for rows.Next() {
+		var name string
+		if scanErr := rows.Scan(&name); scanErr != nil {
+			t.Fatalf("读取列名失败: %v", scanErr)
+		}
+		columns = append(columns, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("读取列名失败: %v", err)
+	}
+	for _, name := range columns {
+		if _, bad := forbidden[name]; bad {
+			t.Fatalf("执行节点表不应包含凭据列: %s", name)
+		}
+	}
+}
