@@ -131,3 +131,29 @@ func TestConfigValidateMissingFile(t *testing.T) {
 		t.Fatalf("错误信息应说明文件不存在，实际: %s", stderr)
 	}
 }
+
+// TestAgentHelp 校验 agent 命令组与子命令出现在帮助中。
+func TestAgentHelp(t *testing.T) {
+	code, stdout, stderr := run(t, "agent", "--help")
+	if code != 0 {
+		t.Fatalf("agent --help 应成功，实际退出码 %d，错误: %s", code, stderr)
+	}
+	for _, expected := range []string{"check", "test"} {
+		if !strings.Contains(stdout, expected) {
+			t.Fatalf("帮助输出缺少 %s，实际: %s", expected, stdout)
+		}
+	}
+}
+
+// TestAgentTestRequiresFlags 校验测试命令要求显式指定参数。
+func TestAgentTestRequiresFlags(t *testing.T) {
+	code, _, stderr := run(t, "agent", "test")
+	if code == 0 {
+		t.Fatal("缺少必需参数时应返回非零退出码")
+	}
+	for _, flag := range []string{"model", "dir", "prompt"} {
+		if !strings.Contains(stderr, flag) {
+			t.Fatalf("错误信息应指出缺少 %s，实际: %s", flag, stderr)
+		}
+	}
+}

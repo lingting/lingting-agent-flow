@@ -40,5 +40,6 @@ func NewRootCommand(a *app.App) *cobra.Command {
 	root.SetVersionTemplate(a.Build().String())
 	root.AddCommand(newVersionCommand(a))
 	root.AddCommand(newConfigCommand(a))
+	root.AddCommand(newAgentCommand(a))
 	return root
 }
