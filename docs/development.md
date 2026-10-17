@@ -9,6 +9,8 @@
 - Node.js + pnpm：仅在开发 Web UI 时需要（当前未引入）。
 - Pi CLI：已安装并完成模型 Provider 配置（当前版本不调用 Pi）。
 
+SQLite 驱动为 `modernc.org/sqlite`，纯 Go 实现，无需安装 CGO 工具链或系统 SQLite。
+
 ## 初始化
 
 ```bash
@@ -36,6 +38,13 @@ gofmt -w cmd internal
 go vet ./...
 go test ./...
 go build -o bin/agentflow ./cmd/agentflow
+```
+
+数据库相关测试只依赖临时目录，可单独运行：
+
+```bash
+go test ./internal/storage/...        # 迁移、实体读写、约束与事务
+go test -race ./internal/storage/...  # 并发写入与事务竞争
 ```
 
 `make build` 会通过 `-ldflags -X` 注入 `version`、`commit`、`buildDate`；直接 `go build` 时三者取默认的开发值 `dev` / `none` / `unknown`。可以用环境变量覆盖版本号：
@@ -72,7 +81,7 @@ make build VERSION=0.1.0
 1. 确认改动属于哪一层，按 [architecture.md](architecture.md) 的依赖方向选择位置。
 2. 领域规则变化优先修改 `internal/domain`，其余层只做编排与适配。
 3. 涉及状态迁移时，检查是否仍通过 `Transition` 校验，并确认迁移路径在状态机中已声明。
-4. 涉及持久化时，同步补充迁移脚本与仓储实现。
+4. 涉及持久化时，在 `internal/storage/sqlite/migrations/` 追加新迁移脚本，并在对应实体文件中补充仓储实现；不要修改已发布的迁移。
 5. 改动完成后执行 `gofmt` 与 `go vet`，并自查 `git diff`。
 
 ## 新增角色类型或状态
@@ -87,7 +96,9 @@ make build VERSION=0.1.0
 - 测试必须使用临时目录与临时配置，不得读写用户真实配置、仓库或数据库。
 - 测试不得依赖真实模型凭据，也不得调用真实 Pi。
 - 未经明确授权不运行测试、不创建测试代码与临时验证脚本，也不通过“测试后删除”的方式绕过该限制。
-- 数据库 schema 变更必须同时提交 `migrations/` 下的新迁移脚本。
+- 数据库 schema 变更必须同时在 `internal/storage/sqlite/migrations/` 提交新迁移脚本。
+- 数据库测试必须使用临时目录中的临时数据库，不得读写 `.agentflow/` 下的真实数据。
+- 涉及跨实体状态更新时，必须通过 `storage.WithTx` 在单个事务内完成。
 
 ## 与 Pi 交互的注意事项
 

@@ -9,35 +9,41 @@ import (
 type SessionStatus string
 
 // 会话状态。
+//
+// starting 覆盖进程启动与握手阶段；interrupted 表示编排器或宿主进程异常结束。
 const (
-	SessionStatusStarting SessionStatus = "starting"
-	SessionStatusRunning  SessionStatus = "running"
-	SessionStatusClosed   SessionStatus = "closed"
-	SessionStatusFailed   SessionStatus = "failed"
-	SessionStatusAborted  SessionStatus = "aborted"
+	SessionStatusStarting    SessionStatus = "starting"
+	SessionStatusRunning     SessionStatus = "running"
+	SessionStatusCompleted   SessionStatus = "completed"
+	SessionStatusFailed      SessionStatus = "failed"
+	SessionStatusCancelled   SessionStatus = "cancelled"
+	SessionStatusInterrupted SessionStatus = "interrupted"
 )
 
 // sessionStatusMachine 定义会话状态迁移。
 //
-// starting 覆盖进程启动与握手阶段，任何异常退出都必须落到 failed 或 aborted。
+// starting 覆盖进程启动与握手阶段，任何异常退出都必须落到 failed、cancelled 或 interrupted。
 var sessionStatusMachine = statusMachine{
 	entity: "Session",
 	transitions: map[string][]string{
 		string(SessionStatusStarting): {
 			string(SessionStatusRunning),
 			string(SessionStatusFailed),
-			string(SessionStatusAborted),
+			string(SessionStatusCancelled),
+			string(SessionStatusInterrupted),
 		},
 		string(SessionStatusRunning): {
-			string(SessionStatusClosed),
+			string(SessionStatusCompleted),
 			string(SessionStatusFailed),
-			string(SessionStatusAborted),
+			string(SessionStatusCancelled),
+			string(SessionStatusInterrupted),
 		},
 	},
 	terminal: []string{
-		string(SessionStatusClosed),
+		string(SessionStatusCompleted),
 		string(SessionStatusFailed),
-		string(SessionStatusAborted),
+		string(SessionStatusCancelled),
+		string(SessionStatusInterrupted),
 	},
 }
 
@@ -54,31 +60,75 @@ func (s SessionStatus) IsTerminal() bool {
 	return sessionStatusMachine.isTerminal(string(s))
 }
 
+// SessionScope 描述会话在任务、步骤与尝试上的归属。
+//
+// Planner 等任务级会话没有步骤与尝试；Developer 与 Validator 会话必须同时给出
+// 步骤与尝试。归属关系是否与尝试一致，由存储层在事务内校验。
+type SessionScope struct {
+	TaskID    ID
+	StepID    *ID
+	AttemptID *ID
+}
+
+// Validate 校验会话归属是否自洽。
+func (s SessionScope) Validate() error {
+	if err := s.TaskID.Validate(); err != nil {
+		return err
+	}
+	if s.StepID != nil {
+		if err := s.StepID.Validate(); err != nil {
+			return err
+		}
+	}
+	if s.AttemptID != nil {
+		if err := s.AttemptID.Validate(); err != nil {
+			return err
+		}
+		if s.StepID == nil {
+			return invalidField("Session", "step_id", "关联尝试时必须同时指定步骤")
+		}
+	}
+	return nil
+}
+
 // Session 是一次具体的 Pi Agent 会话。
 //
 // 每次 Agent 执行都创建独立 Session，默认不在不同步骤之间复用会话历史。
+// 外部 Pi 会话标识不得代替 AgentFlow 内部主键。
 type Session struct {
-	ID                 ID            `json:"id"`
-	AttemptID          ID            `json:"attempt_id"`
-	RoleID             ID            `json:"role_id"`
-	Provider           string        `json:"provider"`
-	Model              string        `json:"model"`
-	PiSessionReference string        `json:"pi_session_reference,omitempty"`
-	Status             SessionStatus `json:"status"`
-	StartedAt          time.Time     `json:"started_at"`
-	FinishedAt         *time.Time    `json:"finished_at,omitempty"`
+	ID                ID            `json:"id"`
+	TaskID            ID            `json:"task_id"`
+	StepID            *ID           `json:"step_id,omitempty"`
+	AttemptID         *ID           `json:"attempt_id,omitempty"`
+	RoleID            ID            `json:"role_id"`
+	RoleSnapshot      RoleSnapshot  `json:"role_snapshot"`
+	Provider          string        `json:"provider"`
+	Model             string        `json:"model"`
+	ExternalSessionID string        `json:"external_session_id,omitempty"`
+	ProcessID         *int          `json:"process_id,omitempty"`
+	Status            SessionStatus `json:"status"`
+	StartedAt         time.Time     `json:"started_at"`
+	FinishedAt        *time.Time    `json:"finished_at,omitempty"`
+	CreatedAt         time.Time     `json:"created_at"`
 }
 
 // NewSession 创建并校验会话。
-func NewSession(attemptID, roleID ID, provider, model string, at time.Time) (Session, error) {
+//
+// role 是实际执行时采用的角色，其快照会随会话一并持久化。
+func NewSession(scope SessionScope, role Role, provider, model string, at time.Time) (Session, error) {
+	startedAt := normalizeTime(at)
 	session := Session{
-		ID:        NewID(),
-		AttemptID: attemptID,
-		RoleID:    roleID,
-		Provider:  strings.TrimSpace(provider),
-		Model:     strings.TrimSpace(model),
-		Status:    SessionStatusStarting,
-		StartedAt: normalizeTime(at),
+		ID:           NewID(),
+		TaskID:       scope.TaskID,
+		StepID:       scope.StepID,
+		AttemptID:    scope.AttemptID,
+		RoleID:       role.ID,
+		RoleSnapshot: role.Snapshot(),
+		Provider:     strings.TrimSpace(provider),
+		Model:        strings.TrimSpace(model),
+		Status:       SessionStatusStarting,
+		StartedAt:    startedAt,
+		CreatedAt:    startedAt,
 	}
 	if err := session.Validate(); err != nil {
 		return Session{}, err
@@ -91,11 +141,18 @@ func (s Session) Validate() error {
 	if err := s.ID.Validate(); err != nil {
 		return err
 	}
-	if err := s.AttemptID.Validate(); err != nil {
+	scope := SessionScope{TaskID: s.TaskID, StepID: s.StepID, AttemptID: s.AttemptID}
+	if err := scope.Validate(); err != nil {
 		return err
 	}
 	if err := s.RoleID.Validate(); err != nil {
 		return err
+	}
+	if err := s.RoleSnapshot.Validate(); err != nil {
+		return err
+	}
+	if s.RoleSnapshot.RoleID != s.RoleID {
+		return invalidField("Session", "role_snapshot", "角色快照与角色标识不一致")
 	}
 	if strings.TrimSpace(s.Provider) == "" {
 		return invalidField("Session", "provider", "Provider 不能为空")
@@ -106,7 +163,7 @@ func (s Session) Validate() error {
 	return s.Status.Validate()
 }
 
-// MarkRunning 标记会话已进入运行状态，并记录 Pi 侧会话引用。
+// MarkRunning 标记会话已进入运行状态，并记录 Pi 侧会话标识。
 func (s *Session) MarkRunning(reference string) error {
 	if s == nil {
 		return invalidField("Session", "", "实体为空")
@@ -115,13 +172,25 @@ func (s *Session) MarkRunning(reference string) error {
 		return err
 	}
 	s.Status = SessionStatusRunning
-	s.PiSessionReference = strings.TrimSpace(reference)
+	s.ExternalSessionID = strings.TrimSpace(reference)
 	return nil
 }
 
-// Close 标记会话正常结束。
-func (s *Session) Close(at time.Time) error {
-	return s.finish(SessionStatusClosed, at)
+// SetProcessID 记录承载会话的外部进程 ID。
+func (s *Session) SetProcessID(processID int) error {
+	if s == nil {
+		return invalidField("Session", "", "实体为空")
+	}
+	if processID <= 0 {
+		return invalidField("Session", "process_id", "进程 ID 必须大于 0")
+	}
+	s.ProcessID = &processID
+	return nil
+}
+
+// Complete 标记会话正常结束。
+func (s *Session) Complete(at time.Time) error {
+	return s.finish(SessionStatusCompleted, at)
 }
 
 // Fail 标记会话异常结束。
@@ -129,9 +198,14 @@ func (s *Session) Fail(at time.Time) error {
 	return s.finish(SessionStatusFailed, at)
 }
 
-// Abort 标记会话被用户或编排器中止。
-func (s *Session) Abort(at time.Time) error {
-	return s.finish(SessionStatusAborted, at)
+// Cancel 标记会话被用户或编排器取消。
+func (s *Session) Cancel(at time.Time) error {
+	return s.finish(SessionStatusCancelled, at)
+}
+
+// Interrupt 标记会话因编排器或宿主进程异常结束。
+func (s *Session) Interrupt(at time.Time) error {
+	return s.finish(SessionStatusInterrupted, at)
 }
 
 // finish 执行会话的结束迁移。

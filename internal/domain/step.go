@@ -1,39 +1,47 @@
 package domain
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // StepStatus 表示计划中某一步骤的执行状态。
 type StepStatus string
 
 // 步骤状态。
 const (
-	StepStatusPending StepStatus = "pending"
-	StepStatusRunning StepStatus = "running"
-	StepStatusPassed  StepStatus = "passed"
-	StepStatusFailed  StepStatus = "failed"
-	StepStatusSkipped StepStatus = "skipped"
+	StepStatusPending    StepStatus = "pending"
+	StepStatusDeveloping StepStatus = "developing"
+	StepStatusVerifying  StepStatus = "verifying"
+	StepStatusCompleted  StepStatus = "completed"
+	StepStatusFailed     StepStatus = "failed"
+	StepStatusSkipped    StepStatus = "skipped"
 )
 
 // stepStatusMachine 定义步骤状态迁移。
 //
-// failed 允许回到 running，用于验证失败后创建新的 Attempt 继续修复。
+// failed 允许回到 developing，用于验证失败后创建新的 Attempt 继续修复。
 var stepStatusMachine = statusMachine{
 	entity: "Step",
 	transitions: map[string][]string{
 		string(StepStatusPending): {
-			string(StepStatusRunning),
+			string(StepStatusDeveloping),
 			string(StepStatusSkipped),
 		},
-		string(StepStatusRunning): {
-			string(StepStatusPassed),
+		string(StepStatusDeveloping): {
+			string(StepStatusVerifying),
+			string(StepStatusFailed),
+		},
+		string(StepStatusVerifying): {
+			string(StepStatusCompleted),
 			string(StepStatusFailed),
 		},
 		string(StepStatusFailed): {
-			string(StepStatusRunning),
+			string(StepStatusDeveloping),
 		},
 	},
 	terminal: []string{
-		string(StepStatusPassed),
+		string(StepStatusCompleted),
 		string(StepStatusSkipped),
 	},
 }
@@ -107,12 +115,26 @@ type Step struct {
 	Objective        string           `json:"objective"`
 	Instructions     string           `json:"instructions"`
 	RoleID           ID               `json:"role_id"`
+	RoleSnapshot     RoleSnapshot     `json:"role_snapshot"`
 	VerificationSpec VerificationSpec `json:"verification_spec"`
 	Status           StepStatus       `json:"status"`
+	CreatedAt        time.Time        `json:"created_at"`
+	UpdatedAt        time.Time        `json:"updated_at"`
 }
 
 // NewStep 创建并校验步骤。
-func NewStep(taskID ID, sequence int, title, objective, instructions string, roleID ID, spec VerificationSpec) (Step, error) {
+//
+// role 是计划生成时实际采用的角色，其快照会随步骤一并持久化，避免角色日后修改后
+// 历史任务的配置失去可追溯性。
+func NewStep(
+	taskID ID,
+	sequence int,
+	title, objective, instructions string,
+	role Role,
+	spec VerificationSpec,
+	at time.Time,
+) (Step, error) {
+	createdAt := normalizeTime(at)
 	step := Step{
 		ID:               NewID(),
 		TaskID:           taskID,
@@ -120,9 +142,12 @@ func NewStep(taskID ID, sequence int, title, objective, instructions string, rol
 		Title:            strings.TrimSpace(title),
 		Objective:        strings.TrimSpace(objective),
 		Instructions:     strings.TrimSpace(instructions),
-		RoleID:           roleID,
+		RoleID:           role.ID,
+		RoleSnapshot:     role.Snapshot(),
 		VerificationSpec: spec,
 		Status:           StepStatusPending,
+		CreatedAt:        createdAt,
+		UpdatedAt:        createdAt,
 	}
 	if err := step.Validate(); err != nil {
 		return Step{}, err
@@ -150,14 +175,20 @@ func (s Step) Validate() error {
 	if strings.TrimSpace(s.Objective) == "" {
 		return invalidField("Step", "objective", "目标不能为空")
 	}
+	if err := s.RoleSnapshot.Validate(); err != nil {
+		return err
+	}
+	if s.RoleSnapshot.RoleID != s.RoleID {
+		return invalidField("Step", "role_snapshot", "角色快照与角色标识不一致")
+	}
 	if err := s.VerificationSpec.Validate(); err != nil {
 		return err
 	}
 	return s.Status.Validate()
 }
 
-// Transition 将步骤迁移到下一个状态。
-func (s *Step) Transition(next StepStatus) error {
+// Transition 将步骤迁移到下一个状态，并记录更新时间。
+func (s *Step) Transition(next StepStatus, at time.Time) error {
 	if s == nil {
 		return invalidField("Step", "", "实体为空")
 	}
@@ -168,6 +199,7 @@ func (s *Step) Transition(next StepStatus) error {
 		return err
 	}
 	s.Status = next
+	s.UpdatedAt = normalizeTime(at)
 	return nil
 }
 

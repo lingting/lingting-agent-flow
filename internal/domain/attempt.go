@@ -9,11 +9,14 @@ import (
 type AttemptStatus string
 
 // 尝试状态。
+//
+// interrupted 表示编排器或宿主进程异常结束，未能给出正常的完成或失败结论。
 const (
-	AttemptStatusRunning   AttemptStatus = "running"
-	AttemptStatusSucceeded AttemptStatus = "succeeded"
-	AttemptStatusFailed    AttemptStatus = "failed"
-	AttemptStatusCancelled AttemptStatus = "cancelled"
+	AttemptStatusRunning     AttemptStatus = "running"
+	AttemptStatusCompleted   AttemptStatus = "completed"
+	AttemptStatusFailed      AttemptStatus = "failed"
+	AttemptStatusCancelled   AttemptStatus = "cancelled"
+	AttemptStatusInterrupted AttemptStatus = "interrupted"
 )
 
 // attemptStatusMachine 定义尝试状态迁移。
@@ -23,15 +26,17 @@ var attemptStatusMachine = statusMachine{
 	entity: "Attempt",
 	transitions: map[string][]string{
 		string(AttemptStatusRunning): {
-			string(AttemptStatusSucceeded),
+			string(AttemptStatusCompleted),
 			string(AttemptStatusFailed),
 			string(AttemptStatusCancelled),
+			string(AttemptStatusInterrupted),
 		},
 	},
 	terminal: []string{
-		string(AttemptStatusSucceeded),
+		string(AttemptStatusCompleted),
 		string(AttemptStatusFailed),
 		string(AttemptStatusCancelled),
+		string(AttemptStatusInterrupted),
 	},
 }
 
@@ -59,18 +64,21 @@ type Attempt struct {
 	FailureSummary string        `json:"failure_summary,omitempty"`
 	StartedAt      time.Time     `json:"started_at"`
 	FinishedAt     *time.Time    `json:"finished_at,omitempty"`
+	CreatedAt      time.Time     `json:"created_at"`
 }
 
 // NewAttempt 创建并校验执行尝试。
 //
 // attemptNumber 必须从 1 开始，并由调用方保证同一步骤内递增且不重复。
 func NewAttempt(stepID ID, attemptNumber int, at time.Time) (Attempt, error) {
+	startedAt := normalizeTime(at)
 	attempt := Attempt{
 		ID:            NewID(),
 		StepID:        stepID,
 		AttemptNumber: attemptNumber,
 		Status:        AttemptStatusRunning,
-		StartedAt:     normalizeTime(at),
+		StartedAt:     startedAt,
+		CreatedAt:     startedAt,
 	}
 	if err := attempt.Validate(); err != nil {
 		return Attempt{}, err
@@ -92,9 +100,9 @@ func (a Attempt) Validate() error {
 	return a.Status.Validate()
 }
 
-// Succeed 标记尝试成功结束。
-func (a *Attempt) Succeed(at time.Time) error {
-	return a.finish(AttemptStatusSucceeded, "", at)
+// Complete 标记尝试成功结束。
+func (a *Attempt) Complete(at time.Time) error {
+	return a.finish(AttemptStatusCompleted, "", at)
 }
 
 // Fail 标记尝试失败结束，并记录失败摘要。
@@ -109,6 +117,11 @@ func (a *Attempt) Fail(summary string, at time.Time) error {
 // Cancel 标记尝试被取消结束。
 func (a *Attempt) Cancel(summary string, at time.Time) error {
 	return a.finish(AttemptStatusCancelled, strings.TrimSpace(summary), at)
+}
+
+// Interrupt 标记尝试因编排器或宿主进程异常结束。
+func (a *Attempt) Interrupt(summary string, at time.Time) error {
+	return a.finish(AttemptStatusInterrupted, strings.TrimSpace(summary), at)
 }
 
 // finish 执行尝试的结束迁移。

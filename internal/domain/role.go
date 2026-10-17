@@ -1,6 +1,12 @@
 package domain
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
+
+// RoleRunnerPi 是第一版唯一支持的 Agent 运行时。
+const RoleRunnerPi = "pi"
 
 // RoleType 表示编排器识别角色职责时使用的类型。
 //
@@ -133,27 +139,72 @@ func containsName(names []string, target string) bool {
 	return false
 }
 
-// Role 是用户定义的角色，用于驱动某一阶段的一次 Agent 执行。
-type Role struct {
-	ID           ID          `json:"id"`
+// RoleSnapshot 是角色配置在某一时刻的不可变副本。
+//
+// 计划与执行记录都保存快照，使角色配置日后被修改后，历史记录仍可追溯。
+type RoleSnapshot struct {
+	RoleID       ID          `json:"role_id"`
 	Name         string      `json:"name"`
 	Type         RoleType    `json:"type"`
+	Runner       string      `json:"runner"`
 	Model        string      `json:"model"`
 	SystemPrompt string      `json:"system_prompt"`
 	ToolsPolicy  ToolsPolicy `json:"tools_policy"`
 }
 
-// NewRole 创建并校验角色。
+// Validate 校验角色快照是否完整。
+func (s RoleSnapshot) Validate() error {
+	if err := s.RoleID.Validate(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(s.Name) == "" {
+		return invalidField("RoleSnapshot", "name", "角色名称不能为空")
+	}
+	if err := s.Type.Validate(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(s.Runner) == "" {
+		return invalidField("RoleSnapshot", "runner", "Agent 运行时不能为空")
+	}
+	if strings.TrimSpace(s.Model) == "" {
+		return invalidField("RoleSnapshot", "model", "模型不能为空")
+	}
+	if strings.TrimSpace(s.SystemPrompt) == "" {
+		return invalidField("RoleSnapshot", "system_prompt", "系统提示词不能为空")
+	}
+	return s.ToolsPolicy.Validate()
+}
+
+// Role 是用户定义的角色，用于驱动某一阶段的一次 Agent 执行。
 //
-// Model 允许为空，表示沿用 Pi 侧配置的默认模型。
-func NewRole(name string, roleType RoleType, model, systemPrompt string, policy ToolsPolicy) (Role, error) {
+// 名称由用户自由命名，工作流只依据类型识别职责。
+type Role struct {
+	ID           ID          `json:"id"`
+	Name         string      `json:"name"`
+	Type         RoleType    `json:"type"`
+	Runner       string      `json:"runner"`
+	Model        string      `json:"model"`
+	SystemPrompt string      `json:"system_prompt"`
+	ToolsPolicy  ToolsPolicy `json:"tools_policy"`
+	Enabled      bool        `json:"enabled"`
+	CreatedAt    time.Time   `json:"created_at"`
+	UpdatedAt    time.Time   `json:"updated_at"`
+}
+
+// NewRole 创建并校验角色。
+func NewRole(name string, roleType RoleType, model, systemPrompt string, policy ToolsPolicy, at time.Time) (Role, error) {
+	createdAt := normalizeTime(at)
 	role := Role{
 		ID:           NewID(),
 		Name:         strings.TrimSpace(name),
 		Type:         roleType,
+		Runner:       RoleRunnerPi,
 		Model:        strings.TrimSpace(model),
 		SystemPrompt: strings.TrimSpace(systemPrompt),
 		ToolsPolicy:  policy,
+		Enabled:      true,
+		CreatedAt:    createdAt,
+		UpdatedAt:    createdAt,
 	}
 	if err := role.Validate(); err != nil {
 		return Role{}, err
@@ -172,10 +223,29 @@ func (r Role) Validate() error {
 	if err := r.Type.Validate(); err != nil {
 		return err
 	}
+	if strings.TrimSpace(r.Runner) == "" {
+		return invalidField("Role", "runner", "Agent 运行时不能为空")
+	}
+	if strings.TrimSpace(r.Model) == "" {
+		return invalidField("Role", "model", "模型不能为空")
+	}
 	if strings.TrimSpace(r.SystemPrompt) == "" {
 		return invalidField("Role", "system_prompt", "系统提示词不能为空")
 	}
 	return r.ToolsPolicy.Validate()
+}
+
+// Snapshot 生成角色配置的当前快照。
+func (r Role) Snapshot() RoleSnapshot {
+	return RoleSnapshot{
+		RoleID:       r.ID,
+		Name:         r.Name,
+		Type:         r.Type,
+		Runner:       r.Runner,
+		Model:        r.Model,
+		SystemPrompt: r.SystemPrompt,
+		ToolsPolicy:  r.ToolsPolicy,
+	}
 }
 
 // IsPlanner 判断角色是否为规划角色。

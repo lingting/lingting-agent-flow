@@ -22,7 +22,8 @@ func (c VerificationCheck) Validate() error {
 
 // CommandResult 是一条验证命令的执行结果。
 //
-// 输出保留用于失败证据，不作为业务状态的唯一记录。
+// 输出保留用于失败证据，不作为业务状态的唯一记录。退出码与超时标记是判定依据，
+// 不允许被自然语言结论覆盖。
 type CommandResult struct {
 	Name     string        `json:"name"`
 	Command  string        `json:"command"`
@@ -53,37 +54,51 @@ func (r CommandResult) Validate() error {
 }
 
 // VerificationResult 是某次验证的结构化结果。
+//
+// 每次验证都产生独立记录，不允许用更新 passed 字段的方式覆盖历史。
 type VerificationResult struct {
-	ID             ID                  `json:"id"`
-	StepID         ID                  `json:"step_id"`
-	AttemptID      ID                  `json:"attempt_id"`
-	Passed         bool                `json:"passed"`
-	Checks         []VerificationCheck `json:"checks,omitempty"`
-	CommandResults []CommandResult     `json:"command_results,omitempty"`
-	FailureSummary string              `json:"failure_summary,omitempty"`
-	CreatedAt      time.Time           `json:"created_at"`
+	ID                 ID                  `json:"id"`
+	TaskID             ID                  `json:"task_id"`
+	StepID             ID                  `json:"step_id"`
+	AttemptID          ID                  `json:"attempt_id"`
+	ValidatorSessionID *ID                 `json:"validator_session_id,omitempty"`
+	Passed             bool                `json:"passed"`
+	Summary            string              `json:"summary,omitempty"`
+	Checks             []VerificationCheck `json:"checks,omitempty"`
+	CommandResults     []CommandResult     `json:"command_results,omitempty"`
+	FailureSummary     string              `json:"failure_summary,omitempty"`
+	CreatedAt          time.Time           `json:"created_at"`
+}
+
+// VerificationInput 是构建验证结果所需的输入。
+type VerificationInput struct {
+	TaskID             ID
+	StepID             ID
+	AttemptID          ID
+	ValidatorSessionID *ID
+	Summary            string
+	Checks             []VerificationCheck
+	CommandResults     []CommandResult
+	FailureSummary     string
 }
 
 // NewVerificationResult 根据检查项与命令结果构建验证结果。
 //
 // passed 由检查项与命令结果推导，不接受外部直接指定；失败时要求提供失败摘要，
 // 以便重试时作为证据传递给新的 Developer 会话。
-func NewVerificationResult(
-	stepID, attemptID ID,
-	checks []VerificationCheck,
-	commands []CommandResult,
-	failureSummary string,
-	at time.Time,
-) (VerificationResult, error) {
+func NewVerificationResult(input VerificationInput, at time.Time) (VerificationResult, error) {
 	result := VerificationResult{
-		ID:             NewID(),
-		StepID:         stepID,
-		AttemptID:      attemptID,
-		Passed:         allPassed(checks, commands),
-		Checks:         checks,
-		CommandResults: commands,
-		FailureSummary: strings.TrimSpace(failureSummary),
-		CreatedAt:      normalizeTime(at),
+		ID:                 NewID(),
+		TaskID:             input.TaskID,
+		StepID:             input.StepID,
+		AttemptID:          input.AttemptID,
+		ValidatorSessionID: input.ValidatorSessionID,
+		Passed:             allPassed(input.Checks, input.CommandResults),
+		Summary:            strings.TrimSpace(input.Summary),
+		Checks:             input.Checks,
+		CommandResults:     input.CommandResults,
+		FailureSummary:     strings.TrimSpace(input.FailureSummary),
+		CreatedAt:          normalizeTime(at),
 	}
 	if err := result.Validate(); err != nil {
 		return VerificationResult{}, err
@@ -96,11 +111,19 @@ func (r VerificationResult) Validate() error {
 	if err := r.ID.Validate(); err != nil {
 		return err
 	}
+	if err := r.TaskID.Validate(); err != nil {
+		return err
+	}
 	if err := r.StepID.Validate(); err != nil {
 		return err
 	}
 	if err := r.AttemptID.Validate(); err != nil {
 		return err
+	}
+	if r.ValidatorSessionID != nil {
+		if err := r.ValidatorSessionID.Validate(); err != nil {
+			return err
+		}
 	}
 	for _, check := range r.Checks {
 		if err := check.Validate(); err != nil {

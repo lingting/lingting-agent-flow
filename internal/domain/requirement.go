@@ -25,8 +25,10 @@ func (p Priority) Validate() error {
 	}
 }
 
-// weight 返回优先级的排序权重，数值越小越优先。
-func (p Priority) weight() int {
+// Rank 返回优先级的持久化排序值，数值越小越优先。
+//
+// 数据库以整数保存排序值，本方法是与存储层共享的唯一映射来源。
+func (p Priority) Rank() int {
 	switch p {
 	case PriorityHigh:
 		return 0
@@ -37,27 +39,54 @@ func (p Priority) weight() int {
 	}
 }
 
+// ParsePriorityRank 把持久化的排序值还原为优先级。
+func ParsePriorityRank(rank int) (Priority, error) {
+	switch rank {
+	case 0:
+		return PriorityHigh, nil
+	case 1:
+		return PriorityNormal, nil
+	case 2:
+		return PriorityLow, nil
+	default:
+		return "", invalidField("Requirement", "priority", "不支持的优先级排序值")
+	}
+}
+
+// weight 返回优先级的排序权重，数值越小越优先。
+func (p Priority) weight() int {
+	return p.Rank()
+}
+
 // RequirementStatus 表示需求在队列中的状态。
 type RequirementStatus string
 
 // 需求状态。
 const (
-	RequirementStatusPending   RequirementStatus = "pending"
-	RequirementStatusActive    RequirementStatus = "active"
-	RequirementStatusCompleted RequirementStatus = "completed"
-	RequirementStatusCancelled RequirementStatus = "cancelled"
+	RequirementStatusQueued     RequirementStatus = "queued"
+	RequirementStatusProcessing RequirementStatus = "processing"
+	RequirementStatusCompleted  RequirementStatus = "completed"
+	RequirementStatusFailed     RequirementStatus = "failed"
+	RequirementStatusCancelled  RequirementStatus = "cancelled"
 )
 
 // requirementStatusMachine 定义需求状态迁移。
+//
+// failed 允许回到 queued，用于用户显式重新排队。
 var requirementStatusMachine = statusMachine{
 	entity: "Requirement",
 	transitions: map[string][]string{
-		string(RequirementStatusPending): {
-			string(RequirementStatusActive),
+		string(RequirementStatusQueued): {
+			string(RequirementStatusProcessing),
 			string(RequirementStatusCancelled),
 		},
-		string(RequirementStatusActive): {
+		string(RequirementStatusProcessing): {
 			string(RequirementStatusCompleted),
+			string(RequirementStatusFailed),
+			string(RequirementStatusCancelled),
+		},
+		string(RequirementStatusFailed): {
+			string(RequirementStatusQueued),
 			string(RequirementStatusCancelled),
 		},
 	},
@@ -80,6 +109,25 @@ func (s RequirementStatus) IsTerminal() bool {
 	return requirementStatusMachine.isTerminal(string(s))
 }
 
+// RequirementSource 表示需求的来源渠道。
+type RequirementSource string
+
+// 第一版支持的来源渠道。
+const (
+	// RequirementSourceManual 表示需求由用户在本地手工提交。
+	RequirementSourceManual RequirementSource = "manual"
+)
+
+// Validate 校验需求来源是否受支持。
+func (s RequirementSource) Validate() error {
+	switch s {
+	case RequirementSourceManual:
+		return nil
+	default:
+		return invalidField("Requirement", "source", "不支持的来源 "+string(s))
+	}
+}
+
 // Requirement 是用户提交的原始需求。
 type Requirement struct {
 	ID          ID                `json:"id"`
@@ -87,18 +135,24 @@ type Requirement struct {
 	Description string            `json:"description"`
 	Priority    Priority          `json:"priority"`
 	Status      RequirementStatus `json:"status"`
+	Source      RequirementSource `json:"source"`
+	SourceID    string            `json:"source_id,omitempty"`
 	CreatedAt   time.Time         `json:"created_at"`
+	UpdatedAt   time.Time         `json:"updated_at"`
 }
 
 // NewRequirement 创建并校验需求。
 func NewRequirement(title, description string, priority Priority, at time.Time) (Requirement, error) {
+	createdAt := normalizeTime(at)
 	requirement := Requirement{
 		ID:          NewID(),
 		Title:       strings.TrimSpace(title),
 		Description: strings.TrimSpace(description),
 		Priority:    priority,
-		Status:      RequirementStatusPending,
-		CreatedAt:   normalizeTime(at),
+		Status:      RequirementStatusQueued,
+		Source:      RequirementSourceManual,
+		CreatedAt:   createdAt,
+		UpdatedAt:   createdAt,
 	}
 	if err := requirement.Validate(); err != nil {
 		return Requirement{}, err
@@ -120,11 +174,14 @@ func (r Requirement) Validate() error {
 	if err := r.Priority.Validate(); err != nil {
 		return err
 	}
-	return r.Status.Validate()
+	if err := r.Status.Validate(); err != nil {
+		return err
+	}
+	return r.Source.Validate()
 }
 
-// Transition 将需求迁移到下一个状态。
-func (r *Requirement) Transition(next RequirementStatus) error {
+// Transition 将需求迁移到下一个状态，并记录更新时间。
+func (r *Requirement) Transition(next RequirementStatus, at time.Time) error {
 	if r == nil {
 		return invalidField("Requirement", "", "实体为空")
 	}
@@ -135,6 +192,7 @@ func (r *Requirement) Transition(next RequirementStatus) error {
 		return err
 	}
 	r.Status = next
+	r.UpdatedAt = normalizeTime(at)
 	return nil
 }
 

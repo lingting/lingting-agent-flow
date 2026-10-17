@@ -2,7 +2,7 @@
 
 本文件描述 AgentFlow 的架构边界与依赖方向，用于判断“新代码应该放在哪里”以及“哪些依赖不允许出现”。
 
-> 下文的架构图为**目标架构**，仅说明分层意图。当前代码只实现了 CLI 骨架、配置加载与校验、日志封装，图中其余部分尚未实现。
+> 下文的架构图为**目标架构**，仅说明分层意图。当前代码实现了 CLI 骨架、配置加载与校验、日志封装与 SQLite 数据层，图中调度、Agent 执行与 UI 部分尚未实现。
 
 ## 目标架构
 
@@ -42,12 +42,13 @@ internal/agent/           统一 Agent 接口（未实现）
 internal/agent/pi/        Pi RPC 适配器（未实现）
 internal/process/         外部进程生命周期管理（未实现）
 internal/gitworktree/     任务工作区创建、检查与清理（未实现）
-internal/storage/sqlite/  数据库连接、迁移与仓储实现（未实现）
+internal/storage/         存储接口与统一存储错误
+internal/storage/sqlite/  数据库连接、迁移与仓储实现
 internal/events/          内部事件定义与事件总线（未实现）
 internal/httpapi/         HTTP 路由、处理器与 SSE（未实现）
 web/ui/                   React + TypeScript 前端（未实现）
 configs/                  示例配置
-migrations/               版本化 SQL 迁移
+migrations/               迁移说明（实际迁移脚本在 internal/storage/sqlite/migrations/）
 docs/                     架构与开发文档
 tests/e2e/                端到端测试
 ```
@@ -81,15 +82,16 @@ cmd
 ## 当前实现的分层
 
 ```text
-cmd/agentflow → cli → app → config / logging
-                          ↘ domain（仅用于角色类型取值）
+cmd/agentflow → cli → app → config / logging / storage
+                          ↘ domain
 ```
 
 - `main.go` 只注入构建信息、处理信号并返回退出码。
 - `cli` 只做参数解析、结果输出与退出码转换，不包含校验规则。
-- `app` 组装配置与日志，并把配置校验编排成一次应用服务调用。
+- `app` 组装配置与日志，并把配置校验编排成一次应用服务调用；同时负责把配置中的角色转换为存储层的初始化定义。
 - `config` 负责 YAML 解析、未知字段拒绝与字段级校验。
 - `logging` 封装 `log/slog`，日志统一输出到标准错误流。
+- `storage` 只定义接口与存储错误，不依赖具体驱动；`storage/sqlite` 实现连接、迁移与各实体仓储。
 
 ## 领域模型边界
 
@@ -118,7 +120,10 @@ cmd/agentflow → cli → app → config / logging
 
 - 数据库是唯一真相来源，关键状态迁移必须落库后再继续执行。
 - 任务领取使用事务与原子状态迁移，禁止“先查询、后更新”。
-- schema 变更必须附带 `migrations/` 下的新迁移脚本，不修改已发布的迁移。
+- schema 变更必须在 `internal/storage/sqlite/migrations/` 追加新迁移脚本，不修改已发布的迁移。
+- 迁移脚本通过 `embed` 嵌入程序，运行时按版本顺序自动执行；已应用版本记录在 `schema_migrations`。
+- 跨实体的关键状态更新必须在 `storage.Tx` 内完成，不能在应用层分多次调用独立方法后假定原子性。
+- 外键统一为 `ON DELETE RESTRICT`：角色、需求、任务、步骤等被历史记录引用时不可删除，避免历史丢失。
 - 完整 Agent 会话历史不能作为唯一业务记录，业务结论必须写入结构化字段。
 
 ## 外部进程边界
