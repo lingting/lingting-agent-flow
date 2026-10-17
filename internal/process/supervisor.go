@@ -35,6 +35,11 @@ type Options struct {
 	MaxLineLength int
 	// StderrLimit 是保留的 stderr 诊断输出上限，零值使用 DefaultStderrLimit。
 	StderrLimit int
+	// StderrStream 非 nil 时 stderr 的每一行也会写入该通道。
+	//
+	// 通道由调用方负责消费；缓冲区满时写入会被丢弃，避免阻塞子进程。
+	// stderr 读取结束后由本包关闭该通道，调用方只需消费到关闭为止。
+	StderrStream chan Line
 }
 
 // Supervisor 管理一个已启动的子进程及其管道。
@@ -43,11 +48,12 @@ type Options struct {
 // 该通道直到关闭，否则子进程可能因管道背压而停滞。
 // stderr 只作为诊断信息保留最近若干字节，绝不进入协议解析。
 type Supervisor struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	lines  chan Line
-	stderr *boundedBuffer
-	grace  time.Duration
+	cmd         *exec.Cmd
+	stdin       io.WriteCloser
+	lines       chan Line
+	stderr      *boundedBuffer
+	stderrLines chan Line
+	grace       time.Duration
 
 	stdinOnce sync.Once
 	stdinErr  error
@@ -111,14 +117,15 @@ func Start(command Command, options Options) (*Supervisor, error) {
 	}
 
 	supervisor := &Supervisor{
-		cmd:        cmd,
-		stdin:      stdin,
-		lines:      make(chan Line, 64),
-		stderr:     newBoundedBuffer(stderrLimit),
-		grace:      grace,
-		stdoutDone: make(chan struct{}),
-		stderrDone: make(chan struct{}),
-		done:       make(chan struct{}),
+		cmd:         cmd,
+		stdin:       stdin,
+		lines:       make(chan Line, 64),
+		stderr:      newBoundedBuffer(stderrLimit),
+		stderrLines: options.StderrStream,
+		grace:       grace,
+		stdoutDone:  make(chan struct{}),
+		stderrDone:  make(chan struct{}),
+		done:        make(chan struct{}),
 	}
 	go supervisor.pumpStdout(stdout, maxLine)
 	go supervisor.pumpStderr(stderr)
@@ -279,9 +286,37 @@ func (s *Supervisor) pumpStdout(reader io.Reader, maxLine int) {
 }
 
 // pumpStderr 持续读取 stderr 并保留最近的诊断输出。
+//
+// 配置了 StderrStream 时，每一行同时写入该通道用于流式日志；
+// 通道写入是非阻塞的，消费不及时只会丢弃日志，不会阻塞子进程退出。
 func (s *Supervisor) pumpStderr(reader io.Reader) {
 	defer close(s.stderrDone)
-	_, _ = io.Copy(s.stderr, reader)
+	if s.stderrLines != nil {
+		// 关闭通知消费方不再有新的 stderr 行；关闭后本函数不再写入该通道。
+		defer close(s.stderrLines)
+	}
+	buffered := bufio.NewReaderSize(reader, 16<<10)
+	for {
+		line, err := readLine(buffered, DefaultMaxLineLength)
+		if line != "" {
+			_, _ = s.stderr.Write([]byte(line + "\n"))
+			s.emitStderrLine(line)
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// emitStderrLine 把一行 stderr 写入流式通道，通道未配置或已满时丢弃。
+func (s *Supervisor) emitStderrLine(text string) {
+	if s.stderrLines == nil {
+		return
+	}
+	select {
+	case s.stderrLines <- Line{Text: text}:
+	default:
+	}
 }
 
 // reap 在输出读取完成后回收子进程。

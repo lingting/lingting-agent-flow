@@ -268,3 +268,134 @@ func TestGetSessionNotFound(t *testing.T) {
 		t.Fatalf("应当返回记录不存在，实际: %v", err)
 	}
 }
+
+func TestSessionArtifactsArePersisted(t *testing.T) {
+	db := newTestDB(t)
+	ctx := testContext(t)
+	built := newFixture(t, db)
+	stepID := built.step.ID
+	attemptID := built.attempt.ID
+	session := mustSession(t, db, domain.SessionScope{
+		TaskID:    built.task.ID,
+		StepID:    &stepID,
+		AttemptID: &attemptID,
+	}, built.developer)
+
+	if err := session.MarkRunning("pi-session-artifacts"); err != nil {
+		t.Fatalf("标记运行失败: %v", err)
+	}
+	artifacts := domain.SessionArtifacts{
+		JSONLPath:      "/data/sessions/task/step/attempt/session.jsonl",
+		HTMLPath:       "/data/sessions/task/step/attempt/session.html",
+		RunStatus:      domain.SessionRunCompleted,
+		Completeness:   domain.SessionCompletenessComplete,
+		ExportStatus:   domain.SessionExportSucceeded,
+		ExitCode:       0,
+		FailureSummary: "",
+	}
+	if err := session.ApplyArtifacts(artifacts, time.Now().UTC()); err != nil {
+		t.Fatalf("记录产出元数据失败: %v", err)
+	}
+	if err := db.UpdateSession(ctx, session); err != nil {
+		t.Fatalf("更新会话失败: %v", err)
+	}
+
+	loaded, err := db.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	if loaded.JSONLPath != artifacts.JSONLPath {
+		t.Fatalf("原始 Session 路径未持久化: %q", loaded.JSONLPath)
+	}
+	if loaded.HTMLPath != artifacts.HTMLPath {
+		t.Fatalf("HTML 路径未持久化: %q", loaded.HTMLPath)
+	}
+	if loaded.RunStatus != domain.SessionRunCompleted {
+		t.Fatalf("运行结果未持久化: %s", loaded.RunStatus)
+	}
+	if loaded.Completeness != domain.SessionCompletenessComplete {
+		t.Fatalf("完整性未持久化: %s", loaded.Completeness)
+	}
+	if loaded.ExportStatus != domain.SessionExportSucceeded {
+		t.Fatalf("导出状态未持久化: %s", loaded.ExportStatus)
+	}
+	if loaded.ExitCode == nil || *loaded.ExitCode != 0 {
+		t.Fatalf("退出码未持久化: %+v", loaded.ExitCode)
+	}
+	if loaded.Status != domain.SessionStatusCompleted {
+		t.Fatalf("会话状态未结束: %s", loaded.Status)
+	}
+}
+
+func TestSessionExportFailureIsPersisted(t *testing.T) {
+	db := newTestDB(t)
+	ctx := testContext(t)
+	built := newFixture(t, db)
+	session := mustSession(t, db, domain.SessionScope{TaskID: built.task.ID}, built.planner)
+	if err := session.MarkRunning(""); err != nil {
+		t.Fatalf("标记运行失败: %v", err)
+	}
+	artifacts := domain.SessionArtifacts{
+		JSONLPath:      "/data/sessions/session.jsonl",
+		RunStatus:      domain.SessionRunCompleted,
+		Completeness:   domain.SessionCompletenessExportFailed,
+		ExportStatus:   domain.SessionExportFailed,
+		ExitCode:       0,
+		FailureSummary: "导出 HTML 失败",
+	}
+	if err := session.ApplyArtifacts(artifacts, time.Now().UTC()); err != nil {
+		t.Fatalf("记录产出元数据失败: %v", err)
+	}
+	if err := db.UpdateSession(ctx, session); err != nil {
+		t.Fatalf("更新会话失败: %v", err)
+	}
+	loaded, err := db.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	if loaded.Completeness != domain.SessionCompletenessExportFailed {
+		t.Fatalf("导出失败状态未持久化: %s", loaded.Completeness)
+	}
+	if loaded.HTMLPath != "" {
+		t.Fatalf("导出失败时不应有 HTML 路径: %q", loaded.HTMLPath)
+	}
+	if loaded.FailureSummary != "导出 HTML 失败" {
+		t.Fatalf("错误摘要未持久化: %q", loaded.FailureSummary)
+	}
+}
+
+func TestSessionMissingFileKeepsFailedStatus(t *testing.T) {
+	db := newTestDB(t)
+	ctx := testContext(t)
+	built := newFixture(t, db)
+	session := mustSession(t, db, domain.SessionScope{TaskID: built.task.ID}, built.planner)
+	if err := session.MarkRunning(""); err != nil {
+		t.Fatalf("标记运行失败: %v", err)
+	}
+	artifacts := domain.SessionArtifacts{
+		RunStatus:      domain.SessionRunTimedOut,
+		Completeness:   domain.SessionCompletenessMissing,
+		ExportStatus:   domain.SessionExportNotAttempted,
+		ExitCode:       -1,
+		FailureSummary: "执行超时",
+	}
+	if err := session.ApplyArtifacts(artifacts, time.Now().UTC()); err != nil {
+		t.Fatalf("记录产出元数据失败: %v", err)
+	}
+	if err := db.UpdateSession(ctx, session); err != nil {
+		t.Fatalf("更新会话失败: %v", err)
+	}
+	loaded, err := db.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	if loaded.Status != domain.SessionStatusFailed {
+		t.Fatalf("超时应结束为失败状态: %s", loaded.Status)
+	}
+	if loaded.RunStatus != domain.SessionRunTimedOut {
+		t.Fatalf("超时结果未持久化: %s", loaded.RunStatus)
+	}
+	if loaded.Completeness != domain.SessionCompletenessMissing {
+		t.Fatalf("缺失状态未持久化: %s", loaded.Completeness)
+	}
+}

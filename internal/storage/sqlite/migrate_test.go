@@ -13,7 +13,7 @@ import (
 )
 
 // latestSchemaVersion 是当前程序内置迁移的最新版本号。
-const latestSchemaVersion = 2
+const latestSchemaVersion = 3
 
 // expectedTables 是迁移应当创建的业务表。
 var expectedTables = []string{
@@ -120,9 +120,25 @@ func TestMigrateUpgradesExistingDatabase(t *testing.T) {
 	if _, err := db.sql.ExecContext(ctx, `DROP TABLE execution_hosts`); err != nil {
 		t.Fatalf("删除执行节点表失败: %v", err)
 	}
+	// 会话产出字段同样需要回退，才能重新执行对应的迁移。
+	for _, statement := range []string{
+		`DROP INDEX idx_sessions_run_status`,
+		`DROP INDEX idx_sessions_completeness`,
+		`ALTER TABLE sessions DROP COLUMN session_jsonl_path`,
+		`ALTER TABLE sessions DROP COLUMN session_html_path`,
+		`ALTER TABLE sessions DROP COLUMN run_status`,
+		`ALTER TABLE sessions DROP COLUMN completeness`,
+		`ALTER TABLE sessions DROP COLUMN export_status`,
+		`ALTER TABLE sessions DROP COLUMN exit_code`,
+		`ALTER TABLE sessions DROP COLUMN failure_summary`,
+	} {
+		if _, err := db.sql.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("回退会话产出字段失败: %s: %v", statement, err)
+		}
+	}
 	if _, err := db.sql.ExecContext(
 		ctx,
-		`DELETE FROM `+migrationTable+` WHERE version = 2`,
+		`DELETE FROM `+migrationTable+` WHERE version IN (2, 3)`,
 	); err != nil {
 		t.Fatalf("删除迁移记录失败: %v", err)
 	}

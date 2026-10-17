@@ -12,7 +12,9 @@ import (
 
 // sessionColumns 是会话表的完整列顺序。
 const sessionColumns = `id, task_id, step_id, attempt_id, role_id, role_snapshot_json,
-	provider, model, external_session_id, process_id, status, started_at, finished_at, created_at`
+	provider, model, external_session_id, process_id, status,
+	session_jsonl_path, session_html_path, run_status, completeness, export_status,
+	exit_code, failure_summary, started_at, finished_at, created_at`
 
 // sessionStore 实现 storage.SessionStore。
 type sessionStore struct {
@@ -35,7 +37,7 @@ func (s sessionStore) CreateSession(ctx context.Context, session domain.Session)
 		return err
 	}
 	const statement = `INSERT INTO sessions (` + sessionColumns + `)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	_, err = s.q.ExecContext(
 		ctx,
 		statement,
@@ -50,6 +52,13 @@ func (s sessionStore) CreateSession(ctx context.Context, session domain.Session)
 		sqlNullString(session.ExternalSessionID),
 		toIntPtrParam(session.ProcessID),
 		string(session.Status),
+		sqlNullString(session.JSONLPath),
+		sqlNullString(session.HTMLPath),
+		sqlNullString(string(session.RunStatus)),
+		sqlNullString(string(session.Completeness)),
+		sqlNullString(string(session.ExportStatus)),
+		toIntPtrParam(session.ExitCode),
+		sqlNullString(session.FailureSummary),
 		toMillis(session.StartedAt),
 		toMillisPtr(session.FinishedAt),
 		toMillis(session.CreatedAt),
@@ -70,7 +79,9 @@ func (s sessionStore) UpdateSession(ctx context.Context, session domain.Session)
 	const statement = `
 UPDATE sessions SET
 	provider = ?, model = ?, external_session_id = ?, process_id = ?,
-	status = ?, finished_at = ?
+	status = ?, session_jsonl_path = ?, session_html_path = ?,
+	run_status = ?, completeness = ?, export_status = ?,
+	exit_code = ?, failure_summary = ?, finished_at = ?
 WHERE id = ?`
 	result, err := s.q.ExecContext(
 		ctx,
@@ -80,6 +91,13 @@ WHERE id = ?`
 		sqlNullString(session.ExternalSessionID),
 		toIntPtrParam(session.ProcessID),
 		string(session.Status),
+		sqlNullString(session.JSONLPath),
+		sqlNullString(session.HTMLPath),
+		sqlNullString(string(session.RunStatus)),
+		sqlNullString(string(session.Completeness)),
+		sqlNullString(string(session.ExportStatus)),
+		toIntPtrParam(session.ExitCode),
+		sqlNullString(session.FailureSummary),
 		toMillisPtr(session.FinishedAt),
 		toIDParam(session.ID),
 	)
@@ -218,6 +236,13 @@ func scanSession(row scanner) (*domain.Session, error) {
 		externalID    sql.NullString
 		processID     sql.NullInt64
 		status        string
+		jsonlPath     sql.NullString
+		htmlPath      sql.NullString
+		runStatus     sql.NullString
+		completeness  sql.NullString
+		exportStatus  sql.NullString
+		exitCode      sql.NullInt64
+		failure       sql.NullString
 		startedAt     int64
 		finishedAt    sql.NullInt64
 		createdAtUnix int64
@@ -234,6 +259,13 @@ func scanSession(row scanner) (*domain.Session, error) {
 		&externalID,
 		&processID,
 		&status,
+		&jsonlPath,
+		&htmlPath,
+		&runStatus,
+		&completeness,
+		&exportStatus,
+		&exitCode,
+		&failure,
 		&startedAt,
 		&finishedAt,
 		&createdAtUnix,
@@ -249,6 +281,13 @@ func scanSession(row scanner) (*domain.Session, error) {
 	session.ExternalSessionID = externalID.String
 	session.ProcessID = fromIntPtr(processID)
 	session.Status = domain.SessionStatus(status)
+	session.JSONLPath = jsonlPath.String
+	session.HTMLPath = htmlPath.String
+	session.RunStatus = domain.SessionRunStatus(runStatus.String)
+	session.Completeness = domain.SessionCompleteness(completeness.String)
+	session.ExportStatus = domain.SessionExportStatus(exportStatus.String)
+	session.ExitCode = fromIntPtr(exitCode)
+	session.FailureSummary = failure.String
 	session.StartedAt = fromMillis(startedAt)
 	session.FinishedAt = fromMillisPtr(finishedAt)
 	session.CreatedAt = fromMillis(createdAtUnix)

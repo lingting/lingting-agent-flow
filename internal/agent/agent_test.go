@@ -12,9 +12,9 @@ import (
 // TestNewEventEncodesPayload 验证事件负载被编码为 JSON 并保留会话标识。
 func TestNewEventEncodesPayload(t *testing.T) {
 	at := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
-	event, err := agent.NewEvent("session-1", agent.EventMessageDelta, agent.MessageDeltaData{
-		ContentIndex: 0,
-		Text:         "READY",
+	event, err := agent.NewEvent("session-1", agent.EventRunOutput, agent.RunOutputData{
+		Stream: agent.StreamStdout,
+		Text:   "READY",
 	}, at)
 	if err != nil {
 		t.Fatalf("构造事件失败: %v", err)
@@ -25,7 +25,7 @@ func TestNewEventEncodesPayload(t *testing.T) {
 	if !event.Timestamp.Equal(at) {
 		t.Fatalf("时间戳不符: %s", event.Timestamp)
 	}
-	var payload agent.MessageDeltaData
+	var payload agent.RunOutputData
 	if err := json.Unmarshal(event.Data, &payload); err != nil {
 		t.Fatalf("解析负载失败: %v", err)
 	}
@@ -56,14 +56,13 @@ func TestNewEventRejectsUnknownType(t *testing.T) {
 func TestEventTypeValidate(t *testing.T) {
 	types := []agent.EventType{
 		agent.EventRunStarted,
-		agent.EventMessageDelta,
-		agent.EventMessageCompleted,
-		agent.EventToolStarted,
-		agent.EventToolUpdated,
-		agent.EventToolCompleted,
+		agent.EventRunOutput,
+		agent.EventSessionSaved,
+		agent.EventSessionExported,
 		agent.EventRunSettled,
 		agent.EventRunFailed,
 		agent.EventRunCancelled,
+		agent.EventRunTimedOut,
 	}
 	for _, eventType := range types {
 		if err := eventType.Validate(); err != nil {
@@ -78,6 +77,7 @@ func TestRunStatusValidate(t *testing.T) {
 		agent.RunCompleted,
 		agent.RunFailed,
 		agent.RunCancelled,
+		agent.RunTimedOut,
 	} {
 		if err := status.Validate(); err != nil {
 			t.Fatalf("运行状态 %s 应受支持: %v", status, err)
@@ -90,14 +90,28 @@ func TestRunStatusValidate(t *testing.T) {
 
 // TestRunRequestValidate 验证执行输入的必需字段。
 func TestRunRequestValidate(t *testing.T) {
-	valid := agent.RunRequest{SessionID: "session-1", Model: "provider/model", Prompt: "只回答 READY"}
+	valid := agent.RunRequest{
+		SessionID:   "session-1",
+		Model:       "provider/model",
+		Prompt:      "只回答 READY",
+		SessionRoot: t.TempDir(),
+	}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("完整请求应通过校验: %v", err)
 	}
+	root := t.TempDir()
 	cases := map[string]agent.RunRequest{
-		"缺少会话标识": {Model: "provider/model", Prompt: "x"},
-		"缺少模型":   {SessionID: "session-1", Prompt: "x"},
-		"缺少提示词":  {SessionID: "session-1", Model: "provider/model"},
+		"缺少会话标识":  {Model: "provider/model", Prompt: "x", SessionRoot: root},
+		"缺少模型":    {SessionID: "session-1", Prompt: "x", SessionRoot: root},
+		"缺少提示词":   {SessionID: "session-1", Model: "provider/model", SessionRoot: root},
+		"缺少会话根目录": {SessionID: "session-1", Model: "provider/model", Prompt: "x"},
+		"超时为负数": {
+			SessionID:   "session-1",
+			Model:       "provider/model",
+			Prompt:      "x",
+			SessionRoot: root,
+			Timeout:     -time.Second,
+		},
 	}
 	for name, request := range cases {
 		if err := request.Validate(); err == nil {

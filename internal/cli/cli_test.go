@@ -145,15 +145,37 @@ func TestAgentHelp(t *testing.T) {
 	}
 }
 
-// TestAgentTestRequiresFlags 校验测试命令要求显式指定参数。
-func TestAgentTestRequiresFlags(t *testing.T) {
+// TestAgentTestRequiresPrompt 校验测试命令要求显式指定提示词。
+func TestAgentTestRequiresPrompt(t *testing.T) {
 	code, _, stderr := run(t, "agent", "test")
 	if code == 0 {
 		t.Fatal("缺少必需参数时应返回非零退出码")
 	}
-	for _, flag := range []string{"model", "dir", "prompt"} {
-		if !strings.Contains(stderr, flag) {
-			t.Fatalf("错误信息应指出缺少 %s，实际: %s", flag, stderr)
-		}
+	if !strings.Contains(stderr, "prompt") {
+		t.Fatalf("错误信息应指出缺少 prompt，实际: %s", stderr)
+	}
+}
+
+// TestAgentTestMissingConfig 校验缺少配置文件时返回明确错误。
+func TestAgentTestMissingConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "absent.yaml")
+	code, _, stderr := run(t, "agent", "test", "--config", path, "--prompt", "只回答 READY")
+	if code == 0 {
+		t.Fatal("缺少配置文件时应返回非零退出码")
+	}
+	if !strings.Contains(stderr, "配置文件不存在") {
+		t.Fatalf("错误信息应说明配置文件不存在，实际: %s", stderr)
+	}
+}
+
+// TestAgentCheckUnknownExecutable 校验 Pi 不可用时检查命令返回明确错误。
+func TestAgentCheckUnknownExecutable(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	code, _, stderr := run(t, "agent", "check")
+	if code == 0 {
+		t.Fatal("Pi 不可用时应返回非零退出码")
+	}
+	if !strings.Contains(stderr, "未找到可执行程序") {
+		t.Fatalf("错误信息应说明可执行程序缺失，实际: %s", stderr)
 	}
 }

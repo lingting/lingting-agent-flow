@@ -107,9 +107,23 @@ type Session struct {
 	ExternalSessionID string        `json:"external_session_id,omitempty"`
 	ProcessID         *int          `json:"process_id,omitempty"`
 	Status            SessionStatus `json:"status"`
-	StartedAt         time.Time     `json:"started_at"`
-	FinishedAt        *time.Time    `json:"finished_at,omitempty"`
-	CreatedAt         time.Time     `json:"created_at"`
+	// JSONLPath 是原始 Session 文件在本机的持久化路径。
+	JSONLPath string `json:"session_jsonl_path,omitempty"`
+	// HTMLPath 是 Session 导出的 HTML 在本机的持久化路径。
+	HTMLPath string `json:"session_html_path,omitempty"`
+	// RunStatus 是本次执行自身的运行结果。
+	RunStatus SessionRunStatus `json:"run_status,omitempty"`
+	// Completeness 是 Session 文件的完整性状态。
+	Completeness SessionCompleteness `json:"completeness,omitempty"`
+	// ExportStatus 是 HTML 导出状态。
+	ExportStatus SessionExportStatus `json:"export_status,omitempty"`
+	// ExitCode 是 Agent 进程退出码，未能取得时为空。
+	ExitCode *int `json:"exit_code,omitempty"`
+	// FailureSummary 是失败或异常的可诊断摘要。
+	FailureSummary string     `json:"failure_summary,omitempty"`
+	StartedAt      time.Time  `json:"started_at"`
+	FinishedAt     *time.Time `json:"finished_at,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
 }
 
 // NewSession 创建并校验会话。
@@ -160,7 +174,34 @@ func (s Session) Validate() error {
 	if strings.TrimSpace(s.Model) == "" {
 		return invalidField("Session", "model", "模型不能为空")
 	}
-	return s.Status.Validate()
+	if err := s.Status.Validate(); err != nil {
+		return err
+	}
+	return s.validateArtifacts()
+}
+
+// validateArtifacts 校验可选的产出元数据：未记录时跳过，记录时必须自洽。
+func (s Session) validateArtifacts() error {
+	if s.RunStatus == "" && s.Completeness == "" && s.ExportStatus == "" {
+		return nil
+	}
+	return SessionArtifacts{
+		JSONLPath:      s.JSONLPath,
+		HTMLPath:       s.HTMLPath,
+		RunStatus:      s.RunStatus,
+		Completeness:   s.Completeness,
+		ExportStatus:   s.ExportStatus,
+		ExitCode:       exitCodeOrMinusOne(s.ExitCode),
+		FailureSummary: s.FailureSummary,
+	}.Validate()
+}
+
+// exitCodeOrMinusOne 把可空退出码转换为退出码，未知时返回 -1。
+func exitCodeOrMinusOne(code *int) int {
+	if code == nil {
+		return -1
+	}
+	return *code
 }
 
 // MarkRunning 标记会话已进入运行状态，并记录 Pi 侧会话标识。

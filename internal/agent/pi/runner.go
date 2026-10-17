@@ -1,75 +1,43 @@
-// Package pi 实现基于 Pi RPC 的统一 Agent Runner。
-//
-// 一次 Run 对应一个全新的 Pi 子进程：启动后先查询会话状态，再提交提示词，
-// 持续消费 stdout 的 JSONL 记录并映射为内部事件，直到收到 agent_settled。
-// 进程的终止与回收统一交给 internal/process。
 package pi
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lingting/agentflow/internal/agent"
 	"github.com/lingting/agentflow/internal/process"
 )
 
-// 默认超时与容量参数。
-const (
-	// DefaultGraceTimeout 是关闭与取消时等待进程退出的宽限时间。
-	DefaultGraceTimeout = 5 * time.Second
-	// DefaultResponseTimeout 是等待单条命令响应的默认超时时间。
-	DefaultResponseTimeout = 30 * time.Second
-	// DefaultRecordBuffer 是待处理记录的缓冲数量。
-	DefaultRecordBuffer = 128
-)
-
-// Options 是 Pi Runner 的可选配置。
-type Options struct {
-	// Executable 是 Pi 可执行文件路径或 PATH 中的名称，为空时使用 pi。
-	Executable string
-	// Env 是子进程环境变量，nil 表示继承当前进程环境。
-	Env []string
-	// GraceTimeout 是关闭与取消时的宽限时间，零值使用 DefaultGraceTimeout。
-	GraceTimeout time.Duration
-	// ResponseTimeout 是等待命令响应的超时时间，零值使用 DefaultResponseTimeout。
-	ResponseTimeout time.Duration
-}
-
-// Runner 是 Pi 的 Agent Runner 实现。
-type Runner struct {
-	options Options
-}
-
-// NewRunner 构造 Pi Runner。
-func NewRunner(options Options) *Runner {
-	return &Runner{options: options}
-}
-
-// runState 保存一次执行的进程与事件状态。
-type runState struct {
-	request    agent.RunRequest
-	supervisor *process.Supervisor
-	decoder    *decoder
-	translator *translator
-	startedAt  time.Time
-	grace      time.Duration
-}
-
 // Run 执行一次完整的 Agent 调用。
 //
 // 返回的 RunResult 始终描述本次执行的实际结果；error 只在执行未能正常完成时非空，
-// 便于调用方区分「执行完成」与「执行失败或取消」。
+// 便于调用方区分「执行完成」与「执行失败、取消或超时」。
+//
+// 无论进程如何结束，都会尽力保存已有的 Session 文件：异常退出时保留的内容仍然
+// 是排查问题的唯一线索。
 func (r *Runner) Run(
 	ctx context.Context,
 	request agent.RunRequest,
 	emit func(agent.Event),
 ) (agent.RunResult, error) {
 	startedAt := time.Now()
-	result := agent.RunResult{SessionID: request.SessionID, ExitCode: -1, StartedAt: startedAt}
+	result := agent.RunResult{
+		SessionID: request.SessionID,
+		ExitCode:  -1,
+		StartedAt: startedAt,
+		Session: agent.SessionFiles{
+			Completeness: agent.SessionMissing,
+			ExportStatus: agent.ExportNotAttempted,
+		},
+	}
 	if err := request.Validate(); err != nil {
 		result.Status = agent.RunFailed
+		result.Failure = err.Error()
 		result.FinishedAt = time.Now()
 		return result, err
 	}
@@ -79,275 +47,427 @@ func (r *Runner) Run(
 	if err := ctx.Err(); err != nil {
 		result.Status = agent.RunCancelled
 		result.FinishedAt = time.Now()
-		emitCancelled(result, emit, err)
+		emitEvent(result.SessionID, emit, agent.EventRunCancelled, agent.RunCancelledData{
+			Reason: "调用前已取消",
+		})
 		return result, err
 	}
 
 	options := r.resolveOptions()
-	executable, err := resolveExecutable(options.Executable)
-	if err != nil {
+	if _, err := resolveExecutable(options.Executable); err != nil {
 		result.Status = agent.RunFailed
+		result.Failure = err.Error()
 		result.FinishedAt = time.Now()
+		emitEvent(result.SessionID, emit, agent.EventRunFailed, agent.RunFailedData{
+			Reason:  "executable_missing",
+			Message: err.Error(),
+		})
 		return result, err
 	}
-	supervisor, err := process.Start(processCommand(processOptions{
-		Executable: executable,
-		Model:      request.Model,
-		WorkingDir: request.WorkingDir,
-		Env:        options.Env,
-	}), process.Options{GraceTimeout: options.GraceTimeout})
+	paths, err := r.sessionPaths(request)
 	if err != nil {
 		result.Status = agent.RunFailed
+		result.Failure = err.Error()
 		result.FinishedAt = time.Now()
+		emitEvent(result.SessionID, emit, agent.EventRunFailed, agent.RunFailedData{
+			Reason:  "session_path_invalid",
+			Message: err.Error(),
+		})
+		return result, err
+	}
+	if err := prepareSessionDir(paths); err != nil {
+		result.Status = agent.RunFailed
+		result.Failure = err.Error()
+		result.FinishedAt = time.Now()
+		emitEvent(result.SessionID, emit, agent.EventRunFailed, agent.RunFailedData{
+			Reason:  "session_dir_failed",
+			Message: err.Error(),
+		})
 		return result, err
 	}
 
-	state := &runState{
-		request:    request,
-		supervisor: supervisor,
-		decoder:    &decoder{},
-		translator: newTranslator(request.SessionID, emit),
-		startedAt:  startedAt,
-		grace:      options.GraceTimeout,
+	timeout := options.Timeout
+	if request.Timeout > 0 {
+		timeout = request.Timeout
 	}
-	// 所有结束路径都保证子进程被终止并回收。
-	defer func() {
-		_, _ = supervisor.Shutdown(state.grace)
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	stderrLines := make(chan process.Line, 64)
+	supervisor, err := process.Start(
+		processCommand(processOptions{
+			Executable:   options.Executable,
+			PrefixArgs:   options.PrefixArgs,
+			Model:        request.Model,
+			SystemPrompt: request.SystemPrompt,
+			SessionPath:  paths.JSONL,
+			WorkingDir:   request.WorkingDir,
+			Env:          options.Env,
+		}),
+		process.Options{
+			GraceTimeout: options.GraceTimeout,
+			StderrLimit:  options.StderrLimit,
+			StderrStream: stderrLines,
+		},
+	)
+	if err != nil {
+		result.Status = agent.RunFailed
+		result.Failure = err.Error()
+		result.FinishedAt = time.Now()
+		emitEvent(result.SessionID, emit, agent.EventRunFailed, agent.RunFailedData{
+			Reason:  "start_failed",
+			Message: err.Error(),
+		})
+		return result, err
+	}
+	result.ProcessID = supervisor.PID()
+	emitEvent(result.SessionID, emit, agent.EventRunStarted, agent.RunStartedData{
+		Model:      request.Model,
+		RoleType:   request.RoleType,
+		WorkingDir: request.WorkingDir,
+		SessionDir: paths.Dir,
+		PID:        supervisor.PID(),
+	})
+
+	capture := newOutputCapture(options.OutputLimit, request.SessionID, emit)
+	var readers sync.WaitGroup
+	readers.Add(2)
+	go func() {
+		defer readers.Done()
+		capture.consumeStdout(supervisor.Lines())
+	}()
+	go func() {
+		defer readers.Done()
+		capture.consumeStderr(stderrLines)
 	}()
 
-	emitStarted(state, supervisor.PID())
-	result = r.execute(ctx, state, options, result)
+	promptErr := writePrompt(supervisor, request.Prompt)
+	ended := waitOutcome(runCtx, supervisor, options.GraceTimeout, timeout)
+	// 进程回收后管道随之关闭，读取协程会自然结束；这里只做有上限的等待，
+	// 避免进程无法回收时永久阻塞。
+	waitReaders(&readers, drainTimeout(options.GraceTimeout))
+
+	// 进程已经回收（waitOutcome 覆盖了全部路径）；这里再加一层有上限的等待，
+	// 保证极端情况下也不会让调用永久阻塞。
+	exit := awaitExit(supervisor, drainTimeout(options.GraceTimeout))
+	result.ExitCode = exit.Code
+	result.FinalText = agent.TruncateText(capture.stdoutTail(), agent.MaxFinalTextLength)
+	result.StderrSummary = agent.TruncateText(capture.stderrTail(), agent.MaxFinalTextLength)
+	result.Status = ended.status()
+	result.Failure = ended.reason(promptErr, exit, result.StderrSummary)
+	if result.Status == agent.RunCompleted && result.Failure != "" {
+		// 进程已退出但退出码非零或提示词写入失败：执行未正常完成。
+		result.Status = agent.RunFailed
+	}
+
+	// Session 处理放在进程回收之后：Pi 在退出前写完 Session 文件，
+	// 提前读取可能得到不完整内容。
+	result.Session = r.persistSession(runCtx, options, request, paths, result.Status, emit)
+	if result.Session.Completeness == agent.SessionMissing && result.Status == agent.RunCompleted {
+		// 进程正常结束却没有 Session 文件，属于提取失败，不能报告为成功。
+		result.Status = agent.RunFailed
+		if result.Failure == "" {
+			result.Failure = "未找到 Session 文件: " + paths.JSONL
+		}
+	}
+	// 终态事件放在 Session 处理之后，保证事件反映最终结果。
+	emitOutcome(result, emit, ended, promptErr)
 	result.FinishedAt = time.Now()
 	return result, runError(result)
 }
 
-// execute 完成握手、提交提示词并消费事件流。
-func (r *Runner) execute(
-	ctx context.Context,
-	state *runState,
-	options Options,
-	result agent.RunResult,
-) agent.RunResult {
-	pump := newRecordPump(state.supervisor.Lines(), state.decoder, state.translator, DefaultRecordBuffer)
-	defer pump.stop()
+// outcomeKind 描述进程结束的原因。
+type outcomeKind int
 
-	sessionRef, err := r.requestState(ctx, state, pump, options.ResponseTimeout)
-	if err != nil {
-		// 先停止消费协程并让它排空剩余输出，避免关闭进程时管道背压阻塞。
-		pump.stop()
-		return r.failWith(result, state, err)
-	}
-	result.ExternalSessionID = sessionRef.SessionID
+// 进程结束原因。
+const (
+	outcomeExited outcomeKind = iota
+	outcomeCancelled
+	outcomeTimedOut
+)
 
-	disposition, err := r.sendPrompt(ctx, state, pump, options.ResponseTimeout)
-	if err != nil {
-		pump.stop()
-		return r.failWith(result, state, err)
-	}
-	if disposition == dispositionHandled {
-		// 提示词被扩展命令消费，不会启动 Agent 运行，因此不等待 agent_settled。
-		result.Status = agent.RunCompleted
-		return result
-	}
-
-	settled := pump.waitSettled(ctx)
-	pump.stop()
-	return r.settle(state, result, settled)
+// outcome 是等待进程结束的结果。
+type outcome struct {
+	kind outcomeKind
+	// limit 是本次调用生效的超时时间，用于生成可诊断的说明。
+	limit time.Duration
 }
 
-// settle 处理事件消费阶段的结束结果与进程关闭。
-func (r *Runner) settle(
-	state *runState,
-	result agent.RunResult,
-	outcome outcome,
-) agent.RunResult {
-	switch outcome.kind {
+// status 返回该结束原因对应的运行状态。
+func (o outcome) status() agent.RunStatus {
+	switch o.kind {
 	case outcomeCancelled:
-		r.requestAbort(state)
-		state.translator.emitEvent(agent.EventRunCancelled, agent.RunCancelledData{
+		return agent.RunCancelled
+	case outcomeTimedOut:
+		return agent.RunTimedOut
+	default:
+		return agent.RunCompleted
+	}
+}
+
+// reason 返回失败或异常的可诊断说明。
+//
+// 正常退出（退出码为 0 且提示词写入成功）时返回空字符串；其余情况都给出原因，
+// 避免把非零退出码当成成功。
+func (o outcome) reason(promptErr error, exit process.Exit, stderr string) string {
+	switch o.kind {
+	case outcomeCancelled:
+		return "执行被调用方取消"
+	case outcomeTimedOut:
+		return fmt.Sprintf("执行超时（上限 %s）", o.limit)
+	}
+	if promptErr != nil {
+		return promptErr.Error()
+	}
+	if exit.Code != 0 {
+		detail := agent.TruncateText(strings.TrimSpace(stderr), maxFailureDetail)
+		switch {
+		case detail != "":
+			return fmt.Sprintf("Pi 异常退出（退出码 %d）: %s", exit.Code, detail)
+		case exit.Err != nil:
+			return fmt.Sprintf("Pi 异常退出（退出码 %d）: %v", exit.Code, exit.Err)
+		default:
+			return fmt.Sprintf("Pi 异常退出（退出码 %d）", exit.Code)
+		}
+	}
+	return ""
+}
+
+// waitOutcome 等待进程结束、调用取消或超时，并保证进程被回收。
+func waitOutcome(
+	ctx context.Context,
+	supervisor *process.Supervisor,
+	grace time.Duration,
+	limit time.Duration,
+) outcome {
+	select {
+	case <-supervisor.Done():
+		return outcome{kind: outcomeExited}
+	case <-ctx.Done():
+	}
+	_, _ = supervisor.Shutdown(grace)
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return outcome{kind: outcomeTimedOut, limit: limit}
+	}
+	return outcome{kind: outcomeCancelled}
+}
+
+// awaitExit 在有上限的时间内等待进程回收结果。
+//
+// 进程无法回收时返回未知退出码，调用方仍能拿到 Session 与诊断信息。
+func awaitExit(supervisor *process.Supervisor, timeout time.Duration) process.Exit {
+	exited := make(chan process.Exit, 1)
+	go func() {
+		exited <- supervisor.Wait()
+	}()
+	select {
+	case exit := <-exited:
+		return exit
+	case <-time.After(timeout):
+		return process.Exit{Code: -1}
+	}
+}
+
+// waitReaders 在有上限的时间内等待输出读取协程退出。
+//
+// 进程无法回收时输出管道可能永远不会关闭；此时放弃等待，避免调用永久阻塞。
+// 放弃等待只影响尾部输出摘要，不影响进程回收与 Session 处理。
+func waitReaders(readers *sync.WaitGroup, timeout time.Duration) {
+	finished := make(chan struct{})
+	go func() {
+		readers.Wait()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(timeout):
+	}
+}
+
+// persistSession 校验 Session 文件并尝试导出 HTML。
+//
+// 原始 JSONL 已经是本次调用的持久化位置，因此不需要额外复制；
+// 这里只校验内容、记录大小，并在导出失败时保留原始文件。
+func (r *Runner) persistSession(
+	ctx context.Context,
+	options Options,
+	request agent.RunRequest,
+	paths SessionPaths,
+	status agent.RunStatus,
+	emit func(agent.Event),
+) agent.SessionFiles {
+	files := agent.SessionFiles{
+		Completeness: agent.SessionMissing,
+		ExportStatus: agent.ExportNotAttempted,
+	}
+	info, err := os.Stat(paths.JSONL)
+	if err != nil {
+		files.Error = fmt.Sprintf("未找到 Session 文件: %s", paths.JSONL)
+		if !os.IsNotExist(err) {
+			files.Error = fmt.Sprintf("读取 Session 文件失败: %v", err)
+		}
+		return files
+	}
+	if info.IsDir() {
+		files.Error = fmt.Sprintf("Session 路径是目录而非文件: %s", paths.JSONL)
+		return files
+	}
+	if err := validateSessionFile(paths.JSONL); err != nil {
+		// 文件存在但内容不可读或不完整时仍然保留，供人工排查。
+		files.Completeness = agent.SessionPartial
+		files.JSONLPath = paths.JSONL
+		files.Bytes = info.Size()
+		files.Error = err.Error()
+		emitEvent(request.SessionID, emit,
+			agent.EventSessionSaved, agent.SessionSavedData{
+				Path:         paths.JSONL,
+				Bytes:        files.Bytes,
+				Completeness: files.Completeness,
+			})
+		return files
+	}
+
+	files.JSONLPath = paths.JSONL
+	files.Bytes = info.Size()
+	if status == agent.RunCompleted {
+		files.Completeness = agent.SessionComplete
+	} else {
+		files.Completeness = agent.SessionPartial
+	}
+	emitEvent(request.SessionID, emit,
+		agent.EventSessionSaved, agent.SessionSavedData{
+			Path:         paths.JSONL,
+			Bytes:        files.Bytes,
+			Completeness: files.Completeness,
+		})
+
+	if options.DisableExport {
+		return files
+	}
+	if ctx.Err() != nil {
+		// 调用已取消或超时：不再启动导出进程，避免为异常调用额外消耗时间。
+		return files
+	}
+	exportErr := r.exportHTML(ctx, options, paths)
+	if exportErr != nil {
+		files.ExportStatus = agent.ExportFailed
+		files.Error = exportErr.Error()
+		// 导出失败不影响原始 JSONL；只有正常结束的调用才把完整性降级，
+		// 异常调用本来就是 partial，不需要再降级。
+		if files.Completeness == agent.SessionComplete {
+			files.Completeness = agent.SessionExportFailed
+		}
+		emitEvent(request.SessionID, emit,
+			agent.EventSessionExported, agent.SessionExportedData{
+				Status: files.ExportStatus,
+				Error:  exportErr.Error(),
+			})
+		return files
+	}
+	files.HTMLPath = paths.HTML
+	files.ExportStatus = agent.ExportSucceeded
+	emitEvent(request.SessionID, emit,
+		agent.EventSessionExported, agent.SessionExportedData{
+			Path:   paths.HTML,
+			Status: files.ExportStatus,
+		})
+	return files
+}
+
+// exportHTML 调用 Pi 官方导出能力把 Session 文件转换为 HTML。
+//
+// 导出只读取原始 JSONL，不会启动新的交互式会话；导出失败不能导致原始文件丢失。
+func (r *Runner) exportHTML(ctx context.Context, options Options, paths SessionPaths) error {
+	if err := ensureParent(paths.HTML); err != nil {
+		return err
+	}
+	exportCtx, cancel := context.WithTimeout(ctx, options.ExportTimeout)
+	defer cancel()
+	stdout, exit, err := runOnce(
+		exportCtx,
+		options,
+		exportArguments(paths.JSONL, paths.HTML),
+		options.ExportTimeout,
+	)
+	if err != nil {
+		return fmt.Errorf("导出 HTML 失败: %w", err)
+	}
+	if exit.Code != 0 {
+		return fmt.Errorf(
+			"导出 HTML 失败（退出码 %d）: %s",
+			exit.Code,
+			agent.TruncateText(strings.TrimSpace(stdout), 512),
+		)
+	}
+	if _, statErr := os.Stat(paths.HTML); statErr != nil {
+		return fmt.Errorf("导出 HTML 后未找到文件: %s: %w", paths.HTML, statErr)
+	}
+	return nil
+}
+
+// emitOutcome 根据进程结束原因发出终态事件。
+func emitOutcome(
+	result agent.RunResult,
+	emit func(agent.Event),
+	ended outcome,
+	promptErr error,
+) {
+	switch ended.kind {
+	case outcomeCancelled:
+		emitEvent(result.SessionID, emit, agent.EventRunCancelled, agent.RunCancelledData{
 			Reason: "执行被调用方取消",
-		}, time.Now())
-		result.Status = agent.RunCancelled
-		result.ExitCode = r.shutdown(state).Code
-		return result
-	case outcomeProtocolFailed, outcomeOutputFailed:
-		state.translator.emitEvent(agent.EventRunFailed, agent.RunFailedData{
-			Reason:  outcome.kind.String(),
-			Message: errorText(outcome.err),
-		}, time.Now())
-		result.Status = agent.RunFailed
-		result.ExitCode = r.shutdown(state).Code
-		result.Failure = errorText(outcome.err)
-		return result
-	}
-
-	exit := r.shutdown(state)
-	result.ExitCode = exit.Code
-	result.FinalText = agent.TruncateText(state.translator.finalText.String(), agent.MaxFinalTextLength)
-
-	if state.translator.aborted {
-		state.translator.emitEvent(agent.EventRunCancelled, agent.RunCancelledData{
-			Reason: "agent_settled 声明运行被中止",
-		}, time.Now())
-		result.Status = agent.RunCancelled
-		return result
-	}
-	if reason := state.translator.failureReason(); reason != "" {
-		state.translator.emitEvent(agent.EventRunFailed, agent.RunFailedData{
-			Reason:   "run_failed",
-			Message:  reason,
-			ExitCode: exit.Code,
-		}, time.Now())
-		result.Status = agent.RunFailed
-		result.Failure = reason
-		return result
-	}
-	result.Status = agent.RunCompleted
-	return result
-}
-
-// requestState 发送 get_state 并返回 Pi 侧的会话状态。
-func (r *Runner) requestState(
-	ctx context.Context,
-	state *runState,
-	pump *recordPump,
-	timeout time.Duration,
-) (stateData, error) {
-	id := "agentflow-state-" + state.request.SessionID
-	response, err := r.call(ctx, state, pump, timeout, command{ID: id, Type: commandGetState})
-	if err != nil {
-		return stateData{}, err
-	}
-	var data stateData
-	if err := response.decodeData(&data); err != nil {
-		return stateData{}, err
-	}
-	return data, nil
-}
-
-// sendPrompt 发送提示词并返回 Pi 报告的 disposition。
-//
-// 记录消费协程在发送前已经就绪，避免错过快速到达的完成事件。
-func (r *Runner) sendPrompt(
-	ctx context.Context,
-	state *runState,
-	pump *recordPump,
-	timeout time.Duration,
-) (string, error) {
-	id := "agentflow-prompt-" + state.request.SessionID
-	response, err := r.call(ctx, state, pump, timeout, command{
-		ID:      id,
-		Type:    commandPrompt,
-		Message: state.request.Prompt,
-	})
-	if err != nil {
-		return "", err
-	}
-	var data promptData
-	if err := response.decodeData(&data); err != nil {
-		return "", err
-	}
-	return data.Disposition, nil
-}
-
-// call 发送命令并等待其响应，期间的事件记录被映射为内部事件。
-func (r *Runner) call(
-	ctx context.Context,
-	state *runState,
-	pump *recordPump,
-	timeout time.Duration,
-	cmd command,
-) (record, error) {
-	payload, err := encodeCommand(cmd)
-	if err != nil {
-		return record{}, err
-	}
-	if err := state.supervisor.Write(payload); err != nil {
-		return record{}, err
-	}
-	response, err := pump.awaitResponse(ctx, cmd.ID, timeout)
-	if err != nil {
-		// 等待响应失败时补上进程诊断输出，便于区分协议问题与 Pi 自身启动失败。
-		if stderr := strings.TrimSpace(state.supervisor.Stderr()); stderr != "" {
-			return record{}, fmt.Errorf("%w（stderr: %s）", err, agent.TruncateText(stderr, 512))
-		}
-		return record{}, err
-	}
-	if !response.Success {
-		return record{}, &ProtocolError{
-			Record: response.Index,
-			Kind:   kindCommandFailed,
-			Detail: fmt.Sprintf("%s 命令失败: %s", response.Command, snippet(response.Error)),
-		}
-	}
-	return response, nil
-}
-
-// shutdown 请求进程正常退出并返回退出结果。
-func (r *Runner) shutdown(state *runState) process.Exit {
-	exit, _ := state.supervisor.Shutdown(state.grace)
-	return exit
-}
-
-// requestAbort 在进程仍可通信时请求中止当前运行。
-//
-// 这里不等待 abort 的响应：取消路径必须最终落到进程回收，
-// 由调用方的宽限时间决定是否强制终止。
-func (r *Runner) requestAbort(state *runState) {
-	payload, err := encodeCommand(command{Type: commandAbort})
-	if err != nil {
+		})
+		return
+	case outcomeTimedOut:
+		emitEvent(result.SessionID, emit, agent.EventRunTimedOut, agent.RunTimedOutData{
+			Timeout:  ended.limit.String(),
+			ExitCode: result.ExitCode,
+		})
 		return
 	}
-	_ = state.supervisor.Write(payload)
+	if promptErr != nil {
+		emitEvent(result.SessionID, emit, agent.EventRunFailed, agent.RunFailedData{
+			Reason:   "prompt_failed",
+			Message:  promptErr.Error(),
+			ExitCode: result.ExitCode,
+		})
+		return
+	}
+	if result.ExitCode != 0 {
+		emitEvent(result.SessionID, emit, agent.EventRunFailed, agent.RunFailedData{
+			Reason:   "exit_nonzero",
+			Message:  agent.TruncateText(result.StderrSummary, 512),
+			ExitCode: result.ExitCode,
+		})
+		return
+	}
+	if result.Status == agent.RunFailed {
+		// 进程正常退出但 Session 提取失败：同样不能报告为收敛。
+		emitEvent(result.SessionID, emit, agent.EventRunFailed, agent.RunFailedData{
+			Reason:   "session_unusable",
+			Message:  result.Failure,
+			ExitCode: result.ExitCode,
+		})
+		return
+	}
+	emitEvent(result.SessionID, emit, agent.EventRunSettled, agent.RunSettledData{ExitCode: result.ExitCode})
 }
 
-// failWith 把执行标记为失败，回收进程并发出失败事件。
-func (r *Runner) failWith(result agent.RunResult, state *runState, err error) agent.RunResult {
-	exit := r.shutdown(state)
-	state.translator.emitEvent(agent.EventRunFailed, agent.RunFailedData{
-		Reason:   "run_failed",
-		Message:  errorText(err),
-		ExitCode: exit.Code,
-	}, time.Now())
-	result.Status = agent.RunFailed
-	result.ExitCode = exit.Code
-	result.Failure = errorText(err)
-	return result
-}
-
-// emitStarted 发出 run.started 事件。
-func emitStarted(state *runState, pid int) {
-	state.translator.emitEvent(agent.EventRunStarted, agent.RunStartedData{
-		Model:      state.request.Model,
-		WorkingDir: state.request.WorkingDir,
-		PID:        pid,
-	}, state.startedAt)
-}
-
-// emitCancelled 在启动前取消时发出 run.cancelled 事件。
-func emitCancelled(result agent.RunResult, emit func(agent.Event), err error) {
+// emitEvent 编码并发出内部事件，回调为空或编码失败时忽略。
+func emitEvent(
+	sessionID string,
+	emit func(agent.Event),
+	eventType agent.EventType,
+	payload any,
+) {
 	if emit == nil {
 		return
 	}
-	event, buildErr := agent.NewEvent(result.SessionID, agent.EventRunCancelled, agent.RunCancelledData{
-		Reason: errorText(err),
-	}, result.FinishedAt)
-	if buildErr != nil {
+	event, err := agent.NewEvent(sessionID, eventType, payload, time.Now())
+	if err != nil {
 		return
 	}
 	emit(event)
-}
-
-// resolveOptions 补齐默认配置。
-func (r *Runner) resolveOptions() Options {
-	options := r.options
-	if options.GraceTimeout <= 0 {
-		options.GraceTimeout = DefaultGraceTimeout
-	}
-	if options.ResponseTimeout <= 0 {
-		options.ResponseTimeout = DefaultResponseTimeout
-	}
-	return options
 }
 
 // runError 把执行结果转换为错误，便于调用方区分成功与失败。
@@ -355,20 +475,25 @@ func runError(result agent.RunResult) error {
 	switch result.Status {
 	case agent.RunCancelled:
 		return fmt.Errorf("pi: 执行被取消: %w", context.Canceled)
+	case agent.RunTimedOut:
+		return fmt.Errorf("pi: 执行超时: %w", context.DeadlineExceeded)
 	case agent.RunFailed:
 		if result.Failure != "" {
 			return fmt.Errorf("pi: 执行失败（退出码 %d）: %s", result.ExitCode, result.Failure)
 		}
 		return fmt.Errorf("pi: 执行失败（退出码 %d）", result.ExitCode)
 	default:
+		// 导出失败只是降级结果：原始 Session 已保存，不作为执行失败返回。
 		return nil
 	}
 }
 
-// errorText 返回错误的可读文本。
-func errorText(err error) string {
-	if err == nil {
-		return ""
-	}
-	return strings.TrimSpace(err.Error())
+// sessionPaths 解析本次调用的 Session 文件路径。
+func (r *Runner) sessionPaths(request agent.RunRequest) (SessionPaths, error) {
+	return SessionLayout{
+		TaskID:    request.TaskID,
+		StepID:    request.StepID,
+		AttemptID: request.AttemptID,
+		SessionID: request.SessionID,
+	}.Paths(request.SessionRoot)
 }

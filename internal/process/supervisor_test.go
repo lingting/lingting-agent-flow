@@ -283,3 +283,51 @@ func TestPIDIsReported(t *testing.T) {
 		t.Fatalf("关闭子进程失败: %v", err)
 	}
 }
+
+// TestStderrStreamReceivesLines 验证 stderr 可以流式读取，且在读取结束后关闭通道。
+func TestStderrStreamReceivesLines(t *testing.T) {
+	stderr := writeTempFile(t, "stderr.txt", "first-line\nsecond-line\n")
+	stream := make(chan process.Line, 16)
+	supervisor, err := process.Start(
+		fakeCommand(t, "emit", fakeStderrEnv+"="+stderr),
+		process.Options{StderrStream: stream},
+	)
+	if err != nil {
+		t.Fatalf("启动子进程失败: %v", err)
+	}
+	var lines []string
+	for line := range stream {
+		lines = append(lines, line.Text)
+	}
+	if _, err := supervisor.Shutdown(time.Second); err != nil {
+		t.Fatalf("关闭子进程失败: %v", err)
+	}
+	expected := []string{"first-line", "second-line"}
+	if strings.Join(lines, "|") != strings.Join(expected, "|") {
+		t.Fatalf("stderr 流内容不符: %#v", lines)
+	}
+	if !strings.Contains(supervisor.Stderr(), "second-line") {
+		t.Fatalf("stderr 诊断缓冲应保留内容: %q", supervisor.Stderr())
+	}
+}
+
+// TestStderrStreamDoesNotBlockWithoutConsumer 验证无人消费时 stderr 不会阻塞进程。
+func TestStderrStreamDoesNotBlockWithoutConsumer(t *testing.T) {
+	stream := make(chan process.Line)
+	supervisor, err := process.Start(
+		fakeCommand(t, "flood"),
+		process.Options{StderrStream: stream, GraceTimeout: 5 * time.Second},
+	)
+	if err != nil {
+		t.Fatalf("启动子进程失败: %v", err)
+	}
+	for range supervisor.Lines() {
+	}
+	exit, err := supervisor.Shutdown(5 * time.Second)
+	if err != nil {
+		t.Fatalf("关闭子进程失败: %v", err)
+	}
+	if exit.Code != 0 {
+		t.Fatalf("期望退出码 0，实际 %d", exit.Code)
+	}
+}

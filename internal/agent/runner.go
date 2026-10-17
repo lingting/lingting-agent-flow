@@ -1,7 +1,7 @@
 // Package agent 定义与具体 Agent 实现无关的统一执行接口。
 //
 // 业务层只依赖本包的 Runner、RunRequest、RunResult 与 Event，
-// 不感知 Pi 的 JSONL RPC 协议、子进程或事件字段。
+// 不感知具体 Agent 的命令行参数、子进程或协议字段。
 package agent
 
 import "context"

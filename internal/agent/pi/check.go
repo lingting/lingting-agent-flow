@@ -2,241 +2,244 @@ package pi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/lingting/agentflow/internal/process"
 )
 
-// 检查命令使用的参数与超时。
+// 检查命令使用的超时。
 const (
-	// argVersion 打印 Pi 版本。
-	argVersion = "--version"
-	// argHelp 打印 Pi 的命令行帮助。
-	argHelp = "--help"
 	// checkTimeout 是单项检查的超时时间。
 	checkTimeout = 30 * time.Second
 )
 
-// CheckReport 是一次 Pi 安装检查的结果。
+// CheckReport 是一次 Pi 安装与能力检查的结果。
+//
+// 检查只验证非交互式执行所需的条件：可执行程序、版本、必需参数是否出现在帮助中、
+// 以及模型是否被 Pi 识别。检查不会发送提示词，因此不消耗模型调用。
 type CheckReport struct {
 	// Executable 是解析后的 Pi 可执行程序路径。
 	Executable string
 	// Version 是 Pi 报告的版本号，无法获取时为空。
 	Version string
-	// RPCModeSupported 表示帮助信息中声明了 rpc 输出模式。
-	RPCModeSupported bool
-	// StateHandshake 表示 get_state 请求已收到成功响应。
-	StateHandshake bool
-	// ExternalSessionID 是 get_state 返回的 Pi 会话标识。
-	ExternalSessionID string
-	// ExitCode 是关闭检查进程后的退出码。
-	ExitCode int
-	// Stderr 是检查过程中收集的诊断输出。
-	Stderr string
+	// PrintSupported 表示帮助信息中声明了 --print。
+	PrintSupported bool
+	// SessionSupported 表示帮助信息中声明了 --session。
+	SessionSupported bool
+	// ExportSupported 表示帮助信息中声明了 --export。
+	ExportSupported bool
+	// Model 是被检查的模型标识，为空表示未检查。
+	Model string
+	// ModelRecognized 表示 Pi 在模型列表中返回了该模型。
+	ModelRecognized bool
+	// AuthStatus 是 Pi 报告的凭据状态，未检查时为空。
+	AuthStatus string
 }
 
-// Check 检查 Pi 是否可用、是否支持 RPC 模式以及能否完成一次协议握手。
+// Check 检查 Pi 是否可用以及是否支持非交互式 CLI 执行。
 //
-// 检查使用真实的 Pi 子进程，但不发送提示词，因此不会调用模型。
-func Check(ctx context.Context, options Options) (CheckReport, error) {
-	report := CheckReport{ExitCode: -1}
+// model 非空时额外检查 Pi 是否识别该模型，并查询该模型的凭据状态。
+func Check(ctx context.Context, options Options, model string) (CheckReport, error) {
+	options = optionsWithDefaults(options)
+	report := CheckReport{Model: strings.TrimSpace(model)}
 	path, err := resolveExecutable(options.Executable)
 	if err != nil {
 		return report, err
 	}
 	report.Executable = path
-	if err := checkVersion(ctx, options, path, &report); err != nil {
+	version, err := checkVersion(ctx, options)
+	if err != nil {
 		return report, err
 	}
-	if err := checkRPCMode(ctx, options, path, &report); err != nil {
+	report.Version = version
+	help, err := checkHelp(ctx, options)
+	if err != nil {
 		return report, err
 	}
-	if err := checkHandshake(ctx, options, path, &report); err != nil {
+	report.PrintSupported = containsFlag(help, argPrint)
+	report.SessionSupported = containsFlag(help, argSession)
+	report.ExportSupported = containsFlag(help, argExport)
+	if err := checkRequiredFlags(report); err != nil {
 		return report, err
 	}
+	if report.Model == "" {
+		return report, nil
+	}
+	recognized, err := checkModel(ctx, options, report.Model)
+	if err != nil {
+		return report, err
+	}
+	report.ModelRecognized = recognized
+	status, err := checkAuth(ctx, options, report.Model)
+	if err != nil {
+		return report, err
+	}
+	report.AuthStatus = status
 	return report, nil
 }
 
+// checkRequiredFlags 确认非交互式执行所需的参数都出现在帮助信息中。
+func checkRequiredFlags(report CheckReport) error {
+	var missing []string
+	if !report.PrintSupported {
+		missing = append(missing, argPrint)
+	}
+	if !report.SessionSupported {
+		missing = append(missing, argSession)
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"pi: 当前版本未声明必需的参数 %s，请升级 Pi（当前版本 %s）",
+		strings.Join(missing, "、"),
+		report.Version,
+	)
+}
+
 // checkVersion 读取 Pi 版本号。
-func checkVersion(ctx context.Context, options Options, path string, report *CheckReport) error {
-	stdout, exit, err := runOnce(ctx, options, path, argVersion)
+func checkVersion(ctx context.Context, options Options) (string, error) {
+	stdout, exit, err := runOnce(ctx, options, []string{argVersion}, checkTimeout)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if exit.Code != 0 {
-		return fmt.Errorf("pi: 版本查询失败（退出码 %d）: %s", exit.Code, strings.TrimSpace(stdout))
+		return "", fmt.Errorf(
+			"pi: 版本查询失败（退出码 %d）: %s",
+			exit.Code,
+			strings.TrimSpace(stdout),
+		)
 	}
 	version := strings.TrimSpace(stdout)
 	if version == "" {
-		return fmt.Errorf("pi: 版本查询没有输出")
+		return "", fmt.Errorf("pi: 版本查询没有输出")
 	}
-	report.Version = strings.Split(version, "\n")[0]
-	return nil
+	return strings.Split(version, "\n")[0], nil
 }
 
-// checkRPCMode 检查帮助信息中是否声明了 rpc 输出模式。
-func checkRPCMode(ctx context.Context, options Options, path string, report *CheckReport) error {
-	stdout, exit, err := runOnce(ctx, options, path, argHelp)
+// checkHelp 读取 Pi 的命令行帮助。
+func checkHelp(ctx context.Context, options Options) (string, error) {
+	stdout, exit, err := runOnce(ctx, options, []string{argHelp}, checkTimeout)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if exit.Code != 0 {
-		return fmt.Errorf("pi: 帮助信息查询失败（退出码 %d）", exit.Code)
+		return "", fmt.Errorf("pi: 帮助信息查询失败（退出码 %d）", exit.Code)
 	}
-	report.RPCModeSupported = strings.Contains(stdout, modeRPC)
-	if !report.RPCModeSupported {
-		return fmt.Errorf("pi: 当前版本未声明 rpc 输出模式，请升级 Pi")
+	if strings.TrimSpace(stdout) == "" {
+		return "", fmt.Errorf("pi: 帮助信息为空，无法确认参数支持情况")
 	}
-	return nil
+	return stdout, nil
 }
 
-// runOnce 运行一次短生命周期的 Pi 子进程并收集 stdout。
-func runOnce(
-	ctx context.Context,
-	options Options,
-	path string,
-	arg string,
-) (string, process.Exit, error) {
-	runCtx, cancel := context.WithTimeout(ctx, checkTimeout)
-	defer cancel()
-	if err := runCtx.Err(); err != nil {
-		return "", process.Exit{Code: -1}, err
-	}
-	supervisor, err := process.Start(
-		process.Command{Path: path, Args: []string{arg}, Env: options.Env},
-		process.Options{GraceTimeout: resolveGrace(options)},
-	)
-	if err != nil {
-		return "", process.Exit{Code: -1}, err
-	}
-	collected := make(chan collectedOutput, 1)
-	go collectOutput(supervisor, collected)
-	select {
-	case output := <-collected:
-		exit, shutdownErr := supervisor.Shutdown(resolveGrace(options))
-		if output.err != nil {
-			return output.text, exit, output.err
+// containsFlag 判断帮助信息中是否声明了指定参数。
+func containsFlag(help, flag string) bool {
+	for _, line := range strings.Split(help, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
 		}
-		return output.text, exit, shutdownErr
-	case <-runCtx.Done():
-		_, _ = supervisor.Shutdown(resolveGrace(options))
-		return "", process.Exit{Code: -1}, runCtx.Err()
-	}
-}
-
-// collectedOutput 是收集到的子进程输出。
-type collectedOutput struct {
-	text string
-	err  error
-}
-
-// collectOutput 读取子进程全部 stdout，直到输出流关闭。
-func collectOutput(supervisor *process.Supervisor, result chan<- collectedOutput) {
-	var builder strings.Builder
-	for line := range supervisor.Lines() {
-		if line.Err != nil {
-			result <- collectedOutput{text: builder.String(), err: line.Err}
-			return
-		}
-		builder.WriteString(line.Text)
-		builder.WriteByte('\n')
-	}
-	result <- collectedOutput{text: builder.String()}
-}
-
-// checkHandshake 启动 RPC 子进程并完成一次 get_state 握手。
-func checkHandshake(ctx context.Context, options Options, path string, report *CheckReport) error {
-	runCtx, cancel := context.WithTimeout(ctx, checkTimeout)
-	defer cancel()
-	supervisor, err := process.Start(
-		process.Command{
-			Path: path,
-			Args: arguments(""),
-			Env:  options.Env,
-		},
-		process.Options{GraceTimeout: resolveGrace(options)},
-	)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		exit, _ := supervisor.Shutdown(resolveGrace(options))
-		report.ExitCode = exit.Code
-		report.Stderr = strings.TrimSpace(supervisor.Stderr())
-	}()
-
-	payload, err := encodeCommand(command{ID: "agentflow-check", Type: commandGetState})
-	if err != nil {
-		return err
-	}
-	if err := supervisor.Write(payload); err != nil {
-		return err
-	}
-	response, err := awaitProbe(runCtx, supervisor.Lines(), resolveResponseTimeout(options))
-	if err != nil {
-		return err
-	}
-	if !response.Success {
-		return fmt.Errorf("pi: get_state 请求失败: %s", snippet(response.Error))
-	}
-	var data stateData
-	if err := response.decodeData(&data); err != nil {
-		return err
-	}
-	report.StateHandshake = true
-	report.ExternalSessionID = data.SessionID
-	// 握手结束后继续排空输出，避免关闭进程时因管道背压阻塞。
-	go drain(supervisor.Lines())
-	return nil
-}
-
-// awaitProbe 等待检查用请求的响应，超时返回错误。
-func awaitProbe(
-	ctx context.Context,
-	lines <-chan process.Line,
-	timeout time.Duration,
-) (record, error) {
-	dec := &decoder{}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return record{}, ctx.Err()
-		case <-timer.C:
-			return record{}, fmt.Errorf("pi: 等待 get_state 响应超时（%s）", timeout)
-		case line, ok := <-lines:
-			if !ok {
-				return record{}, fmt.Errorf("pi: 输出流在 get_state 响应之前关闭")
-			}
-			if line.Err != nil {
-				return record{}, line.Err
-			}
-			rec, err := dec.decode(line.Text)
-			if err != nil {
-				return record{}, err
-			}
-			if rec.isResponse() {
-				return rec, nil
+		for _, field := range fields {
+			if strings.TrimSuffix(field, ",") == flag {
+				return true
 			}
 		}
 	}
+	return false
 }
 
-// resolveGrace 返回生效的关闭宽限时间。
-func resolveGrace(options Options) time.Duration {
-	if options.GraceTimeout > 0 {
-		return options.GraceTimeout
+// checkModel 判断 Pi 的模型列表中是否包含指定模型。
+//
+// Pi 的 --list-models 输出为对齐表格，模型标识位于第二列；这里按列匹配而不是
+// 子串匹配，避免 provider/model 与 model 相互误判。
+func checkModel(ctx context.Context, options Options, model string) (bool, error) {
+	stdout, exit, err := runOnce(ctx, options, []string{argListModels}, checkTimeout)
+	if err != nil {
+		return false, err
 	}
-	return DefaultGraceTimeout
+	if exit.Code != 0 {
+		return false, fmt.Errorf("pi: 模型列表查询失败（退出码 %d）", exit.Code)
+	}
+	provider, identifier := splitModel(model)
+	for _, line := range strings.Split(stdout, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		if provider == "" {
+			if fields[1] == identifier {
+				return true, nil
+			}
+			continue
+		}
+		if fields[0] == provider && fields[1] == identifier {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
-// resolveResponseTimeout 返回生效的响应超时时间。
-func resolveResponseTimeout(options Options) time.Duration {
-	if options.ResponseTimeout > 0 {
-		return options.ResponseTimeout
+// splitModel 拆分 provider/model 形式的模型标识。
+//
+// 模型标识中可能包含多个斜杠，只有第一段是 provider。
+func splitModel(model string) (string, string) {
+	index := strings.Index(model, "/")
+	if index <= 0 || index == len(model)-1 {
+		return "", model
 	}
-	return DefaultResponseTimeout
+	return model[:index], model[index+1:]
+}
+
+// checkAuth 查询指定模型的凭据状态。
+//
+// 凭据不可用不属于检查失败：它表示当前环境尚未完成登录，需要用户自行处理。
+// 只有命令本身无法执行时才返回错误。
+func checkAuth(ctx context.Context, options Options, model string) (string, error) {
+	args := []string{argAuthCheck, authSubcommandCheck, argModel, model, argJSON}
+	stdout, exit, err := runOnce(ctx, options, args, checkTimeout)
+	if err != nil {
+		return "", nil
+	}
+	status := parseAuthStatus(stdout)
+	if status != "" {
+		return status, nil
+	}
+	if exit.Code != 0 {
+		return "unknown", nil
+	}
+	return "unknown", nil
+}
+
+// authResult 是 pi auth check --json 的输出结构。
+type authResult struct {
+	Status string `json:"status"`
+	Reason string `json:"reason"`
+}
+
+// parseAuthStatus 从结构化输出中提取凭据状态。
+func parseAuthStatus(stdout string) string {
+	trimmed := strings.TrimSpace(stdout)
+	if trimmed == "" || !strings.HasPrefix(trimmed, "{") {
+		return ""
+	}
+	var result authResult
+	if err := json.Unmarshal([]byte(trimmed), &result); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(result.Status)
+}
+
+// optionsWithDefaults 补齐检查所需的默认配置。
+func optionsWithDefaults(options Options) Options {
+	if options.GraceTimeout <= 0 {
+		options.GraceTimeout = DefaultGraceTimeout
+	}
+	if options.ExportTimeout <= 0 {
+		options.ExportTimeout = DefaultExportTimeout
+	}
+	if options.Timeout <= 0 {
+		options.Timeout = DefaultTimeout
+	}
+	return options
 }
