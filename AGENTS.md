@@ -52,6 +52,57 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
 - 未经用户明确要求，不运行测试、不创建测试文件、不编写临时验证脚本，也不通过“测试后删除”的方式绕过该限制。
 - 数据库 schema 变更必须同时提供 `migrations/` 下的迁移脚本。
 
+## 测试规范
+
+以下规则是长期项目规范，任何新增或修改测试的工作都必须遵守。
+
+### 目录
+
+- 所有测试代码与测试入口必须放在根目录 `tests/` 下，按 `unit/`、`integration/local/`、
+  `integration/pi/`、`integration/ssh/`、`e2e/` 分层。
+- 禁止在生产源码目录（`internal/`、`cmd/`）新增或保留测试文件。
+- `tests/internal/testkit/` 只存放通用测试辅助代码，不存放产品实现，也不存放需要额外执行的验证脚本。
+
+### 独立入口与并发
+
+- 每个测试目录都是独立的 Go 测试包，可用 `go test` 直接执行；成功判定与退出码由 Go
+  测试框架负责，不得把结果判断委托给额外的 Shell、Python 或日志解析脚本。
+- 每个测试入口必须自行完成初始化、执行被测操作、自动断言，并用非零退出码报告失败。
+- 新测试默认必须支持并发：无共享状态的用例使用 `t.Parallel()`，不得依赖固定执行顺序，
+  不得依赖其他测试预先创建的数据。
+- 并发度由 `-p` 与 `-parallel` 控制，不得在测试代码中把全部用例强制串行化。
+
+### 测试工作空间
+
+- 每次测试入口启动时在 `os.TempDir()/lingting-agent-flow-tests/` 下创建随机根目录，
+  每个用例使用独立子目录，并输出绝对路径 `TEST_ARTIFACT_DIR`。
+- 数据库、WAL/SHM、Session、日志、配置与生成文件必须全部落在该工作空间内，不得写入
+  真实项目目录、用户默认数据目录或其他用例的工作空间。
+- 使用 `tests/internal/testkit` 提供的 `testkit.New(t)` 与 `testkit.Dir(t)`，
+  不要用 `t.TempDir()`，也不要用 `t.Setenv` 切换全局数据目录；路径通过结构体、
+  构造参数或子进程独立环境变量传入。
+- 测试结束禁止删除工作空间与测试产物：不调用 `os.RemoveAll` 删除测试根目录，不使用会在
+  结束时自动清理目录的临时目录 API，也不在 `t.Cleanup` 中删除目录。允许关闭数据库连接、
+  终止测试启动的子进程、关闭监听端口等运行时资源。
+
+### 真实外部依赖
+
+- 本机没有 `pi` 时，只有依赖真实 Pi CLI 的用例输出 `WARN [SKIP]` 并跳过；Pi Runner
+  的单元测试使用替身，必须继续执行。
+- 真实 Pi 测试默认模型为 `group/free`，可用 `AGENTFLOW_TEST_PI_MODEL` 覆盖；每次真实
+  调用都必须显式传入模型，不得回退到 Pi CLI 配置中的默认付费模型。
+- 真实 SSH 测试必须通过 `AGENTFLOW_TEST_SSH_HOST`、`AGENTFLOW_TEST_SSH_USER`、
+  `AGENTFLOW_TEST_SSH_PORT`、`AGENTFLOW_TEST_SSH_KEY_PATH`、
+  `AGENTFLOW_TEST_SSH_KNOWN_HOSTS` 获取目标；必需目标缺失时输出警告并跳过，目标配置
+  完整但连接、认证或主机密钥校验失败时必须让测试失败。
+- 禁止关闭 SSH 主机密钥验证来规避测试失败，禁止自动接受未知主机密钥。
+- 真实外部测试的远程操作只允许在随机生成的远程临时目录内进行。
+
+### 结果报告
+
+- 修改测试相关基础设施后，必须运行与修改范围相关的测试，并如实报告通过、失败、跳过与
+  未执行的测试；不得把未执行、被跳过或失败的测试报告为通过。
+
 ## 文档同步
 
 - 代码编辑期间不修改 `README.md` 及其他文档。
@@ -60,8 +111,8 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
 ## 常用命令
 
 ```bash
-gofmt -l internal cmd        # 检查格式
-gofmt -w internal cmd        # 格式化
+gofmt -l internal cmd tests  # 检查格式
+gofmt -w internal cmd tests  # 格式化
 go vet ./...                 # 静态检查
 go build ./...               # 编译
 ```

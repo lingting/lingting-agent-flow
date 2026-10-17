@@ -54,7 +54,9 @@ Pi RPC、Git Worktree、React 与 TypeScript 属于后续阶段的技术选型�
 - Git（`make build` 用它注入提交号）
 - Make（可选，也可直接使用 `go` 命令）
 
-当前版本不调用 Pi，也不需要模型 Provider 凭据。安装并配置 Pi 是后续阶段的要求。
+只有 `agent check` 与 `agent test` 需要 Pi：前者检查 PATH 中的 `pi` 及其非交互式参数，
+后者还会用角色配置的模型发起一次真实调用，因此需要对应 Provider 的凭据。其余命令
+（`config`、`version`、`host`）不依赖 Pi，也不需要模型凭据。
 
 ## 安装与运行
 
@@ -287,25 +289,40 @@ storage:
 ## 开发与测试命令
 
 ```bash
-make fmt          # 格式化 cmd 与 internal
+make fmt          # 格式化 cmd、internal 与 tests
 make fmt-check    # 列出未格式化的文件
 make vet          # 静态检查
-make test         # 单元测试
+make test         # 全部测试
+make test-unit    # 快速单元测试
+make test-local   # 本机集成测试
+make test-pi      # 真实 Pi 集成测试
+make test-ssh     # 真实 SSH 集成测试
+make test-e2e     # CLI 端到端测试
+make test-race    # 单元测试竞态检测
 make build        # 构建 bin/agentflow
 make run          # 直接运行
-make check        # fmt + vet + test + build
+make check        # fmt-check + vet + build
 ```
 
-数据库相关测试全部使用临时目录中的临时数据库，不读写用户真实数据：
+测试代码全部位于根目录 `tests/` 下，按 `unit/`、`integration/local/`、`integration/pi/`、
+`integration/ssh/`、`e2e/` 分层，每个目录都是独立的 Go 测试包：
 
 ```bash
-go test ./internal/storage/...        # 迁移、实体读写、约束、事务与恢复
-go test -race ./internal/storage/...  # 并发写入与事务竞争
-go test ./internal/sshprobe/...       # SSH 探测：本地模拟服务、超时、取消与资源释放
-go test ./internal/cli/...            # CLI 命令行为
+go test -count=1 -v -p 8 -parallel 8 ./tests/unit/...               # 快速单元测试
+go test -count=1 -v -p 8 -parallel 8 ./tests/integration/local/...  # 本机集成测试
+go test -count=1 -v ./tests/integration/pi/...                      # 真实 Pi
+go test -count=1 -v ./tests/integration/ssh/...                     # 真实 SSH
+go test -count=1 -v ./tests/e2e/...                                 # CLI 端到端
+go test -count=1 -v -p 8 -parallel 8 ./tests/...                    # 全部
+go test -race -count=1 ./tests/unit/...                             # 竞态检测
 ```
 
-SSH 探测测试使用本地回环地址上的模拟 TCP 服务，不依赖真实 SSH 服务器或任何凭据。
+每次测试入口启动时在系统临时目录下创建随机工作空间，数据库、Session、日志与生成文件
+全部落在其中，并把绝对路径输出为 `TEST_ARTIFACT_DIR`。测试结束只关闭运行时资源，
+**不删除测试产物**，便于检查失败现场。快速单元测试与本机集成测试不访问真实模型或远程
+网络；本机没有 `pi` 时真实 Pi 用例输出警告并跳过。
+
+测试分类、环境变量与编写约定见 [tests/README.md](tests/README.md)。
 
 开发环境、代码风格与提交约定见 [docs/development.md](docs/development.md)，分层与依赖方向见 [docs/architecture.md](docs/architecture.md)。
 

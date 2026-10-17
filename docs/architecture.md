@@ -52,10 +52,22 @@ web/ui/                   React + TypeScript 前端（未实现）
 configs/                  示例配置
 migrations/               迁移说明（实际迁移脚本在 internal/storage/sqlite/migrations/）
 docs/                     架构与开发文档
-tests/e2e/                端到端测试
+tests/unit/               快速单元测试（不依赖真实 Pi、SSH 或网络）
+tests/integration/local/  本机集成测试（数据库全链路、模拟 SSH/SFTP、TCP 探测）
+tests/integration/pi/     需要本机真实 Pi CLI 的集成测试
+tests/integration/ssh/    需要真实远程机器的集成测试
+tests/e2e/                端到端测试（CLI 完整操作路径）
+tests/internal/testkit/   测试工作空间与通用辅助组件
+tests/internal/fakepi/    以测试二进制充当 Pi CLI 的可控替身
 ```
 
 标为“未实现”的目录在对应能力落地前不创建，避免留下只有接口没有使用场景的抽象。
+
+测试代码不放在生产源码目录，全部集中在根目录 `tests/` 下，按测试类型与领域分层，
+每个子目录都是独立的 Go 测试包。`tests/internal/testkit` 提供统一的测试工作空间：
+在系统临时目录的 `lingting-agent-flow-tests` 下创建随机根目录，为每个用例分配独立子目录，
+并保证测试产物不被自动删除。`tests/internal/fakepi` 让测试二进制充当 Pi CLI 替身，
+使 Pi Runner 的单元测试不依赖本机是否安装 Pi。
 
 ## 依赖方向
 

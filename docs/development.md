@@ -7,7 +7,8 @@
 - Go：使用当前受支持的稳定版本，版本要求以 `go.mod` 声明为准。
 - Git：用于工作区隔离与版本管理，Makefile 会用 `git rev-parse` 注入提交号。
 - Node.js + pnpm：仅在开发 Web UI 时需要（当前未引入）。
-- Pi CLI：已安装并完成模型 Provider 配置（当前版本不调用 Pi）。
+- Pi CLI：`agent check` 与 `agent test` 需要 PATH 中存在 `pi`；`agent test` 还会使用角色
+  配置中的模型，因此需要完成对应 Provider 的凭据配置。其他命令不依赖 Pi。
 
 SQLite 驱动为 `modernc.org/sqlite`，纯 Go 实现，无需安装 CGO 工具链或系统 SQLite。
 
@@ -22,34 +23,45 @@ go mod tidy
 ## 常用命令
 
 ```bash
-make fmt          # gofmt -w cmd internal
+make fmt          # gofmt -w cmd internal tests
 make fmt-check    # 列出未格式化的文件
 make vet          # go vet ./...
-make test         # go test ./...
+make test         # go test ./tests/...
+make test-unit    # 快速单元测试
+make test-local   # 本机集成测试
+make test-pi      # 真实 Pi 集成测试
+make test-ssh     # 真实 SSH 集成测试
+make test-e2e     # CLI 端到端测试
+make test-race    # 单元测试竞态检测
 make build        # 构建 bin/agentflow
 make run          # go run ./cmd/agentflow
-make check        # fmt + vet + test + build
+make check        # fmt-check + vet + build
 ```
 
 不依赖 Make 时可以直接使用底层命令：
 
 ```bash
-gofmt -w cmd internal
+gofmt -w cmd internal tests
 go vet ./...
-go test ./...
+go test -count=1 ./tests/...
 go build -o bin/agentflow ./cmd/agentflow
 ```
 
-数据库相关测试只依赖临时目录，可单独运行：
+测试代码全部位于根目录 `tests/` 下，按测试类型分层，每个目录都是独立的 Go 测试包，
+可以单独运行：
 
 ```bash
-go test ./internal/storage/...        # 迁移、实体读写、约束与事务
-go test -race ./internal/storage/...  # 并发写入与事务竞争
-go test ./internal/sshprobe/...       # SSH 探测：本地模拟服务、超时、取消与资源释放
-go test ./internal/cli/...            # CLI 命令行为
+go test -count=1 -v -p 8 -parallel 8 ./tests/unit/...               # 快速单元测试
+go test -count=1 -v -p 8 -parallel 8 ./tests/integration/local/...  # 本机集成测试
+go test -count=1 -v ./tests/integration/pi/...                      # 真实 Pi
+go test -count=1 -v ./tests/integration/ssh/...                     # 真实 SSH
+go test -count=1 -v ./tests/e2e/...                                 # CLI 端到端
+go test -count=1 -v -p 8 -parallel 8 ./tests/...                    # 全部
+go test -race -count=1 ./tests/unit/...                             # 竞态检测
 ```
 
-SSH 探测测试使用本地回环地址上的模拟 TCP 服务，不依赖真实 SSH 服务器、外部网络或任何凭据。
+真实 Pi 与真实 SSH 入口在依赖缺失时输出 `WARN [SKIP]` 并跳过；本机集成测试与快速单元
+测试只使用本机回环地址上的模拟服务，不依赖真实 SSH 服务器、外部网络或模型凭据。
 
 `make build` 会通过 `-ldflags -X` 注入 `version`、`commit`、`buildDate`；直接 `go build` 时三者取默认的开发值 `dev` / `none` / `unknown`。可以用环境变量覆盖版本号：
 
@@ -106,12 +118,25 @@ make build VERSION=0.1.0
 
 ## 测试流程
 
-- 测试使用 Go 标准库 `testing`，与源码同包或同目录的 `_test.go` 文件。
-- 测试必须使用临时目录与临时配置，不得读写用户真实配置、仓库或数据库。
-- 测试不得依赖真实模型凭据，也不得调用真实 Pi。
+- 测试使用 Go 标准库 `testing`，全部放在根目录 `tests/` 下，按 `unit/`、
+  `integration/local/`、`integration/pi/`、`integration/ssh/`、`e2e/` 分层；生产源码目录
+  `internal/`、`cmd/` 不存放测试文件。
+- 每个测试目录都是独立的 Go 测试包，用 `go test` 直接执行，成功判定与退出码由测试框架
+  负责，不依赖额外脚本解析日志。
+- 测试工作空间由 `tests/internal/testkit` 创建：在系统临时目录的
+  `lingting-agent-flow-tests` 下生成随机根目录，每个用例使用独立子目录，并输出绝对路径
+  `TEST_ARTIFACT_DIR`。数据库、Session、日志与生成文件必须全部落在其中。
+- 使用 `testkit.New(t)`、`testkit.Dir(t)`，不用 `t.TempDir()`；不用 `t.Setenv` 切换全局
+  数据目录，路径通过结构体、构造参数或子进程独立环境变量传入。
+- 测试结束禁止删除工作空间与产物，只关闭数据库连接、子进程与监听端口。
+- 无共享状态的用例使用 `t.Parallel()`，不得依赖固定执行顺序或其他测试预先创建的数据；
+  并发度通过 `-p` 与 `-parallel` 控制。
+- 测试不得读写用户真实配置、仓库或 `.agentflow/` 下的真实数据。
+- 真实 Pi 测试默认使用模型 `group/free`，可用 `AGENTFLOW_TEST_PI_MODEL` 覆盖；本机没有
+  `pi` 时输出 `WARN [SKIP]` 并跳过。真实 SSH 测试通过 `AGENTFLOW_TEST_SSH_*` 获取目标，
+  缺少必需目标时跳过，配置完整但连接、认证或主机密钥校验失败时必须失败。
 - 未经明确授权不运行测试、不创建测试代码与临时验证脚本，也不通过“测试后删除”的方式绕过该限制。
 - 数据库 schema 变更必须同时在 `internal/storage/sqlite/migrations/` 提交新迁移脚本。
-- 数据库测试必须使用临时目录中的临时数据库，不得读写 `.agentflow/` 下的真实数据。
 - 涉及跨实体状态更新时，必须通过 `storage.WithTx` 在单个事务内完成。
 
 ## 与 Pi 交互的注意事项
