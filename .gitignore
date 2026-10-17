@@ -1,1 +1,10 @@
-.idea
+.idea/
+
+# 构建产物
+/bin/
+
+# 运行期数据与工作区
+/.agentflow/
+
+# 本地配置（示例配置之外的配置文件不入库）
+/configs/agentflow.yaml

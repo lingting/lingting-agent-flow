@@ -1,0 +1,62 @@
+# AgentFlow 示例配置
+#
+# 用法：
+#   ./bin/agentflow config validate --config configs/example.yaml
+#
+# 未显式指定 --config 时，命令读取 configs/agentflow.yaml。
+# 模型值为占位符，不代表已验证的模型名称，需要替换为本机 Pi 已配置的模型。
+
+app:
+  name: agentflow
+  # 可选 debug、info、warn、error
+  log_level: info
+
+storage:
+  database_path: .agentflow/agentflow.db
+
+workspace:
+  worktree_root: .agentflow/worktrees
+
+scheduler:
+  # 必须大于 0
+  max_concurrent_tasks: 3
+  # 不得为负数，0 表示步骤失败后不自动重试
+  max_retries_per_step: 3
+
+# 角色名称可自由命名，工作流只依据 type 识别职责。
+# type 只能取 planner、developer、validator。
+# tools_policy.mode 与 type 一一对应：
+#   planner -> read_only
+#   developer -> development
+#   validator -> verification
+# 第一版只校验声明，不据此实施实际权限控制。
+roles:
+  - id: planner
+    name: 架构规划师
+    type: planner
+    runner: pi
+    model: "provider/model-id"
+    system_prompt: |
+      分析需求并生成结构化开发计划。
+    tools_policy:
+      mode: read_only
+
+  - id: developer
+    name: 开发工程师
+    type: developer
+    runner: pi
+    model: "provider/model-id"
+    system_prompt: |
+      按照指定开发步骤实现代码。
+    tools_policy:
+      mode: development
+
+  - id: validator
+    name: 验证工程师
+    type: validator
+    runner: pi
+    model: "provider/model-id"
+    system_prompt: |
+      根据验收标准验证代码，并输出结构化验证结果。
+    tools_policy:
+      mode: verification
