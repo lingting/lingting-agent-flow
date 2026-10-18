@@ -8,7 +8,8 @@
 ```text
 tests/
 ├── internal/
-│   ├── testkit/        # 测试工作空间与通用辅助组件
+│   ├── testkit/        # 测试工作空间、通用辅助组件与工作流测试数据构造
+│   ├── workflowfake/   # 工作流下层组件（容器/代码获取/Agent/命令/代码保存）替身
 │   └── fakepi/         # 以测试二进制充当 Pi CLI 的可控替身
 ├── unit/               # 快速单元测试，不依赖真实 Pi、SSH 或网络
 │   ├── agent/          # Agent 事件、结果类型与容器内 Pi Runner（使用替身）
@@ -24,6 +25,7 @@ tests/
 │   │   └── codesaver/  # 代码保存：提交、推送、合并与状态记录
 │   ├── ssh/            # SSH 主机密钥、认证配置、路径与结果状态
 │   ├── store/          # SQLite 仓储与数据库约束
+│   ├── workflow/       # 工作流引擎、状态机、重试与恢复核验
 │   └── testkit/        # testkit 自身的测试
 ├── integration/
 │   ├── local/          # 本机集成测试，不依赖外部服务
@@ -33,12 +35,14 @@ tests/
 │   │   ├── session/    # Session 提取与持久化边界（真实文件系统）
 │   │   ├── codesaver/  # 真实 Git 提交、推送与合并（本机 bare 仓库）
 │   │   ├── source/     # 容器内 Git Clone 与任务分支（真实 Git）
+│   │   ├── workflow/   # 工作流持久化、进程重启恢复与并发隔离
 │   │   ├── ssh/        # 本地模拟 SSH/SFTP 服务端
 │   │   └── sshprobe/   # 本机 TCP 探测
 │   ├── pi/             # 需要本机真实 Pi CLI
 │   ├── remote/
 │   │   ├── agent/      # 需要真实远程容器与容器内真实 Pi CLI
 │   │   ├── codesaver/  # 需要真实远程容器与容器内 Git
+│   │   ├── workflow/   # 需要真实远程容器与真实工作流前置条件
 │   │   └── docker/     # 需要真实远程 Linux 机器与真实 Docker Engine
 │   └── ssh/            # 需要真实远程 Linux 机器
 └── e2e/
@@ -71,6 +75,9 @@ AGENTFLOW_TEST_REMOTE_DOCKER=1 go test -count=1 -v ./tests/integration/remote/do
 # 真实远程 Agent 集成测试（必须显式启用）
 AGENTFLOW_TEST_REMOTE_DOCKER=1 go test -count=1 -v ./tests/integration/remote/agent/...
 
+# 真实远程工作流集成测试（必须显式启用）
+AGENTFLOW_TEST_REMOTE_DOCKER=1 go test -count=1 -v ./tests/integration/remote/workflow/...
+
 # CLI 端到端测试
 go test -count=1 -v ./tests/e2e/...
 
@@ -81,6 +88,8 @@ go test -count=1 -v -p 8 -parallel 8 ./tests/...
 go test -race -count=1 ./tests/unit/...
 # 竞态检测（代码保存的并发隔离）
 go test -race -count=1 ./tests/unit/source/codesaver/ ./tests/unit/store/
+# 竞态检测（工作流状态机、租约与并发任务隔离）
+go test -race -count=1 ./tests/unit/workflow/ ./tests/integration/local/workflow/
 # 竞态检测（SSH 连接管理与并发操作，需要真实协议交互）
 go test -race -count=1 ./tests/integration/local/ssh/...
 ```

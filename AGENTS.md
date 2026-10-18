@@ -62,6 +62,8 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
   `integration/pi/`、`integration/ssh/`、`integration/remote/`、`e2e/` 分层。
 - 禁止在生产源码目录（`internal/`、`cmd/`）新增或保留测试文件。
 - `tests/internal/testkit/` 只存放通用测试辅助代码，不存放产品实现，也不存放需要额外执行的验证脚本。
+- `tests/internal/workflowfake/` 只提供工作流下层组件（容器、代码获取、Agent、命令、代码保存）
+  的受控替身，不得在其中复制工作流决策逻辑；重试、判定与资源处置必须由真实工作流引擎执行。
 
 ### 独立入口与并发
 
@@ -113,6 +115,8 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
   `AGENTFLOW_TEST_REMOTE_DOCKER=1`；容器内 Pi CLI 是否可用必须通过容器内实际检查确认，
   不能依据本机是否安装 Pi 判断。测试镜像由该目录下的 `Dockerfile` 构建，基础镜像与
   Pi CLI 版本都固定到具体版本。
+- 真实远程工作流测试放在 `tests/integration/remote/workflow/`，同样必须显式设置
+  `AGENTFLOW_TEST_REMOTE_DOCKER=1`；只操作带随机后缀、属于本次测试的容器与远程目录。
 
 ### 远程执行与 Session 约束
 
@@ -126,6 +130,24 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
   SCP/SFTP 上传到宿主机后再 bind mount 进容器。
 - SourceProvider 只负责获取代码与初始化任务分支，不负责 Push、Merge 或删除容器。
 - Runner 不负责工作流重试决策，也不决定整个任务的成功清理策略。
+
+### 工作流引擎约束
+
+- Task、Step、Attempt 的状态迁移只能通过 `domain` 的状态机方法完成；禁止在业务层直接
+  赋值状态字段绕过校验，条件更新必须使用 `UpdateTaskIfStatus` 等带状态前置条件的方法。
+- 只有 `internal/workflow/` 可以依据持久化状态、验证结果与代码保存结果把 Task 推进到最终
+  状态；Pi 不更新任务状态，也不决定是否重试。
+- 每次 Planner、Developer、Validator 调用必须创建新的 Attempt（开发步骤）与独立的
+  Invocation / Session；重试不得复用旧记录。
+- 必需确定性验证命令必须先执行，再按需调用 Validator Agent；Agent 返回 `passed: true`
+  不能覆盖必需检查的失败或未执行。
+- 失败任务重新开始时必须创建新容器，旧容器只能由用户显式选择 `delete` 或 `detach`；
+  不得迁移旧容器中的未推送修改。
+- 已 detached 的容器不得被自动启动、停止、删除或重新接管。
+- 成功清理只删除受管理的任务容器与任务级临时资源；共享镜像、共享缓存卷、远程项目配置
+  目录与 Session 一律保留。
+- Commit、Push 与 Merge 状态必须分别持久化；`merge_after_push` 默认关闭，Push 结果未知时
+  必须先核验远程分支再决定状态。
 
 
 ### 代码保存（CodeSaver）约束

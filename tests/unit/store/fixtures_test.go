@@ -106,7 +106,9 @@ func mustStep(t *testing.T, db *sqlite.DB, task domain.Task, role domain.Role, s
 	t.Helper()
 	spec := domain.VerificationSpec{
 		AcceptanceCriteria: []string{"构建通过"},
-		Commands:           []domain.VerificationCommand{{Name: "build", Command: "go build ./..."}},
+		Commands: []domain.VerificationCommand{
+			{Name: "build", Command: "go", Args: []string{"build", "./..."}, Required: true},
+		},
 	}
 	step, err := domain.NewStep(
 		task.ID,

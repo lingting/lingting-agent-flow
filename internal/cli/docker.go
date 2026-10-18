@@ -8,6 +8,7 @@ import (
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/config"
 	"github.com/lingting/agentflow/internal/docker"
+	"github.com/lingting/agentflow/internal/storage"
 	"github.com/spf13/cobra"
 )
 
@@ -165,6 +166,12 @@ func withContainerService(
 type dockerServices struct {
 	environments *app.EnvironmentService
 	containers   *app.ContainerService
+	// store 是持久化入口，供任务命令直接读写任务记录。
+	store storage.Store
+	// ssh 是 SSH 服务，供任务命令构造凭据提供器。
+	ssh *app.SSHService
+	// config 是本次命令使用的配置。
+	config *config.Config
 }
 
 // withDockerServices 加载配置、打开数据库并构造远程 Docker 服务。
@@ -204,7 +211,13 @@ func withDockerServices(
 	if err != nil {
 		return err
 	}
-	return run(ctx, dockerServices{environments: environments, containers: containers})
+	return run(ctx, dockerServices{
+		environments: environments,
+		containers:   containers,
+		store:        store,
+		ssh:          sshService,
+		config:       cfg,
+	})
 }
 
 // printPreflightResult 输出远程 Docker 预检结果。

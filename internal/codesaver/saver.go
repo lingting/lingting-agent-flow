@@ -397,6 +397,7 @@ func (x *Session) createRecord(ctx context.Context) error {
 		return newError(CodeInvalidArgument, "prepare", err.Error(), err)
 	}
 	record.ProjectID = x.request.ProjectID
+	record.AttemptID = x.request.AttemptID
 	record.Start("prepare", x.started)
 	if err := x.saver.recorder.Create(ctx, record); err != nil {
 		return recordError("prepare", err)

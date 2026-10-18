@@ -118,6 +118,13 @@ func (r EnvironmentRef) IsBase() bool {
 	return r.Type == EnvironmentTypeBase
 }
 
+// IsZero 判断环境引用是否为空。
+//
+// 空引用表示"未配置环境"，用于兼容不含工作流配置的历史任务记录。
+func (r EnvironmentRef) IsZero() bool {
+	return r.Type == "" && r.Name == ""
+}
+
 // VersionLabelPrefix 是环境版本号的前缀。
 const VersionLabelPrefix = "v"
 

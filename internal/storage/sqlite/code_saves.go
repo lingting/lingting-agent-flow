@@ -9,14 +9,14 @@ import (
 )
 
 // codeSaveColumns 是代码保存表的完整列顺序。
-const codeSaveColumns = `id, project_id, task_id, container_id, docker_id,
+const codeSaveColumns = `id, project_id, task_id, container_id, docker_id, attempt_id,
 	remote_name, repository, task_branch, base_branch, commit_status, commit_sha,
 	commit_message, push_status, remote_commit_sha, merge_enabled, merge_status,
 	merge_sha, stage, error_code, error_summary, created_at, started_at,
 	finished_at, updated_at`
 
 // codeSaveInsertCount 是写入代码保存记录时的参数个数。
-const codeSaveInsertCount = 24
+const codeSaveInsertCount = 25
 
 // codeSaveStore 实现 storage.CodeSaveStore。
 type codeSaveStore struct {
@@ -52,7 +52,7 @@ func (s codeSaveStore) UpdateCodeSaveRecord(
 	}
 	const statement = `
 UPDATE code_saves SET
-	project_id = ?, docker_id = ?, remote_name = ?, repository = ?,
+	project_id = ?, docker_id = ?, attempt_id = ?, remote_name = ?, repository = ?,
 	task_branch = ?, base_branch = ?, commit_status = ?, commit_sha = ?,
 	commit_message = ?, push_status = ?, remote_commit_sha = ?, merge_enabled = ?,
 	merge_status = ?, merge_sha = ?, stage = ?, error_code = ?, error_summary = ?,
@@ -63,6 +63,7 @@ WHERE id = ?`
 		statement,
 		nullIfBlank(record.ProjectID),
 		nullIfBlank(record.DockerID),
+		nullIfBlank(record.AttemptID),
 		record.RemoteName,
 		nullIfBlank(record.Repository),
 		record.TaskBranch,
@@ -99,6 +100,7 @@ func codeSaveArgs(record domain.CodeSaveRecord) []any {
 		record.TaskID,
 		record.ContainerID,
 		nullIfBlank(record.DockerID),
+		nullIfBlank(record.AttemptID),
 		record.RemoteName,
 		nullIfBlank(record.Repository),
 		record.TaskBranch,
@@ -171,6 +173,7 @@ func scanCodeSaveRecord(row scanner) (domain.CodeSaveRecord, error) {
 		taskID          string
 		containerID     string
 		dockerID        sql.NullString
+		attemptID       sql.NullString
 		remoteName      string
 		repository      sql.NullString
 		taskBranch      string
@@ -197,6 +200,7 @@ func scanCodeSaveRecord(row scanner) (domain.CodeSaveRecord, error) {
 		&taskID,
 		&containerID,
 		&dockerID,
+		&attemptID,
 		&remoteName,
 		&repository,
 		&taskBranch,
@@ -229,6 +233,7 @@ func scanCodeSaveRecord(row scanner) (domain.CodeSaveRecord, error) {
 		TaskID:          taskID,
 		ContainerID:     containerID,
 		DockerID:        dockerID.String,
+		AttemptID:       attemptID.String,
 		RemoteName:      remoteName,
 		Repository:      repository.String,
 		TaskBranch:      taskBranch,

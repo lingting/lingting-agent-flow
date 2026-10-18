@@ -28,6 +28,16 @@ const (
 	EventTypeTaskFailed           EventType = "task.failed"
 	EventTypeTaskCancelled        EventType = "task.cancelled"
 	EventTypeRequirementSubmitted EventType = "requirement.submitted"
+	EventTypeTaskCancelRequested  EventType = "task.cancel_requested"
+	EventTypeTaskRecoveryRequired EventType = "task.recovery_required"
+	EventTypeTaskRetrying         EventType = "task.retrying"
+	EventTypeContainerCreated     EventType = "container.created"
+	EventTypeContainerCleaned     EventType = "container.cleaned"
+	EventTypeContainerRetained    EventType = "container.retained"
+	EventTypeSourceFetched        EventType = "source.fetched"
+	EventTypeVerificationSkipped  EventType = "verification.skipped"
+	EventTypeCodeSaved            EventType = "code.saved"
+	EventTypeAttemptInterrupted   EventType = "attempt.interrupted"
 )
 
 // knownEventTypes 是当前受支持的事件类型集合。
@@ -47,6 +57,16 @@ var knownEventTypes = []EventType{
 	EventTypeTaskFailed,
 	EventTypeTaskCancelled,
 	EventTypeRequirementSubmitted,
+	EventTypeTaskCancelRequested,
+	EventTypeTaskRecoveryRequired,
+	EventTypeTaskRetrying,
+	EventTypeContainerCreated,
+	EventTypeContainerCleaned,
+	EventTypeContainerRetained,
+	EventTypeSourceFetched,
+	EventTypeVerificationSkipped,
+	EventTypeCodeSaved,
+	EventTypeAttemptInterrupted,
 }
 
 // Validate 校验事件类型是否受支持。

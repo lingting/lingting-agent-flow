@@ -24,6 +24,8 @@ func newVerificationInput(
 		{
 			Name:     "go build",
 			Command:  "go build ./...",
+			Required: true,
+			Certain:  true,
 			ExitCode: 0,
 			Stdout:   "构建成功",
 			Duration: 1200 * time.Millisecond,
@@ -31,6 +33,8 @@ func newVerificationInput(
 		{
 			Name:     "go test",
 			Command:  "go test ./...",
+			Required: true,
+			Certain:  true,
 			Duration: 3400 * time.Millisecond,
 		},
 	}
@@ -226,8 +230,15 @@ func TestVerificationFailureRequiresFailureSummary(t *testing.T) {
 	built := newFixture(t, db)
 	input := newVerificationInput(built, nil, false)
 	input.FailureSummary = ""
-	if _, err := domain.NewVerificationResult(input, time.Now().UTC()); err == nil {
-		t.Fatal("验证失败时必须提供失败摘要")
+	result, err := domain.NewVerificationResult(input, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("构造验证结果失败: %v", err)
+	}
+	if result.Verdict != domain.VerificationVerdictFailed {
+		t.Fatalf("必需检查失败时判定必须为 failed: %s", result.Verdict)
+	}
+	if result.FailureSummary == "" {
+		t.Fatal("验证失败时必须给出失败摘要")
 	}
 }
 
@@ -243,7 +254,11 @@ func TestVerificationPassedConstraintRejectsInconsistentRow(t *testing.T) {
 	if err := db.CreateVerificationResult(ctx, result); err != nil {
 		t.Fatalf("写入验证结果失败: %v", err)
 	}
-	err = testkit.ExecConstraint(t, rawDB(t, db), `UPDATE verification_results SET passed = 0, failure_summary = NULL WHERE id = ?`,
+	err = testkit.ExecConstraint(
+		t,
+		rawDB(t, db),
+		`UPDATE verification_results SET passed = 0, verdict = 'failed', failure_summary = NULL
+		 WHERE id = ?`,
 		result.ID.String(),
 	)
 	if !errors.Is(err, storage.ErrInvalidData) {

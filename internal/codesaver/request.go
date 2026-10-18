@@ -123,6 +123,8 @@ type Request struct {
 	DockerID string
 	// ProjectID 是可选的项目标识。
 	ProjectID string
+	// AttemptID 是发起本次保存的执行尝试标识，用于从尝试反查保存结果。
+	AttemptID string
 	// TaskID 是任务标识，任务分支固定为 agent/<task-id>。
 	TaskID string
 	// WorkDir 是容器内 Git 工作区路径，空值使用 domain.DefaultContainerWorkDir。

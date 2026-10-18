@@ -35,7 +35,8 @@ func TestCreateAndGetStep(t *testing.T) {
 	if len(loaded.VerificationSpec.Commands) != 1 {
 		t.Fatalf("验证规格未完整保存: %+v", loaded.VerificationSpec)
 	}
-	if loaded.VerificationSpec.Commands[0].Command != "go build ./..." {
+	if loaded.VerificationSpec.Commands[0].Command != "go" ||
+		len(loaded.VerificationSpec.Commands[0].Args) != 2 {
 		t.Fatalf("验证命令不符: %+v", loaded.VerificationSpec.Commands)
 	}
 	if loaded.Status != domain.StepStatusPending {

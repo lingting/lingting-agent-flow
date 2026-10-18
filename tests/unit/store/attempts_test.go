@@ -171,7 +171,7 @@ func TestAttemptInvalidStatusIsRejected(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	built := newFixture(t, db)
-	err := testkit.ExecConstraint(t, rawDB(t, db), `UPDATE attempts SET status = 'unknown' WHERE id = ?`,
+	err := testkit.ExecConstraint(t, rawDB(t, db), `UPDATE attempts SET status = 'bogus' WHERE id = ?`,
 		built.attempt.ID.String(),
 	)
 	if !errors.Is(err, storage.ErrInvalidData) {

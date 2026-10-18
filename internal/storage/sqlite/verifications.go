@@ -12,11 +12,23 @@ import (
 
 // verificationColumns 是验证结果表的完整列顺序。
 const verificationColumns = `id, task_id, step_id, attempt_id, validator_session_id, passed,
-	summary, checks_json, command_results_json, failure_summary, created_at`
+	verdict, summary, checks_json, command_results_json, assessment_json,
+	review_skipped, failure_summary, created_at`
+
+// verificationInsertCount 是写入验证结果时的参数个数。
+const verificationInsertCount = 14
 
 // verificationStore 实现 storage.VerificationStore。
 type verificationStore struct {
 	q queryer
+}
+
+// verificationRecord 是写入验证结果前的 JSON 编码结果。
+type verificationRecord struct {
+	result       domain.VerificationResult
+	checksJSON   string
+	commandsJSON string
+	assessment   any
 }
 
 // CreateVerificationResult 追加一条验证结果。
@@ -27,36 +39,32 @@ func (s verificationStore) CreateVerificationResult(
 	ctx context.Context,
 	result domain.VerificationResult,
 ) error {
-	if err := result.Validate(); err != nil {
-		return err
-	}
-	checks, err := marshalSlice("VerificationResult.checks", result.Checks)
-	if err != nil {
-		return err
-	}
-	commands, err := marshalSlice("VerificationResult.command_results", result.CommandResults)
+	record, err := encodeVerification(result)
 	if err != nil {
 		return err
 	}
 	if err := s.ensureScopeConsistent(ctx, result); err != nil {
 		return err
 	}
-	const statement = `INSERT INTO verification_results (` + verificationColumns + `)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	statement := `INSERT INTO verification_results (` + verificationColumns + `)
+		VALUES (` + placeholders(verificationInsertCount) + `)`
 	_, err = s.q.ExecContext(
 		ctx,
 		statement,
-		toIDParam(result.ID),
-		toIDParam(result.TaskID),
-		toIDParam(result.StepID),
-		toIDParam(result.AttemptID),
-		toIDPtrParam(result.ValidatorSessionID),
-		toBoolInt(result.Passed),
-		sqlNullString(result.Summary),
-		checks,
-		commands,
-		sqlNullString(result.FailureSummary),
-		toMillis(result.CreatedAt),
+		toIDParam(record.result.ID),
+		toIDParam(record.result.TaskID),
+		toIDParam(record.result.StepID),
+		toIDParam(record.result.AttemptID),
+		toIDPtrParam(record.result.ValidatorSessionID),
+		toBoolInt(record.result.Passed),
+		string(record.result.Verdict),
+		sqlNullString(record.result.Summary),
+		record.checksJSON,
+		record.commandsJSON,
+		record.assessment,
+		toBoolInt(record.result.ReviewSkipped),
+		sqlNullString(record.result.FailureSummary),
+		toMillis(record.result.CreatedAt),
 	)
 	if err != nil {
 		return wrapError("写入验证结果", err)
@@ -153,6 +161,35 @@ func (s verificationStore) ensureScopeConsistent(
 	return nil
 }
 
+// encodeVerification 校验验证结果并编码其 JSON 字段。
+func encodeVerification(result domain.VerificationResult) (verificationRecord, error) {
+	if err := result.Validate(); err != nil {
+		return verificationRecord{}, err
+	}
+	checks, err := marshalSlice("VerificationResult.checks", result.Checks)
+	if err != nil {
+		return verificationRecord{}, err
+	}
+	commands, err := marshalSlice("VerificationResult.command_results", result.CommandResults)
+	if err != nil {
+		return verificationRecord{}, err
+	}
+	var assessment any
+	if result.Assessment != nil {
+		encoded, err := marshalJSON("VerificationResult.assessment", result.Assessment)
+		if err != nil {
+			return verificationRecord{}, err
+		}
+		assessment = encoded
+	}
+	return verificationRecord{
+		result:       result,
+		checksJSON:   checks,
+		commandsJSON: commands,
+		assessment:   assessment,
+	}, nil
+}
+
 // scanVerificationResult 从一行结果读取验证结果。
 func scanVerificationResult(row scanner) (*domain.VerificationResult, error) {
 	var (
@@ -163,9 +200,12 @@ func scanVerificationResult(row scanner) (*domain.VerificationResult, error) {
 		attemptID          string
 		validatorSessionID sql.NullString
 		passed             int
+		verdict            string
 		summary            sql.NullString
 		checksJSON         string
 		commandsJSON       string
+		assessmentJSON     sql.NullString
+		reviewSkipped      int
 		failureSummary     sql.NullString
 		createdAt          int64
 	)
@@ -176,9 +216,12 @@ func scanVerificationResult(row scanner) (*domain.VerificationResult, error) {
 		&attemptID,
 		&validatorSessionID,
 		&passed,
+		&verdict,
 		&summary,
 		&checksJSON,
 		&commandsJSON,
+		&assessmentJSON,
+		&reviewSkipped,
 		&failureSummary,
 		&createdAt,
 	)
@@ -191,7 +234,9 @@ func scanVerificationResult(row scanner) (*domain.VerificationResult, error) {
 	result.AttemptID = domain.ID(attemptID)
 	result.ValidatorSessionID = fromIDPtr(validatorSessionID)
 	result.Passed = fromBoolInt(passed)
+	result.Verdict = domain.VerificationVerdict(verdict)
 	result.Summary = summary.String
+	result.ReviewSkipped = fromBoolInt(reviewSkipped)
 	result.FailureSummary = failureSummary.String
 	result.CreatedAt = fromMillis(createdAt)
 	if err := unmarshalJSON("VerificationResult.checks", checksJSON, &result.Checks); err != nil {
@@ -203,6 +248,17 @@ func scanVerificationResult(row scanner) (*domain.VerificationResult, error) {
 		&result.CommandResults,
 	); err != nil {
 		return nil, err
+	}
+	if assessmentJSON.Valid && assessmentJSON.String != "" {
+		var assessment domain.AgentAssessment
+		if err := unmarshalJSON(
+			"VerificationResult.assessment",
+			assessmentJSON.String,
+			&assessment,
+		); err != nil {
+			return nil, err
+		}
+		result.Assessment = &assessment
 	}
 	return &result, nil
 }

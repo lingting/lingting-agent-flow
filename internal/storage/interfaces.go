@@ -8,6 +8,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
 )
@@ -88,18 +89,56 @@ type RequirementStore interface {
 type TaskFilter struct {
 	// RequirementID 限制任务所属需求。
 	RequirementID domain.ID
+	// HostID 限制任务所属执行节点。
+	HostID domain.ID
 	// Statuses 限制任务状态，为空表示不限制。
 	Statuses []domain.TaskStatus
+	// ExcludeStatuses 排除指定状态，用于筛选未结束任务。
+	ExcludeStatuses []domain.TaskStatus
 	// Limit 限制返回条数，小于等于 0 表示不限制。
 	Limit int
 }
 
 // TaskStore 保存需求的一次执行实例。
+//
+// 关键状态更新必须使用条件更新接口：UpdateTaskIfStatus 只在数据库中的状态仍属于
+// 允许集合时才写入，避免过期的执行结果覆盖更新的状态。
 type TaskStore interface {
 	CreateTask(ctx context.Context, task domain.Task) error
 	UpdateTask(ctx context.Context, task domain.Task) error
+	// UpdateTaskIfStatus 在数据库中的状态仍属于 expected 时写入任务。
+	//
+	// 状态不匹配时返回 storage.ErrConflict，调用方不得假定更新成功。
+	UpdateTaskIfStatus(
+		ctx context.Context,
+		task domain.Task,
+		expected []domain.TaskStatus,
+	) error
 	GetTask(ctx context.Context, id domain.ID) (*domain.Task, error)
+	// GetTaskByIdempotencyKey 按幂等键查询任务，不存在时返回 storage.ErrNotFound。
+	GetTaskByIdempotencyKey(ctx context.Context, key string) (*domain.Task, error)
 	ListTasks(ctx context.Context, filter TaskFilter) ([]domain.Task, error)
+	// AcquireTaskLease 以原子条件更新领取任务租约。
+	//
+	// 只有任务处于允许开始的状态、且当前租约为空或已过期时才成功；
+	// 否则返回 storage.ErrConflict，保证同一任务不会被两个执行者同时推进。
+	AcquireTaskLease(ctx context.Context, request TaskLeaseRequest) error
+	// ReleaseTaskLease 释放由 owner 持有的租约，其他持有者的租约不会被清除。
+	ReleaseTaskLease(ctx context.Context, id domain.ID, owner string, at time.Time) error
+}
+
+// TaskLeaseRequest 是一次任务租约领取请求。
+type TaskLeaseRequest struct {
+	// TaskID 是目标任务。
+	TaskID domain.ID
+	// Owner 是执行者标识，必须非空。
+	Owner string
+	// TTL 是租约有效期，必须大于 0。
+	TTL time.Duration
+	// Statuses 是允许领取的状态集合，为空表示只允许可开始的状态。
+	Statuses []domain.TaskStatus
+	// At 是领取时间，零值使用当前时间。
+	At time.Time
 }
 
 // StepStore 保存 Planner 生成的结构化开发步骤。

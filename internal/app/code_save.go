@@ -20,6 +20,8 @@ type CodeSaveRequest struct {
 	ProjectID string
 	// TaskID 是任务标识，任务分支固定为 agent/<task-id>。
 	TaskID string
+	// AttemptID 是发起本次保存的执行尝试标识，可为空。
+	AttemptID string
 	// WorkDir 是容器内 Git 工作区路径，空值使用默认项目目录。
 	WorkDir string
 	// BaseBranch 是显式指定的基础分支，空值表示自动识别。
@@ -97,6 +99,7 @@ func (s *ContainerService) SaveCode(
 				DockerID:       current.DockerID,
 				ProjectID:      strings.TrimSpace(request.ProjectID),
 				TaskID:         strings.TrimSpace(request.TaskID),
+				AttemptID:      strings.TrimSpace(request.AttemptID),
 				WorkDir:        request.WorkDir,
 				BaseBranch:     request.BaseBranch,
 				MergeAfterPush: request.MergeAfterPush,

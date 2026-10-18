@@ -18,7 +18,7 @@ import (
 // expectedSchemaVersion 是当前程序内置迁移的最新版本号。
 //
 // 该常量与 migrations 目录中的脚本数量保持一致，新增迁移时必须同步更新。
-const expectedSchemaVersion = 7
+const expectedSchemaVersion = 8
 
 // TestPersistentWorkflowLifecycle 覆盖一次完整的持久化链路：
 // 迁移 → 角色初始化 → 需求与任务 → 计划 → 尝试 → 会话 → 验证 → 事件 → 重启恢复。
@@ -154,7 +154,13 @@ func TestPersistentWorkflowLifecycle(t *testing.T) {
 		domain.VerificationSpec{
 			AcceptanceCriteria: []string{"构建通过"},
 			Commands: []domain.VerificationCommand{
-				{Name: "build", Command: "go build ./...", TimeoutSeconds: 120},
+				{
+					Name:           "build",
+					Command:        "go",
+					Args:           []string{"build", "./..."},
+					Required:       true,
+					TimeoutSeconds: 120,
+				},
 			},
 		},
 		time.Now().UTC(),

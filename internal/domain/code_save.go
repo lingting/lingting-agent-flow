@@ -290,6 +290,8 @@ type CodeSaveRecord struct {
 	ContainerID string `json:"container_id"`
 	// DockerID 是执行时使用的 Docker 容器 ID。
 	DockerID string `json:"docker_id,omitempty"`
+	// AttemptID 是发起本次保存的执行尝试，用于从尝试反查保存结果。
+	AttemptID string `json:"attempt_id,omitempty"`
 	// RemoteName 是使用的 Git 远程名称，例如 origin。
 	RemoteName string `json:"remote_name"`
 	// Repository 是脱敏后的仓库地址，可以安全写入日志与数据库。
