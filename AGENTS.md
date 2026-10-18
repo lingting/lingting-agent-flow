@@ -97,6 +97,13 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
   `AGENTFLOW_TEST_SSH_PORT`、`AGENTFLOW_TEST_SSH_KEY_PATH`、
   `AGENTFLOW_TEST_SSH_KNOWN_HOSTS` 获取目标；必需目标缺失时输出警告并跳过，目标配置
   完整但连接、认证或主机密钥校验失败时必须让测试失败。
+- `AGENTFLOW_TEST_SSH_KNOWN_HOSTS` 未设置时，真实 SSH 测试必须复用本机用户 OpenSSH 的
+  `~/.ssh/known_hosts` 与 `known_hosts2`，与产品默认行为一致；显式设置但文件不可读时
+  直接让测试失败，不得静默回落到空信任库。来源解析统一由 `tests/internal/testkit` 的
+  `KnownHostsSources` 提供，各远程测试目录不得各自实现。
+- 真实 SSH 测试写入的信任记录只允许落在测试工作空间，不得修改用户真实 known_hosts。
+- 主机密钥未知的失败信息必须列出实际读取的 known_hosts 路径、可用的环境变量与目标信任
+  记录路径，使"环境变量配错"与"连接层缺陷"可以区分。
 - 禁止关闭 SSH 主机密钥验证来规避测试失败，禁止自动接受未知主机密钥。
 - 真实外部测试的远程操作只允许在随机生成的远程临时目录内进行。
 - SSH 连接层的单元测试放在 `tests/unit/ssh/`，本机协议集成测试放在
@@ -117,6 +124,20 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
   Pi CLI 版本都固定到具体版本。
 - 真实远程工作流测试放在 `tests/integration/remote/workflow/`，同样必须显式设置
   `AGENTFLOW_TEST_REMOTE_DOCKER=1`；只操作带随机后缀、属于本次测试的容器与远程目录。
+
+### SSH 连接层约束
+
+- 主机密钥校验不可关闭：`sshclient.NewDialer` 未收到 `HostKeyStore` 时直接失败，任何位置
+  都不得引入 `InsecureIgnoreHostKey` 等价实现。
+- 主机密钥类型协商必须按 known_hosts 中该主机已记录的类型逐个尝试握手，取第一个校验
+  通过的结果；某个类型校验失败或服务端不提供该类型时换下一个。不得只把全部已记录类型
+  一次性交给库协商：服务端会选中第一个共同算法，使"旧记录已失效、新记录仍有效"的主机
+  直接失败。没有记录时才交给库默认协商。
+- 逐类型重试只针对主机密钥类失败（未知、已变化、已吊销、无共同算法）；TCP 不可达、
+  超时、取消与认证失败必须立即返回，不得继续换类型掩盖真实原因。
+- 未知主机必须返回 `CodeHostKeyUnknown` 并给出算法与 SHA-256 指纹；密钥变化必须返回
+  `CodeHostKeyMismatch` 并给出已信任记录，不得静默接受或自动覆盖。
+- 信任记录只写入 AgentFlow 自己的 known_hosts 文件，用户 OpenSSH 的 known_hosts 只读。
 
 ### 远程执行与 Session 约束
 

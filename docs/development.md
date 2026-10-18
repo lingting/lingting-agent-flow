@@ -158,6 +158,9 @@ make build VERSION=0.1.0
 - 真实 Pi 测试默认使用模型 `group/free`，可用 `AGENTFLOW_TEST_PI_MODEL` 覆盖；本机没有
   `pi` 时输出 `WARN [SKIP]` 并跳过。真实 SSH 测试通过 `AGENTFLOW_TEST_SSH_*` 获取目标，
   缺少必需目标时跳过，配置完整但连接、认证或主机密钥校验失败时必须失败。
+- 真实 SSH 测试的 known_hosts 来源统一由 `testkit.KnownHostsSources` 解析：显式设置
+  `AGENTFLOW_TEST_SSH_KNOWN_HOSTS` 时读取该文件（不可读直接失败），未设置时复用本机
+  `~/.ssh/known_hosts` 与 `known_hosts2`。写入的信任记录只落在测试工作空间。
 - SSH 连接层按三层覆盖：`tests/unit/ssh/` 放纯逻辑单元测试，`tests/integration/local/ssh/`
   在进程内启动真实 SSH/SFTP 服务端，`tests/integration/ssh/` 面向真实远程机器。本机集成测试
   不得要求用户预先启动服务，也不得用"配置解析正确"代替真实握手、认证与传输验证。
@@ -177,6 +180,9 @@ make build VERSION=0.1.0
 ## 与 SSH 交互的注意事项
 
 - 主机密钥校验不得关闭：`NewDialer` 必须拿到 `HostKeyStore`，未知或不匹配一律拒绝。
+- 主机密钥类型由 `KnownHostsStore.RecordedHostKeyTypes` 提供：`Dialer` 按记录顺序逐个
+  用单一类型握手，取第一个校验通过的结果；全部失败时返回首个结论。没有记录时交给
+  `golang.org/x/crypto/ssh` 自行协商。逐类型重试只针对主机密钥类失败。
 - 凭据只在内存中传递，用完调用 `Credential.Clear()`；不得把密码、口令或私钥内容写入
   错误信息、日志、数据库或命令行参数。
 - 远程命令必须用 `ShellCommand` 构造（程序名 + 参数数组 + 逐参数转义），禁止拼接用户输入。

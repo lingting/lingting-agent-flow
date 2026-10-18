@@ -70,12 +70,13 @@ const remoteOpTimeout = 10 * time.Minute
 
 // target 是本次测试使用的远程目标与凭据。
 type target struct {
-	host       string
-	user       string
-	port       int
-	keyPath    string
-	knownHosts string
-	image      string
+	host    string
+	user    string
+	port    int
+	keyPath string
+	// knownHostsPaths 是参与校验的只读 known_hosts 文件列表。
+	knownHostsPaths []string
+	image           string
 }
 
 // loadTarget 读取并校验远程测试目标。
@@ -98,11 +99,11 @@ func loadTarget(t *testing.T) target {
 		return value
 	}
 	loaded := target{
-		host:       read(EnvHost),
-		user:       read(EnvUser),
-		keyPath:    strings.TrimSpace(os.Getenv(EnvKeyPath)),
-		knownHosts: strings.TrimSpace(os.Getenv(EnvKnownHosts)),
-		image:      read(EnvImage),
+		host:            read(EnvHost),
+		user:            read(EnvUser),
+		keyPath:         strings.TrimSpace(os.Getenv(EnvKeyPath)),
+		knownHostsPaths: testkit.KnownHostsSources(t),
+		image:           read(EnvImage),
 	}
 	if len(missing) > 0 {
 		reason := "WARN [SKIP] codesaver remote tests: missing " + strings.Join(missing, ", ") + "."
@@ -127,7 +128,7 @@ func loadTarget(t *testing.T) target {
 func (t target) dial(t2 *testing.T, workspace *testkit.Workspace) sshclient.Client {
 	t2.Helper()
 	store, err := sshclient.NewKnownHostsStore(sshclient.KnownHostsOptions{
-		TrustedPaths: []string{t.knownHosts},
+		TrustedPaths: t.knownHostsPaths,
 		StorePath:    filepath.Join(workspace.Root(), "known_hosts"),
 	})
 	if err != nil {

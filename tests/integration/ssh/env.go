@@ -36,18 +36,21 @@ const (
 	// EnvKeyPath 是测试使用的私钥路径，可选；为空时使用 SSH Agent。
 	EnvKeyPath = "AGENTFLOW_TEST_SSH_KEY_PATH"
 	// EnvKnownHosts 是只读的 known_hosts 文件，可选。
-	EnvKnownHosts = "AGENTFLOW_TEST_SSH_KNOWN_HOSTS"
+	//
+	// 未设置时复用本机用户 OpenSSH 的 known_hosts；取值见 testkit.KnownHostsEnv。
+	EnvKnownHosts = testkit.KnownHostsEnv
 	// defaultPort 是未指定端口时使用的 SSH 端口。
 	defaultPort = 22
 )
 
 // target 是一次真实 SSH 测试的连接目标。
 type target struct {
-	host       string
-	user       string
-	port       int
-	keyPath    string
-	knownHosts string
+	host    string
+	user    string
+	port    int
+	keyPath string
+	// knownHostsPaths 是参与校验的只读 known_hosts 文件列表。
+	knownHostsPaths []string
 }
 
 // loadTarget 读取并校验目标配置。
@@ -82,19 +85,41 @@ func loadTarget(t *testing.T) target {
 		port = parsed
 	}
 	return target{
-		host:       host,
-		user:       user,
-		port:       port,
-		keyPath:    strings.TrimSpace(os.Getenv(EnvKeyPath)),
-		knownHosts: strings.TrimSpace(os.Getenv(EnvKnownHosts)),
+		host:            host,
+		user:            user,
+		port:            port,
+		keyPath:         strings.TrimSpace(os.Getenv(EnvKeyPath)),
+		knownHostsPaths: testkit.KnownHostsSources(t),
 	}
+}
+
+// logTarget 输出目标与 known_hosts 来源，便于区分"配置错误"与"代码问题"。
+func logTarget(t *testing.T, tg target) {
+	t.Helper()
+	t.Logf(
+		"SSH 目标: %s@%s:%d，私钥: %s",
+		tg.user,
+		tg.host,
+		tg.port,
+		describeKeyPath(tg.keyPath),
+	)
+	t.Logf("主机密钥来源: %s", testkit.DescribeKnownHosts(t))
+}
+
+// describeKeyPath 描述私钥来源，未指定时说明使用 SSH Agent。
+func describeKeyPath(path string) string {
+	if path == "" {
+		return "SSH Agent"
+	}
+	return path
 }
 
 // dial 建立经过主机密钥校验与身份认证的连接，并在测试结束时关闭。
 func dial(t *testing.T, ws *testkit.Workspace, tg target) sshclient.DialResult {
 	t.Helper()
+	logTarget(t, tg)
 	store, err := sshclient.NewKnownHostsStore(sshclient.KnownHostsOptions{
-		TrustedPaths: []string{tg.knownHosts},
+		TrustedPaths: tg.knownHostsPaths,
 		// 信任记录写在测试工作空间中，不修改用户真实的 known_hosts。
 		StorePath: filepath.Join(ws.Root(), "known_hosts"),
 	})
@@ -123,11 +148,13 @@ func dial(t *testing.T, ws *testkit.Workspace, tg target) sshclient.DialResult {
 	}, auth, nil)
 	if err != nil {
 		if sshclient.ErrorCodeOf(err) == sshclient.CodeHostKeyUnknown {
+			storePath := filepath.Join(ws.Root(), "known_hosts")
 			t.Fatalf(
-				"主机密钥未知，请先核验指纹后写入 %s: %s %s",
-				filepath.Join(ws.Root(), "known_hosts"),
+				"主机密钥未知，请先核验指纹后写入 %s: %s %s\n%s",
+				storePath,
 				result.HostKey.Algorithm,
 				result.HostKey.Fingerprint,
+				testkit.HostKeyHint(t, storePath),
 			)
 		}
 		t.Fatalf("连接真实远程机器失败: %v", err)

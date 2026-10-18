@@ -129,29 +129,129 @@ func (d *Dialer) Dial(
 
 	dialCtx, cancel := context.WithTimeout(ctx, d.connectTimeout)
 	defer cancel()
-	conn, err := d.dialTCP(dialCtx, endpoint)
+	return d.dialWithHostKeyTypes(dialCtx, endpoint, auth.methods, started)
+}
+
+// dialWithHostKeyTypes 按 known_hosts 记录的主机密钥类型依次尝试握手与认证。
+//
+// 服务端可能同时提供多种主机密钥（例如 ed25519 与 ECDSA），而 known_hosts 里可能
+// 记录了其中若干种。这里按记录顺序逐个尝试：每次只用一种算法握手，校验通过并完成
+// 认证即返回；某个类型校验失败（未知、已变化、服务端不支持）则换下一个类型。
+// 没有任何记录时交给 ssh 库使用自身默认的算法协商顺序。
+//
+// 每次尝试都会新建 TCP 连接：SSH 握手一旦被拒绝，该连接上无法重新协商主机密钥类型。
+func (d *Dialer) dialWithHostKeyTypes(
+	ctx context.Context,
+	endpoint Endpoint,
+	methods []ssh.AuthMethod,
+	started time.Time,
+) (DialResult, error) {
+	recorded := recordedHostKeyTypes(d.hostKeys, endpoint.Host, endpoint.Port)
+	attempts := hostKeyTypeAttempts(recorded)
+
+	var firstFailure *ConnectError
+	var lastResult DialResult
+	var lastErr error
+	for _, algorithm := range attempts {
+		result, err := d.dialOnce(ctx, endpoint, methods, algorithm, started)
+		if err == nil {
+			return result, nil
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return result, err
+		}
+		lastResult = result
+		lastErr = err
+		// 只有"该主机密钥类型不可用"才值得换下一个类型继续尝试；TCP 不可达、
+		// 超时、取消、认证失败与类型无关，继续尝试只会掩盖真正原因。
+		if !isHostKeyTypeUnavailable(err) {
+			return result, err
+		}
+		if firstFailure == nil {
+			firstFailure = asConnectError(err)
+		}
+	}
+	if firstFailure != nil {
+		// 全部已记录类型都不可用时，返回第一个失败的结论：它对应 known_hosts 中
+		// 最靠前的记录，是用户最需要处理的那一条。
+		return lastResult, firstFailure
+	}
+	return lastResult, lastErr
+}
+
+// hostKeyTypeAttempts 把已记录类型转换为握手尝试序列。
+//
+// 无记录时返回一个空算法元素，表示不限制算法、由库自行协商。
+func hostKeyTypeAttempts(recorded []string) []string {
+	if len(recorded) == 0 {
+		return []string{""}
+	}
+	return recorded
+}
+
+// dialOnce 用指定主机密钥算法（空表示交给库协商）完成一次连接尝试。
+func (d *Dialer) dialOnce(
+	ctx context.Context,
+	endpoint Endpoint,
+	methods []ssh.AuthMethod,
+	algorithm string,
+	started time.Time,
+) (DialResult, error) {
+	conn, err := d.dialTCP(ctx, endpoint)
 	if err != nil {
-		return DialResult{Duration: time.Since(started)}, d.tcpError(dialCtx, endpoint, err)
+		return DialResult{Duration: time.Since(started)}, d.tcpError(ctx, endpoint, err)
 	}
 	handshake := &hostKeyHandshake{store: d.hostKeys, host: endpoint.Host, port: endpoint.Port}
 	clientConfig := &ssh.ClientConfig{
 		User:            endpoint.Username,
-		Auth:            auth.methods,
+		Auth:            methods,
 		HostKeyCallback: handshake.callback,
 		Timeout:         d.connectTimeout,
 		ClientVersion:   d.clientVersion,
 	}
-	client, err := d.handshake(dialCtx, conn, endpoint, clientConfig)
+	if algorithm != "" {
+		clientConfig.HostKeyAlgorithms = []string{algorithm}
+	}
+	client, err := d.handshake(ctx, conn, endpoint, clientConfig)
 	result := DialResult{
 		HostKey:        handshake.presented,
 		HostKeyVerdict: handshake.verdict,
 		Duration:       time.Since(started),
 	}
 	if err != nil {
-		return result, d.handshakeError(dialCtx, endpoint, handshake, err)
+		return result, d.handshakeError(ctx, endpoint, handshake, err)
 	}
 	result.Client = newClient(client, endpoint, d.keepAliveInterval)
 	return result, nil
+}
+
+// isHostKeyTypeUnavailable 判断错误是否表示"该主机密钥类型无法用于本次连接"。
+//
+// 包括两类情况：服务端提供了该类型但校验未通过（未知、已变化、已吊销），
+// 以及服务端根本不提供该类型（握手时报告没有共同的主机密钥算法）。
+// 两者都只说明当前类型不可用，换下一个已记录类型可能成功。
+func isHostKeyTypeUnavailable(err error) bool {
+	switch ErrorCodeOf(err) {
+	case CodeHostKeyUnknown, CodeHostKeyMismatch, CodeHostKeyRevoked:
+		return true
+	}
+	// x/crypto/ssh 没有导出"没有共同算法"的哨兵错误，只能依据其固定文案判断。
+	const marker = "no common algorithm for host key"
+	for current := err; current != nil; current = errors.Unwrap(current) {
+		if strings.Contains(current.Error(), marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// asConnectError 把错误转换为 *ConnectError，无法转换时返回 nil。
+func asConnectError(err error) *ConnectError {
+	var connectErr *ConnectError
+	if errors.As(err, &connectErr) {
+		return connectErr
+	}
+	return nil
 }
 
 // dialTCP 建立到目标地址的 TCP 连接。
@@ -164,6 +264,9 @@ func (d *Dialer) dialTCP(ctx context.Context, endpoint Endpoint) (net.Conn, erro
 //
 // 该方法用于在用户确认信任之前展示指纹；它同样不允许跳过主机密钥校验，
 // 校验结论通过返回的 *ConnectError 表达，调用方据此决定是否请求用户确认。
+//
+// 与 Dial 一致按 known_hosts 记录的主机密钥类型逐个尝试：记录中有多个类型时，
+// 只要其中任意一个能取得并校验通过，就返回该类型；全部失败时返回第一个可展示的结论。
 func (d *Dialer) ProbeHostKey(ctx context.Context, endpoint Endpoint) (HostKeyInfo, error) {
 	if err := validateEndpoint(endpoint); err != nil {
 		return HostKeyInfo{}, newConnectError(CodeInvalidConfig, endpoint.Address(), err.Error(), err)
@@ -173,9 +276,49 @@ func (d *Dialer) ProbeHostKey(ctx context.Context, endpoint Endpoint) (HostKeyIn
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, d.connectTimeout)
 	defer cancel()
-	conn, err := d.dialTCP(probeCtx, endpoint)
+
+	attempts := hostKeyTypeAttempts(recordedHostKeyTypes(d.hostKeys, endpoint.Host, endpoint.Port))
+	var firstPresented HostKeyInfo
+	var firstFailure *ConnectError
+	var lastErr error
+	for _, algorithm := range attempts {
+		info, failure, err := d.probeOnce(probeCtx, endpoint, algorithm)
+		if failure == nil && err == nil {
+			return info, nil
+		}
+		if ctxErr := probeCtx.Err(); ctxErr != nil {
+			return info, err
+		}
+		lastErr = err
+		// 已取得服务端密钥：无论校验是否通过，它都是可向用户展示的候选结论。
+		if info.Fingerprint != "" {
+			if failure == nil {
+				return info, nil
+			}
+			if firstFailure == nil {
+				firstFailure = failure
+				firstPresented = info
+			}
+		}
+	}
+	if firstFailure != nil {
+		return firstPresented, firstFailure
+	}
+	if lastErr != nil {
+		return HostKeyInfo{}, lastErr
+	}
+	return HostKeyInfo{}, nil
+}
+
+// probeOnce 用指定主机密钥算法（空表示交给库协商）完成一次探测。
+func (d *Dialer) probeOnce(
+	ctx context.Context,
+	endpoint Endpoint,
+	algorithm string,
+) (HostKeyInfo, *ConnectError, error) {
+	conn, err := d.dialTCP(ctx, endpoint)
 	if err != nil {
-		return HostKeyInfo{}, d.tcpError(probeCtx, endpoint, err)
+		return HostKeyInfo{}, nil, d.tcpError(ctx, endpoint, err)
 	}
 	handshake := &hostKeyHandshake{store: d.hostKeys, host: endpoint.Host, port: endpoint.Port}
 	// 只要求握手成功：认证阶段使用空的认证方式列表，握手完成后立即关闭连接。
@@ -186,21 +329,24 @@ func (d *Dialer) ProbeHostKey(ctx context.Context, endpoint Endpoint) (HostKeyIn
 		Timeout:         d.connectTimeout,
 		ClientVersion:   d.clientVersion,
 	}
-	client, handshakeErr := d.handshake(probeCtx, conn, endpoint, clientConfig)
+	if algorithm != "" {
+		clientConfig.HostKeyAlgorithms = []string{algorithm}
+	}
+	client, handshakeErr := d.handshake(ctx, conn, endpoint, clientConfig)
 	if client != nil {
 		_ = client.Close()
 	}
 	if handshakeErr != nil {
 		// 认证失败不影响主机密钥结论：此时已经取得并校验了主机密钥。
 		if handshake.failure != nil {
-			return handshake.presented, handshake.failure
+			return handshake.presented, handshake.failure, nil
 		}
 		if handshake.presented.Fingerprint != "" {
-			return handshake.presented, nil
+			return handshake.presented, nil, nil
 		}
-		return HostKeyInfo{}, d.handshakeError(probeCtx, endpoint, handshake, handshakeErr)
+		return HostKeyInfo{}, nil, d.handshakeError(ctx, endpoint, handshake, handshakeErr)
 	}
-	return handshake.presented, nil
+	return handshake.presented, nil, nil
 }
 
 // handshake 在已建立的 TCP 连接上完成 SSH 握手与认证。

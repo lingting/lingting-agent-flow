@@ -45,7 +45,7 @@ internal/gitworktree/     任务工作区创建、检查与清理（未实现）
 internal/storage/         存储接口与统一存储错误
 internal/storage/sqlite/  数据库连接、迁移与仓储实现
 internal/sshprobe/        SSH 端点探测：TCP 可达性与协议标识校验
-internal/sshclient/        SSH 连接层：主机密钥校验、身份认证、远程执行与 SFTP 传输
+internal/sshclient/        SSH 连接层：主机密钥校验与算法协商、身份认证、远程执行与 SFTP 传输
 internal/events/          内部事件定义与事件总线（未实现）
 internal/httpapi/         HTTP 路由、处理器与 SSE（未实现）
 web/ui/                   React + TypeScript 前端（未实现）
@@ -53,7 +53,7 @@ configs/                  示例配置
 migrations/               迁移说明（实际迁移脚本在 internal/storage/sqlite/migrations/）
 docs/                     架构与开发文档
 tests/unit/               快速单元测试（不依赖真实 Pi、SSH 或网络）
-tests/unit/ssh/           SSH 连接层单元测试（主机密钥、认证配置、路径与结果状态）
+tests/unit/ssh/           SSH 连接层单元测试（主机密钥与类型记录、认证配置、路径与结果状态）
 tests/integration/local/  本机集成测试（数据库全链路、进程内 SSH/SFTP 服务端、TCP 探测）
 tests/integration/pi/     需要本机真实 Pi CLI 的集成测试
 tests/integration/ssh/    需要真实远程机器的集成测试
@@ -110,7 +110,8 @@ cmd/agentflow → cli → app → config / logging / storage / sshprobe / sshcli
 - `storage` 只定义接口与存储错误，不依赖具体驱动；`storage/sqlite` 实现连接、迁移与各实体仓储。
 - `sshprobe` 只做网络与协议标识探测，不进行身份认证，不依赖 `cli` 或 `storage`。
 - `sshclient` 提供 SSH 连接层，内部按职责分为：凭据提供器（`CredentialProvider`）、
-  主机密钥信任（`HostKeyStore` / `KnownHostsStore`）、连接管理（`Dialer` / `Client`）、
+  主机密钥信任（`HostKeyStore` / `KnownHostsStore`，含按 known_hosts 记录提供的
+  主机密钥类型 `HostKeyTypeProvider`）、连接管理（`Dialer` / `Client`）、
   远程执行（`Run` 与 `CommandResult`）、SFTP 传输（`FileTransfer`）与远程工作空间
   （`ResolveHome` / `ResolveWorkspace` / `EnsureWorkspace`）。它不依赖 `cli`、`storage`
   或 `app`，业务代码通过接口注入依赖，不在各处直接创建 SSH 客户端。

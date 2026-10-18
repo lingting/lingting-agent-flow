@@ -61,12 +61,13 @@ const remoteOpTimeout = 10 * time.Minute
 
 // target 是一次真实远程工作流测试的连接目标。
 type target struct {
-	host       string
-	user       string
-	port       int
-	keyPath    string
-	knownHosts string
-	model      string
+	host    string
+	user    string
+	port    int
+	keyPath string
+	// knownHostsPaths 是参与校验的只读 known_hosts 文件列表。
+	knownHostsPaths []string
+	model           string
 }
 
 // loadTarget 读取并校验目标配置。
@@ -105,12 +106,12 @@ func loadTarget(t *testing.T) target {
 		model = defaultPiModel
 	}
 	return target{
-		host:       host,
-		user:       user,
-		port:       port,
-		keyPath:    strings.TrimSpace(os.Getenv(EnvKeyPath)),
-		knownHosts: strings.TrimSpace(os.Getenv(EnvKnownHosts)),
-		model:      model,
+		host:            host,
+		user:            user,
+		port:            port,
+		keyPath:         strings.TrimSpace(os.Getenv(EnvKeyPath)),
+		knownHostsPaths: testkit.KnownHostsSources(t),
+		model:           model,
 	}
 }
 
@@ -154,11 +155,7 @@ func TestRemoteWorkflowPreconditions(t *testing.T) {
 		suffix,
 		ws.Root(),
 	)
-	if target.knownHosts != "" {
-		if _, err := os.Stat(target.knownHosts); err != nil {
-			t.Fatalf("known_hosts 文件不可读: %s: %v", target.knownHosts, err)
-		}
-	}
+	fmt.Printf("主机密钥来源: %s\n", testkit.DescribeKnownHosts(t))
 	if target.keyPath != "" {
 		if _, err := os.Stat(target.keyPath); err != nil {
 			t.Fatalf("私钥文件不可读: %s: %v", target.keyPath, err)

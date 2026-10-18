@@ -8,7 +8,7 @@
 ```text
 tests/
 ├── internal/
-│   ├── testkit/        # 测试工作空间、通用辅助组件与工作流测试数据构造
+│   ├── testkit/        # 测试工作空间、known_hosts 来源解析、通用辅助组件与工作流测试数据构造
 │   ├── workflowfake/   # 工作流下层组件（容器/代码获取/Agent/命令/代码保存）替身
 │   └── fakepi/         # 以测试二进制充当 Pi CLI 的可控替身
 ├── unit/               # 快速单元测试，不依赖真实 Pi、SSH 或网络
@@ -23,7 +23,7 @@ tests/
 │   ├── process/        # 子进程监管
 │   ├── source/         # Git Clone 代码来源（容器执行替身）
 │   │   └── codesaver/  # 代码保存：提交、推送、合并与状态记录
-│   ├── ssh/            # SSH 主机密钥、认证配置、路径与结果状态
+│   ├── ssh/            # SSH 主机密钥与类型记录、认证配置、路径与结果状态
 │   ├── httpapi/        # HTTP API 处理器：健康检查、错误结构、API 路径边界与 404
 │   ├── lifecycle/      # 后台服务生命周期：启动顺序、逆序清理、超时与故障传播
 │   ├── server/         # 统一服务编排：启动失败清理、优雅关闭与组件故障
@@ -129,8 +129,8 @@ TEST_ARTIFACT_DIR=<绝对路径>
 
 | 目录 | 内容 | 外部依赖 |
 |---|---|---|
-| `tests/unit/ssh/` | 主机密钥指纹与结论、认证配置、私钥路径、参数转义、远程路径、结果状态 | 无 |
-| `tests/integration/local/ssh/` | 本机真实 SSH 握手与认证、远程命令执行、取消与超时、SFTP 传输、工作空间解析、并发与资源释放 | 无（测试内启动服务端） |
+| `tests/unit/ssh/` | 主机密钥指纹与结论、已记录主机密钥类型、认证配置、私钥路径、参数转义、远程路径、结果状态 | 无 |
+| `tests/integration/local/ssh/` | 本机真实 SSH 握手与认证、多主机密钥类型协商、远程命令执行、取消与超时、SFTP 传输、工作空间解析、并发与资源释放 | 无（测试内启动服务端） |
 | `tests/integration/ssh/` | 真实远程 Linux 机器上的认证、命令状态、超时、SFTP 与工作空间 | 环境变量指定的 SSH 目标 |
 
 本机集成测试使用 `golang.org/x/crypto/ssh` 启动真实的服务端进程内实例，并配合
@@ -141,6 +141,25 @@ SSH Agent 用例在测试工作空间中创建 Unix 套接字并提供 Agent 协
 Unix 套接字时该用例输出 `WARN [SKIP]` 并跳过，其余用例仍会执行。
 
 所有 SSH 测试都禁止关闭主机密钥校验，禁止自动接受未知主机密钥。
+
+### 主机密钥类型协商
+
+服务端可能同时提供多种主机密钥（例如 ed25519 与 ECDSA），known_hosts 里可能记录了其中
+若干种。`sshclient.Dialer` 会按 known_hosts 中该主机已记录的类型**逐个**尝试握手：每次
+只用一种类型，校验通过并完成认证即成功；某个类型校验失败或服务端不再提供该类型时换下
+一个。没有任何记录时不做限制，交给 `golang.org/x/crypto/ssh` 自身协商。
+
+逐类型重试只针对主机密钥类失败（未知、已变化、已吊销、无共同算法）；TCP 不可达、超时、
+取消与认证失败会立即返回，避免换类型掩盖真实原因。全部已记录类型都不可用时返回第一个
+失败类型对应的结论。
+
+测试覆盖：
+
+- `tests/unit/ssh/hostkey_algorithms_test.go`：已记录类型按文件顺序去重返回、无记录返回
+  空、主机字段的多种写法（带端口、逗号多主机、通配符、哈希主机名）、注释与 `@revoked`、
+  `@cert-authority` 行的忽略规则。
+- `tests/integration/local/ssh/hostkey_retry_test.go`：进程内多主机密钥服务端，验证旧记录
+  失效时回落到下一条记录、记录顺序决定优先类型、全部类型失败时返回首个结论。
 
 ## Docker 测试分层
 
@@ -184,7 +203,7 @@ Unix 套接字时该用例输出 `WARN [SKIP]` 并跳过，其余用例仍会执
 | `AGENTFLOW_TEST_SSH_USER` | 登录用户名 | 是 |
 | `AGENTFLOW_TEST_SSH_PORT` | SSH 端口 | 否，默认 `22` |
 | `AGENTFLOW_TEST_SSH_KEY_PATH` | 私钥路径 | 否，为空时使用 SSH Agent |
-| `AGENTFLOW_TEST_SSH_KNOWN_HOSTS` | 只读 known_hosts 文件 | 否 |
+| `AGENTFLOW_TEST_SSH_KNOWN_HOSTS` | 只读 known_hosts 文件 | 否，未设置时复用本机 `~/.ssh/known_hosts` 与 `known_hosts2` |
 
 示例：
 
@@ -199,6 +218,15 @@ go test -count=1 -v ./tests/integration/ssh/...
 主机密钥校验失败时必须让测试失败。真实 SSH 测试始终执行主机密钥校验，不会自动接受
 未知主机密钥。远程文件操作只发生在随机生成的远程临时目录内。
 
+known_hosts 来源由 `tests/internal/testkit` 的 `KnownHostsSources` 统一解析：显式设置的
+`AGENTFLOW_TEST_SSH_KNOWN_HOSTS` 优先，文件不可读时直接让测试失败；未设置时复用本机
+用户 OpenSSH 的 known_hosts，与产品 `internal/app.SSHService` 的默认行为一致。新写入的
+信任记录只落在测试工作空间，不修改用户真实配置。
+
+每个真实 SSH 用例都会在日志中输出目标与 known_hosts 来源，便于区分"环境变量配错"与
+"连接层缺陷"。主机密钥未知时，失败信息会列出实际读取的 known_hosts 路径、可用的环境
+变量以及需要写入信任记录的路径。
+
 ### 真实远程 Docker
 
 | 变量 | 用途 | 必填 |
@@ -208,7 +236,7 @@ go test -count=1 -v ./tests/integration/ssh/...
 | `AGENTFLOW_TEST_SSH_USER` | 登录用户名 | 是 |
 | `AGENTFLOW_TEST_SSH_PORT` | SSH 端口 | 否，默认 `22` |
 | `AGENTFLOW_TEST_SSH_KEY_PATH` | 私钥路径 | 否，为空时使用 SSH Agent |
-| `AGENTFLOW_TEST_SSH_KNOWN_HOSTS` | 只读 known_hosts 文件 | 否 |
+| `AGENTFLOW_TEST_SSH_KNOWN_HOSTS` | 只读 known_hosts 文件 | 否，未设置时复用本机 `~/.ssh/known_hosts` 与 `known_hosts2` |
 
 示例：
 
@@ -267,7 +295,7 @@ AGENTFLOW_TEST_REMOTE_DOCKER=1 AGENTFLOW_TEST_SSH_HOST=10.0.0.10 AGENTFLOW_TEST_
 | `AGENTFLOW_TEST_SSH_USER` | 登录用户名 | 是 |
 | `AGENTFLOW_TEST_SSH_PORT` | SSH 端口 | 否，默认 `22` |
 | `AGENTFLOW_TEST_SSH_KEY_PATH` | 私钥路径 | 否，为空时使用 SSH Agent |
-| `AGENTFLOW_TEST_SSH_KNOWN_HOSTS` | 只读 known_hosts 文件 | 否 |
+| `AGENTFLOW_TEST_SSH_KNOWN_HOSTS` | 只读 known_hosts 文件 | 否，未设置时复用本机 `~/.ssh/known_hosts` 与 `known_hosts2` |
 | `AGENTFLOW_TEST_REMOTE_GIT_IMAGE` | 远程代码保存测试使用的容器镜像（需包含 `git`） | 是 |
 
 ```bash
@@ -302,7 +330,7 @@ docker build -t agentflow-test-agent:1.0.0 -f tests/integration/remote/agent/Doc
 | `AGENTFLOW_TEST_SSH_USER` | 登录用户名 | 是 |
 | `AGENTFLOW_TEST_SSH_PORT` | SSH 端口 | 否，默认 `22` |
 | `AGENTFLOW_TEST_SSH_KEY_PATH` | 私钥路径 | 否，为空时使用 SSH Agent |
-| `AGENTFLOW_TEST_SSH_KNOWN_HOSTS` | 只读 known_hosts 文件 | 否 |
+| `AGENTFLOW_TEST_SSH_KNOWN_HOSTS` | 只读 known_hosts 文件 | 否，未设置时复用本机 `~/.ssh/known_hosts` 与 `known_hosts2` |
 | `AGENTFLOW_TEST_PI_MODEL` | 覆盖真实模型标识 | 否，默认 `group/free` |
 | `AGENTFLOW_TEST_REMOTE_AGENT_IMAGE` | 覆盖测试镜像引用 | 否，默认 `agentflow-test-agent:1.0.0` |
 | `AGENTFLOW_TEST_REMOTE_GIT_REPOSITORY` | 测试使用的仓库地址（必须能从远程机器访问） | 是 |

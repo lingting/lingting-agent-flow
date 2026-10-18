@@ -63,11 +63,12 @@ const testImageRepository = "agentflow-test-lifecycle"
 
 // target 是一次真实远程测试的连接目标。
 type target struct {
-	host       string
-	user       string
-	port       int
-	keyPath    string
-	knownHosts string
+	host    string
+	user    string
+	port    int
+	keyPath string
+	// knownHostsPaths 是参与校验的只读 known_hosts 文件列表。
+	knownHostsPaths []string
 }
 
 // requireEnabled 检查远程 Docker 测试开关与目标配置。
@@ -109,11 +110,11 @@ func requireEnabled(t *testing.T) target {
 		port = parsed
 	}
 	return target{
-		host:       host,
-		user:       user,
-		port:       port,
-		keyPath:    strings.TrimSpace(os.Getenv(EnvKeyPath)),
-		knownHosts: strings.TrimSpace(os.Getenv(EnvKnownHosts)),
+		host:            host,
+		user:            user,
+		port:            port,
+		keyPath:         strings.TrimSpace(os.Getenv(EnvKeyPath)),
+		knownHostsPaths: testkit.KnownHostsSources(t),
 	}
 }
 
@@ -123,7 +124,7 @@ func requireEnabled(t *testing.T) target {
 func dial(t *testing.T, ws *testkit.Workspace, tg target) sshclient.Client {
 	t.Helper()
 	store, err := sshclient.NewKnownHostsStore(sshclient.KnownHostsOptions{
-		TrustedPaths: []string{tg.knownHosts},
+		TrustedPaths: tg.knownHostsPaths,
 		// 信任记录写在测试工作空间中，不修改用户真实的 known_hosts。
 		StorePath: filepath.Join(ws.Root(), "known_hosts"),
 	})
