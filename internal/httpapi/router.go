@@ -21,6 +21,8 @@ type Deps struct {
 	Health *app.HealthService
 	// SystemInfo 返回系统信息，为空时接口返回服务不可用。
 	SystemInfo func() app.SystemInfo
+	// Tasks 是任务管理服务，为空时任务接口返回服务不可用。
+	Tasks *app.TaskService
 	// Logger 是日志器，为空时使用 slog.Default。
 	Logger *slog.Logger
 }
@@ -37,11 +39,15 @@ func NewHandler(deps Deps) http.Handler {
 	router := &router{
 		health:     deps.Health,
 		systemInfo: deps.SystemInfo,
+		tasks:      newTaskHandler(deps.Tasks, logger),
 		logger:     logger,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(PathHealth, router.healthHandler)
 	mux.HandleFunc(PathSystemInfo, router.systemInfoHandler)
+	// 任务集合路径与单任务路径分别注册：ServeMux 会按更具体的模式优先匹配。
+	mux.HandleFunc(PathTasks, router.tasksHandler)
+	mux.HandleFunc(taskPathPrefix, router.tasksHandler)
 	mux.HandleFunc("/", router.notFoundHandler)
 	return withRequestID(mux)
 }
@@ -50,7 +56,45 @@ func NewHandler(deps Deps) http.Handler {
 type router struct {
 	health     *app.HealthService
 	systemInfo func() app.SystemInfo
+	tasks      *taskHandler
 	logger     *slog.Logger
+}
+
+// tasksHandler 分发任务集合路径与单任务路径的请求。
+//
+// 任务服务未初始化时返回 503，而不是让请求落到 404 或前端页面上。
+func (rt *router) tasksHandler(w http.ResponseWriter, r *http.Request) {
+	if rt.tasks == nil || rt.tasks.tasks == nil {
+		writeError(
+			w,
+			r,
+			rt.logger,
+			http.StatusServiceUnavailable,
+			CodeInternal,
+			"任务服务未初始化",
+		)
+		return
+	}
+	if r.URL.Path == PathTasks {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead:
+			rt.tasks.list(w, r)
+		case http.MethodPost:
+			rt.tasks.create(w, r)
+		default:
+			w.Header().Set("Allow", "GET, HEAD, POST")
+			writeError(
+				w,
+				r,
+				rt.logger,
+				http.StatusMethodNotAllowed,
+				CodeMethodNotAllowed,
+				"该接口只支持 GET 与 POST 请求",
+			)
+		}
+		return
+	}
+	rt.tasks.serve(w, r)
 }
 
 // healthHandler 处理健康检查请求。

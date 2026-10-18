@@ -8,7 +8,9 @@
 !/internal/webui/dist/.gitkeep
 
 # 运行期数据与工作区
-/.agentflow/
-
+#
+# 忽略任意层级下的 .agentflow 目录：除仓库根目录外，测试用例若误用相对路径也会
+# 在包目录下生成该目录，这里一并兜住，避免运行期数据被提交。
+.agentflow/
 # 本地配置（示例配置之外的配置文件不入库）
 /configs/agentflow.yaml

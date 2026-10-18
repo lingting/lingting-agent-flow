@@ -15,11 +15,11 @@ import (
 const taskColumns = `id, requirement_id, status, host_id, config_json, repository_path,
 	base_ref, worktree_path, container_id, current_step_id, current_attempt_id,
 	cancel_requested, cancel_requested_at, final_result, failure_summary,
-	idempotency_key, lease_owner, lease_expires_at, created_at, started_at,
+	idempotency_key, lease_owner, lease_expires_at, deleted_at, created_at, started_at,
 	finished_at, updated_at`
 
 // taskInsertCount 是写入任务时的参数个数。
-const taskInsertCount = 22
+const taskInsertCount = 23
 
 // taskStore 实现 storage.TaskStore。
 type taskStore struct {
@@ -61,8 +61,8 @@ UPDATE tasks SET
 	status = ?, host_id = ?, config_json = ?, repository_path = ?, base_ref = ?,
 	worktree_path = ?, container_id = ?, current_step_id = ?, current_attempt_id = ?,
 	cancel_requested = ?, cancel_requested_at = ?, final_result = ?, failure_summary = ?,
-	idempotency_key = ?, lease_owner = ?, lease_expires_at = ?, started_at = ?,
-	finished_at = ?, updated_at = ?
+	idempotency_key = ?, lease_owner = ?, lease_expires_at = ?, deleted_at = ?,
+	started_at = ?, finished_at = ?, updated_at = ?
 WHERE id = ?`
 	result, err := s.q.ExecContext(
 		ctx,
@@ -83,6 +83,7 @@ WHERE id = ?`
 		nullIfBlank(record.task.IdempotencyKey),
 		nullIfBlank(record.task.LeaseOwner),
 		toMillisPtr(record.task.LeaseExpiresAt),
+		toMillisPtr(record.task.DeletedAt),
 		toMillisPtr(record.task.StartedAt),
 		toMillisPtr(record.task.FinishedAt),
 		toMillis(record.task.UpdatedAt),
@@ -132,6 +133,7 @@ func (s taskStore) UpdateTaskIfStatus(
 		nullIfBlank(record.task.IdempotencyKey),
 		nullIfBlank(record.task.LeaseOwner),
 		toMillisPtr(record.task.LeaseExpiresAt),
+		toMillisPtr(record.task.DeletedAt),
 		toMillisPtr(record.task.StartedAt),
 		toMillisPtr(record.task.FinishedAt),
 		toMillis(record.task.UpdatedAt),
@@ -146,8 +148,8 @@ UPDATE tasks SET
 	status = ?, host_id = ?, config_json = ?, repository_path = ?, base_ref = ?,
 	worktree_path = ?, container_id = ?, current_step_id = ?, current_attempt_id = ?,
 	cancel_requested = ?, cancel_requested_at = ?, final_result = ?, failure_summary = ?,
-	idempotency_key = ?, lease_owner = ?, lease_expires_at = ?, started_at = ?,
-	finished_at = ?, updated_at = ?
+	idempotency_key = ?, lease_owner = ?, lease_expires_at = ?, deleted_at = ?,
+	started_at = ?, finished_at = ?, updated_at = ?
 WHERE id = ? AND status IN (` + strings.Join(conditions, ", ") + `)`
 	result, err := s.q.ExecContext(ctx, statement, args...)
 	if err != nil {
@@ -227,6 +229,79 @@ func (s taskStore) ListTasks(ctx context.Context, filter storage.TaskFilter) ([]
 		return nil, wrapError("查询任务", err)
 	}
 	return tasks, nil
+}
+
+// ListTaskPage 分页返回任务并给出满足筛选条件的总数。
+//
+// 两条查询使用同一组筛选条件，总数与分页无关；已逻辑删除的记录默认不参与统计。
+func (s taskStore) ListTaskPage(
+	ctx context.Context,
+	filter storage.TaskFilter,
+) (storage.TaskPage, error) {
+	page := storage.TaskPage{Tasks: []domain.Task{}}
+	countStatement, countArgs := buildTaskCountQuery(filter)
+	if err := s.q.QueryRowContext(ctx, countStatement, countArgs...).Scan(&page.Total); err != nil {
+		return storage.TaskPage{}, wrapError("统计任务数量", err)
+	}
+	if page.Total == 0 {
+		return page, nil
+	}
+	tasks, err := s.ListTasks(ctx, filter)
+	if err != nil {
+		return storage.TaskPage{}, err
+	}
+	page.Tasks = tasks
+	return page, nil
+}
+
+// DeleteTask 逻辑删除任务。
+//
+// 只写入 deleted_at 与 updated_at：任务行、步骤、尝试、会话等历史记录全部保留。
+// 条件同时覆盖"未被删除"与允许的状态集合，两个请求并发删除时只有一个成功。
+func (s taskStore) DeleteTask(
+	ctx context.Context,
+	id domain.ID,
+	expected []domain.TaskStatus,
+	at time.Time,
+) error {
+	if err := id.Validate(); err != nil {
+		return err
+	}
+	if len(expected) == 0 {
+		return wrapError(
+			"删除任务",
+			errors.Join(storage.ErrInvalidData, errors.New("允许删除的状态集合不能为空")),
+		)
+	}
+	conditions := make([]string, 0, len(expected))
+	args := make([]any, 0, len(expected)+3)
+	args = append(args, toMillis(at), toMillis(at), toIDParam(id))
+	for _, status := range expected {
+		conditions = append(conditions, "?")
+		args = append(args, string(status))
+	}
+	statement := `
+UPDATE tasks SET deleted_at = ?, updated_at = ?
+WHERE id = ? AND deleted_at IS NULL
+  AND status IN (` + strings.Join(conditions, ", ") + `)`
+	result, err := s.q.ExecContext(ctx, statement, args...)
+	if err != nil {
+		return wrapError("删除任务", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return wrapError("删除任务", err)
+	}
+	if affected == 0 {
+		return wrapError(
+			"删除任务",
+			errors.Join(
+				storage.ErrConflict,
+				errors.New("任务已被删除或当前状态不允许删除: "+id.String()),
+			),
+		)
+	}
+	return nil
 }
 
 // AcquireTaskLease 以原子条件更新领取任务租约。
@@ -342,14 +417,15 @@ WHERE id = ? AND lease_owner = ?`
 	return nil
 }
 
-// buildTaskQuery 构造任务查询语句与参数。
-func buildTaskQuery(filter storage.TaskFilter) (string, []any) {
-	var builder strings.Builder
-	builder.WriteString(`SELECT `)
-	builder.WriteString(taskColumns)
-	builder.WriteString(` FROM tasks`)
-	conditions := make([]string, 0, 3)
+// taskFilterConditions 把筛选条件转换为 SQL 条件片段与绑定参数。
+//
+// 条件全部使用占位符，用户输入只通过参数绑定传入；已逻辑删除的任务默认排除。
+func taskFilterConditions(filter storage.TaskFilter) ([]string, []any) {
+	conditions := make([]string, 0, 4)
 	args := make([]any, 0, 8)
+	if !filter.IncludeDeleted {
+		conditions = append(conditions, `deleted_at IS NULL`)
+	}
 	if !filter.RequirementID.IsEmpty() {
 		conditions = append(conditions, `requirement_id = ?`)
 		args = append(args, toIDParam(filter.RequirementID))
@@ -373,13 +449,44 @@ func buildTaskQuery(filter storage.TaskFilter) (string, []any) {
 			args = append(args, string(status))
 		}
 	}
+	return conditions, args
+}
+
+// buildTaskQuery 构造任务列表查询语句与参数。
+//
+// 排序固定为创建时间倒序、同一毫秒内按写入顺序倒序，保证分页结果稳定。
+func buildTaskQuery(filter storage.TaskFilter) (string, []any) {
+	conditions, args := taskFilterConditions(filter)
+	var builder strings.Builder
+	builder.WriteString(`SELECT `)
+	builder.WriteString(taskColumns)
+	builder.WriteString(` FROM tasks`)
 	appendConditions(&builder, conditions)
 	builder.WriteString(` ORDER BY created_at DESC, rowid DESC`)
+	args = appendTaskPaging(&builder, args, filter)
+	return builder.String(), args
+}
+
+// buildTaskCountQuery 构造任务总数查询语句与参数。
+func buildTaskCountQuery(filter storage.TaskFilter) (string, []any) {
+	conditions, args := taskFilterConditions(filter)
+	var builder strings.Builder
+	builder.WriteString(`SELECT COUNT(*) FROM tasks`)
+	appendConditions(&builder, conditions)
+	return builder.String(), args
+}
+
+// appendTaskPaging 按需追加分页子句。
+func appendTaskPaging(builder *strings.Builder, args []any, filter storage.TaskFilter) []any {
 	if filter.Limit > 0 {
 		builder.WriteString(` LIMIT ?`)
 		args = append(args, filter.Limit)
+		if filter.Offset > 0 {
+			builder.WriteString(` OFFSET ?`)
+			args = append(args, filter.Offset)
+		}
 	}
-	return builder.String(), args
+	return args
 }
 
 // encodeTask 校验任务并编码其 JSON 字段。
@@ -420,6 +527,7 @@ func taskInsertArgs(record taskRecord) []any {
 		nullIfBlank(task.IdempotencyKey),
 		nullIfBlank(task.LeaseOwner),
 		toMillisPtr(task.LeaseExpiresAt),
+		toMillisPtr(task.DeletedAt),
 		toMillis(task.CreatedAt),
 		toMillisPtr(task.StartedAt),
 		toMillisPtr(task.FinishedAt),
@@ -447,6 +555,7 @@ func scanTask(row scanner) (*domain.Task, error) {
 		idempotencyKey    sql.NullString
 		leaseOwner        sql.NullString
 		leaseExpiresAt    sql.NullInt64
+		deletedAt         sql.NullInt64
 		createdAt         int64
 		startedAt         sql.NullInt64
 		finishedAt        sql.NullInt64
@@ -471,6 +580,7 @@ func scanTask(row scanner) (*domain.Task, error) {
 		&idempotencyKey,
 		&leaseOwner,
 		&leaseExpiresAt,
+		&deletedAt,
 		&createdAt,
 		&startedAt,
 		&finishedAt,
@@ -494,6 +604,7 @@ func scanTask(row scanner) (*domain.Task, error) {
 	task.IdempotencyKey = idempotencyKey.String
 	task.LeaseOwner = leaseOwner.String
 	task.LeaseExpiresAt = fromMillisPtr(leaseExpiresAt)
+	task.DeletedAt = fromMillisPtr(deletedAt)
 	task.CreatedAt = fromMillis(createdAt)
 	task.StartedAt = fromMillisPtr(startedAt)
 	task.FinishedAt = fromMillisPtr(finishedAt)

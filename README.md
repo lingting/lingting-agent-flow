@@ -162,15 +162,141 @@ make web-dev            # 等价于 cd lingting-agent-flow-ui && pnpm dev
 
 `/api` 是保留路径空间，判定按路径段边界进行：`/apiary`、`/apix` 不是 API 路径，按页面处理。
 
-当前只实现最小只读接口：
+当前已实现的接口：
 
-| 方法 | 路径                   | 说明                                                    |
-| ---- | ---------------------- | ------------------------------------------------------- |
-| GET  | `/api/v1/health`       | HTTP API 与 SQLite 可用性；存在不可用依赖时返回 503      |
-| GET  | `/api/v1/system/info`  | 程序版本、提交、构建时间、Go 版本与编译平台              |
+| 方法   | 路径                            | 说明                                                  |
+| ------ | ------------------------------- | ----------------------------------------------------- |
+| GET    | `/api/v1/health`                | HTTP API 与 SQLite 可用性；存在不可用依赖时返回 503    |
+| GET    | `/api/v1/system/info`           | 程序版本、提交、构建时间、Go 版本与编译平台            |
+| POST   | `/api/v1/tasks`                 | 创建任务，成功返回 201 与完整任务对象                  |
+| GET    | `/api/v1/tasks`                 | 任务列表，支持分页与状态筛选                          |
+| GET    | `/api/v1/tasks/{taskID}`        | 任务详情                                              |
+| POST   | `/api/v1/tasks/{taskID}/cancel` | 请求取消任务                                          |
+| DELETE | `/api/v1/tasks/{taskID}`        | 逻辑删除任务，成功返回 204                            |
 
 `/api/v1/health` 的 `checks` 分别表达 `http_api` 与 `database`，不会因为 HTTP 服务已启动就
-认为数据库一定可用。错误响应统一为 `{"error": {"code", "message", "request_id"}}`。
+认为数据库一定可用。错误响应统一为 `{"error": {"code", "message", "request_id"}}`，
+错误代码取值为 `invalid_request`、`not_found`、`state_conflict`、`method_not_allowed`、
+`internal_error`，分别对应 HTTP 400、404、409、405、500。
+
+#### 任务状态
+
+任务状态取值与 `internal/domain` 完全一致，API 不提供第二套名称：
+
+| 状态                | 含义                                     |
+| ------------------- | ---------------------------------------- |
+| `queued`            | 已创建，尚未执行（新建任务的唯一初始状态）|
+| `preparing`         | 准备执行环境                             |
+| `planning`          | 正在生成计划                             |
+| `planned`           | 计划已确认，等待执行步骤                 |
+| `developing`        | 正在执行开发步骤                         |
+| `verifying`         | 正在执行验证                             |
+| `saving`            | 正在保存代码（Commit / Push / 可选 Merge）|
+| `cancelling`        | 已请求取消，尚未确认停止                 |
+| `retrying`          | 按重试策略准备新的尝试                   |
+| `paused`            | 人工介入后暂停                           |
+| `recovery_required` | 执行结果或资源状态无法确认，需要核验     |
+| `completed`         | 所有必需阶段成功                         |
+| `failed`            | 任务执行失败                             |
+| `cancelled`         | 取消流程已完成                           |
+
+响应中的 `status_terminal` 表示任务是否已结束（`completed`、`cancelled`）。`failed` 允许
+用户显式重试，因此不是终态，但它的执行已经停止，管理接口允许删除这类记录。
+
+#### 创建任务
+
+```http
+POST /api/v1/tasks
+Content-Type: application/json
+
+{
+  "name": "实现登录接口",
+  "description": "为登录页接入真实接口",
+  "project_id": "demo-service",
+  "host_id": "<执行节点标识>",
+  "repository_url": "ssh://git.example.com/team/repo",
+  "base_branch": "main",
+  "environment": "go",
+  "planner_role_id": "<规划角色标识>",
+  "developer_role_id": "<开发角色标识>"
+}
+```
+
+`name`、`description`、`host_id`、`repository_url`、`base_branch`、`environment`、
+`planner_role_id`、`developer_role_id` 必填；其余字段可选。任务名称与描述写入关联需求，
+`name` 最长 200 字符，`description` 最长 4000 字符。客户端**不能**指定 `status`、
+`created_at`、`started_at`、`finished_at`；出现未知字段时请求被拒绝。
+
+创建只落库，不触发执行：新任务固定为 `queued`，`started_at` 与 `finished_at` 为空。
+相同的 `idempotency_key` 重复提交不会创建第二个任务。
+
+#### 任务列表
+
+```http
+GET /api/v1/tasks?current=1&size=20&status=queued&status=failed
+```
+
+- `current` 为页号，从 1 开始，默认 1；`size` 为页大小，默认 20，最大 100。
+- 非法或超限参数返回 400，不会退化为全表查询。
+- `status` 可重复或使用逗号分隔；未知状态返回 400。
+- 排序固定为创建时间倒序，同一毫秒内按写入顺序倒序，分页结果稳定。
+- 已逻辑删除的任务不出现在列表与总数中。
+
+响应：
+
+```json
+{
+  "records": [
+    {
+      "id": "<任务标识>",
+      "name": "实现登录接口",
+      "description": "为登录页接入真实接口",
+      "status": "queued",
+      "status_terminal": false,
+      "project_id": "demo-service",
+      "cancel_requested": false,
+      "created_at": "2025-01-01T00:00:00Z",
+      "updated_at": "2025-01-01T00:00:00Z"
+    }
+  ],
+  "total": 1,
+  "current": 1,
+  "size": 20
+}
+```
+
+时间统一为 UTC 的 RFC 3339 字符串；`started_at`、`finished_at`、`cancel_requested_at`、
+`error` 只在有值时出现。
+
+#### 取消任务
+
+```http
+POST /api/v1/tasks/{taskID}/cancel
+```
+
+- `queued` 任务直接收敛为 `cancelled`，并记录取消请求时间与结束时间。
+- 其他未结束状态只记录取消请求并进入 `cancelling`，实际停止由执行者确认；此时不写入
+  最终结论，也不写 `finished_at`。
+- 已处于 `cancelling` 时重复请求幂等，返回当前状态且不改写请求时间。
+- 已结束任务返回 409 `state_conflict`。
+
+#### 删除任务
+
+```http
+DELETE /api/v1/tasks/{taskID}
+```
+
+- 只有 `completed`、`failed`、`cancelled` 允许删除，其他状态返回 409。
+- 删除是逻辑删除：只写 `tasks.deleted_at`，任务行、需求、步骤、尝试、会话与事件全部保留。
+- 成功返回 204 且无响应体；删除后详情返回 404，重复删除返回 404。
+
+#### 当前能力边界
+
+本阶段的任务 API **只负责管理数据**，不代表任务已经执行：
+
+- 不会调用 Pi CLI、不会创建 Docker 容器、不会连接 SSH、不会克隆 Git 仓库。
+- 没有执行器，因此没有任务会被自动推进到 `running` 或 `succeeded` 等执行状态。
+- 执行节点与角色没有查询接口，创建任务时需要手工填写其标识。
 
 `/api` 下的未知路径返回 JSON 404，不会回退到前端页面；`/api` 之外的未知页面路径进入 SPA
 回退，因此浏览器刷新任意前端路由都能正常打开页面。
@@ -181,8 +307,9 @@ make web-dev            # 等价于 cd lingting-agent-flow-ui && pnpm dev
 
 ### 尚未实现的接口
 
-任务、项目、机器、环境、容器、代码保存与 Agent 调度均**没有** HTTP 接口。Web 页面中的对应
-入口仍为占位说明，连接指示器只表示 HTTP API 的可用性，不代表 SSH、Docker 或 Pi Agent 已就绪。
+项目、机器、环境、容器、代码保存与 Agent 调度均**没有** HTTP 接口。Web 页面中的对应入口仍为
+占位说明，连接指示器只表示 HTTP API 的可用性，不代表 SSH、Docker 或 Pi Agent 已就绪。
+任务页面已接入真实接口，但只能创建、查看、取消与删除任务记录，不能启动执行。
 
 后台服务目前只有生命周期框架：任务调度器、任务执行器、SSH 与 Docker 运维均尚未接入，
 `agentflow server` 启动后只提供 API 与页面。

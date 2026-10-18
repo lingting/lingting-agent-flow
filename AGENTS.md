@@ -27,6 +27,10 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
 - Step 是业务对象，Attempt 是一次执行尝试，Session 是一次 Pi 会话；每次重试必须创建新的 Attempt 与新的 Session，并保留历史记录。
 - 状态迁移统一在 `domain` 内通过 `Transition` 方法校验，非法迁移返回 `ErrInvalidTransition`。禁止在业务层直接赋值状态字段绕过校验。
 - 实体字段校验失败返回 `*ValidationError`，可通过 `errors.Is(err, ErrInvalidValue)` 判断。
+- `TaskStatus.IsTerminal` 只包含 `completed` 与 `cancelled`（允许显式重试的 `failed` 不是终态）；
+  管理接口的删除判定使用 `TaskStatus.IsFinished`，它额外包含 `failed`。
+- 逻辑删除使用 `deleted_at` 标记，读取层默认过滤已删除记录，只有显式 `IncludeDeleted`
+  时才纳入查询；历史记录一律保留。
 
 ## 架构硬性约束
 
@@ -83,6 +87,11 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
 - 使用 `tests/internal/testkit` 提供的 `testkit.New(t)` 与 `testkit.Dir(t)`，
   不要用 `t.TempDir()`，也不要用 `t.Setenv` 切换全局数据目录；路径通过结构体、
   构造参数或子进程独立环境变量传入。
+- 配置文件中的数据库与工作区路径必须是工作空间内的绝对路径。相对路径会按进程工作
+  目录解析（`go test` 下即包目录），把 SQLite 文件写进仓库；配置模板中的路径一律使用
+  占位符，由统一的辅助函数替换为绝对路径，并保留一个断言绝对路径的回归用例。
+- 仓库忽略任意层级的 `.agentflow/` 目录，作为误用相对路径时的兜底；不得把运行期
+  数据文件提交进版本库。
 - 测试结束禁止删除工作空间与测试产物：不调用 `os.RemoveAll` 删除测试根目录，不使用会在
   结束时自动清理目录的临时目录 API，也不在 `t.Cleanup` 中删除目录。允许关闭数据库连接、
   终止测试启动的子进程、关闭监听端口等运行时资源。
@@ -171,6 +180,26 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
   必须先核验远程分支再决定状态。
 
 
+### 任务管理 API 约束
+
+- 任务状态只能由业务层状态机修改：`internal/domain` 的 `Transition`、`RequestCancel`、
+  `CancelImmediately`、`MarkDeleted` 是唯一入口；HTTP Handler 不得直接赋值 `status`、
+  `deleted_at`、`started_at`、`finished_at`，也不得接受客户端指定这些字段。
+- 任务状态取值完全复用 `domain.TaskStatus`，不新增第二套对外状态名，也不把中间状态压平为
+  `succeeded` / `failed`；管理接口只做数据管理，不代表任务已经执行。
+- 取消语义按状态区分：`queued` 任务可直接收敛为 `cancelled`；其他未结束状态只记录取消请求
+  并进入 `cancelling`，实际停止由执行者确认，不得伪造"运行中任务已停止"。
+- 取消请求必须幂等：重复请求返回当前状态，不重复改写 `cancel_requested_at`。
+- 删除采用逻辑删除：只写 `tasks.deleted_at`，不物理删除任务行，不级联删除需求、步骤、
+  尝试、会话与事件；只有 `completed`、`failed`、`cancelled` 允许删除。
+- 状态更新必须使用带状态前置条件的更新：`UpdateTaskIfStatus`、`DeleteTask` 以读取到的
+  原始状态作为条件，禁止"先查询、后无条件更新"。
+- 任务列表必须分页：默认页大小 20，上限 100，超过上限返回参数错误而不是读取全表；
+  响应固定返回 `records` / `total` / `current` / `size`。
+- 任务接口路径固定为 `/api/v1/tasks`，错误响应使用统一结构
+  `{"error":{"code","message","request_id"}}`；参数错误 400、不存在 404、状态冲突 409，
+  不得一律返回 200。
+
 ### 代码保存（CodeSaver）约束
 
 - CodeSaver 只操作当前受管理容器内、经过核验的任务 Git 工作区；不得把容器内代码复制
@@ -214,8 +243,10 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
   长度、JSON 结构、跨字段组合一致性）与合理默认值仍需逐项审核后保留，不得机械删除。
 - 引用完整性、状态转换与生命周期规则由应用层显式承担，不得重新引入数据库外键或枚举
   白名单；数据读取层必须保留未知枚举值，不得自动映射为默认状态。
-- 逻辑删除优先：`roles` 与 `execution_hosts` 使用 `deleted_at` 标记删除，删除操作不得
-  级联删除历史记录。
+- 逻辑删除优先：`roles`、`execution_hosts` 与 `tasks` 使用 `deleted_at` 标记删除，
+  删除操作不得级联删除历史记录。
+- SQLite 变更必须使用增量迁移：已发布脚本不得修改，schema 变更只能追加更高版本的脚本，
+  且优先使用 `ALTER TABLE` 等非破坏性语句，不重建无关表。
 - 迁移已有数据库必须保留数据，禁止删除数据库重建；表重建必须保留必要的索引、触发器、
   视图与自增主键行为。
 - 数据库连接显式关闭外键检查（`foreign_keys(0)`），业务 Schema 本身不得依赖该开关。
@@ -252,6 +283,11 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
 - 导航、页面标题与当前路由高亮必须由同一份路由元数据派生，禁止在多处重复定义路径与标题。
 - 前端不直接访问 SQLite，不执行 SSH、Docker、Git 或 Pi 命令，也不承载工作流状态迁移。
 - 不得使用虚构数据伪装真实业务状态，不得渲染会使用户误以为业务功能已可用的操作入口。
+- 任务页面的状态标签必须由 `src/pages/tasks/status.ts` 的单一映射派生，取值与 Go 端
+  `domain.TaskStatus` 一一对应；禁止新增前端状态名，也禁止把 `queued` 或中间状态显示为
+  成功或失败。
+- 任务页面的操作可用性必须依据接口返回的 `status` 与 `status_terminal` 判定：已结束任务
+  不可取消，未结束任务不可删除；不得在前端伪造状态或跳过服务端校验。
 - 所有前端测试位于 `lingting-agent-flow-ui/tests/`，测试产物写入操作系统临时目录下的随机
   唯一目录并保留，不得自动清理。
 - 不得声称未运行的测试已经通过。

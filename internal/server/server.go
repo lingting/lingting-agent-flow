@@ -48,6 +48,11 @@ type Options struct {
 	OpenStore StoreOpener
 	// SystemInfo 返回系统信息，必填。
 	SystemInfo func() app.SystemInfo
+	// Tasks 是任务管理服务；为空时由数据库自动构造一个只读配置的管理服务。
+	//
+	// 管理接口不涉及执行器，因此这里构造的服务没有工作流引擎：任务只会被创建、
+	// 查询、取消与删除，不会被推进执行。
+	Tasks *app.TaskService
 	// Services 是按依赖顺序排列的后台服务，可留空。
 	Services []Service
 	// RequireWebUI 为 true 时缺少前端构建产物将导致启动失败。
@@ -66,6 +71,7 @@ type Server struct {
 	address    string
 	openStore  StoreOpener
 	systemInfo func() app.SystemInfo
+	tasks      *app.TaskService
 	services   []Service
 	requireWeb bool
 	logger     *slog.Logger
@@ -112,6 +118,7 @@ func New(options Options) (*Server, error) {
 		address:    options.Address,
 		openStore:  options.OpenStore,
 		systemInfo: options.SystemInfo,
+		tasks:      options.Tasks,
 		services:   options.Services,
 		requireWeb: options.RequireWebUI,
 		logger:     options.Logger,
@@ -179,15 +186,38 @@ func (s *Server) startServices(ctx context.Context) error {
 	return s.manager.Start(ctx)
 }
 
+// taskService 返回任务管理服务。
+//
+// 未显式注入时用已打开的数据库构造一个不含工作流引擎的服务：管理接口只负责
+// 创建、查询、取消与删除任务，不推进执行，也不接触 Docker、SSH 或 Pi。
+func (s *Server) taskService() (*app.TaskService, error) {
+	if s.tasks != nil {
+		return s.tasks, nil
+	}
+	tasks, err := app.NewTaskService(app.TaskServiceOptions{
+		Store:  s.store,
+		Logger: s.logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("初始化任务服务失败: %w", err)
+	}
+	return tasks, nil
+}
+
 // startHTTP 组装并启动 HTTP 服务；监听失败时不进入运行阶段。
 func (s *Server) startHTTP(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
+		return err
+	}
+	tasks, err := s.taskService()
+	if err != nil {
 		return err
 	}
 	web, err := httpserver.New(httpserver.Options{
 		Address:         s.address,
 		Health:          app.NewHealthService(s.store),
 		SystemInfo:      s.systemInfo,
+		Tasks:           tasks,
 		RequireWebUI:    s.requireWeb,
 		ShutdownTimeout: s.shutdownTimeout,
 		Report:          s.report,

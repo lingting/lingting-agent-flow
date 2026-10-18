@@ -198,6 +198,7 @@ var expectedIndexes = []string{
 	"idx_tasks_host",
 	"idx_tasks_container",
 	"idx_tasks_idempotency",
+	"idx_tasks_active",
 	"idx_steps_task",
 	"idx_steps_role",
 	"idx_steps_status",

@@ -322,3 +322,62 @@ func TestMigrationArtifactsStayInWorkspace(t *testing.T) {
 		t.Fatalf("数据库文件不存在: %v", err)
 	}
 }
+
+// TestTasksSoftDeleteFollowsSchemaRules 校验任务逻辑删除字段符合数据库约束规范。
+//
+// 逻辑删除只新增可空列与部分索引：不得引入外键、枚举白名单或触发器，
+// 也不得把 deleted_at 变成必填字段，否则历史记录将无法升级。
+func TestTasksSoftDeleteFollowsSchemaRules(t *testing.T) {
+	t.Parallel()
+	db := openFreshDB(t)
+	conn := rawConn(t, db)
+	ctx := testContext(t)
+
+	// tasks 表仍然没有任何外键。
+	rows, err := conn.QueryContext(ctx, `PRAGMA foreign_key_list(tasks)`)
+	if err != nil {
+		t.Fatalf("读取 tasks 外键失败: %v", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+	for rows.Next() {
+		t.Fatal("tasks 表不得声明外键")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("遍历外键结果失败: %v", err)
+	}
+
+	// deleted_at 只做时间范围校验，不限定枚举取值。
+	ddl := tableSQL(t, conn, "tasks")
+	if !strings.Contains(ddl, "deleted_at") {
+		t.Fatalf("tasks 缺少 deleted_at 列:\n%s", ddl)
+	}
+	if strings.Contains(strings.ToUpper(ddl), "REFERENCES") {
+		t.Fatalf("tasks 不得声明外键:\n%s", ddl)
+	}
+
+	// 逻辑删除后记录仍可读取，且未知状态不受影响。
+	testkit.MustExec(t, conn, `INSERT INTO tasks
+		(id, requirement_id, status, config_json, repository_path, base_ref,
+		 created_at, updated_at, deleted_at)
+		VALUES ('soft-task', 'orphan-req', 'unknown_status_v3', '{}', '/repo', 'main', 1, 1, 2)`)
+	var status string
+	if err := conn.QueryRowContext(
+		ctx,
+		`SELECT status FROM tasks WHERE id = 'soft-task'`,
+	).Scan(&status); err != nil {
+		t.Fatalf("读取逻辑删除任务失败: %v", err)
+	}
+	if status != "unknown_status_v3" {
+		t.Fatalf("未知状态应原样保留: %s", status)
+	}
+
+	// deleted_at 的 CHECK 仍然拒绝非正数时间戳。
+	if _, err := conn.ExecContext(
+		ctx,
+		`UPDATE tasks SET deleted_at = 0 WHERE id = 'soft-task'`,
+	); err == nil {
+		t.Fatal("deleted_at = 0 应当被非枚举 CHECK 拒绝")
+	}
+}

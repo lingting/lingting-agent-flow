@@ -267,8 +267,8 @@ func TestLegacyDatabaseLosesNoRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取 schema 版本失败: %v", err)
 	}
-	if version != 9 {
-		t.Fatalf("迁移后版本应为 9，实际 %d", version)
+	if version != 10 {
+		t.Fatalf("迁移后版本应为 10，实际 %d", version)
 	}
 
 	roles, err := db.ListRoles(ctx)
@@ -514,7 +514,7 @@ func TestLegacyDatabaseMigrationIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取 schema 版本失败: %v", err)
 	}
-	if version != 9 {
+	if version != 10 {
 		t.Fatalf("重复迁移后版本不符: %d", version)
 	}
 	task, err := second.GetTask(ctx, domain.ID(fixture.task))
@@ -524,17 +524,17 @@ func TestLegacyDatabaseMigrationIsIdempotent(t *testing.T) {
 	if task.ID != domain.ID(fixture.task) {
 		t.Fatalf("任务标识不符: %s", task.ID)
 	}
-	// 迁移记录只应有一条版本 9 的记录。
+	// 迁移记录只应有一条版本 10 的记录。
 	var count int
 	conn := testkit.OpenSQLite(t, second.Path())
 	if err := conn.QueryRowContext(
 		ctx,
-		`SELECT COUNT(*) FROM schema_migrations WHERE version = 9`,
+		`SELECT COUNT(*) FROM schema_migrations WHERE version = 10`,
 	).Scan(&count); err != nil {
 		t.Fatalf("统计迁移记录失败: %v", err)
 	}
 	if count != 1 {
-		t.Fatalf("版本 9 的迁移记录数量不符: %d", count)
+		t.Fatalf("版本 10 的迁移记录数量不符: %d", count)
 	}
 }
 
@@ -680,12 +680,12 @@ func TestLegacyDatabaseConcurrentOpenMigratesOnce(t *testing.T) {
 	var count int
 	if err := conn.QueryRowContext(
 		testContext(t),
-		`SELECT COUNT(*) FROM schema_migrations WHERE version = 9`,
+		`SELECT COUNT(*) FROM schema_migrations WHERE version = 10`,
 	).Scan(&count); err != nil {
 		t.Fatalf("统计迁移记录失败: %v", err)
 	}
 	if count != 1 {
-		t.Fatalf("并发打开后版本 9 的迁移记录数量不符: %d", count)
+		t.Fatalf("并发打开后版本 10 的迁移记录数量不符: %d", count)
 	}
 }
 

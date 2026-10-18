@@ -90,6 +90,9 @@ type RequirementStore interface {
 }
 
 // TaskFilter 约束任务查询条件，零值表示不限制。
+//
+// 逻辑删除的任务默认不返回：只有 IncludeDeleted 为 true 时才把已删除记录纳入
+// 查询范围，用于审计与历史核对。
 type TaskFilter struct {
 	// RequirementID 限制任务所属需求。
 	RequirementID domain.ID
@@ -99,8 +102,22 @@ type TaskFilter struct {
 	Statuses []domain.TaskStatus
 	// ExcludeStatuses 排除指定状态，用于筛选未结束任务。
 	ExcludeStatuses []domain.TaskStatus
+	// IncludeDeleted 表示把已逻辑删除的任务也纳入查询。
+	IncludeDeleted bool
 	// Limit 限制返回条数，小于等于 0 表示不限制。
 	Limit int
+	// Offset 跳过前面若干条记录，用于分页；小于等于 0 表示不跳过。
+	Offset int
+}
+
+// TaskPage 是一次分页查询的结果。
+//
+// Total 是满足筛选条件的总记录数，与 Limit / Offset 无关，调用方据此计算页数。
+type TaskPage struct {
+	// Tasks 是当前页的任务，按创建时间倒序排列。
+	Tasks []domain.Task
+	// Total 是满足筛选条件的记录总数。
+	Total int
 }
 
 // TaskStore 保存需求的一次执行实例。
@@ -121,7 +138,22 @@ type TaskStore interface {
 	GetTask(ctx context.Context, id domain.ID) (*domain.Task, error)
 	// GetTaskByIdempotencyKey 按幂等键查询任务，不存在时返回 storage.ErrNotFound。
 	GetTaskByIdempotencyKey(ctx context.Context, key string) (*domain.Task, error)
+	// ListTasks 按创建时间倒序返回任务，默认不包含已逻辑删除的记录。
 	ListTasks(ctx context.Context, filter TaskFilter) ([]domain.Task, error)
+	// ListTaskPage 按筛选条件分页返回任务，并给出满足条件的总数。
+	//
+	// 总数与分页参数无关，调用方不需要另外实现一次 COUNT 查询。
+	ListTaskPage(ctx context.Context, filter TaskFilter) (TaskPage, error)
+	// DeleteTask 逻辑删除任务：只标记 deleted_at，不删除任务行与历史记录。
+	//
+	// 条件更新保证并发安全：数据库中的任务必须未被删除且仍处于 expected
+	// 状态之一，否则返回 storage.ErrConflict。
+	DeleteTask(
+		ctx context.Context,
+		id domain.ID,
+		expected []domain.TaskStatus,
+		at time.Time,
+	) error
 	// AcquireTaskLease 以原子条件更新领取任务租约。
 	//
 	// 只有任务处于允许开始的状态、且当前租约为空或已过期时才成功；

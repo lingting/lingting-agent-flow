@@ -14,7 +14,7 @@ import (
 )
 
 // latestSchemaVersion 是当前程序内置迁移的最新版本号。
-const latestSchemaVersion = 9
+const latestSchemaVersion = 10
 
 // migrationTableName 是记录已应用迁移版本的元数据表名。
 const migrationTableName = "schema_migrations"
@@ -153,7 +153,7 @@ func TestMigrateUpgradesExistingDatabase(t *testing.T) {
 	testkit.MustExec(
 		t,
 		rawDB(t, db),
-		`DELETE FROM `+migrationTableName+` WHERE version IN (2, 3, 4, 5, 6, 7, 8, 9)`,
+		`DELETE FROM `+migrationTableName+` WHERE version IN (2, 3, 4, 5, 6, 7, 8, 9, 10)`,
 	)
 	if version, err := db.SchemaVersion(ctx); err != nil || version != 1 {
 		t.Fatalf("模拟旧库版本失败: %d, %v", version, err)

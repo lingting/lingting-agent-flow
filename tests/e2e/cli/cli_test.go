@@ -39,6 +39,41 @@ func run(t *testing.T, args ...string) (int, string, string) {
 	return 0, stdout.String(), stderr.String()
 }
 
+// 配置模板中的路径占位符，由 workspaceConfig 替换为测试工作空间内的绝对路径。
+//
+// 使用占位符而不是相对路径，是因为相对路径会按进程工作目录解析：go test 的工作
+// 目录是包目录，直接把相对路径交给会打开数据库的命令会把 SQLite 文件写进仓库。
+//
+// 占位符以 "/" 开头且包含明显的测试标记，即使被误当作路径使用也会立刻失败，
+// 而不是在包目录里悄悄创建出同名的 SQLite 文件。
+const (
+	configDatabasePlaceholder = "/__agentflow-test-missing-database__"
+	configWorktreePlaceholder = "/__agentflow-test-missing-worktree__"
+)
+
+// workspaceConfig 生成一份数据库与工作区都落在测试工作空间内的配置。
+//
+// 所有会打开数据库的用例都必须使用它：数据库文件、WAL/SHM 与工作区目录因此只会
+// 出现在 testkit.Dir(t) 的随机目录中，测试结束后保留便于排查。
+func workspaceConfig(t *testing.T) string {
+	t.Helper()
+	return writeConfig(t, workspaceConfigContent(t))
+}
+
+// workspaceConfigContent 返回替换了工作空间绝对路径的配置内容。
+//
+// 需要在模板基础上再改写其他字段的用例用它，避免重复创建临时目录。
+func workspaceConfigContent(t *testing.T) string {
+	t.Helper()
+	dir := testkit.Dir(t)
+	return strings.NewReplacer(
+		configDatabasePlaceholder,
+		filepath.ToSlash(filepath.Join(dir, "agentflow.db")),
+		configWorktreePlaceholder,
+		filepath.ToSlash(filepath.Join(dir, "worktrees")),
+	).Replace(minimalConfig)
+}
+
 // writeConfig 在临时目录写入配置文件并返回其路径。
 func writeConfig(t *testing.T, content string) string {
 	t.Helper()
@@ -50,14 +85,18 @@ func writeConfig(t *testing.T, content string) string {
 }
 
 // minimalConfig 是一份可以通过校验的最小配置。
+//
+// 其中的数据库与工作区路径是**占位符**，由 workspaceConfig 替换为测试工作空间内的
+// 绝对路径。任何会打开数据库的用例都必须使用 workspaceConfig 生成的配置，直接用
+// 本常量会让 SQLite 文件按进程工作目录解析，写到包目录下。
 const minimalConfig = `
 app:
   name: agentflow
   log_level: debug
 storage:
-  database_path: .agentflow/agentflow.db
+  database_path: ` + configDatabasePlaceholder + `
 workspace:
-  worktree_root: .agentflow/worktrees
+  worktree_root: ` + configWorktreePlaceholder + `
 scheduler:
   max_concurrent_tasks: 1
   max_retries_per_step: 0
@@ -143,7 +182,7 @@ func TestServerFailsOnMissingConfig(t *testing.T) {
 // TestConfigValidateSuccess 校验合法配置的校验命令输出。
 func TestConfigValidateSuccess(t *testing.T) {
 	t.Parallel()
-	path := writeConfig(t, minimalConfig)
+	path := workspaceConfig(t)
 	code, stdout, stderr := run(t, "config", "validate", "--config", path)
 	if code != 0 {
 		t.Fatalf("配置校验应成功，实际退出码 %d，错误: %s", code, stderr)
@@ -156,7 +195,8 @@ func TestConfigValidateSuccess(t *testing.T) {
 // TestConfigValidateFailure 校验非法配置导致非零退出码与明确错误信息。
 func TestConfigValidateFailure(t *testing.T) {
 	t.Parallel()
-	path := writeConfig(t, strings.Replace(minimalConfig, "max_concurrent_tasks: 1", "max_concurrent_tasks: 0", 1))
+	content := strings.Replace(workspaceConfigContent(t), "max_concurrent_tasks: 1", "max_concurrent_tasks: 0", 1)
+	path := writeConfig(t, content)
 	code, _, stderr := run(t, "config", "validate", "--config", path)
 	if code == 0 {
 		t.Fatal("非法配置应返回非零退出码")
@@ -227,4 +267,43 @@ func TestAgentCheckUnknownExecutable(t *testing.T) {
 	if !strings.Contains(stderr, "未找到可执行程序") {
 		t.Fatalf("错误信息应说明可执行程序缺失，实际: %s", stderr)
 	}
+}
+
+// TestWorkspaceConfigUsesAbsolutePaths 校验测试配置不把运行期数据指向相对路径。
+//
+// 相对路径会按进程工作目录解析：go test 的工作目录是包目录，因此把相对路径交给
+// 会打开数据库的命令会把 SQLite 文件写进仓库。所有会打开数据库的用例都必须使用
+// workspaceConfig 生成的绝对路径配置，本用例守住这一点。
+func TestWorkspaceConfigUsesAbsolutePaths(t *testing.T) {
+	t.Parallel()
+	content := workspaceConfigContent(t)
+	for _, key := range []string{"database_path", "worktree_root"} {
+		value := configValue(t, content, key)
+		if !filepath.IsAbs(value) {
+			t.Fatalf("%s 必须是绝对路径，实际 %q", key, value)
+		}
+	}
+	// 模板本身不应残留占位符。
+	if strings.Contains(content, configDatabasePlaceholder) ||
+		strings.Contains(content, configWorktreePlaceholder) {
+		t.Fatalf("配置模板仍有未替换的占位符: %s", content)
+	}
+	// 生成的路径必须落在测试工作空间内，而不是仓库目录。
+	root := testkit.RunRoot(t)
+	if !strings.HasPrefix(configValue(t, content, "database_path"), filepath.ToSlash(root)) {
+		t.Fatalf("数据库路径必须位于测试根目录 %s 之下: %s", root, content)
+	}
+}
+
+// configValue 读取配置内容中某个键的单行取值。
+func configValue(t *testing.T, content, key string) string {
+	t.Helper()
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if value, ok := strings.CutPrefix(trimmed, key+":"); ok {
+			return strings.TrimSpace(value)
+		}
+	}
+	t.Fatalf("配置中缺少 %s: %s", key, content)
+	return ""
 }

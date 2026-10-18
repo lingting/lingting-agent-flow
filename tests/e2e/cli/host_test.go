@@ -17,16 +17,10 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// hostConfig 生成一份指向临时数据库的执行节点测试配置。
+// hostConfig 生成一份指向临时数据库与工作区的执行节点测试配置。
 func hostConfig(t *testing.T) string {
 	t.Helper()
-	dir := testkit.Dir(t)
-	content := strings.ReplaceAll(
-		minimalConfig,
-		".agentflow/agentflow.db",
-		filepath.ToSlash(filepath.Join(dir, "agentflow.db")),
-	)
-	return writeConfig(t, content)
+	return workspaceConfig(t)
 }
 
 // TestHostHelp 校验 host 命令组暴露全部子命令。

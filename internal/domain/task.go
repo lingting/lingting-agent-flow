@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"fmt"
 	"strings"
 	"time"
 )
@@ -161,6 +162,20 @@ func (s TaskStatus) IsTerminal() bool {
 	return taskStatusMachine.isTerminal(string(s))
 }
 
+// IsFinished 判断任务是否已经结束执行，可以安全删除。
+//
+// 它与 IsTerminal 的区别在于 failed：失败任务允许用户显式重试回到执行流程，
+// 因此不是终态，但它的执行确实已经停止，没有正在运行的容器现场需要保护，
+// 管理接口允许删除这类记录。
+func (s TaskStatus) IsFinished() bool {
+	switch s {
+	case TaskStatusCompleted, TaskStatusFailed, TaskStatusCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
 // IsActive 判断任务是否正在执行。
 func (s TaskStatus) IsActive() bool {
 	switch s {
@@ -250,10 +265,14 @@ type Task struct {
 	LeaseOwner string `json:"lease_owner,omitempty"`
 	// LeaseExpiresAt 是租约到期时间，过期后允许其他执行者接管。
 	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	StartedAt      *time.Time `json:"started_at,omitempty"`
-	FinishedAt     *time.Time `json:"finished_at,omitempty"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	// DeletedAt 是逻辑删除时间，空值表示未被删除。
+	//
+	// 删除只标记时间，任务行与其历史记录永久保留，不做物理删除，也不级联删除。
+	DeletedAt  *time.Time `json:"deleted_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	StartedAt  *time.Time `json:"started_at,omitempty"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
+	UpdatedAt  time.Time  `json:"updated_at"`
 }
 
 // NewTask 创建并校验任务。
@@ -426,12 +445,16 @@ func (t *Task) SetContainer(containerID string) error {
 // RequestCancel 记录取消请求。
 //
 // 取消请求先持久化，再由执行者把任务推进到 cancelling；本方法不直接改变状态。
+// 重复请求是幂等的：已记录请求时直接返回，不重复改写时间戳。
 func (t *Task) RequestCancel(at time.Time) error {
 	if t == nil {
 		return invalidField("Task", "", "实体为空")
 	}
+	if t.Deleted() {
+		return invalidField("Task", "deleted_at", "已删除的任务不能请求取消")
+	}
 	if t.Status.IsTerminal() {
-		return invalidField("Task", "status", "已结束的任务不能请求取消")
+		return fmt.Errorf("%w: 已结束的任务不能请求取消", ErrInvalidState)
 	}
 	if t.CancelRequested {
 		return nil
@@ -441,6 +464,67 @@ func (t *Task) RequestCancel(at time.Time) error {
 	t.CancelRequestedAt = &now
 	t.UpdatedAt = now
 	return nil
+}
+
+// CancelImmediately 直接把尚未开始执行的任务标记为已取消。
+//
+// 只有 queued 允许直接取消：任务还没有进入任何执行阶段，不存在需要停止的现场，
+// 因此可以立即收敛为终态。已经开始的执行必须由工作流引擎确认停止后再收敛，
+// 本方法不会伪造"运行中任务已停止"的事实。
+func (t *Task) CancelImmediately(at time.Time) error {
+	if t == nil {
+		return invalidField("Task", "", "实体为空")
+	}
+	if t.Deleted() {
+		return invalidField("Task", "deleted_at", "已删除的任务不能取消")
+	}
+	if t.Status != TaskStatusQueued {
+		return fmt.Errorf(
+			"%w: 只有等待执行的任务可以直接取消，当前状态 %s",
+			ErrInvalidState,
+			t.Status,
+		)
+	}
+	now := normalizeTime(at)
+	if err := t.RequestCancel(now); err != nil {
+		return err
+	}
+	if err := t.Transition(TaskStatusCancelling, now); err != nil {
+		return err
+	}
+	if err := t.Finish(TaskResultCancelled, "任务在开始执行前被取消", now); err != nil {
+		return err
+	}
+	return t.Transition(TaskStatusCancelled, now)
+}
+
+// MarkDeleted 记录逻辑删除时间。
+//
+// 只有终态任务允许删除：执行中的任务必须先停止，否则会留下无人接管的容器现场。
+// 删除不改变状态字段，也不触碰历史记录。
+func (t *Task) MarkDeleted(at time.Time) error {
+	if t == nil {
+		return invalidField("Task", "", "实体为空")
+	}
+	if t.DeletedAt != nil {
+		return fmt.Errorf("%w: 任务已被删除", ErrInvalidState)
+	}
+	if !t.Status.IsFinished() {
+		return fmt.Errorf(
+			"%w: 只有已结束的任务可以删除，当前状态 %s",
+			ErrInvalidState,
+			t.Status,
+		)
+	}
+	now := normalizeTime(at)
+	t.DeletedAt = &now
+	t.UpdatedAt = now
+	return nil
+}
+
+// Deleted 判断任务是否已被逻辑删除。
+func (t Task) Deleted() bool {
+	return t.DeletedAt != nil
 }
 
 // Finish 写入任务最终结论。

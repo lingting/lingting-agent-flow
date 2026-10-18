@@ -221,6 +221,21 @@ func NewProjectConfig(
 	return config, nil
 }
 
+// ValidateProjectID 校验可选的项目标识。
+//
+// 空值表示"未关联项目"，是合法输入；非空时与 ProjectConfig.ID 使用同一套书写
+// 规则，因为该标识同样会进入缓存卷名与远程目录名。
+func ValidateProjectID(id string) error {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return nil
+	}
+	if !EnvironmentNamePattern.MatchString(trimmed) {
+		return invalidField("Project", "id", "项目标识只能包含小写字母、数字与连字符，且不超过 32 个字符")
+	}
+	return nil
+}
+
 // Validate 校验项目配置。
 func (c ProjectConfig) Validate() error {
 	if !EnvironmentNamePattern.MatchString(strings.TrimSpace(c.ID)) {

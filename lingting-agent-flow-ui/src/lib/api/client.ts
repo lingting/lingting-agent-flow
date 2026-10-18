@@ -81,6 +81,8 @@ export class ApiError extends Error {
 
 /** 单次请求选项 */
 export type ApiRequestOptions = {
+  /** 请求体，已由调用方序列化为字符串；不传表示没有请求体 */
+  body?: string;
   /** 附加的请求头 */
   headers?: Record<string, string>;
   /** 请求方法，默认 GET */
@@ -172,6 +174,7 @@ export async function apiRequest<T>(
     let response: Response;
     try {
       response = await fetch(target, {
+        body: options.body,
         headers: { Accept: "application/json", ...options.headers },
         method,
         signal: controller.signal,

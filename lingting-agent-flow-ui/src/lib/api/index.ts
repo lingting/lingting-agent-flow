@@ -9,11 +9,29 @@ export {
   type ApiRequest,
   type ApiRequestOptions,
 } from "./client";
-export { fetchHealth, fetchSystemInfo, HEALTH_PATH, SYSTEM_INFO_PATH } from "./endpoints";
+export {
+  cancelTask,
+  createTask,
+  deleteTask,
+  fetchHealth,
+  fetchSystemInfo,
+  fetchTask,
+  fetchTasks,
+  HEALTH_PATH,
+  SYSTEM_INFO_PATH,
+  TASKS_PATH,
+  taskCancelPath,
+  taskPath,
+} from "./endpoints";
 export type {
+  CreateTaskRequest,
   HealthCheck,
   HealthCheckStatus,
   HealthResponse,
   HealthStatus,
   SystemInfoResponse,
+  Task,
+  TaskListQuery,
+  TaskListResponse,
+  TaskStatus,
 } from "./types";

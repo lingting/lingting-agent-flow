@@ -73,7 +73,7 @@ func TestCodeStatusRequiresTask(t *testing.T) {
 // TestCodeStatusEmptyTask 校验没有任何记录时输出明确提示。
 func TestCodeStatusEmptyTask(t *testing.T) {
 	t.Parallel()
-	configPath := writeConfig(t, minimalConfig)
+	configPath := workspaceConfig(t)
 	code, stdout, stderr := run(t, "code", "status", "--config", configPath, "--task", "task-1")
 	if code != 0 {
 		t.Fatalf("查询不存在的记录应成功退出，实际 %d，错误: %s", code, stderr)

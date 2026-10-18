@@ -18,6 +18,10 @@ const (
 	CodeMethodNotAllowed = "method_not_allowed"
 	// CodeInternal 表示服务内部错误。
 	CodeInternal = "internal_error"
+	// CodeInvalidRequest 表示请求体或查询参数不合法。
+	CodeInvalidRequest = "invalid_request"
+	// CodeConflict 表示资源当前状态不允许该操作。
+	CodeConflict = "state_conflict"
 )
 
 // ErrorBody 是统一的错误描述。

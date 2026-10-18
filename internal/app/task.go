@@ -274,7 +274,7 @@ func (s *TaskService) prepareTaskRequest(
 func (s *TaskService) resolveHost(ctx context.Context, hostID string) (domain.ID, error) {
 	trimmed := strings.TrimSpace(hostID)
 	if trimmed == "" {
-		return "", fmt.Errorf("创建任务失败: 必须指定执行节点")
+		return "", fmt.Errorf("%w: 必须指定执行节点", ErrTaskInvalidInput)
 	}
 	id := domain.ID(trimmed)
 	if err := id.Validate(); err != nil {
@@ -282,6 +282,13 @@ func (s *TaskService) resolveHost(ctx context.Context, hostID string) (domain.ID
 	}
 	host, err := s.store.GetExecutionHost(ctx, id)
 	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return "", fmt.Errorf(
+				"%w: 执行节点 %s 不存在",
+				ErrTaskInvalidInput,
+				id,
+			)
+		}
 		return "", fmt.Errorf("创建任务失败: 读取执行节点失败: %w", err)
 	}
 	if !host.Enabled {
@@ -323,6 +330,24 @@ func (s *TaskService) ensureRoles(ctx context.Context, cfg domain.TaskConfig) er
 		}
 	}
 	return nil
+}
+
+// Requirement 读取任务关联的原始需求。
+//
+// 任务的名称与描述由需求承载，管理接口需要它来展示可读信息；需求不存在时
+// 返回 storage.ErrNotFound，由调用方决定如何呈现。
+func (s *TaskService) Requirement(
+	ctx context.Context,
+	requirementID domain.ID,
+) (*domain.Requirement, error) {
+	if err := requirementID.Validate(); err != nil {
+		return nil, err
+	}
+	requirement, err := s.store.GetRequirement(ctx, requirementID)
+	if err != nil {
+		return nil, fmt.Errorf("读取需求失败: %w", err)
+	}
+	return requirement, nil
 }
 
 // GetTask 读取任务详情。
