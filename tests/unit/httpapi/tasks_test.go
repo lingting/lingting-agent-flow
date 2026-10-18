@@ -180,6 +180,9 @@ func TestCreateTaskReturnsCreatedTask(t *testing.T) {
 	if created.StatusTerminal {
 		t.Fatal("等待执行的任务不应标记为已结束")
 	}
+	if created.StatusFinished {
+		t.Fatal("等待执行的任务不应标记为已停止执行")
+	}
 	if created.StartedAt != nil || created.FinishedAt != nil {
 		t.Fatal("新建任务不应包含开始或结束时间")
 	}
@@ -410,6 +413,9 @@ func TestCancelQueuedTaskSucceeds(t *testing.T) {
 	if !cancelled.StatusTerminal {
 		t.Fatal("已取消任务应标记为已结束")
 	}
+	if !cancelled.StatusFinished {
+		t.Fatal("已取消任务应标记为已停止执行")
+	}
 	if !cancelled.CancelRequested {
 		t.Fatal("应记录取消请求")
 	}
@@ -483,6 +489,9 @@ func TestCancelRunningTaskMarksCancelling(t *testing.T) {
 	if cancelling.StatusTerminal {
 		t.Fatal("取消中不等于已结束")
 	}
+	if cancelling.StatusFinished {
+		t.Fatal("取消中不等于已停止执行")
+	}
 	if cancelling.FinishedAt != nil {
 		t.Fatal("尚未确认停止时不应有结束时间")
 	}
@@ -515,6 +524,67 @@ func TestDeleteFinishedTaskReturnsNoContent(t *testing.T) {
 	detail := fixture.send(t, http.MethodGet, httpapi.PathTasks+"/"+created.ID, nil)
 	if detail.Code != http.StatusNotFound {
 		t.Fatalf("已删除任务详情应返回 404，实际 %d", detail.Code)
+	}
+}
+
+// TestFailedTaskIsFinishedButNotTerminal 校验 failed 的两种标记语义。
+//
+// 失败任务可以显式重试，因此不是终态；但它的执行已经停止，管理接口允许删除、
+// 拒绝再次取消，前端必须据此禁用取消按钮。
+func TestFailedTaskIsFinishedButNotTerminal(t *testing.T) {
+	t.Parallel()
+	fixture := newTaskAPIFixture(t)
+	created := fixture.createTask(t, "任务", "描述")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	task, err := fixture.db.GetTask(ctx, domain.ID(created.ID))
+	if err != nil {
+		t.Fatalf("读取任务失败: %v", err)
+	}
+	now := time.Now().UTC()
+	if err := task.Transition(domain.TaskStatusPreparing, now); err != nil {
+		t.Fatalf("状态迁移失败: %v", err)
+	}
+	if err := task.Transition(domain.TaskStatusFailed, now); err != nil {
+		t.Fatalf("状态迁移失败: %v", err)
+	}
+	if err := task.Finish(domain.TaskResultFailed, "编译失败", now); err != nil {
+		t.Fatalf("写入结论失败: %v", err)
+	}
+	if err := fixture.db.UpdateTask(ctx, *task); err != nil {
+		t.Fatalf("更新任务失败: %v", err)
+	}
+
+	recorder := fixture.send(t, http.MethodGet, httpapi.PathTasks+"/"+created.ID, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("读取详情失败: %d %s", recorder.Code, recorder.Body.String())
+	}
+	var detail httpapi.TaskResponse
+	decodeBody(t, recorder, &detail)
+	if detail.StatusTerminal {
+		t.Fatal("failed 允许显式重试，不应标记为终态")
+	}
+	if !detail.StatusFinished {
+		t.Fatal("failed 的执行已经停止，应标记为已停止执行")
+	}
+	if detail.Error != "编译失败" {
+		t.Fatalf("错误摘要不符: %q", detail.Error)
+	}
+
+	// 已停止执行的任务不能再次取消。
+	cancelled := fixture.send(
+		t,
+		http.MethodPost,
+		httpapi.PathTasks+"/"+created.ID+"/cancel",
+		nil,
+	)
+	if cancelled.Code != http.StatusConflict {
+		t.Fatalf("取消失败任务应返回 409，实际 %d", cancelled.Code)
+	}
+	// 但允许删除。
+	removed := fixture.send(t, http.MethodDelete, httpapi.PathTasks+"/"+created.ID, nil)
+	if removed.Code != http.StatusNoContent {
+		t.Fatalf("删除失败任务应返回 204，实际 %d: %s", removed.Code, removed.Body.String())
 	}
 }
 

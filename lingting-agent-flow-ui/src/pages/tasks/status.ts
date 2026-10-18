@@ -45,12 +45,17 @@ export function taskStatusMeta(status: TaskStatus): TaskStatusMeta {
   return TASK_STATUS_META[status] ?? { active: false, color: "default", label: String(status) };
 }
 
-/** 是否允许请求取消：已结束或已处于取消中都不需要再发请求 */
+/**
+ * 是否允许请求取消。
+ *
+ * 已停止执行的任务（含 `failed`）不能取消，否则服务端会返回 409；
+ * 已处于 `cancelling` 时请求已经记录，不需要重复发起。
+ */
 export function canCancelTask(task: Task): boolean {
-  return !task.status_terminal && task.status !== "cancelling";
+  return !task.status_finished && task.status !== "cancelling";
 }
 
-/** 是否允许删除：只有已结束的任务可以删除 */
+/** 是否允许删除：只有已停止执行的任务可以删除，与服务端删除规则一致 */
 export function canDeleteTask(task: Task): boolean {
-  return task.status_terminal;
+  return task.status_finished;
 }

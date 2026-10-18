@@ -23,6 +23,7 @@ function task(overrides: Partial<Task> = {}): Task {
     name: "任务",
     project_id: "",
     status: "queued",
+    status_finished: false,
     status_terminal: false,
     updated_at: "2025-01-01T00:00:00Z",
     ...overrides,
@@ -76,10 +77,10 @@ describe("任务状态元数据", () => {
 });
 
 describe("任务操作可用性", () => {
-  it("已结束的任务不能取消", () => {
-    expect(canCancelTask(task({ status: "completed", status_terminal: true }))).toBe(false);
-    expect(canCancelTask(task({ status: "failed", status_terminal: true }))).toBe(false);
-    expect(canCancelTask(task({ status: "cancelled", status_terminal: true }))).toBe(false);
+  it("已停止执行的任务不能取消", () => {
+    for (const status of ["completed", "failed", "cancelled"] as TaskStatus[]) {
+      expect(canCancelTask(task({ status, status_finished: true }))).toBe(false);
+    }
   });
 
   it("等待执行与执行中的任务可以取消", () => {
@@ -91,13 +92,19 @@ describe("任务操作可用性", () => {
     expect(canCancelTask(task({ status: "cancelling" }))).toBe(false);
   });
 
-  it("只有已结束的任务可以删除", () => {
-    expect(canDeleteTask(task({ status: "completed", status_terminal: true }))).toBe(true);
-    expect(canDeleteTask(task({ status: "failed", status_terminal: true }))).toBe(true);
-    expect(canDeleteTask(task({ status: "cancelled", status_terminal: true }))).toBe(true);
+  it("已停止执行的任务可以删除，执行中的任务不能删除", () => {
+    for (const status of ["completed", "failed", "cancelled"] as TaskStatus[]) {
+      expect(canDeleteTask(task({ status, status_finished: true }))).toBe(true);
+    }
     expect(canDeleteTask(task({ status: "queued" }))).toBe(false);
     expect(canDeleteTask(task({ status: "developing" }))).toBe(false);
     expect(canDeleteTask(task({ status: "cancelling" }))).toBe(false);
+  });
+
+  it("failed 不是终态但已停止执行：可删除、不可取消", () => {
+    const failed = task({ status: "failed", status_finished: true, status_terminal: false });
+    expect(canDeleteTask(failed)).toBe(true);
+    expect(canCancelTask(failed)).toBe(false);
   });
 });
 

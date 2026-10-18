@@ -69,8 +69,10 @@ export type Task = {
   name: string;
   description: string;
   status: TaskStatus;
-  /** 任务是否已结束，用于决定可用的操作 */
+  /** 任务是否处于终态（`completed`、`cancelled`），用于区分"已结束"与"可重试" */
   status_terminal: boolean;
+  /** 任务是否已停止执行，用于决定取消与删除是否可用；`failed` 也属于已停止 */
+  status_finished: boolean;
   /** 关联项目标识，未关联时为空字符串 */
   project_id: string;
   cancel_requested: boolean;

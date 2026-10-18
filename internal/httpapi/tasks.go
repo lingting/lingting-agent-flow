@@ -40,8 +40,13 @@ type TaskResponse struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	Status      string `json:"status"`
-	// StatusTerminal 表示任务是否已结束，前端据此决定可用的操作。
+	// StatusTerminal 表示任务是否处于终态，前端据此区分"已结束执行"与"可重试"。
 	StatusTerminal bool `json:"status_terminal"`
+	// StatusFinished 表示任务是否已停止执行，前端据此决定取消与删除是否可用。
+	//
+	// 它与 StatusTerminal 的差别在 failed：失败任务可以显式重试，因此不是终态，
+	// 但它的执行已经停止，管理接口允许删除、拒绝再次取消。
+	StatusFinished bool `json:"status_finished"`
 	// ProjectID 是关联项目标识，未关联时为空字符串。
 	ProjectID         string     `json:"project_id"`
 	CancelRequested   bool       `json:"cancel_requested"`
@@ -333,6 +338,7 @@ func taskResponse(task domain.Task, name, description string) TaskResponse {
 		Description:       description,
 		Status:            string(task.Status),
 		StatusTerminal:    task.Status.IsTerminal(),
+		StatusFinished:    task.Status.IsFinished(),
 		ProjectID:         task.Config.ProjectID,
 		CancelRequested:   task.CancelRequested,
 		CancelRequestedAt: task.CancelRequestedAt,

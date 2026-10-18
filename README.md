@@ -200,8 +200,12 @@ make web-dev            # 等价于 cd lingting-agent-flow-ui && pnpm dev
 | `failed`            | 任务执行失败                             |
 | `cancelled`         | 取消流程已完成                           |
 
-响应中的 `status_terminal` 表示任务是否已结束（`completed`、`cancelled`）。`failed` 允许
-用户显式重试，因此不是终态，但它的执行已经停止，管理接口允许删除这类记录。
+响应中的两个布尔字段表达不同语义，不能互相替代：
+
+- `status_terminal` 表示任务是否处于终态，只有 `completed` 与 `cancelled` 为真；
+  `failed` 允许用户显式重试，因此不是终态。
+- `status_finished` 表示任务是否已停止执行，`completed`、`failed`、`cancelled` 为真。
+  管理接口用它判定可用操作：已停止执行的任务可以删除、不可再次取消。
 
 #### 创建任务
 
@@ -253,6 +257,7 @@ GET /api/v1/tasks?current=1&size=20&status=queued&status=failed
       "description": "为登录页接入真实接口",
       "status": "queued",
       "status_terminal": false,
+      "status_finished": false,
       "project_id": "demo-service",
       "cancel_requested": false,
       "created_at": "2025-01-01T00:00:00Z",

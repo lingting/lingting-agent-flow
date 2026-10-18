@@ -286,8 +286,12 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
 - 任务页面的状态标签必须由 `src/pages/tasks/status.ts` 的单一映射派生，取值与 Go 端
   `domain.TaskStatus` 一一对应；禁止新增前端状态名，也禁止把 `queued` 或中间状态显示为
   成功或失败。
-- 任务页面的操作可用性必须依据接口返回的 `status` 与 `status_terminal` 判定：已结束任务
-  不可取消，未结束任务不可删除；不得在前端伪造状态或跳过服务端校验。
+- 任务页面的操作可用性必须依据接口返回的 `status_finished` 判定：已停止执行的任务
+  （`completed`、`failed`、`cancelled`）不可取消但可以删除，其余状态可以取消但不可删除；
+  `status_terminal` 只表达"是否终态"（`completed`、`cancelled`），不得用它代替删除判定。
+  不得在前端伪造状态或跳过服务端校验。
+- 任务列表必须使用 `lingting-react-ui` 的 `ExTable` 承载分页、筛选与加载状态，不得用
+  原生 `<table>` 或手写分页重新实现一套表格。
 - 所有前端测试位于 `lingting-agent-flow-ui/tests/`，测试产物写入操作系统临时目录下的随机
   唯一目录并保留，不得自动清理。
 - 不得声称未运行的测试已经通过。

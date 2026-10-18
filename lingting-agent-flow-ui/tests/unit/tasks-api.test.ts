@@ -35,6 +35,7 @@ function sampleTask(overrides: Partial<Task> = {}): Task {
     name: "实现登录",
     project_id: "",
     status: "queued",
+    status_finished: false,
     status_terminal: false,
     updated_at: "2025-01-01T00:00:00Z",
     ...overrides,

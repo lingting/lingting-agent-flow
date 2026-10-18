@@ -1,16 +1,17 @@
 import { PlusOutlined, ReloadOutlined } from "@ant-design/icons";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ActionType } from "@ant-design/pro-components";
+import { Alert, Descriptions, Flex, Space, Typography } from "antd";
 import {
-  Alert,
   Button,
-  Descriptions,
-  Flex,
-  Popconfirm,
-  Select,
-  Space,
-  Tag,
-  Typography,
-} from "antd";
+  DictSelect,
+  DictTag,
+  type DictItem,
+  type ExTableColumn,
+  type ExTableRequestParams,
+  ExTable,
+  LinkButton,
+} from "lingting-react-ui";
+import { useCallback, useMemo, useRef, useState } from "react";
 
 import {
   ApiError,
@@ -22,18 +23,22 @@ import {
   type TaskStatus,
 } from "@/lib/api";
 import { CreateTaskModal } from "@/pages/tasks/CreateTaskModal";
-import {
-  canCancelTask,
-  canDeleteTask,
-  TASK_STATUS_OPTIONS,
-  taskStatusMeta,
-} from "@/pages/tasks/status";
+import { canCancelTask, canDeleteTask, TASK_STATUS_META } from "@/pages/tasks/status";
 
 /** 默认页大小，与后端默认值一致 */
 const DEFAULT_PAGE_SIZE = 20;
 
-/** 页大小选项 */
-const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
+/**
+ * 任务状态字典。
+ *
+ * 取值与中文标签完全来自 `status.ts` 的单一映射，这里只把它转换成 DictTag 需要的形状，
+ * 不在页面里重新定义状态名或语义。
+ */
+const STATUS_DICT: DictItem<string>[] = Object.entries(TASK_STATUS_META).map(([value, meta]) => ({
+  label: meta.label,
+  tagColor: meta.color,
+  value,
+}));
 
 /** 把未知错误转成可读说明，保留服务端返回的业务提示 */
 function describeError(error: unknown): string {
@@ -53,12 +58,6 @@ function formatTime(value?: string): string {
   return parsed.toLocaleString();
 }
 
-/** 任务状态标签 */
-function StatusTag({ status }: { status: TaskStatus }) {
-  const meta = taskStatusMeta(status);
-  return <Tag color={meta.color}>{meta.label}</Tag>;
-}
-
 /** 任务详情面板：只展示接口实际返回的字段 */
 function TaskDetail({ task }: { task: Task }) {
   return (
@@ -68,7 +67,7 @@ function TaskDetail({ task }: { task: Task }) {
       </Descriptions.Item>
       <Descriptions.Item label="描述">{task.description}</Descriptions.Item>
       <Descriptions.Item label="状态">
-        <StatusTag status={task.status} />
+        <DictTag dict={STATUS_DICT} value={task.status} />
       </Descriptions.Item>
       <Descriptions.Item label="关联项目">
         {task.project_id || <Typography.Text type="secondary">未关联</Typography.Text>}
@@ -94,52 +93,20 @@ function TaskDetail({ task }: { task: Task }) {
 /**
  * 任务页面：展示真实任务数据，支持创建、查看详情、取消与删除。
  *
- * 页面不做任何状态推断：状态一律按接口返回值展示，不会把尚未执行的任务显示为成功或失败。
+ * 页面不做任何状态推断：状态一律按接口返回值展示，不会把尚未执行的任务显示为成功或失败；
+ * 取消与删除的可用性依据接口返回的 `status_finished`，与服务端规则保持一致。
  */
 export function TasksPage() {
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [total, setTotal] = useState(0);
-  const [current, setCurrent] = useState(1);
-  const [size, setSize] = useState(DEFAULT_PAGE_SIZE);
+  const actionRef = useRef<ActionType>(undefined);
   const [statuses, setStatuses] = useState<TaskStatus[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string>();
+  const [loadError, setLoadError] = useState<string>();
   const [actionError, setActionError] = useState<string>();
   const [selected, setSelected] = useState<Task>();
   const [detailLoading, setDetailLoading] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
-  const requestRef = useRef(0);
 
-  const load = useCallback(async () => {
-    const requestID = requestRef.current + 1;
-    requestRef.current = requestID;
-    setLoading(true);
-    setError(undefined);
-    try {
-      const { data } = await fetchTasks({
-        current,
-        size,
-        status: statuses.length > 0 ? statuses : undefined,
-      });
-      // 只接受最后一次请求的结果，避免过期响应覆盖当前筛选条件。
-      if (requestRef.current !== requestID) return;
-      setTasks(data.records);
-      setTotal(data.total);
-    } catch (cause) {
-      if (requestRef.current !== requestID) return;
-      setTasks([]);
-      setTotal(0);
-      setError(describeError(cause));
-    } finally {
-      if (requestRef.current === requestID) {
-        setLoading(false);
-      }
-    }
-  }, [current, size, statuses]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+  /** 重新拉取当前页真实数据 */
+  const reload = useCallback(() => void actionRef.current?.reload(), []);
 
   const openDetail = useCallback(async (taskID: string) => {
     setDetailLoading(true);
@@ -160,7 +127,7 @@ export function TasksPage() {
       setActionError(undefined);
       try {
         await cancelTask(task.id);
-        await load();
+        reload();
         if (selected?.id === task.id) {
           await openDetail(task.id);
         }
@@ -168,7 +135,7 @@ export function TasksPage() {
         setActionError(describeError(cause));
       }
     },
-    [load, openDetail, selected?.id],
+    [openDetail, reload, selected?.id],
   );
 
   const handleDelete = useCallback(
@@ -179,71 +146,125 @@ export function TasksPage() {
         if (selected?.id === task.id) {
           setSelected(undefined);
         }
-        await load();
+        reload();
       } catch (cause) {
         setActionError(describeError(cause));
       }
     },
-    [load, selected?.id],
+    [reload, selected?.id],
   );
 
-  const totalPages = Math.max(1, Math.ceil(total / size));
-  const emptyText = useMemo(() => {
-    if (loading) return "正在加载任务…";
-    if (error) return "加载失败";
-    if (statuses.length > 0) return "当前筛选条件下没有任务";
-    return "还没有任务，点击「创建任务」开始";
-  }, [error, loading, statuses.length]);
+  const columns = useMemo<ExTableColumn<Task & Record<string, unknown>>[]>(
+    () => [
+      {
+        dataIndex: "name",
+        render: (_dom, record) => (
+          <Flex gap={4} vertical>
+            <LinkButton onClick={() => void openDetail(record.id)} text={record.name} />
+            <Typography.Text type="secondary" ellipsis style={{ maxWidth: 320 }}>
+              {record.description}
+            </Typography.Text>
+          </Flex>
+        ),
+        search: false,
+        title: "任务名称",
+      },
+      {
+        dataIndex: "status",
+        dict: STATUS_DICT,
+        render: (_dom, record) => <DictTag dict={STATUS_DICT} value={record.status} />,
+        search: false,
+        title: "状态",
+      },
+      {
+        dataIndex: "created_at",
+        render: (_dom, record) => formatTime(record.created_at),
+        search: false,
+        title: "创建时间",
+      },
+      {
+        dataIndex: "updated_at",
+        render: (_dom, record) => formatTime(record.updated_at),
+        search: false,
+        title: "更新时间",
+      },
+      {
+        dataIndex: "option",
+        render: (_dom, record) => (
+          <Space>
+            <LinkButton onClick={() => void openDetail(record.id)} text="详情" />
+            <LinkButton
+              disabled={!canCancelTask(record)}
+              onClick={() => void handleCancel(record)}
+              text="取消"
+            />
+            <LinkButton
+              confirm={{
+                description: "删除后任务不再出现在列表中，历史记录仍会保留。",
+                title: "确认删除该任务？",
+              }}
+              danger
+              disabled={!canDeleteTask(record)}
+              onConfirm={() => handleDelete(record)}
+              text="删除"
+            />
+          </Space>
+        ),
+        search: false,
+        title: "操作",
+        valueType: "option",
+      },
+    ],
+    [handleCancel, handleDelete, openDetail],
+  );
+
+  /**
+   * 分页请求。
+   *
+   * 筛选条件通过闭包读取页面状态：ProTable 会在 request 变化时自动重新请求，
+   * 因此切换状态筛选后列表与总数都会刷新；`current` 与 `size` 仍由分页控件提供。
+   *
+   * 请求失败时清空数据并记录错误，由页面顶部的提示给出重试入口，不把失败伪装成空列表。
+   */
+  const request = useCallback(
+    async (params: { current: number; size: number }, query: { statuses?: TaskStatus[] }) => {
+      setLoadError(undefined);
+      const selected = query.statuses ?? [];
+      try {
+        const { data } = await fetchTasks({
+          current: params.current,
+          size: params.size,
+          status: selected.length > 0 ? selected : undefined,
+        });
+        return { records: data.records, total: data.total };
+      } catch (cause) {
+        setLoadError(describeError(cause));
+        return { records: [], total: 0 };
+      }
+    },
+    [],
+  );
 
   return (
     <Flex gap="middle" vertical style={{ width: "100%" }}>
-      <Flex align="center" gap="small" justify="space-between" wrap>
-        <Space wrap>
-          <Select
-            allowClear
-            mode="multiple"
-            options={TASK_STATUS_OPTIONS}
-            placeholder="按状态筛选"
-            style={{ minWidth: 220 }}
-            value={statuses}
-            onChange={(value) => {
-              setStatuses(value as TaskStatus[]);
-              setCurrent(1);
-            }}
-          />
-          <Button icon={<ReloadOutlined />} onClick={() => void load()}>
-            刷新
-          </Button>
-        </Space>
-        <Button icon={<PlusOutlined />} type="primary" onClick={() => setCreateOpen(true)}>
-          创建任务
-        </Button>
-      </Flex>
-
-      {error && (
+      {loadError && (
         <Alert
-          action={
-            <Button size="small" onClick={() => void load()}>
-              重试
-            </Button>
-          }
+          action={<Button onClick={reload} size="small" text="重试" />}
+          description={loadError}
           showIcon
           title="加载任务失败"
-          description={error}
           type="error"
         />
       )}
       {actionError && (
-        <Alert closable showIcon title="操作失败" description={actionError} type="error" />
+        <Alert closable description={actionError} showIcon title="操作失败" type="error" />
       )}
 
       {selected && (
         <Flex gap="small" vertical>
           <Flex align="center" gap="small" justify="space-between">
             <Typography.Text strong>任务详情</Typography.Text>
-            <Button size="small" type="text" onClick={() => setSelected(undefined)}>
-              关闭
-            </Button>
+            <Button onClick={() => setSelected(undefined)} size="small" text="关闭" type="text" />
           </Flex>
           {detailLoading ? (
             <Typography.Text type="secondary">正在加载详情…</Typography.Text>
@@ -253,131 +274,48 @@ export function TasksPage() {
         </Flex>
       )}
 
-      <div style={{ overflowX: "auto" }}>
-        <table style={{ borderCollapse: "collapse", width: "100%" }}>
-          <thead>
-            <tr>
-              {["任务名称", "状态", "创建时间", "更新时间", "操作"].map((title) => (
-                <th
-                  key={title}
-                  style={{
-                    borderBottom: "1px solid rgba(0,0,0,0.08)",
-                    padding: "8px 12px",
-                    textAlign: "left",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  <Typography.Text strong>{title}</Typography.Text>
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {tasks.map((task) => (
-              <tr key={task.id}>
-                <td style={{ borderBottom: "1px solid rgba(0,0,0,0.06)", padding: "8px 12px" }}>
-                  <Flex gap={4} vertical>
-                    <Typography.Link onClick={() => void openDetail(task.id)}>
-                      {task.name}
-                    </Typography.Link>
-                    <Typography.Text type="secondary" ellipsis style={{ maxWidth: 320 }}>
-                      {task.description}
-                    </Typography.Text>
-                  </Flex>
-                </td>
-                <td style={{ borderBottom: "1px solid rgba(0,0,0,0.06)", padding: "8px 12px" }}>
-                  <StatusTag status={task.status} />
-                </td>
-                <td
-                  style={{
-                    borderBottom: "1px solid rgba(0,0,0,0.06)",
-                    padding: "8px 12px",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {formatTime(task.created_at)}
-                </td>
-                <td
-                  style={{
-                    borderBottom: "1px solid rgba(0,0,0,0.06)",
-                    padding: "8px 12px",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {formatTime(task.updated_at)}
-                </td>
-                <td style={{ borderBottom: "1px solid rgba(0,0,0,0.06)", padding: "8px 12px" }}>
-                  <Space>
-                    <Button size="small" onClick={() => void openDetail(task.id)}>
-                      详情
-                    </Button>
-                    <Button
-                      disabled={!canCancelTask(task)}
-                      size="small"
-                      onClick={() => void handleCancel(task)}
-                    >
-                      取消
-                    </Button>
-                    <Popconfirm
-                      description="删除后任务不再出现在列表中，历史记录仍会保留。"
-                      disabled={!canDeleteTask(task)}
-                      okText="删除"
-                      title="确认删除该任务？"
-                      onConfirm={() => void handleDelete(task)}
-                    >
-                      <Button danger disabled={!canDeleteTask(task)} size="small">
-                        删除
-                      </Button>
-                    </Popconfirm>
-                  </Space>
-                </td>
-              </tr>
-            ))}
-            {tasks.length === 0 && (
-              <tr>
-                <td colSpan={5} style={{ padding: "24px 12px", textAlign: "center" }}>
-                  <Typography.Text type="secondary">{emptyText}</Typography.Text>
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-
-      <Flex align="center" gap="small" justify="end" wrap>
-        <Typography.Text type="secondary">共 {total} 条</Typography.Text>
-        <Select
-          options={PAGE_SIZE_OPTIONS.map((value) => ({ label: `${value} 条/页`, value }))}
-          style={{ width: 120 }}
-          value={size}
-          onChange={(value) => {
-            setSize(value);
-            setCurrent(1);
-          }}
-        />
-        <Button disabled={current <= 1} size="small" onClick={() => setCurrent(current - 1)}>
-          上一页
-        </Button>
-        <Typography.Text>
-          {current} / {totalPages}
-        </Typography.Text>
-        <Button
-          disabled={current >= totalPages}
-          size="small"
-          onClick={() => setCurrent(current + 1)}
-        >
-          下一页
-        </Button>
-      </Flex>
+      <ExTable<Task & Record<string, unknown>, { statuses: TaskStatus[] }>
+        actionRef={actionRef}
+        columns={columns}
+        locale={{ emptyText: "没有符合条件的任务" }}
+        pagination={{ defaultPageSize: DEFAULT_PAGE_SIZE, pageSizeOptions: [10, 20, 50, 100] }}
+        // params 在运行时会被合并进 request 参数，是筛选变化的重新请求信号；
+        // 库把该属性类型固定为分页参数，这里按实际形状断言。
+        params={{ statuses } as unknown as ExTableRequestParams}
+        request={request}
+        rowKey="id"
+        search={false}
+        toolBarRender={() => [
+          <DictSelect
+            allowClear
+            dict={STATUS_DICT}
+            key="status-filter"
+            mode="multiple"
+            placeholder="按状态筛选"
+            style={{ minWidth: 220 }}
+            value={statuses}
+            onChange={(value) => {
+              setStatuses((value ?? []) as TaskStatus[]);
+            }}
+          />,
+          <Button icon={<ReloadOutlined />} key="reload" onClick={reload} text="刷新" />,
+          <Button
+            icon={<PlusOutlined />}
+            key="create"
+            onClick={() => setCreateOpen(true)}
+            text="创建任务"
+            type="primary"
+          />,
+        ]}
+      />
 
       <CreateTaskModal
-        open={createOpen}
         onCancel={() => setCreateOpen(false)}
-        onCreated={async () => {
+        onCreated={() => {
           setCreateOpen(false);
-          setCurrent(1);
-          await load();
+          reload();
         }}
+        open={createOpen}
       />
     </Flex>
   );
