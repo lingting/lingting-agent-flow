@@ -18,7 +18,7 @@ import (
 // expectedSchemaVersion 是当前程序内置迁移的最新版本号。
 //
 // 该常量与 migrations 目录中的脚本数量保持一致，新增迁移时必须同步更新。
-const expectedSchemaVersion = 8
+const expectedSchemaVersion = 9
 
 // TestPersistentWorkflowLifecycle 覆盖一次完整的持久化链路：
 // 迁移 → 角色初始化 → 需求与任务 → 计划 → 尝试 → 会话 → 验证 → 事件 → 重启恢复。
@@ -371,8 +371,18 @@ func TestPersistentWorkflowLifecycle(t *testing.T) {
 		t.Fatalf("事件数量不符: %d", len(events))
 	}
 
-	// 被历史引用的角色不能被删除，历史记录不会因角色删除而丢失。
-	if err := reopened.DeleteRole(ctx, roles["developer"].ID); !errors.Is(err, storage.ErrForeignKey) {
-		t.Fatalf("被历史引用的角色不应被删除，实际: %v", err)
+	// 角色删除改为逻辑删除：历史引用不会阻止删除，但历史记录必须完整保留。
+	if err := reopened.DeleteRole(ctx, roles["developer"].ID); err != nil {
+		t.Fatalf("逻辑删除角色失败: %v", err)
+	}
+	if _, err := reopened.GetRole(ctx, roles["developer"].ID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("逻辑删除后角色不应出现在正常查询中，实际: %v", err)
+	}
+	reloadedStep, err := reopened.GetStep(ctx, step.ID)
+	if err != nil {
+		t.Fatalf("步骤历史不应因角色逻辑删除而丢失: %v", err)
+	}
+	if reloadedStep.RoleID != roles["developer"].ID {
+		t.Fatalf("步骤应保留原角色标识: %s", reloadedStep.RoleID)
 	}
 }

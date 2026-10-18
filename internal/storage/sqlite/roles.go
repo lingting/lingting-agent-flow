@@ -89,15 +89,22 @@ WHERE id = ?`
 	return nil
 }
 
-// DeleteRole 删除角色。
+// DeleteRole 逻辑删除角色。
 //
-// 角色仍被步骤或会话历史引用时，外键约束会阻止删除，返回 storage.ErrForeignKey，
-// 保证历史记录不会因角色删除而丢失。
+// 数据库不声明外键，删除角色不会影响历史步骤与会话记录。这里只把 deleted_at
+// 置为当前时间并禁用角色，历史引用仍能读到该角色。
 func (s roleStore) DeleteRole(ctx context.Context, id domain.ID) error {
 	if err := id.Validate(); err != nil {
 		return err
 	}
-	result, err := s.q.ExecContext(ctx, `DELETE FROM roles WHERE id = ?`, toIDParam(id))
+	now := nowMillis()
+	result, err := s.q.ExecContext(
+		ctx,
+		`UPDATE roles SET deleted_at = ?, enabled = 0, updated_at = ? WHERE id = ? AND deleted_at IS NULL`,
+		now,
+		now,
+		toIDParam(id),
+	)
 	if err != nil {
 		return wrapError("删除角色", err)
 	}
@@ -109,7 +116,7 @@ func (s roleStore) GetRole(ctx context.Context, id domain.ID) (*domain.Role, err
 	if err := id.Validate(); err != nil {
 		return nil, err
 	}
-	const statement = `SELECT ` + roleColumns + ` FROM roles WHERE id = ?`
+	const statement = `SELECT ` + roleColumns + ` FROM roles WHERE id = ? AND deleted_at IS NULL`
 	role, err := scanRole(s.q.QueryRowContext(ctx, statement, toIDParam(id)))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -120,9 +127,10 @@ func (s roleStore) GetRole(ctx context.Context, id domain.ID) (*domain.Role, err
 	return role, nil
 }
 
-// ListRoles 按创建时间返回全部角色。
+// ListRoles 按创建时间返回全部未删除的角色。
 func (s roleStore) ListRoles(ctx context.Context) ([]domain.Role, error) {
-	const statement = `SELECT ` + roleColumns + ` FROM roles ORDER BY created_at, rowid`
+	const statement = `SELECT ` + roleColumns + ` FROM roles WHERE deleted_at IS NULL
+		ORDER BY created_at, rowid`
 	rows, err := s.q.QueryContext(ctx, statement)
 	if err != nil {
 		return nil, wrapError("查询角色", err)
@@ -184,10 +192,15 @@ func (s roleStore) SeedRoles(ctx context.Context, seeds []storage.RoleSeed) (int
 	return created, nil
 }
 
-// countRoles 返回角色总数。
+// countRoles 返回未删除角色的数量。
+//
+// 逻辑删除的角色不参与"是否已有角色"的判断，但保留物理行以维持历史引用。
 func (s roleStore) countRoles(ctx context.Context) (int, error) {
 	var total int
-	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM roles`).Scan(&total); err != nil {
+	if err := s.q.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM roles WHERE deleted_at IS NULL`,
+	).Scan(&total); err != nil {
 		return 0, wrapError("统计角色", err)
 	}
 	return total, nil

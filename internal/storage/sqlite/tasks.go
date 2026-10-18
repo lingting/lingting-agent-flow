@@ -34,7 +34,7 @@ type taskRecord struct {
 
 // CreateTask 写入任务。
 //
-// requirement_id 与 host_id 必须引用已存在的记录，否则返回 storage.ErrForeignKey。
+// requirement_id 与 host_id 作为普通文本保存，数据库不校验引用是否存在；
 // 幂等键重复时返回 storage.ErrConflict。
 func (s taskStore) CreateTask(ctx context.Context, task domain.Task) error {
 	record, err := encodeTask(task)

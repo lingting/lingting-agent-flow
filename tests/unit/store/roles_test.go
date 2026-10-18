@@ -125,21 +125,51 @@ func TestCreateRoleRejectsInvalidValue(t *testing.T) {
 	}
 }
 
-func TestDeleteRoleReferencedByHistoryIsRejected(t *testing.T) {
+func TestDeleteRoleReferencedByHistoryIsSoftDeleted(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	ctx := testContext(t)
 	built := newFixture(t, db)
 
-	err := db.DeleteRole(ctx, built.developer.ID)
-	if !errors.Is(err, storage.ErrForeignKey) {
-		t.Fatalf("被历史引用的角色不应被删除，实际: %v", err)
+	// 数据库不声明外键，删除角色改为逻辑删除：历史引用不会阻止删除，
+	// 但步骤与会话历史仍然完整保留。
+	if err := db.DeleteRole(ctx, built.developer.ID); err != nil {
+		t.Fatalf("逻辑删除角色失败: %v", err)
 	}
-	if _, err := db.GetRole(ctx, built.developer.ID); err != nil {
-		t.Fatalf("角色不应被删除: %v", err)
+	if _, err := db.GetRole(ctx, built.developer.ID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("逻辑删除后角色不应出现在正常查询中，实际: %v", err)
 	}
-	if _, err := db.GetStep(ctx, built.step.ID); err != nil {
+	step, err := db.GetStep(ctx, built.step.ID)
+	if err != nil {
 		t.Fatalf("步骤历史不应丢失: %v", err)
+	}
+	if step.RoleID != built.developer.ID {
+		t.Fatalf("步骤仍应保留原角色标识: %s", step.RoleID)
+	}
+	// 删除是幂等的失败路径：重复删除返回记录不存在。
+	if err := db.DeleteRole(ctx, built.developer.ID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("重复删除应当返回记录不存在，实际: %v", err)
+	}
+}
+
+func TestDeleteRoleKeepsRowForHistory(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	built := newFixture(t, db)
+	if err := db.DeleteRole(testContext(t), built.developer.ID); err != nil {
+		t.Fatalf("逻辑删除角色失败: %v", err)
+	}
+	// 逻辑删除只标记 deleted_at，物理行与历史引用都必须保留。
+	var total, deleted int
+	ctx := testContext(t)
+	if err := rawDB(t, db).QueryRowContext(
+		ctx,
+		`SELECT COUNT(*), SUM(CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END) FROM roles`,
+	).Scan(&total, &deleted); err != nil {
+		t.Fatalf("统计角色行失败: %v", err)
+	}
+	if total != 3 || deleted != 1 {
+		t.Fatalf("逻辑删除结果不符: 总行数 %d，已删除 %d", total, deleted)
 	}
 }
 

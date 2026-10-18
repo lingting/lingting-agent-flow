@@ -167,27 +167,50 @@ func TestAttemptInterruptedStatusPersists(t *testing.T) {
 	}
 }
 
-func TestAttemptInvalidStatusIsRejected(t *testing.T) {
+func TestAttemptAcceptsUnknownStatusAtDatabaseLevel(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	built := newFixture(t, db)
-	err := testkit.ExecConstraint(t, rawDB(t, db), `UPDATE attempts SET status = 'bogus' WHERE id = ?`,
+	// 数据库不再限制 status / verification_verdict 的取值集合。
+	testkit.MustExec(
+		t,
+		rawDB(t, db),
+		`UPDATE attempts SET status = 'awaiting_retry', verification_verdict = 'unknown_v2' WHERE id = ?`,
 		built.attempt.ID.String(),
 	)
-	if !errors.Is(err, storage.ErrInvalidData) {
-		t.Fatalf("非法尝试状态应当被拒绝，实际: %v", err)
+	loaded, err := db.GetAttempt(testContext(t), built.attempt.ID)
+	if err != nil {
+		t.Fatalf("读取执行尝试失败: %v", err)
+	}
+	if loaded.Status != domain.AttemptStatus("awaiting_retry") {
+		t.Fatalf("未知状态应当原样保留，实际: %s", loaded.Status)
+	}
+	if loaded.VerificationVerdict != domain.VerificationVerdict("unknown_v2") {
+		t.Fatalf("未知判定应当原样保留，实际: %s", loaded.VerificationVerdict)
+	}
+	// 业务状态机仍然拒绝不合法的迁移。
+	if err := loaded.Complete(time.Now().UTC()); err == nil {
+		t.Fatal("状态机应当拒绝未知状态的迁移")
 	}
 }
 
-func TestAttemptRequiresExistingStep(t *testing.T) {
+func TestAttemptAllowsOrphanStepID(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
+	// 数据库不声明外键，step_id 只是普通文本，允许保存孤立标识。
 	attempt, err := domain.NewAttempt(domain.NewID(), 1, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("构造执行尝试失败: %v", err)
 	}
-	if err := db.CreateAttempt(testContext(t), attempt); !errors.Is(err, storage.ErrForeignKey) {
-		t.Fatalf("引用不存在的步骤应当返回外键错误，实际: %v", err)
+	if err := db.CreateAttempt(testContext(t), attempt); err != nil {
+		t.Fatalf("孤立步骤标识应当允许保存，实际: %v", err)
+	}
+	loaded, err := db.GetAttempt(testContext(t), attempt.ID)
+	if err != nil {
+		t.Fatalf("读取执行尝试失败: %v", err)
+	}
+	if loaded.StepID != attempt.StepID {
+		t.Fatalf("孤立标识应当原样保留: %s", loaded.StepID)
 	}
 }
 
@@ -199,16 +222,21 @@ func TestGetAttemptNotFound(t *testing.T) {
 	}
 }
 
-func TestDeleteStepWithAttemptsIsRejected(t *testing.T) {
+func TestDeleteStepKeepsAttemptHistory(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	ctx := testContext(t)
 	built := newFixture(t, db)
-	err := testkit.ExecConstraint(t, rawDB(t, db), `DELETE FROM steps WHERE id = ?`, built.step.ID.String())
-	if !errors.Is(err, storage.ErrForeignKey) {
-		t.Fatalf("被尝试引用的步骤不应被删除，实际: %v", err)
+	// 数据库不声明外键：删除步骤不会级联删除尝试记录，也不会被阻止。
+	testkit.MustExec(t, rawDB(t, db), `DELETE FROM steps WHERE id = ?`, built.step.ID.String())
+	if _, err := db.GetStep(ctx, built.step.ID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("步骤应当已删除，实际: %v", err)
 	}
-	if _, err := db.GetStep(ctx, built.step.ID); err != nil {
-		t.Fatalf("步骤不应被删除: %v", err)
+	attempt, err := db.GetAttempt(ctx, built.attempt.ID)
+	if err != nil {
+		t.Fatalf("尝试历史不应因步骤删除而丢失: %v", err)
+	}
+	if attempt.StepID != built.step.ID {
+		t.Fatalf("尝试应保留原步骤标识: %s", attempt.StepID)
 	}
 }

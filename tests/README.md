@@ -29,7 +29,7 @@ tests/
 │   └── testkit/        # testkit 自身的测试
 ├── integration/
 │   ├── local/          # 本机集成测试，不依赖外部服务
-│   │   ├── database/   # 持久化工作流全链路
+│   │   ├── database/   # 持久化工作流全链路、Schema 审计、旧库升级
 │   │   ├── docker/     # 远程 Docker 命令构造与结果解析（使用执行替身）
 │   │   ├── environment/# 环境版本文件写入与清单读写（真实文件系统）
 │   │   ├── session/    # Session 提取与持久化边界（真实文件系统）
@@ -86,8 +86,13 @@ go test -count=1 -v -p 8 -parallel 8 ./tests/...
 
 # 竞态检测
 go test -race -count=1 ./tests/unit/...
+# 数据库约束、Schema 审计与旧库升级
+go test -count=1 -v ./tests/unit/store/ ./tests/integration/local/database/
+
 # 竞态检测（代码保存的并发隔离）
 go test -race -count=1 ./tests/unit/source/codesaver/ ./tests/unit/store/
+# 竞态检测（数据库迁移与并发访问）
+go test -race -count=1 ./tests/integration/local/database/
 # 竞态检测（工作流状态机、租约与并发任务隔离）
 go test -race -count=1 ./tests/unit/workflow/ ./tests/integration/local/workflow/
 # 竞态检测（SSH 连接管理与并发操作，需要真实协议交互）
@@ -311,3 +316,43 @@ go test -count=1 -v ./tests/integration/remote/agent/...
 
 容器内 Pi CLI 是否可用由测试在容器内实际执行 `pi --version` 确认，不依据本机是否安装 Pi。
 远程测试只删除本次测试创建并已核验所有权的容器，不执行全局 prune。
+
+## 数据库约束与迁移测试
+
+数据库结构遵循两条长期规则：**枚举字段不受数据库级封闭取值限制**，**业务 Schema
+不声明外键**。相关测试负责守住这两条规则，并验证旧数据库升级不丢数据。
+
+| 目录 | 内容 | 外部依赖 |
+|---|---|---|
+| `tests/unit/store/` | 仓储读写、未知枚举值原样保留、逻辑删除、唯一约束与非枚举 `CHECK` 仍生效、并发写入与事务 | 无 |
+| `tests/integration/local/database/` | 迁移后完整 Schema 审计（外键、触发器、枚举白名单、索引、必需约束）、未知枚举值可写入、旧版本数据库升级与数据保留、自增主键续号、迁移失败不留半成品、并发打开只迁移一次 | 无 |
+
+```bash
+# 数据库约束与 Schema 审计
+go test -count=1 -v ./tests/unit/store/ ./tests/integration/local/database/
+
+# 竞态检测（迁移与并发访问）
+go test -race -count=1 ./tests/integration/local/database/
+```
+
+### 旧版本数据库样本
+
+旧库样本由 `tests/internal/testkit.CreateLegacySchema` 在测试工作空间中直接执行仓库里
+真实的 `0001…0008` 迁移脚本生成，不维护第二份 DDL，也不读取开发者本机的真实数据库。
+样本随后写入完整的 Task / Step / Attempt / Session / 验证结果 / 事件 / 容器 / 环境版本
+/ 代码保存 / 执行节点 / 角色记录，用于验证迁移前后记录数量与关键字段一致。
+
+### Schema 审计范围
+
+- 每张业务表的 `PRAGMA foreign_key_list` 必须返回零条记录。
+- 建表语句不得包含 `REFERENCES` 与 `FOREIGN KEY`。
+- 触发器只允许存在"私钥认证必须给出私钥路径"这一跨字段要求，不得模拟外键或枚举白名单。
+- 枚举字段不得残留 `CHECK (... IN (...))` 形式的封闭取值集合。
+- 主键、`NOT NULL`、`UNIQUE`、非枚举 `CHECK` 与关联索引必须保留。
+- 全新数据库与"旧库迁移后"的建表语句必须逐表一致。
+
+### 查看测试结果
+
+每个测试入口输出 `TEST_ARTIFACT_DIR=<绝对路径>`，旧库样本、迁移后的数据库与 WAL 文件
+都保留在该目录内。测试结束只关闭连接，不删除任何产物，便于直接打开 SQLite 文件核对
+迁移结果。

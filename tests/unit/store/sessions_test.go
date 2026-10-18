@@ -206,7 +206,7 @@ func TestSessionScopeMismatchIsRejected(t *testing.T) {
 	}
 }
 
-func TestSessionRequiresExistingAttempt(t *testing.T) {
+func TestSessionAllowsOrphanAttemptID(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	built := newFixture(t, db)
@@ -220,15 +220,24 @@ func TestSessionRequiresExistingAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造会话失败: %v", err)
 	}
-	if err := db.CreateSession(testContext(t), session); !errors.Is(err, storage.ErrNotFound) {
-		t.Fatalf("引用不存在的尝试应当返回记录不存在，实际: %v", err)
+	// 数据库不声明外键：尝试记录不存在时不阻止写入，也无法做归属比对。
+	if err := db.CreateSession(testContext(t), session); err != nil {
+		t.Fatalf("孤立尝试标识应当允许保存，实际: %v", err)
+	}
+	loaded, err := db.GetSession(testContext(t), session.ID)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	if loaded.AttemptID == nil || *loaded.AttemptID != missingAttempt {
+		t.Fatalf("孤立标识应当原样保留: %+v", loaded.AttemptID)
 	}
 }
 
-func TestSessionRequiresExistingTask(t *testing.T) {
+func TestSessionAllowsOrphanTaskID(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	built := newFixture(t, db)
+	// 数据库不声明外键，task_id 只是普通文本，允许保存孤立标识。
 	session, err := domain.NewSession(
 		domain.SessionScope{TaskID: domain.NewID()},
 		built.planner,
@@ -239,8 +248,8 @@ func TestSessionRequiresExistingTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造会话失败: %v", err)
 	}
-	if err := db.CreateSession(testContext(t), session); !errors.Is(err, storage.ErrForeignKey) {
-		t.Fatalf("引用不存在的任务应当返回外键错误，实际: %v", err)
+	if err := db.CreateSession(testContext(t), session); err != nil {
+		t.Fatalf("孤立任务标识应当允许保存，实际: %v", err)
 	}
 }
 
@@ -257,16 +266,34 @@ func TestSessionAttemptRequiresStep(t *testing.T) {
 	}
 }
 
-func TestSessionInvalidStatusIsRejected(t *testing.T) {
+func TestSessionAcceptsUnknownStatuses(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	built := newFixture(t, db)
 	session := mustSession(t, db, domain.SessionScope{TaskID: built.task.ID}, built.planner)
-	err := testkit.ExecConstraint(t, rawDB(t, db), `UPDATE sessions SET status = 'unknown' WHERE id = ?`,
+	// 数据库不再限制 status / run_status / completeness / export_status 的取值集合。
+	testkit.MustExec(
+		t,
+		rawDB(t, db),
+		`UPDATE sessions SET status = 'paused_v2', run_status = 'paused',
+		 completeness = 'unknown_v2', export_status = 'deferred' WHERE id = ?`,
 		session.ID.String(),
 	)
-	if !errors.Is(err, storage.ErrInvalidData) {
-		t.Fatalf("非法会话状态应当被拒绝，实际: %v", err)
+	loaded, err := db.GetSession(testContext(t), session.ID)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	if loaded.Status != domain.SessionStatus("paused_v2") {
+		t.Fatalf("未知状态应当原样保留，实际: %s", loaded.Status)
+	}
+	if loaded.RunStatus != domain.SessionRunStatus("paused") {
+		t.Fatalf("未知运行状态应当原样保留，实际: %s", loaded.RunStatus)
+	}
+	if loaded.Completeness != domain.SessionCompleteness("unknown_v2") {
+		t.Fatalf("未知完整性状态应当原样保留，实际: %s", loaded.Completeness)
+	}
+	if loaded.ExportStatus != domain.SessionExportStatus("deferred") {
+		t.Fatalf("未知导出状态应当原样保留，实际: %s", loaded.ExportStatus)
 	}
 }
 

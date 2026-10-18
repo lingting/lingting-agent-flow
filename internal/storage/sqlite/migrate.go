@@ -154,6 +154,10 @@ func (db *DB) appliedVersions(ctx context.Context) (map[int]int64, error) {
 }
 
 // applyMigration 在独立事务内执行一个迁移并记录版本。
+//
+// 事务使用 immediate 语义（DSN 的 _txlock），开启时即持有写锁，因此并发打开同一
+// 数据库的多个进程会被串行化。持有写锁后先重新读取版本记录：其他进程可能已经
+// 完成同一迁移，此时直接跳过，避免重复执行 DDL 或写入重复版本记录。
 func (db *DB) applyMigration(ctx context.Context, item migration) error {
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
@@ -165,6 +169,18 @@ func (db *DB) applyMigration(ctx context.Context, item migration) error {
 			_ = tx.Rollback()
 		}
 	}()
+	done, err := migrationApplied(ctx, tx, item.version)
+	if err != nil {
+		return err
+	}
+	if done {
+		// 其他进程已完成同一迁移：回滚空事务并跳过。
+		if rollbackErr := tx.Rollback(); rollbackErr != nil {
+			return wrapError("回滚迁移事务", rollbackErr)
+		}
+		committed = true
+		return nil
+	}
 	if _, err := tx.ExecContext(ctx, item.script); err != nil {
 		return fmt.Errorf(
 			"sqlite: 执行迁移 %04d_%s 失败: %w",
@@ -187,6 +203,20 @@ func (db *DB) applyMigration(ctx context.Context, item migration) error {
 	}
 	committed = true
 	return nil
+}
+
+// migrationApplied 在迁移事务内确认指定版本是否已被应用。
+func migrationApplied(ctx context.Context, tx *sql.Tx, version int) (bool, error) {
+	var count int
+	err := tx.QueryRowContext(
+		ctx,
+		"SELECT COUNT(*) FROM "+migrationTable+" WHERE version = ?",
+		version,
+	).Scan(&count)
+	if err != nil {
+		return false, wrapError("检查迁移版本", err)
+	}
+	return count > 0, nil
 }
 
 // checkSupported 拒绝打开版本高于当前程序支持的数据库。

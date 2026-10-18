@@ -235,15 +235,30 @@ func TestStepTransitionPersists(t *testing.T) {
 	}
 }
 
-func TestStepInvalidStatusIsRejected(t *testing.T) {
+func TestStepAcceptsUnknownStatusAndType(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	built := newFixture(t, db)
-	err := testkit.ExecConstraint(t, rawDB(t, db), `UPDATE steps SET status = 'unknown' WHERE id = ?`,
+	// 数据库不再限制 step_type / status 的取值集合。
+	testkit.MustExec(
+		t,
+		rawDB(t, db),
+		`UPDATE steps SET status = 'awaiting_review', step_type = 'audit' WHERE id = ?`,
 		built.step.ID.String(),
 	)
-	if !errors.Is(err, storage.ErrInvalidData) {
-		t.Fatalf("非法步骤状态应当被拒绝，实际: %v", err)
+	loaded, err := db.GetStep(testContext(t), built.step.ID)
+	if err != nil {
+		t.Fatalf("读取步骤失败: %v", err)
+	}
+	if loaded.Status != domain.StepStatus("awaiting_review") {
+		t.Fatalf("未知状态应当原样保留，实际: %s", loaded.Status)
+	}
+	if loaded.Type != domain.StepType("audit") {
+		t.Fatalf("未知步骤类型应当原样保留，实际: %s", loaded.Type)
+	}
+	// 业务状态机仍然拒绝不合法的迁移。
+	if err := loaded.Transition(domain.StepStatusCompleted, time.Now().UTC()); err == nil {
+		t.Fatal("状态机应当拒绝未知状态的迁移")
 	}
 }
 
@@ -259,7 +274,7 @@ func TestStepJSONColumnsRequireValidJSON(t *testing.T) {
 	}
 }
 
-func TestStepRequiresExistingRole(t *testing.T) {
+func TestStepAllowsOrphanRoleID(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	built := newFixture(t, db)
@@ -278,21 +293,37 @@ func TestStepRequiresExistingRole(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造步骤失败: %v", err)
 	}
-	if err := db.CreateStep(testContext(t), step); !errors.Is(err, storage.ErrForeignKey) {
-		t.Fatalf("引用不存在的角色应当返回外键错误，实际: %v", err)
+	// 数据库不声明外键，孤立角色标识作为普通文本保存。
+	if err := db.CreateStep(testContext(t), step); err != nil {
+		t.Fatalf("孤立角色标识应当允许保存，实际: %v", err)
+	}
+	loaded, err := db.GetStep(testContext(t), step.ID)
+	if err != nil {
+		t.Fatalf("读取步骤失败: %v", err)
+	}
+	if loaded.RoleID != missing.ID {
+		t.Fatalf("孤立角色标识应当原样保留: %s", loaded.RoleID)
 	}
 }
 
-func TestDeleteTaskWithStepsIsRejected(t *testing.T) {
+func TestDeleteTaskKeepsStepHistory(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	ctx := testContext(t)
 	built := newFixture(t, db)
-	err := testkit.ExecConstraint(t, rawDB(t, db), `DELETE FROM tasks WHERE id = ?`, built.task.ID.String())
-	if !errors.Is(err, storage.ErrForeignKey) {
-		t.Fatalf("被步骤引用的任务不应被删除，实际: %v", err)
+	// 数据库不声明外键：删除任务不会级联删除步骤与尝试，也不会被阻止。
+	testkit.MustExec(t, rawDB(t, db), `DELETE FROM tasks WHERE id = ?`, built.task.ID.String())
+	if _, err := db.GetTask(ctx, built.task.ID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("任务应当已删除，实际: %v", err)
 	}
-	if _, err := db.GetTask(ctx, built.task.ID); err != nil {
-		t.Fatalf("任务不应被删除: %v", err)
+	step, err := db.GetStep(ctx, built.step.ID)
+	if err != nil {
+		t.Fatalf("步骤历史不应因任务删除而丢失: %v", err)
+	}
+	if step.TaskID != built.task.ID {
+		t.Fatalf("步骤应保留原任务标识: %s", step.TaskID)
+	}
+	if _, err := db.GetAttempt(ctx, built.attempt.ID); err != nil {
+		t.Fatalf("尝试历史不应因任务删除而丢失: %v", err)
 	}
 }

@@ -233,9 +233,10 @@ func TestEventRejectsInvalidPayload(t *testing.T) {
 	}
 }
 
-func TestEventRequiresExistingTask(t *testing.T) {
+func TestEventAllowsOrphanTaskID(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
+	// 数据库不声明外键，事件可以挂在已不存在的任务上，历史时间线不会因此丢失。
 	event, err := domain.NewEvent(
 		domain.NewID(),
 		nil,
@@ -248,8 +249,15 @@ func TestEventRequiresExistingTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造事件失败: %v", err)
 	}
-	if _, err := db.AppendEvent(testContext(t), event); !errors.Is(err, storage.ErrForeignKey) {
-		t.Fatalf("引用不存在的任务应当返回外键错误，实际: %v", err)
+	if _, err := db.AppendEvent(testContext(t), event); err != nil {
+		t.Fatalf("孤立任务标识应当允许保存，实际: %v", err)
+	}
+	events, err := db.ListEventsByTask(testContext(t), event.TaskID, storage.EventFilter{})
+	if err != nil {
+		t.Fatalf("查询事件失败: %v", err)
+	}
+	if len(events) != 1 || events[0].TaskID != event.TaskID {
+		t.Fatalf("孤立任务的事件应当可读: %+v", events)
 	}
 }
 

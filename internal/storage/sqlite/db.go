@@ -31,6 +31,10 @@ const (
 	defaultMaxOpenConns = 4
 	// defaultMaxIdleConns 限制空闲连接数。
 	defaultMaxIdleConns = 4
+	// busyRetryInitialDelay 是初始化阶段忙重试的起始间隔。
+	busyRetryInitialDelay = 5 * time.Millisecond
+	// busyRetryMaxDelay 是初始化阶段忙重试的间隔上限。
+	busyRetryMaxDelay = 200 * time.Millisecond
 )
 
 // Options 是打开数据库的选项。
@@ -56,6 +60,10 @@ type DB struct {
 //
 // 打开过程依次完成：创建父目录、建立连接、设置连接参数、执行迁移。
 // 任一步骤失败都会关闭已建立的连接，避免泄漏。
+//
+// 并发打开同一数据库时，初始化阶段的 PRAGMA 读取与迁移可能短暂遇到写锁竞争；
+// 这里在可重试的错误上按 busy_timeout 的时间窗口重试，避免把正常的并发启动
+// 报成失败。
 func Open(ctx context.Context, options Options) (*DB, error) {
 	path := strings.TrimSpace(options.Path)
 	if path == "" {
@@ -69,13 +77,48 @@ func Open(ctx context.Context, options Options) (*DB, error) {
 		return nil, err
 	}
 	db := &DB{dbStore: newDBStore(sqlDB), sql: sqlDB, path: path}
-	if err := db.applyPragmas(ctx); err != nil {
+	if err := db.retryBusy(ctx, options, db.applyPragmas); err != nil {
 		return nil, errors.Join(err, db.Close())
 	}
-	if err := db.migrate(ctx); err != nil {
+	if err := db.retryBusy(ctx, options, db.migrate); err != nil {
 		return nil, errors.Join(err, db.Close())
 	}
 	return db, nil
+}
+
+// retryBusy 在数据库忙时重试 fn，直到超过 busy_timeout 的时间窗口。
+//
+// 并发打开同一数据库时，SQLite 的写锁竞争可能让初始化阶段的 PRAGMA 读取或迁移
+// 短暂返回 SQLITE_BUSY。这里只在明确属于"忙"的错误上重试，其他错误立即返回，
+// 避免把真正的迁移失败误判成可重试问题。
+func (db *DB) retryBusy(
+	ctx context.Context,
+	options Options,
+	fn func(ctx context.Context) error,
+) error {
+	timeout := options.BusyTimeout
+	if timeout <= 0 {
+		timeout = defaultBusyTimeout
+	}
+	deadline := time.Now().Add(timeout)
+	delay := busyRetryInitialDelay
+	for {
+		err := fn(ctx)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, storage.ErrBusy) || time.Now().After(deadline) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(err, ctx.Err())
+		case <-time.After(delay):
+		}
+		if delay < busyRetryMaxDelay {
+			delay *= 2
+		}
+	}
 }
 
 // Close 关闭数据库连接，重复调用返回 nil。
@@ -110,7 +153,8 @@ func ensureParentDir(path string) error {
 
 // openSQL 建立数据库连接并设置连接池参数。
 //
-// 外键检查与忙等待通过连接参数在每条新连接上生效，避免依赖连接池中的某一条连接。
+// 忙等待、外键开关与日志模式通过连接参数在每条新连接上生效，避免依赖连接池中的
+// 某一条连接。
 func openSQL(path string, options Options) (*sql.DB, error) {
 	busyTimeout := options.BusyTimeout
 	if busyTimeout <= 0 {
@@ -135,7 +179,9 @@ func openSQL(path string, options Options) (*sql.DB, error) {
 func buildDSN(path string, busyTimeout time.Duration) string {
 	query := strings.Join([]string{
 		"_pragma=busy_timeout(" + formatMillis(busyTimeout) + ")",
-		"_pragma=foreign_keys(1)",
+		// 业务 Schema 不声明外键，因此显式关闭外键检查：数据库不会因为引用
+		// 缺失而拒绝写入，关联完整性由应用层按业务操作自行校验。
+		"_pragma=foreign_keys(0)",
 		// WAL 模式允许读写并行，写事务之间仍由 SQLite 串行协调。
 		"_pragma=journal_mode(WAL)",
 		// NORMAL 在 WAL 下仍然保证一致性，同时避免每次提交都强制 fsync。
@@ -158,14 +204,14 @@ func formatMillis(duration time.Duration) string {
 func (db *DB) applyPragmas(ctx context.Context) error {
 	var foreignKeys int
 	if err := db.sql.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
-		return fmt.Errorf("sqlite: 读取 foreign_keys 设置失败: %w", err)
+		return wrapError("读取 foreign_keys 设置", err)
 	}
-	if foreignKeys != 1 {
-		return fmt.Errorf("sqlite: 外键检查未启用: %s", db.path)
+	if foreignKeys != 0 {
+		return fmt.Errorf("sqlite: 外键检查未关闭: %s", db.path)
 	}
 	var journalMode string
 	if err := db.sql.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&journalMode); err != nil {
-		return fmt.Errorf("sqlite: 读取 journal_mode 设置失败: %w", err)
+		return wrapError("读取 journal_mode 设置", err)
 	}
 	if !strings.EqualFold(journalMode, "wal") {
 		return fmt.Errorf("sqlite: journal_mode 未设置为 WAL，实际为 %q: %s", journalMode, db.path)

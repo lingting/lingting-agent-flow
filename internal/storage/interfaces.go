@@ -19,9 +19,12 @@ var (
 	ErrNotFound = errors.New("storage: 记录不存在")
 	// ErrConflict 表示唯一约束冲突，例如重复主键或重复序号。
 	ErrConflict = errors.New("storage: 唯一约束冲突")
-	// ErrForeignKey 表示外键约束失败，引用的记录不存在或仍被引用。
-	ErrForeignKey = errors.New("storage: 外键约束失败")
-	// ErrInvalidData 表示数据不满足数据库约束，例如状态取值或非空校验。
+	// ErrForeignKey 表示引用完整性校验失败，引用的记录不存在或仍被引用。
+	//
+	// 业务 Schema 不声明外键，该错误由应用层显式校验产生，保留它是为了让调用方
+	// 继续按"引用不成立"处理，而不必区分校验发生在数据库还是应用层。
+	ErrForeignKey = errors.New("storage: 引用完整性校验失败")
+	// ErrInvalidData 表示数据不满足校验，例如非空、长度或字段组合不一致。
 	ErrInvalidData = errors.New("storage: 数据不符合约束")
 	// ErrBusy 表示数据库被其他连接或进程占用，等待锁超时。
 	ErrBusy = errors.New("storage: 数据库忙")
@@ -44,8 +47,8 @@ type RoleSeed struct {
 type RoleStore interface {
 	CreateRole(ctx context.Context, role domain.Role) error
 	UpdateRole(ctx context.Context, role domain.Role) error
-	// DeleteRole 删除角色。仍被步骤或会话历史引用时返回 storage.ErrForeignKey，
-	// 不会级联删除历史记录。
+	// DeleteRole 逻辑删除角色：只标记删除时间并禁用，不删除历史引用。
+	// 被历史步骤或会话引用时仍然成功，记录不会级联删除。
 	DeleteRole(ctx context.Context, id domain.ID) error
 	GetRole(ctx context.Context, id domain.ID) (*domain.Role, error)
 	ListRoles(ctx context.Context) ([]domain.Role, error)
@@ -59,7 +62,8 @@ type ExecutionHostStore interface {
 	CreateExecutionHost(ctx context.Context, host domain.ExecutionHost) error
 	// UpdateExecutionHost 按主键更新节点配置，is_default 与 enabled 也随记录一起写入。
 	UpdateExecutionHost(ctx context.Context, host domain.ExecutionHost) error
-	// DeleteExecutionHost 删除节点配置，不删除远程工作空间或远程资源。
+	// DeleteExecutionHost 逻辑删除节点配置，不删除远程工作空间或远程资源。
+	// 历史容器、环境版本与任务记录保留节点标识，不会被级联删除。
 	DeleteExecutionHost(ctx context.Context, id domain.ID) error
 	GetExecutionHost(ctx context.Context, id domain.ID) (*domain.ExecutionHost, error)
 	ListExecutionHosts(ctx context.Context) ([]domain.ExecutionHost, error)

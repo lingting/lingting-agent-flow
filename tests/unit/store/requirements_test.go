@@ -105,16 +105,20 @@ func TestRequirementStatusTransitionPersists(t *testing.T) {
 	}
 }
 
-func TestRequirementInvalidStatusIsRejected(t *testing.T) {
+func TestRequirementAcceptsUnknownStatusAtDatabaseLevel(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	requirement := mustRequirement(t, db)
-	// 绕过领域校验直接写库，验证数据库 CHECK 约束同样生效。
-	err := testkit.ExecConstraint(t, rawDB(t, db), `UPDATE requirements SET status = 'unknown' WHERE id = ?`,
+	// 数据库不再限制状态取值集合，未知状态可以保存并由 Go 层负责校验。
+	testkit.MustExec(t, rawDB(t, db), `UPDATE requirements SET status = 'awaiting_triage' WHERE id = ?`,
 		requirement.ID.String(),
 	)
-	if !errors.Is(err, storage.ErrInvalidData) {
-		t.Fatalf("非法状态应当被数据库约束拒绝，实际: %v", err)
+	loaded, err := db.GetRequirement(testContext(t), requirement.ID)
+	if err != nil {
+		t.Fatalf("读取需求失败: %v", err)
+	}
+	if loaded.Status != domain.RequirementStatus("awaiting_triage") {
+		t.Fatalf("未知状态应当原样保留，实际: %s", loaded.Status)
 	}
 }
 

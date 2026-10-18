@@ -256,11 +256,12 @@ func (s *ExecutionHostService) SetDefault(
 	return *reloaded, nil
 }
 
-// Remove 删除执行节点配置。
+// Remove 逻辑删除执行节点配置。
 //
 // 删除只影响本机数据库记录，不会删除远程工作空间或远程 Docker 资源。
-// 目前没有其他表引用执行节点，因此不存在需要拒绝删除的活动引用；后续引入
-// 任务与节点的关联后，必须在此处补充活动引用检查。
+// 数据库不声明外键，因此级联行为由这里显式承担：仍有未结束任务使用该节点时
+// 拒绝删除，避免正在执行的任务失去节点配置；其余历史记录（容器、环境版本、
+// 已完成任务）保留节点标识，不会被连带删除。
 func (s *ExecutionHostService) Remove(
 	ctx context.Context,
 	id string,
@@ -269,11 +270,40 @@ func (s *ExecutionHostService) Remove(
 	if err != nil {
 		return domain.ExecutionHost{}, err
 	}
+	active, err := s.hasActiveTasks(ctx, host.ID)
+	if err != nil {
+		return domain.ExecutionHost{}, fmt.Errorf("删除执行节点失败: %w", err)
+	}
+	if active {
+		return domain.ExecutionHost{}, fmt.Errorf(
+			"删除执行节点失败: 节点 %s 仍有未结束的任务，请等待任务结束后重试",
+			host.ID,
+		)
+	}
 	if err := s.store.DeleteExecutionHost(ctx, host.ID); err != nil {
 		return domain.ExecutionHost{}, fmt.Errorf("删除执行节点失败: %w", err)
 	}
 	s.debug(ctx, "执行节点已删除", slog.String("id", host.ID.String()))
 	return host, nil
+}
+
+// hasActiveTasks 判断节点上是否存在未结束的任务。
+//
+// 终态任务（completed / failed / cancelled）不再需要节点，允许节点被逻辑删除。
+func (s *ExecutionHostService) hasActiveTasks(ctx context.Context, hostID domain.ID) (bool, error) {
+	tasks, err := s.store.ListTasks(ctx, storage.TaskFilter{
+		HostID: hostID,
+		ExcludeStatuses: []domain.TaskStatus{
+			domain.TaskStatusCompleted,
+			domain.TaskStatusFailed,
+			domain.TaskStatusCancelled,
+		},
+		Limit: 1,
+	})
+	if err != nil {
+		return false, err
+	}
+	return len(tasks) > 0, nil
 }
 
 // ExecutionHostProbeResult 是一次节点探测的结果。

@@ -209,7 +209,7 @@ func TestVerificationResultRejectsScopeMismatch(t *testing.T) {
 	}
 }
 
-func TestVerificationResultRequiresExistingAttempt(t *testing.T) {
+func TestVerificationResultAllowsOrphanAttemptID(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	built := newFixture(t, db)
@@ -219,8 +219,16 @@ func TestVerificationResultRequiresExistingAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造验证结果失败: %v", err)
 	}
-	if err := db.CreateVerificationResult(testContext(t), result); !errors.Is(err, storage.ErrNotFound) {
-		t.Fatalf("引用不存在的尝试应当返回记录不存在，实际: %v", err)
+	// 数据库不声明外键：尝试记录不存在时不阻止写入，历史验证结果保留。
+	if err := db.CreateVerificationResult(testContext(t), result); err != nil {
+		t.Fatalf("孤立尝试标识应当允许保存，实际: %v", err)
+	}
+	loaded, err := db.GetVerificationResult(testContext(t), result.ID)
+	if err != nil {
+		t.Fatalf("读取验证结果失败: %v", err)
+	}
+	if loaded.AttemptID != input.AttemptID {
+		t.Fatalf("孤立标识应当原样保留: %s", loaded.AttemptID)
 	}
 }
 
@@ -242,7 +250,7 @@ func TestVerificationFailureRequiresFailureSummary(t *testing.T) {
 	}
 }
 
-func TestVerificationPassedConstraintRejectsInconsistentRow(t *testing.T) {
+func TestVerificationAcceptsUnknownVerdictAtDatabaseLevel(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	ctx := testContext(t)
@@ -254,15 +262,27 @@ func TestVerificationPassedConstraintRejectsInconsistentRow(t *testing.T) {
 	if err := db.CreateVerificationResult(ctx, result); err != nil {
 		t.Fatalf("写入验证结果失败: %v", err)
 	}
-	err = testkit.ExecConstraint(
+	// 数据库不再限制 verdict 的取值集合，也不再强制 passed 与 verdict 一致。
+	testkit.MustExec(
 		t,
 		rawDB(t, db),
-		`UPDATE verification_results SET passed = 0, verdict = 'failed', failure_summary = NULL
+		`UPDATE verification_results SET passed = 0, verdict = 'pending_review', failure_summary = NULL
 		 WHERE id = ?`,
 		result.ID.String(),
 	)
-	if !errors.Is(err, storage.ErrInvalidData) {
-		t.Fatalf("失败的验证必须带失败摘要，实际: %v", err)
+	loaded, err := db.GetVerificationResult(ctx, result.ID)
+	if err != nil {
+		t.Fatalf("读取验证结果失败: %v", err)
+	}
+	if loaded.Verdict != domain.VerificationVerdict("pending_review") {
+		t.Fatalf("未知判定应当原样保留，实际: %s", loaded.Verdict)
+	}
+	if loaded.Passed {
+		t.Fatal("passed 应当保持数据库中的实际取值")
+	}
+	// 业务层仍然拒绝未知判定与不一致的 passed。
+	if err := loaded.Validate(); err == nil {
+		t.Fatal("领域校验应当拒绝未知判定")
 	}
 }
 

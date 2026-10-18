@@ -41,15 +41,23 @@ func TestCreateAndGetTask(t *testing.T) {
 	}
 }
 
-func TestCreateTaskWithMissingRequirementIsRejected(t *testing.T) {
+func TestCreateTaskAllowsOrphanRequirementID(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
+	// 数据库不声明外键，requirement_id 只是普通文本，允许保存孤立标识。
 	task, err := domain.NewTask(domain.NewID(), "/repo", "main", "", time.Now().UTC())
 	if err != nil {
 		t.Fatalf("构造任务失败: %v", err)
 	}
-	if err := db.CreateTask(testContext(t), task); !errors.Is(err, storage.ErrForeignKey) {
-		t.Fatalf("引用不存在的需求应当返回外键错误，实际: %v", err)
+	if err := db.CreateTask(testContext(t), task); err != nil {
+		t.Fatalf("孤立需求标识应当允许保存，实际: %v", err)
+	}
+	loaded, err := db.GetTask(testContext(t), task.ID)
+	if err != nil {
+		t.Fatalf("读取任务失败: %v", err)
+	}
+	if loaded.RequirementID != task.RequirementID {
+		t.Fatalf("孤立标识应当原样保留: %s", loaded.RequirementID)
 	}
 }
 
@@ -180,16 +188,25 @@ func TestSameRequirementCanHaveMultipleTasks(t *testing.T) {
 	}
 }
 
-func TestTaskInvalidStatusIsRejected(t *testing.T) {
+func TestTaskAcceptsUnknownStatusAtDatabaseLevel(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	requirement := mustRequirement(t, db)
 	task := mustTask(t, db, requirement.ID)
-	err := testkit.ExecConstraint(t, rawDB(t, db), `UPDATE tasks SET status = 'unknown' WHERE id = ?`,
+	// 数据库不再限制枚举取值：未知状态可以保存，由 Go 层状态机拒绝非法迁移。
+	testkit.MustExec(t, rawDB(t, db), `UPDATE tasks SET status = 'recovery_required_v2' WHERE id = ?`,
 		task.ID.String(),
 	)
-	if !errors.Is(err, storage.ErrInvalidData) {
-		t.Fatalf("非法任务状态应当被拒绝，实际: %v", err)
+	loaded, err := db.GetTask(testContext(t), task.ID)
+	if err != nil {
+		t.Fatalf("读取任务失败: %v", err)
+	}
+	if loaded.Status != domain.TaskStatus("recovery_required_v2") {
+		t.Fatalf("未知状态应当原样保留，实际: %s", loaded.Status)
+	}
+	// 业务状态机仍然拒绝不合法的迁移。
+	if err := loaded.Transition(domain.TaskStatusCompleted, time.Now().UTC()); err == nil {
+		t.Fatal("状态机应当拒绝未知状态的迁移")
 	}
 }
 
@@ -208,19 +225,22 @@ func TestTaskRequiresRepositoryPathAndBaseRef(t *testing.T) {
 	}
 }
 
-func TestDeleteRequirementWithTasksIsRejected(t *testing.T) {
+func TestDeleteRequirementKeepsTaskHistory(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	ctx := testContext(t)
 	requirement := mustRequirement(t, db)
-	mustTask(t, db, requirement.ID)
-	err := testkit.ExecConstraint(t, rawDB(t, db), `DELETE FROM requirements WHERE id = ?`,
-		requirement.ID.String(),
-	)
-	if !errors.Is(err, storage.ErrForeignKey) {
-		t.Fatalf("被任务引用的需求不应被删除，实际: %v", err)
+	task := mustTask(t, db, requirement.ID)
+	// 数据库不声明外键：删除需求不会级联删除任务，也不会被阻止。
+	testkit.MustExec(t, rawDB(t, db), `DELETE FROM requirements WHERE id = ?`, requirement.ID.String())
+	if _, err := db.GetRequirement(ctx, requirement.ID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("需求应当已删除，实际: %v", err)
 	}
-	if _, err := db.GetRequirement(ctx, requirement.ID); err != nil {
-		t.Fatalf("需求不应被删除: %v", err)
+	loaded, err := db.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("任务历史不应因需求删除而丢失: %v", err)
+	}
+	if loaded.RequirementID != requirement.ID {
+		t.Fatalf("任务应保留原需求标识: %s", loaded.RequirementID)
 	}
 }

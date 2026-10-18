@@ -125,6 +125,9 @@ func (s verificationStore) ListVerificationResultsByAttempt(
 }
 
 // ensureScopeConsistent 校验验证结果的任务、步骤与尝试归属一致。
+//
+// 数据库不声明外键，因此这里只校验能够读到父记录时的归属关系；尝试或步骤记录
+// 已不存在（历史孤立 ID）时不阻止写入。
 func (s verificationStore) ensureScopeConsistent(
 	ctx context.Context,
 	result domain.VerificationResult,
@@ -136,7 +139,7 @@ func (s verificationStore) ensureScopeConsistent(
 	err := s.q.QueryRowContext(ctx, statement, toIDParam(result.AttemptID)).Scan(&taskID, &stepID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return notFoundError("执行尝试", result.AttemptID.String())
+			return nil
 		}
 		return wrapError("读取尝试归属", err)
 	}

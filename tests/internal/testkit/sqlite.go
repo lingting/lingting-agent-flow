@@ -10,12 +10,15 @@ import (
 
 // OpenSQLite 打开一条指向指定数据库文件的独立连接。
 //
-// 它用于绕过仓储层直接验证数据库约束（CHECK、触发器、外键、表结构），
-// 与产品使用的驱动和 PRAGMA 保持一致；连接在测试结束时关闭，数据库文件保留。
+// 它用于绕过仓储层直接验证数据库约束（CHECK、触发器、表结构），与产品使用的
+// 驱动和 PRAGMA 保持一致；连接在测试结束时关闭，数据库文件保留。
+//
+// 业务 Schema 不声明外键，产品连接显式关闭外键检查，测试连接保持同一设置，
+// 避免测试与运行时行为不一致。
 func OpenSQLite(t *testing.T, path string) *sql.DB {
 	t.Helper()
 	dsn := "file:" + path +
-		"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+		"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(0)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatalf("打开测试数据库连接失败: %s: %v", path, err)

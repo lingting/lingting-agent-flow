@@ -114,14 +114,24 @@ func executionHostArgs(host domain.ExecutionHost) []any {
 	}
 }
 
-// DeleteExecutionHost 删除执行节点配置。
+// DeleteExecutionHost 逻辑删除执行节点配置。
 //
-// 删除只影响本机数据库记录，不会删除远程工作空间或远程 Docker 资源。
+// 数据库不声明外键，删除不会级联删除容器、环境版本或任务记录，也不会影响远程
+// 工作空间与远程 Docker 资源。这里只把 deleted_at 置为当前时间并清除默认标记，
+// 历史记录中的节点标识仍然可读。
 func (s executionHostStore) DeleteExecutionHost(ctx context.Context, id domain.ID) error {
 	if err := id.Validate(); err != nil {
 		return err
 	}
-	result, err := s.q.ExecContext(ctx, `DELETE FROM execution_hosts WHERE id = ?`, toIDParam(id))
+	now := nowMillis()
+	result, err := s.q.ExecContext(
+		ctx,
+		`UPDATE execution_hosts SET deleted_at = ?, is_default = 0, enabled = 0, updated_at = ?
+		 WHERE id = ? AND deleted_at IS NULL`,
+		now,
+		now,
+		toIDParam(id),
+	)
 	if err != nil {
 		return wrapError("删除执行节点", err)
 	}
@@ -136,7 +146,8 @@ func (s executionHostStore) GetExecutionHost(
 	if err := id.Validate(); err != nil {
 		return nil, err
 	}
-	const statement = `SELECT ` + executionHostColumns + ` FROM execution_hosts WHERE id = ?`
+	const statement = `SELECT ` + executionHostColumns + ` FROM execution_hosts
+		WHERE id = ? AND deleted_at IS NULL`
 	host, err := scanExecutionHost(s.q.QueryRowContext(ctx, statement, toIDParam(id)))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -147,9 +158,10 @@ func (s executionHostStore) GetExecutionHost(
 	return host, nil
 }
 
-// ListExecutionHosts 按创建时间返回全部执行节点。
+// ListExecutionHosts 按创建时间返回全部未删除的执行节点。
 func (s executionHostStore) ListExecutionHosts(ctx context.Context) ([]domain.ExecutionHost, error) {
-	const statement = `SELECT ` + executionHostColumns + ` FROM execution_hosts ORDER BY created_at, rowid`
+	const statement = `SELECT ` + executionHostColumns + ` FROM execution_hosts
+		WHERE deleted_at IS NULL ORDER BY created_at, rowid`
 	rows, err := s.q.QueryContext(ctx, statement)
 	if err != nil {
 		return nil, wrapError("查询执行节点", err)
@@ -220,7 +232,8 @@ func (s executionHostStore) setDefaultInTx(ctx context.Context, id domain.ID) er
 func (s executionHostStore) GetDefaultExecutionHost(
 	ctx context.Context,
 ) (*domain.ExecutionHost, error) {
-	const statement = `SELECT ` + executionHostColumns + ` FROM execution_hosts WHERE is_default = 1`
+	const statement = `SELECT ` + executionHostColumns + ` FROM execution_hosts
+		WHERE is_default = 1 AND deleted_at IS NULL`
 	host, err := scanExecutionHost(s.q.QueryRowContext(ctx, statement))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

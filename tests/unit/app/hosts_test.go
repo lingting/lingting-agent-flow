@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -303,6 +304,104 @@ func TestRemoveExecutionHost(t *testing.T) {
 	}
 	if _, err := service.Remove(ctx, created.ID.String()); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("重复删除应当返回记录不存在，实际: %v", err)
+	}
+}
+
+// TestRemoveExecutionHostRejectedWithActiveTask 验证节点上仍有未结束任务时拒绝删除。
+func TestRemoveExecutionHostRejectedWithActiveTask(t *testing.T) {
+	t.Parallel()
+	service, store := newService(t)
+	ctx := testContext(t)
+	created, err := service.Create(ctx, app.CreateExecutionHostRequest{
+		Name: "构建节点", Host: "10.0.0.12", Username: "deploy",
+	})
+	if err != nil {
+		t.Fatalf("新增执行节点失败: %v", err)
+	}
+	requirement, err := domain.NewRequirement(
+		"运行中需求",
+		"节点仍有未结束任务",
+		domain.PriorityNormal,
+		time.Now().UTC(),
+	)
+	if err != nil {
+		t.Fatalf("构造需求失败: %v", err)
+	}
+	if err := store.CreateRequirement(ctx, requirement); err != nil {
+		t.Fatalf("写入需求失败: %v", err)
+	}
+	task, err := domain.NewTask(requirement.ID, "/repo", "main", "", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("构造任务失败: %v", err)
+	}
+	hostID := created.ID
+	task.HostID = &hostID
+	if err := store.CreateTask(ctx, task); err != nil {
+		t.Fatalf("写入任务失败: %v", err)
+	}
+	if _, err := service.Remove(ctx, created.ID.String()); err == nil {
+		t.Fatal("节点上存在未结束任务时必须拒绝删除")
+	}
+	if _, err := service.Get(ctx, created.ID.String()); err != nil {
+		t.Fatalf("拒绝删除后节点应当仍然存在: %v", err)
+	}
+
+	// 任务进入终态后允许删除。
+	if err := task.Transition(domain.TaskStatusPreparing, time.Now().UTC()); err != nil {
+		t.Fatalf("状态迁移失败: %v", err)
+	}
+	if err := task.Transition(domain.TaskStatusFailed, time.Now().UTC()); err != nil {
+		t.Fatalf("状态迁移失败: %v", err)
+	}
+	if err := store.UpdateTask(ctx, task); err != nil {
+		t.Fatalf("更新任务失败: %v", err)
+	}
+	if _, err := service.Remove(ctx, created.ID.String()); err != nil {
+		t.Fatalf("任务结束后应当允许删除节点: %v", err)
+	}
+}
+
+// TestRemoveExecutionHostKeepsHistoryReferences 验证逻辑删除不级联删除历史记录。
+func TestRemoveExecutionHostKeepsHistoryReferences(t *testing.T) {
+	t.Parallel()
+	service, store := newService(t)
+	ctx := testContext(t)
+	created, err := service.Create(ctx, app.CreateExecutionHostRequest{
+		Name: "构建节点", Host: "10.0.0.13", Username: "deploy",
+	})
+	if err != nil {
+		t.Fatalf("新增执行节点失败: %v", err)
+	}
+	ref, err := domain.NewEnvironmentRef(domain.EnvironmentTypeBase, "")
+	if err != nil {
+		t.Fatalf("构造环境引用失败: %v", err)
+	}
+	version := domain.EnvironmentVersion{
+		HostID:            created.ID,
+		Ref:               ref,
+		Number:            1,
+		DockerfileSHA256:  strings.Repeat("a", 64),
+		BuildConfigSHA256: strings.Repeat("b", 64),
+		ContextSHA256:     strings.Repeat("c", 64),
+		ImageRef:          "agentflow-base:v0001-aaaaaaaaaaaa",
+		Status:            domain.BuildStatusPending,
+		CreatedAt:         time.Now().UTC(),
+	}
+	if err := store.CreateEnvironmentVersion(ctx, version); err != nil {
+		t.Fatalf("写入环境版本失败: %v", err)
+	}
+	if _, err := service.Remove(ctx, created.ID.String()); err != nil {
+		t.Fatalf("删除执行节点失败: %v", err)
+	}
+	versions, err := store.ListEnvironmentVersions(
+		ctx,
+		storage.EnvironmentVersionFilter{HostID: created.ID},
+	)
+	if err != nil {
+		t.Fatalf("读取环境版本失败: %v", err)
+	}
+	if len(versions) != 1 {
+		t.Fatalf("逻辑删除不应级联删除环境版本，实际 %d 条", len(versions))
 	}
 }
 

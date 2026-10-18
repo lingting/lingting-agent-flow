@@ -28,16 +28,18 @@ func TestOpenCreatesParentDirectory(t *testing.T) {
 	}
 }
 
-func TestOpenEnablesForeignKeysAndWAL(t *testing.T) {
+func TestOpenDisablesForeignKeysAndEnablesWAL(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	ctx := testContext(t)
+	// 业务 Schema 不声明外键，连接显式关闭外键检查，避免残留配置让数据库重新
+	// 承担引用完整性。
 	var foreignKeys int
 	if err := rawDB(t, db).QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
 		t.Fatalf("读取 foreign_keys 失败: %v", err)
 	}
-	if foreignKeys != 1 {
-		t.Fatalf("外键检查未启用: %d", foreignKeys)
+	if foreignKeys != 0 {
+		t.Fatalf("外键检查应当关闭，实际: %d", foreignKeys)
 	}
 	var journalMode string
 	if err := rawDB(t, db).QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&journalMode); err != nil {

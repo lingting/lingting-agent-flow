@@ -23,9 +23,11 @@ type sessionStore struct {
 }
 
 // CreateSession 写入会话。
+// 写入前在同一连接上校验归属一致性：若会话关联了 Attempt，则该 Attempt 所属的
+// 步骤必须与会话声明的步骤一致，否则返回 storage.ErrInvalidData。
 //
-// 写入前在同一连接上校验归属一致性：若会话关联了 Attempt，则该 Attempt 必须属于
-// 会话声明的步骤，且该步骤必须属于会话声明的任务，否则返回 storage.ErrInvalidData。
+// 数据库不声明外键，因此这里只校验能够读到父记录时的归属关系；父记录已不存在
+// （历史孤立 ID）时不阻止写入。
 func (s sessionStore) CreateSession(ctx context.Context, session domain.Session) error {
 	if err := session.Validate(); err != nil {
 		return err
@@ -189,9 +191,13 @@ func (s sessionStore) ensureScopeConsistent(ctx context.Context, session domain.
 	if session.AttemptID == nil {
 		return nil
 	}
-	attemptStepID, err := s.attemptStepID(ctx, *session.AttemptID)
+	attemptStepID, found, err := s.attemptStepID(ctx, *session.AttemptID)
 	if err != nil {
 		return err
+	}
+	if !found {
+		// 尝试记录已不存在：数据库不再强制引用完整性，允许保存孤立的历史标识。
+		return nil
 	}
 	declaredStepID := ""
 	if session.StepID != nil {
@@ -209,18 +215,21 @@ func (s sessionStore) ensureScopeConsistent(ctx context.Context, session domain.
 	return nil
 }
 
-// attemptStepID 返回某次尝试所属的步骤标识。
-func (s sessionStore) attemptStepID(ctx context.Context, attemptID domain.ID) (string, error) {
+// attemptStepID 返回某次尝试所属的步骤标识；尝试不存在时 found 为 false。
+func (s sessionStore) attemptStepID(
+	ctx context.Context,
+	attemptID domain.ID,
+) (string, bool, error) {
 	const statement = `SELECT step_id FROM attempts WHERE id = ?`
 	var stepID string
 	err := s.q.QueryRowContext(ctx, statement, toIDParam(attemptID)).Scan(&stepID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", notFoundError("执行尝试", attemptID.String())
+			return "", false, nil
 		}
-		return "", wrapError("读取尝试归属", err)
+		return "", false, wrapError("读取尝试归属", err)
 	}
-	return stepID, nil
+	return stepID, true, nil
 }
 
 // toIntPtrParam 把可空整数转换为可写入 NULL 的参数。
