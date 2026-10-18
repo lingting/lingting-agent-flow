@@ -27,13 +27,28 @@ func (r *Runner) Run(
 ) (agent.RunResult, error) {
 	startedAt := time.Now()
 	result := agent.RunResult{
-		SessionID: request.SessionID,
-		ExitCode:  -1,
-		StartedAt: startedAt,
+		SessionID:    request.SessionID,
+		InvocationID: request.InvocationID,
+		Model:        request.Model,
+		ExitCode:     -1,
+		StartedAt:    startedAt,
 		Session: agent.SessionFiles{
 			Completeness: agent.SessionMissing,
 			ExportStatus: agent.ExportNotAttempted,
 		},
+	}
+	if request.Container != nil {
+		// 本机 Runner 明确拒绝容器目标：容器执行必须走 ContainerRunner，
+		// 不能因为远程执行失败而静默回退到本机运行。
+		err := fmt.Errorf("pi: 本机 Runner 不支持容器目标，请使用容器 Runner")
+		result.Status = agent.RunFailed
+		result.Failure = err.Error()
+		result.FinishedAt = time.Now()
+		emitEvent(result.SessionID, emit, agent.EventRunFailed, agent.RunFailedData{
+			Reason:  "container_target_unsupported",
+			Message: err.Error(),
+		})
+		return result, err
 	}
 	if err := request.Validate(); err != nil {
 		result.Status = agent.RunFailed
@@ -491,9 +506,10 @@ func runError(result agent.RunResult) error {
 // sessionPaths 解析本次调用的 Session 文件路径。
 func (r *Runner) sessionPaths(request agent.RunRequest) (SessionPaths, error) {
 	return SessionLayout{
-		TaskID:    request.TaskID,
-		StepID:    request.StepID,
-		AttemptID: request.AttemptID,
-		SessionID: request.SessionID,
+		TaskID:       request.TaskID,
+		StepID:       request.StepID,
+		AttemptID:    request.AttemptID,
+		SessionID:    request.SessionID,
+		InvocationID: request.InvocationID,
 	}.Paths(request.SessionRoot)
 }

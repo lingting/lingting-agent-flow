@@ -114,8 +114,37 @@ func (c *client) Run(
 	command string,
 	options RunOptions,
 ) (CommandResult, error) {
+	return c.runWithInput(ctx, command, nil, options)
+}
+
+// RunWithInput 执行远程命令并把 input 写入其标准输入。
+//
+// input 为 nil 时不提供标准输入；非 nil 时在命令启动后写入内容并立即关闭写入端，
+// 使需要 EOF 才能继续的程序能够正常结束。
+func (c *client) RunWithInput(
+	ctx context.Context,
+	command string,
+	input io.Reader,
+	options RunOptions,
+) (CommandResult, error) {
+	if input == nil {
+		return c.Run(ctx, command, options)
+	}
+	return c.runWithInput(ctx, command, input, options)
+}
+
+// runWithInput 是 Run 与 RunWithInput 的共同实现。
+//
+// input 非 nil 时在会话启动后把内容写入标准输入并关闭写入端。标准输入写入与
+// 输出读取并行进行，避免大输入与大输出互相阻塞。
+func (c *client) runWithInput(
+	ctx context.Context,
+	command string,
+	input io.Reader,
+	options RunOptions,
+) (CommandResult, error) {
 	started := time.Now()
-	result := CommandResult{Command: command, ExitCode: -1}
+	result := CommandResult{Command: command, ExitCode: -1, Stdin: StdinResult{Status: StdinStatusNone}}
 	if err := c.ensureOpen(); err != nil {
 		result.Status = CommandStatusConnectionError
 		result.Duration = time.Since(started)
@@ -141,10 +170,25 @@ func (c *client) Run(
 	stderr := newBoundedWriter(outputLimit(options.MaxOutputBytes))
 	session.Stdout = stdout
 	session.Stderr = stderr
+	stdin, err := attachStdin(session, input)
+	if err != nil {
+		_ = session.Close()
+		result.Status = CommandStatusConnectionError
+		result.Duration = time.Since(started)
+		return result, err
+	}
 	finished := make(chan error, 1)
 	go func() {
 		finished <- session.Run(command)
 	}()
+	// 写入与读取并行：输入较大时不会因为远程进程尚未开始读取而阻塞输出采集。
+	writeDone := writeStdin(stdin, input)
+	collect := func() StdinResult {
+		if stdin == nil {
+			return StdinResult{Status: StdinStatusNone}
+		}
+		return <-writeDone
+	}
 	select {
 	case runErr := <-finished:
 		// 命令正常结束：会话已由 ssh 库自行关闭，这里只补一次兜底关闭。
@@ -153,6 +197,7 @@ func (c *client) Run(
 		result.Stderr = stderr.String()
 		result.StdoutTruncated = stdout.Truncated()
 		result.StderrTruncated = stderr.Truncated()
+		result.Stdin = collect()
 		result.Duration = time.Since(started)
 		return completeRun(result, runErr)
 	case <-runCtx.Done():
@@ -165,7 +210,65 @@ func (c *client) Run(
 		// 本端已关闭会话通道，但无法确认远程进程是否被终止；
 		// TerminationConfirmed 保持 false，如实记录这一限制。
 		terminateSession(session, finished)
+		result.Stdin = collectWithLimit(writeDone)
 		return result, runContextError(ctx, command)
+	}
+}
+
+// attachStdin 在需要时把标准输入接入会话。
+//
+// 只有在显式提供输入时才申请 stdin 管道：不需要输入的调用不应改变远程命令的
+// 标准输入行为。
+func attachStdin(session *ssh.Session, input io.Reader) (io.WriteCloser, error) {
+	if input == nil {
+		return nil, nil
+	}
+	writer, err := session.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("sshclient: 创建标准输入管道失败: %w", err)
+	}
+	return writer, nil
+}
+
+// writeStdin 在后台写入标准输入并关闭写入端，结果通过返回的通道取得。
+func writeStdin(writer io.WriteCloser, input io.Reader) <-chan StdinResult {
+	if writer == nil {
+		return nil
+	}
+	done := make(chan StdinResult, 1)
+	go func() {
+		defer close(done)
+		written, writeErr := io.Copy(writer, input)
+		closeErr := writer.Close()
+		status := StdinResult{Status: StdinStatusWritten, Bytes: written}
+		if writeErr != nil {
+			status.Status = StdinStatusFailed
+			status.Error = writeErr.Error()
+			done <- status
+			return
+		}
+		if closeErr != nil {
+			status.Status = StdinStatusFailed
+			status.Error = closeErr.Error()
+		}
+		done <- status
+	}()
+	return done
+}
+
+// collectWithLimit 在有限时间内等待标准输入写入结果。
+//
+// 取消或超时后远程会话可能已经关闭，写入协程仍可能阻塞在管道上；
+// 此时不等待最终结果，只如实标记写入状态未知。
+func collectWithLimit(done <-chan StdinResult) StdinResult {
+	if done == nil {
+		return StdinResult{Status: StdinStatusNone}
+	}
+	select {
+	case result := <-done:
+		return result
+	case <-time.After(closeGraceTimeout):
+		return StdinResult{Status: StdinStatusFailed, Error: "标准输入写入状态未能在宽限期内确认"}
 	}
 }
 

@@ -30,6 +30,11 @@ type SessionLayout struct {
 	AttemptID string
 	// SessionID 是内部会话标识，必填。
 	SessionID string
+	// InvocationID 是本次调用的唯一标识，非空时作为最内层目录。
+	//
+	// 同一次会话内可能发生多次调用，用调用标识分层可以保证每次调用都得到
+	// 独立的 Session 文件，不会互相覆盖。
+	InvocationID string
 }
 
 // Validate 校验布局是否可用。
@@ -45,7 +50,7 @@ func (l SessionLayout) Directory() (string, error) {
 	if err := l.Validate(); err != nil {
 		return "", err
 	}
-	segments := make([]string, 0, 3)
+	segments := make([]string, 0, 4)
 	if task := sanitizeSegment(l.TaskID); task != "" {
 		segments = append(segments, task)
 		if step := sanitizeSegment(l.StepID); step != "" {
@@ -59,6 +64,9 @@ func (l SessionLayout) Directory() (string, error) {
 		segments = append(segments, fallbackDirName)
 	}
 	segments = append(segments, sanitizeSegment(l.SessionID))
+	if invocation := sanitizeSegment(l.InvocationID); invocation != "" {
+		segments = append(segments, invocation)
+	}
 	return filepath.Join(segments...), nil
 }
 

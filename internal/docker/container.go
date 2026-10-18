@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -429,8 +430,7 @@ func (r *Runner) ExecCommand(
 	if len(command) == 0 {
 		return CommandResult{}, newError(CodeInvalidArgument, "docker exec", "容器内命令不能为空", nil)
 	}
-	args := append([]string{"--workdir", domain.DefaultContainerWorkDir, dockerID}, command...)
-	remote, err := dockerCommand("exec", args...)
+	remote, err := execCommandString(dockerID, command)
 	if err != nil {
 		return CommandResult{}, err
 	}
@@ -438,6 +438,52 @@ func (r *Runner) ExecCommand(
 		timeout = DefaultMutateTimeout
 	}
 	return r.Run(ctx, "docker exec", remote, timeout)
+}
+
+// ExecCommandWithInput 在运行中的容器内执行命令并把 input 写入其标准输入。
+//
+// docker exec 只有在指定 --interactive 时才转发标准输入，因此这里显式启用该参数。
+// 写入结果通过 CommandResult.Stdin 报告：写入失败不会把命令本身的退出码改成失败，
+// 调用方需要同时检查 Stdin.Status。
+func (r *Runner) ExecCommandWithInput(
+	ctx context.Context,
+	dockerID string,
+	command []string,
+	input io.Reader,
+	timeout time.Duration,
+) (CommandResult, error) {
+	if strings.TrimSpace(dockerID) == "" {
+		return CommandResult{}, newError(CodeInvalidArgument, "docker exec", "容器 ID 不能为空", nil)
+	}
+	if len(command) == 0 {
+		return CommandResult{}, newError(CodeInvalidArgument, "docker exec", "容器内命令不能为空", nil)
+	}
+	if input == nil {
+		return r.ExecCommand(ctx, dockerID, command, timeout)
+	}
+	remote, err := execCommandString(dockerID, command, "--interactive")
+	if err != nil {
+		return CommandResult{}, err
+	}
+	if timeout <= 0 {
+		timeout = DefaultMutateTimeout
+	}
+	return r.RunWithInput(ctx, "docker exec", remote, input, timeout)
+}
+
+// execCommandString 构造 docker exec 的远程命令字符串。
+//
+// 额外参数只能来自本包的固定字面量，容器内命令的每个参数都会被单独转义。
+func execCommandString(
+	dockerID string,
+	command []string,
+	extra ...string,
+) (string, error) {
+	args := []string{"--workdir", domain.DefaultContainerWorkDir}
+	args = append(args, extra...)
+	args = append(args, dockerID)
+	args = append(args, command...)
+	return dockerCommand("exec", args...)
 }
 
 // ContainerLogs 读取容器日志的末尾内容。

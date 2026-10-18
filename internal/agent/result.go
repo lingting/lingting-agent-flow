@@ -129,6 +129,20 @@ type RunResult struct {
 	Failure string
 	// Session 是本次调用产生的 Session 文件信息。
 	Session SessionFiles
+	// InvocationID 是本次调用的唯一标识。
+	InvocationID string
+	// ContainerID 是执行本次调用的容器登记记录 ID，本机执行时为空。
+	ContainerID string
+	// DockerID 是执行本次调用的 Docker 容器 ID，本机执行时为空。
+	DockerID string
+	// Model 是本次调用实际使用的模型标识。
+	Model string
+	// Stdout 是标准输出的末尾摘要，长度受 MaxFinalTextLength 限制。
+	Stdout string
+	// StdoutTruncated 表示标准输出是否因超过上限被截断。
+	StdoutTruncated bool
+	// StderrTruncated 表示标准错误是否因超过上限被截断。
+	StderrTruncated bool
 	// StartedAt 是执行开始时间。
 	StartedAt time.Time
 	// FinishedAt 是执行结束时间。

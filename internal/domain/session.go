@@ -120,10 +120,19 @@ type Session struct {
 	// ExitCode 是 Agent 进程退出码，未能取得时为空。
 	ExitCode *int `json:"exit_code,omitempty"`
 	// FailureSummary 是失败或异常的可诊断摘要。
-	FailureSummary string     `json:"failure_summary,omitempty"`
-	StartedAt      time.Time  `json:"started_at"`
-	FinishedAt     *time.Time `json:"finished_at,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
+	FailureSummary string `json:"failure_summary,omitempty"`
+	// InvocationID 是本次 Agent 调用的唯一标识，用于区分同一会话下的多次调用。
+	InvocationID string `json:"invocation_id,omitempty"`
+	// ContainerID 是执行本次调用的容器登记记录 ID，本机执行时为空。
+	ContainerID string `json:"container_id,omitempty"`
+	// DockerID 是执行本次调用的 Docker 容器 ID，本机执行时为空。
+	DockerID string `json:"docker_id,omitempty"`
+	// StartedAt 是执行开始时间。
+	StartedAt time.Time
+	// FinishedAt 是执行结束时间。
+	FinishedAt *time.Time
+	// CreatedAt 是记录创建时间。
+	CreatedAt time.Time
 }
 
 // NewSession 创建并校验会话。

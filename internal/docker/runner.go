@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -71,6 +72,8 @@ type CommandResult struct {
 	Duration time.Duration
 	// Status 是 sshclient 的结果状态。
 	Status sshclient.CommandStatus
+	// Stdin 是标准输入的写入结果，未提供输入时状态为 none。
+	Stdin sshclient.StdinResult
 	// Certain 表示可以确认远程命令已经结束。
 	//
 	// 超时、取消或连接中断时为 false：此时远程命令可能已经执行完成，
@@ -88,6 +91,16 @@ func (r CommandResult) Uncertain() bool {
 	return !r.Certain
 }
 
+// TimedOut 判断命令是否因超时被中断。
+func (r CommandResult) TimedOut() bool {
+	return r.Status == sshclient.CommandStatusTimeout
+}
+
+// Cancelled 判断命令是否因调用方取消被中断。
+func (r CommandResult) Cancelled() bool {
+	return r.Status == sshclient.CommandStatusCancelled
+}
+
 // Run 执行一条固定的远程命令字符串。
 //
 // 调用方必须使用 sshclient.ShellCommand 或本包提供的构造函数生成命令，
@@ -98,13 +111,51 @@ func (r *Runner) Run(
 	command string,
 	timeout time.Duration,
 ) (CommandResult, error) {
+	return r.runWithInput(ctx, op, command, nil, timeout)
+}
+
+// RunWithInput 执行一条固定的远程命令字符串并向其标准输入写入内容。
+//
+// input 为 nil 时等价于 Run。写入结果通过 CommandResult.Stdin 报告，
+// 写入失败不改变命令本身的退出码判定。
+func (r *Runner) RunWithInput(
+	ctx context.Context,
+	op string,
+	command string,
+	input io.Reader,
+	timeout time.Duration,
+) (CommandResult, error) {
+	return r.runWithInput(ctx, op, command, input, timeout)
+}
+
+// runWithInput 是 Run 与 RunWithInput 的共同实现。
+func (r *Runner) runWithInput(
+	ctx context.Context,
+	op string,
+	command string,
+	input io.Reader,
+	timeout time.Duration,
+) (CommandResult, error) {
 	if strings.TrimSpace(command) == "" {
 		return CommandResult{}, newError(CodeInvalidArgument, op, "远程命令不能为空", nil)
 	}
 	if timeout <= 0 {
 		timeout = r.queryTimeout
 	}
-	result, err := r.client.Run(ctx, command, sshclient.RunOptions{Timeout: timeout})
+	var (
+		result sshclient.CommandResult
+		err    error
+	)
+	if input == nil {
+		result, err = r.client.Run(ctx, command, sshclient.RunOptions{Timeout: timeout})
+	} else {
+		result, err = r.client.RunWithInput(
+			ctx,
+			command,
+			input,
+			sshclient.RunOptions{Timeout: timeout},
+		)
+	}
 	converted := CommandResult{
 		Command:   command,
 		ExitCode:  result.ExitCode,
@@ -113,6 +164,7 @@ func (r *Runner) Run(
 		Truncated: result.StdoutTruncated || result.StderrTruncated,
 		Duration:  result.Duration,
 		Status:    result.Status,
+		Stdin:     result.Stdin,
 		Certain:   result.TerminationConfirmed,
 	}
 	if err != nil {

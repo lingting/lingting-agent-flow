@@ -11,7 +11,7 @@ tests/
 │   ├── testkit/        # 测试工作空间与通用辅助组件
 │   └── fakepi/         # 以测试二进制充当 Pi CLI 的可控替身
 ├── unit/               # 快速单元测试，不依赖真实 Pi、SSH 或网络
-│   ├── agent/          # Agent 事件与结果类型
+│   ├── agent/          # Agent 事件、结果类型与容器内 Pi Runner（使用替身）
 │   │   └── pi/         # Pi Runner 单元测试（使用 fakepi 替身）
 │   ├── app/            # 应用服务层
 │   ├── config/         # 配置加载与校验
@@ -20,6 +20,7 @@ tests/
 │   ├── environment/    # 环境类型、版本号与镜像引用规则
 │   ├── image/          # 构建上下文哈希、Dockerfile 校验与语言模板
 │   ├── process/        # 子进程监管
+│   ├── source/         # Git Clone 代码来源（容器执行替身）
 │   ├── ssh/            # SSH 主机密钥、认证配置、路径与结果状态
 │   ├── store/          # SQLite 仓储与数据库约束
 │   └── testkit/        # testkit 自身的测试
@@ -28,10 +29,13 @@ tests/
 │   │   ├── database/   # 持久化工作流全链路
 │   │   ├── docker/     # 远程 Docker 命令构造与结果解析（使用执行替身）
 │   │   ├── environment/# 环境版本文件写入与清单读写（真实文件系统）
+│   │   ├── session/    # Session 提取与持久化边界（真实文件系统）
+│   │   ├── source/     # 容器内 Git Clone 与任务分支（真实 Git）
 │   │   ├── ssh/        # 本地模拟 SSH/SFTP 服务端
 │   │   └── sshprobe/   # 本机 TCP 探测
 │   ├── pi/             # 需要本机真实 Pi CLI
 │   ├── remote/
+│   │   ├── agent/      # 需要真实远程容器与容器内真实 Pi CLI
 │   │   └── docker/     # 需要真实远程 Linux 机器与真实 Docker Engine
 │   └── ssh/            # 需要真实远程 Linux 机器
 └── e2e/
@@ -57,6 +61,9 @@ go test -count=1 -v ./tests/integration/ssh/...
 
 # 真实远程 Docker 集成测试（必须显式启用）
 AGENTFLOW_TEST_REMOTE_DOCKER=1 go test -count=1 -v ./tests/integration/remote/docker/...
+
+# 真实远程 Agent 集成测试（必须显式启用）
+AGENTFLOW_TEST_REMOTE_DOCKER=1 go test -count=1 -v ./tests/integration/remote/agent/...
 
 # CLI 端到端测试
 go test -count=1 -v ./tests/e2e/...
@@ -194,3 +201,58 @@ AGENTFLOW_TEST_REMOTE_DOCKER=1 AGENTFLOW_TEST_SSH_HOST=10.0.0.10 AGENTFLOW_TEST_
 - Docker 相关测试必须显式启用 `AGENTFLOW_TEST_REMOTE_DOCKER=1` 才允许修改真实远程
   Docker；本机测试一律使用执行替身或路径映射，不依赖本机是否安装 Docker。
 - 测试结束不得删除测试工作空间与产物；真实远程测试的远程测试目录同样保留。
+
+## 远程执行测试分层
+
+| 目录 | 内容 | 外部依赖 |
+|---|---|---|
+| `tests/unit/source/` | 仓库地址校验、目标目录冲突、Git 缺失分类、参数转义、基础分支识别优先级、任务分支初始化、取消与超时、结果不确定分类 | 无（使用容器执行替身） |
+| `tests/unit/agent/` | 容器内 Pi 参数构造、调用标识唯一性、标准输入、退出状态分类、Session 缺失/残缺、导出失败保留 JSONL、容器所有权核验 | 无（使用容器执行替身） |
+| `tests/integration/local/source/` | 真实 Git 克隆、基础分支识别、`agent/<task-id>` 分支、远程任务分支检出、目标目录不被删除、并发目录隔离 | 本机 `git` |
+| `tests/integration/local/session/` | 容器内 → 宿主机 → 本机三段式传输、字节校验、传输中断保留部分文件、导出失败保留 JSONL、并发 Session 隔离、容器删除后本机 Session 可读 | 无（路径映射到测试工作空间） |
+| `tests/integration/remote/agent/` | 真实远程容器内 Git Clone、容器内 Pi 调用、独立 Session、本机持久化、容器删除后 Session 仍可读 | 环境变量指定的 SSH 目标、真实 Docker 与容器内真实 Pi CLI |
+
+本机 Git 缺失时，`tests/integration/local/source/` 的用例输出 `WARN [SKIP]` 并跳过，
+其余用例仍会执行。
+
+### 远程 Agent 测试镜像
+
+`tests/integration/remote/agent/Dockerfile` 定义测试用任务环境镜像，基础镜像与 Pi CLI
+版本都固定到具体版本。构建方式（在仓库根目录执行，可在远程机器上执行）：
+
+```bash
+docker build -t agentflow-test-agent:1.0.0 -f tests/integration/remote/agent/Dockerfile .
+```
+
+### 远程 Agent 测试的环境变量
+
+| 变量 | 用途 | 必填 |
+|---|---|---|
+| `AGENTFLOW_TEST_REMOTE_DOCKER` | 显式启用远程 Docker 测试，必须为 `1` | 是 |
+| `AGENTFLOW_TEST_SSH_HOST` | SSH 服务器地址 | 是 |
+| `AGENTFLOW_TEST_SSH_USER` | 登录用户名 | 是 |
+| `AGENTFLOW_TEST_SSH_PORT` | SSH 端口 | 否，默认 `22` |
+| `AGENTFLOW_TEST_SSH_KEY_PATH` | 私钥路径 | 否，为空时使用 SSH Agent |
+| `AGENTFLOW_TEST_SSH_KNOWN_HOSTS` | 只读 known_hosts 文件 | 否 |
+| `AGENTFLOW_TEST_PI_MODEL` | 覆盖真实模型标识 | 否，默认 `group/free` |
+| `AGENTFLOW_TEST_REMOTE_AGENT_IMAGE` | 覆盖测试镜像引用 | 否，默认 `agentflow-test-agent:1.0.0` |
+| `AGENTFLOW_TEST_REMOTE_GIT_REPOSITORY` | 测试使用的仓库地址（必须能从远程机器访问） | 是 |
+
+示例（Git Bash / Linux / macOS）：
+
+```bash
+AGENTFLOW_TEST_REMOTE_DOCKER=1 AGENTFLOW_TEST_SSH_HOST=10.0.0.10 AGENTFLOW_TEST_SSH_USER=deploy AGENTFLOW_TEST_SSH_KEY_PATH=$HOME/.ssh/id_ed25519 AGENTFLOW_TEST_REMOTE_GIT_REPOSITORY=https://github.com/example/repo.git go test -count=1 -v ./tests/integration/remote/agent/...
+```
+
+示例（PowerShell）：
+
+```powershell
+$env:AGENTFLOW_TEST_REMOTE_DOCKER="1"
+$env:AGENTFLOW_TEST_SSH_HOST="10.0.0.10"
+$env:AGENTFLOW_TEST_SSH_USER="deploy"
+$env:AGENTFLOW_TEST_REMOTE_GIT_REPOSITORY="https://github.com/example/repo.git"
+go test -count=1 -v ./tests/integration/remote/agent/...
+```
+
+容器内 Pi CLI 是否可用由测试在容器内实际执行 `pi --version` 确认，不依据本机是否安装 Pi。
+远程测试只删除本次测试创建并已核验所有权的容器，不执行全局 prune。

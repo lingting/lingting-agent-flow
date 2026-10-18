@@ -77,6 +77,9 @@ func (s *SessionService) Record(ctx context.Context, request RecordRequest) (dom
 	if id := strings.TrimSpace(request.SessionID); id != "" {
 		session.ID = domain.ID(id)
 	}
+	session.InvocationID = strings.TrimSpace(request.Result.InvocationID)
+	session.ContainerID = strings.TrimSpace(request.Result.ContainerID)
+	session.DockerID = strings.TrimSpace(request.Result.DockerID)
 	if processID := request.Result.ProcessID; processID > 0 {
 		if err := session.SetProcessID(processID); err != nil {
 			return domain.Session{}, fmt.Errorf("记录会话失败: %w", err)

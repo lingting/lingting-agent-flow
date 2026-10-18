@@ -8,6 +8,7 @@ package environment_local
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -369,6 +370,21 @@ func (c *stubClient) Run(
 		Status:               sshclient.CommandStatusSucceeded,
 		TerminationConfirmed: true,
 	}, nil
+}
+
+// RunWithInput 读取标准输入后转发到 Run，测试替身不真正写入远程进程。
+func (c *stubClient) RunWithInput(
+	ctx context.Context,
+	command string,
+	input io.Reader,
+	options sshclient.RunOptions,
+) (sshclient.CommandResult, error) {
+	if input != nil {
+		if _, err := io.Copy(io.Discard, input); err != nil {
+			return sshclient.CommandResult{}, err
+		}
+	}
+	return c.Run(ctx, command, options)
 }
 
 // SFTP 表示替身不支持文件传输。

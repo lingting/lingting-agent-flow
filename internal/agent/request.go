@@ -32,8 +32,57 @@ type RunRequest struct {
 	WorkingDir string
 	// SessionRoot 是 Session 文件的本机持久化根目录，必须显式给出。
 	SessionRoot string
+	// InvocationID 是本次调用的唯一标识，用于区分同一会话下的多次调用。
+	//
+	// 为空时由执行器按 SessionID 生成，保证每次调用都得到独立的 Session 文件路径。
+	InvocationID string
+	// Container 是容器内执行的附加配置，为空表示在本机执行。
+	Container *ContainerTarget
 	// Timeout 是本次调用的超时时间，零值表示使用执行器的默认超时。
 	Timeout time.Duration
+}
+
+// ContainerTarget 描述在任务容器内执行 Agent 所需的附加配置。
+//
+// 该结构只描述"在哪里执行"，不承担容器生命周期：容器的创建、停止与删除仍由
+// 容器管理层负责，Runner 不会擅自启停或接管容器。
+type ContainerTarget struct {
+	// ContainerID 是容器登记记录 ID，用于核验归属与管理状态。
+	ContainerID string
+	// DockerID 是 Docker 侧容器 ID，命令在该容器内执行。
+	DockerID string
+	// WorkDir 是容器内的项目工作目录，空值使用 domain.DefaultContainerWorkDir。
+	WorkDir string
+	// SessionDir 是容器内临时 Session 目录。
+	//
+	// 该目录只在容器内存在，进程退出后由 Runner 通过受控导出路径复制到本机；
+	// 为空时使用 DefaultContainerSessionDir。
+	SessionDir string
+	// Executable 是容器内 Pi 可执行文件路径，为空时使用 PATH 中的 pi。
+	Executable string
+	// Env 是容器内 Pi 进程的额外环境变量。
+	Env []string
+}
+
+// Validate 校验容器执行配置是否完整。
+func (t ContainerTarget) Validate() error {
+	if strings.TrimSpace(t.ContainerID) == "" {
+		return fmt.Errorf("agent: 容器内执行必须给出容器标识")
+	}
+	if strings.TrimSpace(t.DockerID) == "" {
+		return fmt.Errorf("agent: 容器内执行必须给出 Docker 容器 ID")
+	}
+	if workDir := strings.TrimSpace(t.WorkDir); workDir != "" {
+		if !strings.HasPrefix(workDir, "/") {
+			return fmt.Errorf("agent: 容器内工作目录 %q 必须是绝对路径", workDir)
+		}
+	}
+	if dir := strings.TrimSpace(t.SessionDir); dir != "" {
+		if !strings.HasPrefix(dir, "/") {
+			return fmt.Errorf("agent: 容器内 Session 目录 %q 必须是绝对路径", dir)
+		}
+	}
+	return nil
 }
 
 // Validate 校验执行输入。
@@ -54,6 +103,11 @@ func (r RunRequest) Validate() error {
 	}
 	if r.Timeout < 0 {
 		return fmt.Errorf("agent: timeout 不得为负数")
+	}
+	if r.Container != nil {
+		if err := r.Container.Validate(); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -14,7 +14,8 @@ import (
 const sessionColumns = `id, task_id, step_id, attempt_id, role_id, role_snapshot_json,
 	provider, model, external_session_id, process_id, status,
 	session_jsonl_path, session_html_path, run_status, completeness, export_status,
-	exit_code, failure_summary, started_at, finished_at, created_at`
+	exit_code, failure_summary, invocation_id, container_id, docker_id,
+	started_at, finished_at, created_at`
 
 // sessionStore 实现 storage.SessionStore。
 type sessionStore struct {
@@ -37,7 +38,7 @@ func (s sessionStore) CreateSession(ctx context.Context, session domain.Session)
 		return err
 	}
 	const statement = `INSERT INTO sessions (` + sessionColumns + `)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	_, err = s.q.ExecContext(
 		ctx,
 		statement,
@@ -59,6 +60,9 @@ func (s sessionStore) CreateSession(ctx context.Context, session domain.Session)
 		sqlNullString(string(session.ExportStatus)),
 		toIntPtrParam(session.ExitCode),
 		sqlNullString(session.FailureSummary),
+		sqlNullString(session.InvocationID),
+		sqlNullString(session.ContainerID),
+		sqlNullString(session.DockerID),
 		toMillis(session.StartedAt),
 		toMillisPtr(session.FinishedAt),
 		toMillis(session.CreatedAt),
@@ -81,7 +85,8 @@ UPDATE sessions SET
 	provider = ?, model = ?, external_session_id = ?, process_id = ?,
 	status = ?, session_jsonl_path = ?, session_html_path = ?,
 	run_status = ?, completeness = ?, export_status = ?,
-	exit_code = ?, failure_summary = ?, finished_at = ?
+	exit_code = ?, failure_summary = ?,
+	invocation_id = ?, container_id = ?, docker_id = ?, finished_at = ?
 WHERE id = ?`
 	result, err := s.q.ExecContext(
 		ctx,
@@ -98,6 +103,9 @@ WHERE id = ?`
 		sqlNullString(string(session.ExportStatus)),
 		toIntPtrParam(session.ExitCode),
 		sqlNullString(session.FailureSummary),
+		sqlNullString(session.InvocationID),
+		sqlNullString(session.ContainerID),
+		sqlNullString(session.DockerID),
 		toMillisPtr(session.FinishedAt),
 		toIDParam(session.ID),
 	)
@@ -243,6 +251,9 @@ func scanSession(row scanner) (*domain.Session, error) {
 		exportStatus  sql.NullString
 		exitCode      sql.NullInt64
 		failure       sql.NullString
+		invocationID  sql.NullString
+		containerID   sql.NullString
+		dockerID      sql.NullString
 		startedAt     int64
 		finishedAt    sql.NullInt64
 		createdAtUnix int64
@@ -266,6 +277,9 @@ func scanSession(row scanner) (*domain.Session, error) {
 		&exportStatus,
 		&exitCode,
 		&failure,
+		&invocationID,
+		&containerID,
+		&dockerID,
 		&startedAt,
 		&finishedAt,
 		&createdAtUnix,
@@ -288,6 +302,9 @@ func scanSession(row scanner) (*domain.Session, error) {
 	session.ExportStatus = domain.SessionExportStatus(exportStatus.String)
 	session.ExitCode = fromIntPtr(exitCode)
 	session.FailureSummary = failure.String
+	session.InvocationID = invocationID.String
+	session.ContainerID = containerID.String
+	session.DockerID = dockerID.String
 	session.StartedAt = fromMillis(startedAt)
 	session.FinishedAt = fromMillisPtr(finishedAt)
 	session.CreatedAt = fromMillis(createdAtUnix)

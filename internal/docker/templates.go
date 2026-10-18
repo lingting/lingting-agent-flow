@@ -7,21 +7,30 @@ import (
 	"github.com/lingting/agentflow/internal/domain"
 )
 
-// 默认基础镜像来源。
+// 默认基础镜像与 Pi CLI 安装配置。
 //
-// 基础镜像固定到具体的发行版版本标签，不使用 latest：基础环境更新时必须显式
-// 修改本文件并生成新版本，使历史镜像始终可追溯。
+// 版本固定到具体发行版号，不使用 latest：镜像更新必须显式修改本文件并生成新版本，
+// 使历史镜像始终可追溯。安装方式采用 Pi 官方文档给出的 npm 方案，
+// 因此镜像内必须同时提供 Node.js 与 npm。
 const (
 	// DefaultBaseImage 是默认基础镜像引用。
-	DefaultBaseImage = "debian:12.7-slim"
+	//
+	// 基础镜像固定到具体的发行版版本标签，不使用 latest：基础环境更新时必须显式
+	// 修改本文件并生成新版本，使历史镜像始终可追溯。
+	DefaultBaseImage = "node:22.19.0-bookworm-slim"
+	// DefaultPiCLIPackage 是 Pi CLI 的 npm 包名。
+	DefaultPiCLIPackage = "@earendil-works/pi-coding-agent"
+	// DefaultPiCLIVersion 是默认安装的 Pi CLI 版本。
+	DefaultPiCLIVersion = "1.3.0"
 )
 
 // DefaultBaseDockerfile 是默认基础环境的 Dockerfile 内容。
 //
 // 内容约定：
-//   - 只安装后续 Agent 执行所需的通用工具，不安装 Pi CLI；
+//   - 安装后续 Agent 执行所需的通用工具与固定版本的 Pi CLI；
 //   - 不写入任何凭据、Token 或私钥；
 //   - 不挂载或引用宿主机 Docker Socket；
+//   - 不预装任何需要人工交互的 Pi 扩展或凭据配置；
 //   - 提供可验证的常驻运行契约（sleep 可用）。
 const DefaultBaseDockerfile = `# AgentFlow 基础环境
 #
@@ -41,7 +50,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8
 
-# 仅安装通用工具：版本控制、网络诊断、构建辅助与文本处理。
+# 通用工具：版本控制、网络诊断、构建辅助与文本处理。
+# 其中 git 是 SourceProvider 在容器内执行 Clone 的必要条件，
+# procps 提供 ps，便于诊断容器内进程状态。
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -54,6 +65,14 @@ RUN apt-get update \
         xz-utils \
         zip \
     && rm -rf /var/lib/apt/lists/*
+
+# Pi CLI 固定到具体版本，安装方式与官方文档一致（npm 全局安装，不执行依赖脚本）。
+# 不在此处写入任何凭据：模型凭据由运行期环境变量或容器内登录状态提供，
+# 也不预装任何需要人工交互的扩展。
+RUN npm install -g --ignore-scripts \
+        ` + DefaultPiCLIPackage + `@` + DefaultPiCLIVersion + ` \
+    && npm cache clean --force \
+    && pi --version
 
 # 任务项目目录只存在于容器内部可写层，不绑定挂载宿主机目录。
 WORKDIR /workspace/project

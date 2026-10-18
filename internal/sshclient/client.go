@@ -16,6 +16,7 @@ package sshclient
 
 import (
 	"context"
+	"io"
 	"time"
 )
 
@@ -42,6 +43,17 @@ type Client interface {
 	// 非零退出码通过 CommandResult.ExitCode 与 CommandStatusExitError 表达，
 	// 不视为传输层错误；error 只在无法执行命令、连接断开、超时或取消时返回。
 	Run(ctx context.Context, command string, options RunOptions) (CommandResult, error)
+	// RunWithInput 执行远程命令并把 input 写入其标准输入。
+	//
+	// input 为 nil 时不提供标准输入（等价于 Run）；非 nil 时在命令启动后写入内容并
+	// 立即关闭写入端，使需要 EOF 才能继续的远程程序能够正常结束。写入失败不会中断
+	// 命令本身，错误通过 CommandResult.StdinError 报告。
+	RunWithInput(
+		ctx context.Context,
+		command string,
+		input io.Reader,
+		options RunOptions,
+	) (CommandResult, error)
 	// SFTP 打开一个新的 SFTP 子系统通道。
 	//
 	// 返回的 FileTransfer 由调用方负责关闭；关闭它只释放该通道，
@@ -94,6 +106,8 @@ type CommandResult struct {
 	StderrTruncated bool
 	// Duration 是命令执行耗时。
 	Duration time.Duration
+	// Stdin 描述标准输入的写入结果，未提供输入时 Status 为 StdinStatusNone。
+	Stdin StdinResult
 	// TerminationConfirmed 表示是否确认远程命令已经结束。
 	//
 	// 正常结束时为 true；超时或取消时本端已关闭会话通道，但 SSH 协议不保证
@@ -137,3 +151,26 @@ type RunOptions struct {
 
 // DefaultMaxOutputBytes 是远程命令输出保留的默认字节上限。
 const DefaultMaxOutputBytes = 1 << 20
+
+// 标准输入写入结果状态。
+const (
+	// StdinStatusNone 表示本次执行没有提供标准输入。
+	StdinStatusNone = "none"
+	// StdinStatusWritten 表示内容已完整写入并关闭标准输入。
+	StdinStatusWritten = "written"
+	// StdinStatusFailed 表示写入或关闭标准输入时出错。
+	StdinStatusFailed = "failed"
+)
+
+// StdinResult 描述标准输入的写入结果。
+//
+// 写入失败不代表远程命令失败：命令可能已经读到部分内容并自行结束。
+// 调用方必须结合退出码与 StdinError 判断实际状态。
+type StdinResult struct {
+	// Status 是写入结果状态。
+	Status string
+	// Bytes 是成功写入的字节数。
+	Bytes int64
+	// Error 是写入或关闭失败的说明，成功时为空。
+	Error string
+}

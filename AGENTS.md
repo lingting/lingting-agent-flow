@@ -59,7 +59,7 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
 ### 目录
 
 - 所有测试代码与测试入口必须放在根目录 `tests/` 下，按 `unit/`、`integration/local/`、
-  `integration/pi/`、`integration/ssh/`、`e2e/` 分层。
+  `integration/pi/`、`integration/ssh/`、`integration/remote/`、`e2e/` 分层。
 - 禁止在生产源码目录（`internal/`、`cmd/`）新增或保留测试文件。
 - `tests/internal/testkit/` 只存放通用测试辅助代码，不存放产品实现，也不存放需要额外执行的验证脚本。
 
@@ -109,11 +109,29 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
   但认证失败、Docker 不可用或断言不成立时必须让测试失败。
 - 真实远程 Docker 测试只允许操作带随机后缀、属于本次测试的镜像标签、容器与远程目录；
   禁止执行全局 `docker system prune`、`docker image prune`、`docker volume prune`。
+- 真实远程 Agent 测试放在 `tests/integration/remote/agent/`，同样必须显式设置
+  `AGENTFLOW_TEST_REMOTE_DOCKER=1`；容器内 Pi CLI 是否可用必须通过容器内实际检查确认，
+  不能依据本机是否安装 Pi 判断。测试镜像由该目录下的 `Dockerfile` 构建，基础镜像与
+  Pi CLI 版本都固定到具体版本。
+
+### 远程执行与 Session 约束
+
+- Pi 运行在任务容器内部，不得静默回退到本机执行；本机 Runner 收到容器目标时必须直接失败。
+- 每次 Agent 调用使用独立的 invocation ID 与独立的 Session 文件，禁止复用同一个 Session。
+- 原始 JSONL 必须复制到本机 AgentFlow 数据目录并独立于容器生命周期；容器删除后仍可读。
+- 不得把 Session 仅保存在容器内部、远程 AgentFlow 配置目录或远程项目代码目录。
+- 不得把 Session 内容写入本机真实项目目录，也不得把完整 Session 打印到日志或控制台。
+- HTML 导出失败只降级导出状态，不得删除或覆盖已经保存的原始 JSONL。
+- 项目代码只能克隆到容器内部工作目录，不得克隆到远程宿主机项目配置目录，也不得通过
+  SCP/SFTP 上传到宿主机后再 bind mount 进容器。
+- SourceProvider 只负责获取代码与初始化任务分支，不负责 Push、Merge 或删除容器。
+- Runner 不负责工作流重试决策，也不决定整个任务的成功清理策略。
 
 ### 结果报告
 
 - 修改测试相关基础设施后，必须运行与修改范围相关的测试，并如实报告通过、失败、跳过与
   未执行的测试；不得把未执行、被跳过或失败的测试报告为通过。
+- 测试产物路径（`TEST_ARTIFACT_DIR`）与远程测试资源位置必须在最终报告中列出。
 
 ## Docker 与容器管理约束
 

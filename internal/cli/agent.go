@@ -25,6 +25,7 @@ func newAgentCommand(a *app.App) *cobra.Command {
 	}
 	command.AddCommand(newAgentCheckCommand(a))
 	command.AddCommand(newAgentTestCommand(a))
+	command.AddCommand(newAgentRunCommand(a))
 	return command
 }
 
