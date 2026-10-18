@@ -6,7 +6,8 @@
 
 - Go：使用当前受支持的稳定版本，版本要求以 `go.mod` 声明为准。
 - Git：用于工作区隔离与版本管理，Makefile 会用 `git rev-parse` 注入提交号。
-- Node.js + pnpm：仅在开发 Web UI 时需要（当前未引入）。
+- Node.js 22 + pnpm 11：仅在构建或开发 Web UI 时需要；`make release` 会用它完成前端生产构建，
+  产物随后由 Go 通过 `//go:embed` 嵌入可执行文件。
 - Pi CLI：`agent check` 与 `agent test` 需要 PATH 中存在 `pi`；`agent test` 还会使用角色
   配置中的模型，因此需要完成对应 Provider 的凭据配置。其他命令不依赖 Pi。
 
@@ -33,10 +34,16 @@ make test-pi      # 真实 Pi 集成测试
 make test-ssh     # 真实 SSH 集成测试
 make test-e2e     # CLI 端到端测试
 make test-race    # 竞态检测（单元测试与 SSH 连接层）
-make build        # 构建 bin/agentflow
-make run          # go run ./cmd/agentflow
+make build        # 构建 bin/agentflow（不重建前端）
+make release      # 单文件生产构建：前端构建 + Go 编译
+make run          # go run ./cmd/agentflow web serve
+make web-dev      # 前端开发服务器（另开终端运行 make web-serve）
+make web-serve    # 本地 HTTP 服务（API + 内嵌页面）
+make test-packaging  # 单文件打包冒烟测试
 make check        # fmt-check + vet + build
 ```
+
+Web 相关说明见根目录 [README](../README.md#web-界面与单文件交付)。
 
 不依赖 Make 时可以直接使用底层命令：
 

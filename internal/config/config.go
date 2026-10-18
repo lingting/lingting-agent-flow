@@ -6,6 +6,8 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 
 	"github.com/lingting/agentflow/internal/domain"
@@ -25,12 +27,23 @@ const (
 	ToolsModeVerification = "verification"
 )
 
+// HTTP 服务默认监听地址与端口。
+//
+// 默认端口与前端开发服务器（26390）分开，避免开发时两个进程争用同一端口。
+const (
+	// DefaultServerHost 是未配置监听地址时使用的回环地址。
+	DefaultServerHost = "127.0.0.1"
+	// DefaultServerPort 是未配置监听端口时使用的端口。
+	DefaultServerPort = 26380
+)
+
 // Config 是 AgentFlow 的完整配置。
 type Config struct {
 	// SourcePath 是本次加载使用的配置文件路径，由加载器写入，不参与 YAML 解析。
 	SourcePath string `yaml:"-"`
 
 	App       AppConfig       `yaml:"app"`
+	Server    ServerConfig    `yaml:"server"`
 	Storage   StorageConfig   `yaml:"storage"`
 	Workspace WorkspaceConfig `yaml:"workspace"`
 	Scheduler SchedulerConfig `yaml:"scheduler"`
@@ -42,6 +55,16 @@ type Config struct {
 type AppConfig struct {
 	Name     string `yaml:"name"`
 	LogLevel string `yaml:"log_level"`
+}
+
+// ServerConfig 描述本地 HTTP 服务的监听设置。
+//
+// 默认只监听回环地址：Web 页面与 API 同源，未实现远程访问认证前不对外开放网卡。
+type ServerConfig struct {
+	// Host 是监听地址，为空时使用 DefaultServerHost。
+	Host string `yaml:"host"`
+	// Port 是监听端口，必须大于 0；端口是否被占用由启动阶段判断。
+	Port int `yaml:"port"`
 }
 
 // StorageConfig 描述持久化位置。
@@ -136,6 +159,7 @@ func (i *issues) empty() bool {
 func (c *Config) Validate() error {
 	var problems issues
 	c.App.validate(&problems)
+	c.Server.validate(&problems)
 	c.Storage.validate(&problems)
 	c.Workspace.validate(&problems)
 	c.Scheduler.validate(&problems)
@@ -159,6 +183,31 @@ func (a AppConfig) validate(problems *issues) {
 	if _, err := logging.ParseLevel(a.LogLevel); err != nil {
 		problems.add("app.log_level", err.Error())
 	}
+}
+
+// validate 校验 HTTP 服务监听设置。
+//
+// 端口 0 表示使用默认端口，因此只在负值时报告问题；监听地址只在启动阶段解析。
+func (s ServerConfig) validate(problems *issues) {
+	if s.Port < 0 || s.Port > 65535 {
+		problems.add("server.port", "必须在 0 到 65535 之间")
+	}
+	if strings.ContainsAny(s.Host, " \t\r\n") {
+		problems.add("server.host", "不能包含空白字符")
+	}
+}
+
+// Address 返回用于监听的 host:port，未配置的字段使用默认值。
+func (s ServerConfig) Address() string {
+	host := strings.TrimSpace(s.Host)
+	if host == "" {
+		host = DefaultServerHost
+	}
+	port := s.Port
+	if port <= 0 {
+		port = DefaultServerPort
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port))
 }
 
 // validate 校验持久化路径。

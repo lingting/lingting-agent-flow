@@ -139,6 +139,21 @@ func (db *DB) Path() string {
 	return db.path
 }
 
+// Ping 用一次只读查询确认数据库仍然可用。
+//
+// 这里不读取任何业务表：健康检查只需要知道连接能否完成一次真实往返，
+// 不能因为业务表为空而误判为不可用。
+func (db *DB) Ping(ctx context.Context) error {
+	if err := db.ensureOpen(); err != nil {
+		return err
+	}
+	var one int
+	if err := db.sql.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
+		return wrapError("检查数据库连接", err)
+	}
+	return nil
+}
+
 // ensureParentDir 创建数据库文件的父目录。
 func ensureParentDir(path string) error {
 	parent := filepath.Dir(path)

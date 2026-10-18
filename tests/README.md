@@ -24,12 +24,15 @@ tests/
 │   ├── source/         # Git Clone 代码来源（容器执行替身）
 │   │   └── codesaver/  # 代码保存：提交、推送、合并与状态记录
 │   ├── ssh/            # SSH 主机密钥、认证配置、路径与结果状态
+│   ├── httpapi/        # HTTP API 处理器：健康检查、错误结构与 404
 │   ├── store/          # SQLite 仓储与数据库约束
+│   ├── webui/          # 前端静态资源处理器与 SPA 回退
 │   ├── workflow/       # 工作流引擎、状态机、重试与恢复核验
 │   └── testkit/        # testkit 自身的测试
 ├── integration/
 │   ├── local/          # 本机集成测试，不依赖外部服务
 │   │   ├── database/   # 持久化工作流全链路、Schema 审计、旧库升级
+│   │   ├── httpserver/ # HTTP 服务：API、静态资源、SPA 回退与关闭
 │   │   ├── docker/     # 远程 Docker 命令构造与结果解析（使用执行替身）
 │   │   ├── environment/# 环境版本文件写入与清单读写（真实文件系统）
 │   │   ├── session/    # Session 提取与持久化边界（真实文件系统）
@@ -46,7 +49,8 @@ tests/
 │   │   └── docker/     # 需要真实远程 Linux 机器与真实 Docker Engine
 │   └── ssh/            # 需要真实远程 Linux 机器
 └── e2e/
-    └── cli/            # CLI 完整用户操作路径
+    ├── cli/            # CLI 完整用户操作路径
+    └── packaging/      # 单文件打包冒烟测试（前端构建 + Go 编译 + 独立目录启动）
 ```
 
 ## 测试入口
@@ -80,6 +84,9 @@ AGENTFLOW_TEST_REMOTE_DOCKER=1 go test -count=1 -v ./tests/integration/remote/wo
 
 # CLI 端到端测试
 go test -count=1 -v ./tests/e2e/...
+
+# 单文件打包冒烟测试（需要 pnpm 与已安装的前端依赖，否则自行跳过）
+go test -count=1 -v -run TestSingleBinaryPackaging ./tests/e2e/packaging/...
 
 # 完整测试
 go test -count=1 -v -p 8 -parallel 8 ./tests/...

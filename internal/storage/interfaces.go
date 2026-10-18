@@ -299,6 +299,11 @@ type Store interface {
 	RoleSeeder
 	// WithTx 在单个事务内执行 fn，fn 返回错误或发生 panic 时回滚。
 	WithTx(ctx context.Context, fn func(ctx context.Context, tx Tx) error) error
+	// Ping 检查存储是否可用，不读写任何业务数据。
+	//
+	// 健康检查用它区分"HTTP 服务已启动"与"SQLite 实际可用"，不得用其他
+	// 业务查询代替。
+	Ping(ctx context.Context) error
 	// Close 关闭数据库连接，已关闭时重复调用返回 nil。
 	Close() error
 }

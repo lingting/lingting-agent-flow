@@ -29,6 +29,9 @@ AgentFlow 处于**执行节点接入阶段**。当前仓库包含工程骨架、
 - 远程命令执行：返回退出码、标准输出、标准错误、耗时与结果状态，区分成功、非零退出、超时、取消与连接中断；输出超过上限时标记截断，取消与超时只关闭对应会话而不影响同连接的其他操作。
 - SFTP 文件操作：创建目录、属性查询（含符号链接识别）、目录列举、上传、下载、重命名与删除；上传先写同目录临时文件并校验字节数，覆盖提交优先使用 `posix-rename` 原子替换；下载支持大小上限，失败不留下最终文件。
 - 远程 Home 与工作空间：通过已认证连接解析远程登录用户 Home，把 `~/.lingting/agentflow` 或自定义路径解析为远程绝对路径，并检查存在性与可写性。
+- 本地 HTTP 服务：`agentflow web serve` 同时提供 `/api/v1` 接口与内嵌的 Web 页面，默认只监听 `127.0.0.1:26380`。
+- 最小只读接口：`GET /api/v1/health` 分别报告 HTTP API 与 SQLite 的可用性，`GET /api/v1/system/info` 返回构建信息；错误响应统一为 `{"error": {...}}`。
+- 单文件交付：前端生产构建产物通过 `//go:embed` 嵌入 Go 可执行文件，`make release` 是唯一推荐的生产构建入口。
 
 第一版目标（尚未实现）：
 
@@ -38,7 +41,7 @@ AgentFlow 处于**执行节点接入阶段**。当前仓库包含工程骨架、
 - 以验证结果驱动的修复循环。
 - 相互隔离的 Git Worktree。
 - 可恢复的任务状态。
-- 可选的本地 Web UI。
+- 业务 Web 页面（当前只有 Web 外壳与连接状态）。
 
 ## 技术栈
 
@@ -63,7 +66,7 @@ Pi RPC、Git Worktree、React 与 TypeScript 属于后续阶段的技术选型�
 
 只有 `agent check` 与 `agent test` 需要 Pi：前者检查 PATH 中的 `pi` 及其非交互式参数，
 后者还会用角色配置的模型发起一次真实调用，因此需要对应 Provider 的凭据。其余命令
-（`config`、`version`、`host`）不依赖 Pi，也不需要模型凭据。
+（`config`、`version`、`host`、`web`）不依赖 Pi，也不需要模型凭据。
 
 ## 安装与运行
 
@@ -77,6 +80,92 @@ make build
 ```
 
 不依赖 Make：
+
+```bash
+go build -o bin/agentflow ./cmd/agentflow
+go run ./cmd/agentflow --help
+```
+
+## Web 界面与单文件交付
+
+AgentFlow 的 Web 界面与 HTTP API 由同一个 Go 进程提供。生产环境只交付一个可执行文件，
+前端构建产物通过 `//go:embed` 嵌入其中；部署时不需要 Node.js、前端 `dist/` 目录或额外的
+静态文件服务器。
+
+### 正式构建（唯一推荐入口）
+
+```bash
+make release
+```
+
+该命令先按 `pnpm-lock.yaml` 安装前端依赖并执行前端生产构建，把产物写入 `internal/webui/dist/`，
+然后编译 Go 程序，最终可执行文件为 `bin/agentflow`。构建顺序不可颠倒：先编译 Go 再构建前端
+会让二进制中保留旧 UI。
+
+前端构建失败、`index.html` 缺失或 `assets/` 中缺少 `.js`、`.css` 时构建立即失败，不会产出
+"看起来成功但实际没有页面"的可执行文件。
+
+构建完成后把 `bin/agentflow` 复制到任意目录，只启动它即可访问页面：
+
+```bash
+./bin/agentflow web serve
+# AgentFlow Web 服务已启动: http://127.0.0.1:26380
+```
+
+### 开发模式
+
+开发模式保留两个进程：
+
+```bash
+# 终端 1：Go HTTP 服务，提供 /api/v1 接口
+make web-serve          # 等价于 go run ./cmd/agentflow web serve
+
+# 终端 2：Vite+ 开发服务器，负责页面热更新
+make web-dev            # 等价于 cd lingting-agent-flow-ui && pnpm dev
+```
+
+开发服务器监听 `127.0.0.1:26390`，并把 `/api` 代理到 `http://127.0.0.1:26380`。需要其他后端
+地址时设置 `AGENTFLOW_DEV_API_TARGET`；该变量只影响开发代理，不会进入生产构建产物。
+
+### HTTP 接口
+
+当前只实现最小只读接口：
+
+| 方法 | 路径                   | 说明                                                    |
+| ---- | ---------------------- | ------------------------------------------------------- |
+| GET  | `/api/v1/health`       | HTTP API 与 SQLite 可用性；存在不可用依赖时返回 503      |
+| GET  | `/api/v1/system/info`  | 程序版本、提交、构建时间、Go 版本与编译平台              |
+
+`/api/v1/health` 的 `checks` 分别表达 `http_api` 与 `database`，不会因为 HTTP 服务已启动就
+认为数据库一定可用。错误响应统一为 `{"error": {"code", "message", "request_id"}}`。
+
+`/api/` 下的未知路径返回 JSON 404，不会回退到前端页面；`/api` 之外的未知路径进入 SPA 回退，
+因此浏览器刷新任意前端路由都能正常打开页面。
+
+监听地址默认是 `127.0.0.1:26380`，可在配置文件 `server` 段或 `--address` 参数中修改。默认
+只监听回环地址，未实现远程访问认证前不会默认监听所有网卡。
+
+### 尚未实现的接口
+
+任务、项目、机器、环境、容器、代码保存与 Agent 调度均**没有** HTTP 接口。Web 页面中的对应
+入口仍为占位说明，连接指示器只表示 HTTP API 的可用性，不代表 SSH、Docker 或 Pi Agent 已就绪。
+
+## 前端工程
+
+前端源码位于 `lingting-agent-flow-ui/`，依赖管理与构建工具为 pnpm 与 Vite+：
+
+```bash
+cd lingting-agent-flow-ui
+pnpm install
+pnpm dev                     # vp dev
+pnpm build                   # 生产构建，写入 ../internal/webui/dist
+pnpm lint                    # 格式、lint 与类型检查
+pnpm test                    # 单元测试（vp test run）
+pnpm exec playwright test    # 浏览器测试
+```
+
+前端通过 `src/lib/api/` 的统一客户端访问 API，路径全部是同源相对路径（如 `/api/v1/health`）。
+测试产物写入操作系统临时目录下的随机目录并保留，不自动清理。
 
 ```bash
 go build -o bin/agentflow ./cmd/agentflow
@@ -475,7 +564,7 @@ SSH 连接层按三层覆盖：`tests/unit/ssh/`（主机密钥、认证配置�
 - Git Worktree 创建与清理。
 - Planner / Developer / Validator 的实际执行。
 - 验证失败回退与任务恢复。
-- HTTP API 与 Web UI。
+- 任务、项目、机器、环境等业务 HTTP 接口与对应页面。
 - 多 Agent Provider 与分布式执行。
 - 角色管理 CLI 与 Web 页面（当前只有存储层的角色初始化与增删改查接口）。
 - 远程 Docker 检测、Dockerfile 版本化、镜像构建与容器生命周期管理。
@@ -499,7 +588,7 @@ AgentFlow 的最终形态会**执行外部程序并修改项目文件**，请注
   已终止；结果中的终止确认标志为 false 时，不要假定远程进程已经退出。
 - SFTP 上传覆盖优先使用 `posix-rename` 原子替换；服务端不支持该扩展时会退化为"删除旧
   文件后重命名"，此时替换不是原子的，请避免在关键文件上依赖强原子性。
-- 本地 HTTP 服务在实现后将默认只监听 `127.0.0.1`，且不存储模型凭据。
+- 本地 HTTP 服务默认只监听 `127.0.0.1`，且不存储模型凭据。Web 连接指示器只表示 HTTP API 可用，不代表 SSH、Docker 或 Pi Agent 已就绪。
 
 ## 许可证
 

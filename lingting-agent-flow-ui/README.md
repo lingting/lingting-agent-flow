@@ -1,6 +1,7 @@
 # lingting-agent-flow-ui
 
-AgentFlow 的 Web 前端。当前只包含基础工程、应用外壳、路由与占位页面，**尚未接入后端 API**。
+AgentFlow 的 Web 前端。包含基础工程、应用外壳、路由、占位页面，以及通过统一 API 客户端接入的
+后端连接状态。生产构建产物由 Go 程序通过 `//go:embed` 嵌入并随单可执行文件交付。
 
 ## 技术栈
 
@@ -41,39 +42,83 @@ pnpm add lingting-react-ui@2026.10.0
 
 ```bash
 pnpm install
-pnpm dev      # vp dev，开发服务器 http://127.0.0.1:26390
-pnpm build    # vp build，产物输出到 dist/
-pnpm lint     # vp fmt && vp lint --fix && tsc --noEmit
-pnpm test     # vp test run，单元测试
-pnpm exec playwright test   # 基础布局浏览器测试
+pnpm dev                    # vp dev，开发服务器 http://127.0.0.1:26390
+pnpm build                  # 生产构建，产物写入 ../internal/webui/dist
+pnpm build:assets           # 仅执行 vp build，不补回占位文件
+pnpm lint                   # vp fmt && vp lint --fix && tsc --noEmit
+pnpm test                   # vp test run，单元测试
+pnpm exec playwright test   # 基础布局与连接状态浏览器测试
 ```
 
-本步骤不配置 API 代理：AgentFlow 后端 HTTP 服务尚未实现，不得填写任何后端端口或路由前缀。
+### 开发代理
+
+开发服务器把 `/api` 代理到 Go HTTP 服务（默认 `http://127.0.0.1:26380`）。开发时需要同时
+启动 Go 服务：
+
+```bash
+# 仓库根目录
+make web-serve
+```
+
+需要其他后端地址时设置 `AGENTFLOW_DEV_API_TARGET`（例如 `http://127.0.0.1:26381`）。该变量
+只影响开发代理，不会进入生产构建产物。
+
+### 生产构建
+
+`pnpm build` 把产物直接写入 Go 的嵌入包目录 `internal/webui/dist/`（`//go:embed` 无法引用包
+目录之外的文件），随后补回 `.gitkeep`，保证仓库在构建后仍可编译。构建脚本会校验
+`index.html`、`assets/` 下的 `.js` 与 `.css` 是否齐全，任一缺失即失败。
+
+单文件生产构建的推荐入口是仓库根目录的 `make release`。
 
 ## 目录结构
 
 ```text
 src/
-├── main.tsx                 应用入口：初始化 UserStore 并挂载 LRI 的 AppSidebarLayout
+├── main.tsx                 应用入口：只挂载 AppShell
 ├── index.css                应用级样式入口（高度链与 body 滚动）
 ├── app/
+│   ├── AppShell.tsx         应用外壳：连接状态 Provider + LRI 布局 + 头部指示器
 │   └── navigation.tsx       导航与路由的唯一定义处、根重定向目标、产品名
+├── lib/api/
+│   ├── client.ts            统一请求层：路径校验、超时、取消与错误分类
+│   ├── endpoints.ts         已实现接口（健康检查、系统信息）
+│   ├── types.ts             公共响应类型
+│   ├── useApiConnection.ts  连接状态 Hook（首次检查前为 checking）
+│   └── ApiConnectionContext.tsx  应用内共享同一份连接状态
 ├── components/
+│   ├── api-connection-status/  头部连接指示器与错误文案
 │   ├── page-placeholder/    占位页内容
 │   └── product-brand/       侧栏产品标识
 └── pages/
-    ├── overview/            概览
+    ├── overview/            概览（含真实连接状态面板）
     ├── tasks/               任务
     ├── projects/            项目
     ├── machines/            机器
     ├── environments/        环境
     ├── settings/            设置
     └── not-found/           404 页面
+scripts/
+└── build-webui.mjs          生产构建入口：vp build + 产物校验 + 占位文件补回
 tests/
-├── unit/                    工程配置与导航元数据测试（Vitest）
-├── e2e/                     基础布局浏览器测试（Playwright）
+├── unit/                    工程配置、导航元数据、API 客户端与连接文案测试（Vitest）
+├── e2e/                     基础布局与连接状态浏览器测试（Playwright）
 └── internal/                测试工作空间与工程读取辅助
 ```
+
+## API 连接层
+
+- 所有请求经由 `src/lib/api/` 的统一客户端发出，页面不直接调用 `fetch`。
+- 路径一律为同源相对路径（如 `/api/v1/health`），不硬编码 `localhost`、端口或后端完整 URL；
+  开发环境靠 Vite+ 代理，生产环境由同一个 Go 进程提供页面与 API。
+- 错误按类别区分：`http`（非成功状态码）、`network`（连接失败）、`timeout`（超时）、
+  `aborted`（主动取消）、`invalid_response`（响应不是合法 JSON）。超时与取消不会被显示成
+  服务端业务错误。
+- 连接状态只有 `checking` / `connected` / `disconnected` 三种，首次检查完成前不显示已连接。
+  挂载、窗口重新获得焦点、页面从 bfcache 恢复时各检查一次，并按 30 秒间隔轮询。
+- 连接指示器只表示 AgentFlow HTTP API 的可用性，不代表 SSH、Docker、远程机器或 Pi Agent
+  已经就绪。
+
 
 ## 路由与布局
 
@@ -91,9 +136,11 @@ tests/
 ## 测试
 
 - 单元测试（`tests/unit`）：`pnpm test`，覆盖 `lingting-react-ui` 实际安装版本、依赖去重配置的
-  推导方式、脚本命令与导航元数据。
+  推导方式、脚本命令、导航元数据、API 客户端（成功、非成功状态码、非法 JSON、网络失败、
+  超时、取消、错误结构解析、路径不带开发地址）、连接文案与构建输出配置。
 - 浏览器测试（`tests/e2e`）：`pnpm exec playwright test`，由 Playwright 自动启动 `vp dev`，覆盖
-  六个路由、根重定向、刷新后状态、导航切换、404、桌面与窄视口布局、水平溢出与渲染错误。
+  六个路由、根重定向、刷新后状态、导航切换、404、桌面与窄视口布局、水平溢出与渲染错误，以及
+  通过拦截 `/api/v1/health` 验证的已连接、未连接、503 与服务端错误说明。
 - 两个测试入口都会输出 `TEST_ARTIFACT_DIR=<绝对路径>`，产物写入操作系统临时目录
   `lingting-agent-flow-ui-tests/run-*`，测试结束后保留，不自动清理。
 - 测试默认不依赖 Go 后端、Docker、SSH、Pi CLI 或真实模型服务。
@@ -110,10 +157,11 @@ tests/
 | `index.css` 提供高度链与 `body` 滚动               | 沿用                                           |
 | `resolve.dedupe` 手工列举 LRI 的 peer 依赖         | 改为从 `lingting-react-ui/package.json` 推导   |
 | `@lri` 别名、`@lingting/ai-gateway-sdk` workspace  | 不引入：本项目直接依赖发布包 `lingting-react-ui` |
-| `server.proxy` 指向 `26384` 后端与 `mode: desktop` 构建 | 不引入：后端与桌面构建均尚未实现          |
+| `server.proxy` 指向 `26384` 后端                    | 沿用代理思路，目标改为 Go 服务的 `26380`，可用环境变量覆盖 |
+| `mode: desktop` 构建                               | 不引入：桌面构建尚未实现                        |
 | `routeType="hash"`（桌面端）                       | 不引入：Web 端使用浏览器 history 路由          |
 
 ## 尚未实现
 
-真实后端 API 接入、任务创建与执行、任务详情、SSH 连接、Docker 容器操作、Git 工作流与 Pi Agent
+任务、项目、机器、环境的业务 API 与页面，以及 SSH 连接、Docker 容器操作、Git 工作流与 Pi Agent
 调用均不在本步骤范围内。页面中的说明文字只描述规划，不代表功能已经可用。

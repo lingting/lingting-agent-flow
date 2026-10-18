@@ -37,11 +37,20 @@ describe("导航与路由元数据", () => {
     expect(navigation).not.toContain('path: ""');
   });
 
-  it("入口把导航配置与重定向目标交给 LRI 布局", () => {
+  it("应用外壳把导航配置、重定向目标与连接状态交给 LRI 布局", () => {
+    const shell = readProjectFile("src/app/AppShell.tsx");
+
+    expect(shell).toContain("menuRoutes={navigationRoutes}");
+    expect(shell).toContain("rootRedirectTo={ROOT_REDIRECT_TO}");
+    expect(shell).toContain("notFoundComponent={NotFoundPage}");
+    expect(shell).toContain("ApiConnectionProvider");
+    expect(shell).toContain("headerRightItems");
+  });
+
+  it("入口只挂载应用外壳，不在入口重复定义路由", () => {
     const main = readProjectFile("src/main.tsx");
 
-    expect(main).toContain("menuRoutes={navigationRoutes}");
-    expect(main).toContain("rootRedirectTo={ROOT_REDIRECT_TO}");
-    expect(main).toContain("notFoundComponent={NotFoundPage}");
+    expect(main).toContain("<AppShell />");
+    expect(main).not.toContain("menuRoutes");
   });
 });

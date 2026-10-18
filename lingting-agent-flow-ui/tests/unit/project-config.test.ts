@@ -37,7 +37,8 @@ describe("工程配置", () => {
     };
 
     expect(manifest.scripts.dev).toBe("vp dev");
-    expect(manifest.scripts.build).toBe("vp build");
+    expect(manifest.scripts.build).toBe("node scripts/build-webui.mjs");
+    expect(manifest.scripts["build:assets"]).toBe("vp build");
     expect(manifest.scripts.test).toBe("vp test run");
   });
 });

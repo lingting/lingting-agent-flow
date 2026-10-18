@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vp dev",
-    "build": "vp build",
+    "build": "node scripts/build-webui.mjs",
+    "build:assets": "vp build",
     "lint": "vp fmt && vp lint --fix && tsc --noEmit",
     "test": "vp test run"
   },

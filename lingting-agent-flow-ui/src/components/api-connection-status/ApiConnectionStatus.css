@@ -1,0 +1,7 @@
+.api-connection-status {
+  white-space: nowrap;
+}
+
+.api-connection-status__label {
+  font-size: 12px;
+}

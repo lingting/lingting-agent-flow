@@ -235,6 +235,27 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
   唯一目录并保留，不得自动清理。
 - 不得声称未运行的测试已经通过。
 
+## Web 连接层与单文件交付约束
+
+- 开发模式保留两个进程：Vite+ 开发服务器负责页面热更新，Go HTTP 服务负责 API；Vite+ 的
+  `/api` 代理只作用于开发环境，代理目标通过 `AGENTFLOW_DEV_API_TARGET` 或开发配置设置。
+- 生产模式只交付一个 Go 可执行文件：API 与前端静态资源由同一进程提供，前端构建产物通过
+  `//go:embed` 嵌入，禁止要求用户在发布后手工复制 HTML、CSS 或 JavaScript。
+- 前端源码固定使用同源相对 API 路径（例如 `/api/v1/health`），禁止在生产构建中硬编码
+  `localhost`、开发端口、局域网 IP 或后端完整 URL。
+- 所有前端 API 请求必须经由 `lingting-agent-flow-ui/src/lib/api/` 的统一客户端发出，页面不得
+  直接调用 `fetch`，也不得各自解析 JSON 或错误。
+- 前端构建输出目录固定为 `internal/webui/dist/`；该目录必须保留 `.gitkeep`，使全新检出的
+  仓库仍满足 `go:embed` 的编译要求。缺少真实构建产物时不得静默返回空白页面。
+- 仓库根目录 `Makefile` 的 `release` 是唯一推荐的单文件生产构建入口，必须先构建前端再编译
+  Go；禁止先编译 Go 再构建前端，否则二进制中会残留旧 UI。
+- 前端连接状态只能来自真实健康检查响应，禁止使用固定假数据；首次检查完成前不得显示已连接。
+  连接指示器只表示 AgentFlow HTTP API 的可用性，不得表达为 SSH、Docker、远程机器或 Pi Agent
+  已连接。
+- `/api/` 下的未知路径必须返回统一 JSON 错误，不得回退到前端入口页面；缺失的 `.js`、`.css`
+  等静态资源必须返回 404，不得伪装成成功的 HTML。
+- Go HTTP 服务默认只监听 `127.0.0.1`，未实现远程访问认证前不得默认监听所有网卡。
+
 ## 文档同步
 
 - 代码编辑期间不修改 `README.md` 及其他文档。
@@ -252,9 +273,20 @@ go build ./...               # 编译
 前端命令在 `lingting-agent-flow-ui/` 下执行：
 
 ```bash
-pnpm dev              # 启动开发服务器（vp dev）
-pnpm build            # 生产构建（vp build）
-pnpm lint             # 格式、lint 与类型检查
-pnpm test             # 单元测试（vp test run）
-pnpm exec playwright test   # 基础布局浏览器测试
+pnpm dev                  # 开发服务器（vp dev），/api 代理到 Go 服务
+pnpm build                # 生产构建，产物写入 internal/webui/dist（含占位文件补回）
+pnpm build:assets         # 仅执行 vp build，不补回占位文件
+pnpm lint                 # 格式、lint 与类型检查
+pnpm test                 # 单元测试（vp test run）
+pnpm exec playwright test # 基础布局与连接状态浏览器测试
+```
+
+Go 侧 Web 相关命令在仓库根目录执行：
+
+```bash
+go run ./cmd/agentflow web serve                     # 启动本地 HTTP 服务（API + 内嵌页面）
+go run ./cmd/agentflow web serve --address 127.0.0.1:26380
+make web-build                                       # 前端生产构建（按锁文件安装依赖）
+make release                                         # 单文件生产构建：前端 + Go
+go test -count=1 ./tests/e2e/packaging/...           # 单文件打包冒烟测试
 ```

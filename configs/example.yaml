@@ -11,6 +11,14 @@ app:
   # 可选 debug、info、warn、error
   log_level: info
 
+# 本地 HTTP 服务（agentflow web serve）的监听设置。
+#
+# 默认只监听回环地址：Web 页面与 API 同源，未实现远程访问认证前不对外开放网卡。
+# port 省略时使用 26380；--address 参数优先于这里的配置。
+server:
+  host: 127.0.0.1
+  port: 26380
+
 storage:
   database_path: .agentflow/agentflow.db
 
