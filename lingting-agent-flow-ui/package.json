@@ -1,0 +1,47 @@
+{
+  "name": "lingting-agent-flow-ui",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vp dev",
+    "build": "vp build",
+    "lint": "vp fmt && vp lint --fix && tsc --noEmit",
+    "test": "vp test run"
+  },
+  "dependencies": {
+    "@ant-design/cssinjs": "^2.1.2",
+    "@ant-design/icons": "~6.3.2",
+    "@ant-design/plots": "~2.6.8",
+    "@ant-design/pro-components": "^3.1.14-6",
+    "@ant-design/x": "~2.8.0",
+    "@ant-design/x-markdown": "~2.8.0",
+    "@ant-design/x-sdk": "~2.8.0",
+    "@marsidev/react-turnstile": "~1.6.1",
+    "@tanstack/react-query": "~5.101.2",
+    "@tanstack/react-router": "^1.170.18",
+    "@tanstack/react-store": "^0.11.0",
+    "antd": "~6.6.0",
+    "clsx": "~2.1.1",
+    "dayjs": "~1.11.21",
+    "lingting-react-ui": "2026.10.0",
+    "react": "~19.2.7",
+    "react-dom": "~19.2.7"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "@tailwindcss/vite": "~4.1.18",
+    "@types/node": "~22.13.1",
+    "@types/react": "~19.2.8",
+    "@types/react-dom": "~19.2.3",
+    "@vitejs/plugin-react": "~5.1.1",
+    "tailwindcss": "~4.1.18",
+    "typescript": "~5.9.3",
+    "vite": "catalog:",
+    "vite-plus": "catalog:",
+    "vitest": "4.1.10"
+  },
+  "volta": {
+    "node": "22.22.3"
+  }
+}

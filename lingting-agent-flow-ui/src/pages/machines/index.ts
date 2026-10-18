@@ -1,0 +1,1 @@
+export { MachinesPage } from "./MachinesPage";

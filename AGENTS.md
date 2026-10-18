@@ -217,6 +217,24 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
 - Detached 容器不得被 AgentFlow 自动重新接管，也不得被自动启动、停止或删除。
 - 只有构建成功并核实到实际镜像 ID 的版本才能用于创建容器；构建失败不得标记为可用。
 
+## 前端工程约束
+
+- 前端根目录固定为仓库根目录下的 `lingting-agent-flow-ui/`，与 Go 代码不共享模块。
+- UI 组件库固定为 `lingting-react-ui@2026.10.0`，必须精确锁定版本；不得升级、降级或替换为
+  其他版本，也不得绕开该库另建一套 UI 设计体系。
+- 依赖管理与构建工具固定为 pnpm 与 Vite+（`vp dev` / `vp build` / `vp lint` / `vp test`）。
+- 组件选择优先级为 `lingting-react-ui` → Ant Design Pro Components → Ant Design。Ant Design
+  组件必须在确认前两级没有等效能力后才直接使用。
+- 参考项目为 `lingting-ai-gateway`（本地 `D:\code\lingting\lingting-ai-gateway\lingting-ai-gateway-ui`）。
+  重要布局、路由与导航实现必须先阅读其真实源码，再决定借鉴点；不得只按文档推测，也不得复制
+  只对其自身生效的别名、SDK workspace、代理端口与构建模式。
+- 导航、页面标题与当前路由高亮必须由同一份路由元数据派生，禁止在多处重复定义路径与标题。
+- 前端不直接访问 SQLite，不执行 SSH、Docker、Git 或 Pi 命令，也不承载工作流状态迁移。
+- 不得使用虚构数据伪装真实业务状态，不得渲染会使用户误以为业务功能已可用的操作入口。
+- 所有前端测试位于 `lingting-agent-flow-ui/tests/`，测试产物写入操作系统临时目录下的随机
+  唯一目录并保留，不得自动清理。
+- 不得声称未运行的测试已经通过。
+
 ## 文档同步
 
 - 代码编辑期间不修改 `README.md` 及其他文档。
@@ -229,4 +247,14 @@ gofmt -l internal cmd tests  # 检查格式
 gofmt -w internal cmd tests  # 格式化
 go vet ./...                 # 静态检查
 go build ./...               # 编译
+```
+
+前端命令在 `lingting-agent-flow-ui/` 下执行：
+
+```bash
+pnpm dev              # 启动开发服务器（vp dev）
+pnpm build            # 生产构建（vp build）
+pnpm lint             # 格式、lint 与类型检查
+pnpm test             # 单元测试（vp test run）
+pnpm exec playwright test   # 基础布局浏览器测试
 ```

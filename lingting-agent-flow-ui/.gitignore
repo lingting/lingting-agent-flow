@@ -1,0 +1,8 @@
+# 前端依赖与构建产物
+node_modules/
+dist/
+*.tsbuildinfo
+
+# 前端测试产物（正常写入 OS 临时目录，这里兜底忽略误留在仓库内的输出）
+test-results/
+playwright-report/
