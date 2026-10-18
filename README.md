@@ -29,7 +29,7 @@ AgentFlow 处于**执行节点接入阶段**。当前仓库包含工程骨架、
 - 远程命令执行：返回退出码、标准输出、标准错误、耗时与结果状态，区分成功、非零退出、超时、取消与连接中断；输出超过上限时标记截断，取消与超时只关闭对应会话而不影响同连接的其他操作。
 - SFTP 文件操作：创建目录、属性查询（含符号链接识别）、目录列举、上传、下载、重命名与删除；上传先写同目录临时文件并校验字节数，覆盖提交优先使用 `posix-rename` 原子替换；下载支持大小上限，失败不留下最终文件。
 - 远程 Home 与工作空间：通过已认证连接解析远程登录用户 Home，把 `~/.lingting/agentflow` 或自定义路径解析为远程绝对路径，并检查存在性与可写性。
-- 本地 HTTP 服务：`agentflow web serve` 同时提供 `/api/v1` 接口与内嵌的 Web 页面，默认只监听 `127.0.0.1:26380`。
+- 统一服务入口：`agentflow server` 在同一个进程内启动 HTTP API、内嵌 Web 页面与后台服务，按依赖顺序初始化并按逆序优雅关闭，默认只监听 `127.0.0.1:26380`。
 - 最小只读接口：`GET /api/v1/health` 分别报告 HTTP API 与 SQLite 的可用性，`GET /api/v1/system/info` 返回构建信息；错误响应统一为 `{"error": {...}}`。
 - 单文件交付：前端生产构建产物通过 `//go:embed` 嵌入 Go 可执行文件，`make release` 是唯一推荐的生产构建入口。
 
@@ -66,7 +66,7 @@ Pi RPC、Git Worktree、React 与 TypeScript 属于后续阶段的技术选型�
 
 只有 `agent check` 与 `agent test` 需要 Pi：前者检查 PATH 中的 `pi` 及其非交互式参数，
 后者还会用角色配置的模型发起一次真实调用，因此需要对应 Provider 的凭据。其余命令
-（`config`、`version`、`host`、`web`）不依赖 Pi，也不需要模型凭据。
+（`config`、`version`、`host`、`server`）不依赖 Pi，也不需要模型凭据。
 
 ## 安装与运行
 
@@ -86,11 +86,26 @@ go build -o bin/agentflow ./cmd/agentflow
 go run ./cmd/agentflow --help
 ```
 
+## 统一服务入口
+
+`agentflow server` 是 AgentFlow 完整应用服务的启动命令，Web 服务与后台服务由同一个进程管理：
+
+```text
+配置校验 → 日志与公共依赖 → SQLite → 后台服务 → HTTP 服务
+关闭顺序完全相反：HTTP 服务 → 后台服务 → SQLite
+```
+
+- 任一必需组件启动失败时，命令返回明确错误，已启动组件按逆序停止，不留下监听端口与 goroutine。
+- 数据库是必需组件：初始化失败时服务不会启动，也不会带着不可用的存储继续运行。
+- HTTP 服务退出或关键后台服务异常退出时，统一入口会感知并进入关闭流程，而不是留下半运行状态。
+- 当前版本还没有调度器与执行器等后台业务模块；后续模块通过 `internal/lifecycle` 的
+  `Service` 契约（`Name`/`Start`/`Stop`）注册进同一入口，不在 HTTP Handler 中自行创建。
+
 ## Web 界面与单文件交付
 
-AgentFlow 的 Web 界面与 HTTP API 由同一个 Go 进程提供。生产环境只交付一个可执行文件，
-前端构建产物通过 `//go:embed` 嵌入其中；部署时不需要 Node.js、前端 `dist/` 目录或额外的
-静态文件服务器。
+AgentFlow 的 Web 界面、HTTP API 与后台服务由同一个 Go 进程提供。生产环境只交付一个
+可执行文件，前端构建产物通过 `//go:embed` 嵌入其中；部署时不需要 Node.js、前端 `dist/`
+目录或额外的静态文件服务器。
 
 ### 正式构建（唯一推荐入口）
 
@@ -108,8 +123,8 @@ make release
 构建完成后把 `bin/agentflow` 复制到任意目录，只启动它即可访问页面：
 
 ```bash
-./bin/agentflow web serve
-# AgentFlow Web 服务已启动: http://127.0.0.1:26380
+./bin/agentflow server
+# AgentFlow 服务已启动: http://127.0.0.1:26380
 ```
 
 ### 开发模式
@@ -117,8 +132,8 @@ make release
 开发模式保留两个进程：
 
 ```bash
-# 终端 1：Go HTTP 服务，提供 /api/v1 接口
-make web-serve          # 等价于 go run ./cmd/agentflow web serve
+# 终端 1：Go 服务，提供 /api 接口与后台服务
+make serve              # 等价于 go run ./cmd/agentflow server --require-web-ui=false
 
 # 终端 2：Vite+ 开发服务器，负责页面热更新
 make web-dev            # 等价于 cd lingting-agent-flow-ui && pnpm dev
@@ -127,7 +142,23 @@ make web-dev            # 等价于 cd lingting-agent-flow-ui && pnpm dev
 开发服务器监听 `127.0.0.1:26390`，并把 `/api` 代理到 `http://127.0.0.1:26380`。需要其他后端
 地址时设置 `AGENTFLOW_DEV_API_TARGET`；该变量只影响开发代理，不会进入生产构建产物。
 
-### HTTP 接口
+`agentflow server` 默认要求二进制内已包含前端产物，缺少时启动即失败；开发阶段页面由 Vite+
+提供，因此用 `--require-web-ui=false` 关闭该校验，此时后端仍提供 API，页面请求返回说明原因
+的诊断页。
+
+### HTTP 接口与路径分发
+
+所有后端接口使用 `/api` 前缀，当前版本挂在 `/api/v1` 下。请求分发规则：
+
+| 请求路径 | 处理方式 |
+| --- | --- |
+| `/api`、`/api/...` | 交给 API 处理器；未注册路径返回统一 JSON 404，永不回退页面 |
+| `/assets/...` 与真实存在的静态资源 | 返回嵌入的构建产物 |
+| 缺失的静态资源 | 返回 404，不返回 `index.html` |
+| 其他 GET/HEAD 页面路径 | 回退到 `index.html`，由前端路由展示 |
+| 非 GET/HEAD 的页面请求 | 返回 405 |
+
+`/api` 是保留路径空间，判定按路径段边界进行：`/apiary`、`/apix` 不是 API 路径，按页面处理。
 
 当前只实现最小只读接口：
 
@@ -139,16 +170,20 @@ make web-dev            # 等价于 cd lingting-agent-flow-ui && pnpm dev
 `/api/v1/health` 的 `checks` 分别表达 `http_api` 与 `database`，不会因为 HTTP 服务已启动就
 认为数据库一定可用。错误响应统一为 `{"error": {"code", "message", "request_id"}}`。
 
-`/api/` 下的未知路径返回 JSON 404，不会回退到前端页面；`/api` 之外的未知路径进入 SPA 回退，
-因此浏览器刷新任意前端路由都能正常打开页面。
+`/api` 下的未知路径返回 JSON 404，不会回退到前端页面；`/api` 之外的未知页面路径进入 SPA
+回退，因此浏览器刷新任意前端路由都能正常打开页面。
 
-监听地址默认是 `127.0.0.1:26380`，可在配置文件 `server` 段或 `--address` 参数中修改。默认
-只监听回环地址，未实现远程访问认证前不会默认监听所有网卡。
+监听地址默认是 `127.0.0.1:26380`，可在配置文件 `server` 段或 `--address` 参数中修改；优雅
+关闭超时通过 `server.shutdown_timeout_seconds` 设置（0 表示默认 10 秒）。默认只监听回环
+地址，未实现远程访问认证前不会默认监听所有网卡。
 
 ### 尚未实现的接口
 
 任务、项目、机器、环境、容器、代码保存与 Agent 调度均**没有** HTTP 接口。Web 页面中的对应
 入口仍为占位说明，连接指示器只表示 HTTP API 的可用性，不代表 SSH、Docker 或 Pi Agent 已就绪。
+
+后台服务目前只有生命周期框架：任务调度器、任务执行器、SSH 与 Docker 运维均尚未接入，
+`agentflow server` 启动后只提供 API 与页面。
 
 ## 前端工程
 
@@ -181,6 +216,9 @@ go run ./cmd/agentflow --help
 
 # 校验示例配置
 ./bin/agentflow config validate --config configs/example.yaml
+
+# 启动完整服务（HTTP API、内嵌页面与后台服务）
+./bin/agentflow server --config configs/example.yaml --address 127.0.0.1:26380
 
 # 执行节点：配置、认证、主机密钥与远程工作空间
 ./bin/agentflow host add --id node-a --host 192.0.2.10 --user deploy --auth agent

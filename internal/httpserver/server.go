@@ -1,7 +1,7 @@
 // Package httpserver 组装 AgentFlow 的本地 HTTP 服务。
 //
 // 服务同时提供 API 与嵌入的前端静态资源，使生产环境只需要一个可执行文件；
-// 监听地址、启动与优雅关闭都集中在这里，CLI 只负责参数解析。
+// 监听地址、请求分发与优雅关闭都集中在这里，进程级生命周期由 internal/server 编排。
 package httpserver
 
 import (
@@ -22,22 +22,24 @@ import (
 const (
 	// defaultReadHeaderTimeout 防止慢速请求头占用连接。
 	defaultReadHeaderTimeout = 10 * time.Second
-	// defaultShutdownTimeout 是优雅关闭的最长等待时间。
-	defaultShutdownTimeout = 10 * time.Second
+	// DefaultShutdownTimeout 是未配置时优雅关闭的最长等待时间。
+	DefaultShutdownTimeout = 10 * time.Second
 )
 
 // Options 是构造 HTTP 服务的输入。
 type Options struct {
 	// Address 是监听地址，形如 127.0.0.1:26380，必填。
 	Address string
-	// Health 是健康检查服务，必填。
+	// Health 是健康检查服务，为空时健康检查接口报告服务不可用。
 	Health *app.HealthService
-	// SystemInfo 返回系统信息，必填。
+	// SystemInfo 返回系统信息，为空时该接口报告服务不可用。
 	SystemInfo func() app.SystemInfo
 	// Files 是前端静态资源文件系统，为空时使用嵌入资源。
 	Files fs.FS
 	// RequireWebUI 为 true 时，缺少前端构建产物将导致构造失败。
 	RequireWebUI bool
+	// ShutdownTimeout 是优雅关闭的最长等待时间，零值使用 DefaultShutdownTimeout。
+	ShutdownTimeout time.Duration
 	// Report 用于输出启动信息，为空时只写日志。
 	Report func(message string)
 	// Logger 是日志器，为空时使用 slog.Default。
@@ -46,9 +48,10 @@ type Options struct {
 
 // Server 是一个已组装但尚未启动的 HTTP 服务。
 type Server struct {
-	address string
-	http    *http.Server
-	report  func(message string)
+	address         string
+	http            *http.Server
+	report          func(message string)
+	shutdownTimeout time.Duration
 }
 
 // New 组装 API 与静态资源处理器，返回可启动的服务。
@@ -64,11 +67,9 @@ func New(options Options) (*Server, error) {
 	if address == "" {
 		return nil, fmt.Errorf("HTTP 服务初始化失败: 监听地址不能为空")
 	}
-	if options.Health == nil {
-		return nil, fmt.Errorf("HTTP 服务初始化失败: 健康检查服务不能为空")
-	}
-	if options.SystemInfo == nil {
-		return nil, fmt.Errorf("HTTP 服务初始化失败: 系统信息提供者不能为空")
+	timeout := options.ShutdownTimeout
+	if timeout <= 0 {
+		timeout = DefaultShutdownTimeout
 	}
 	api := httpapi.NewHandler(httpapi.Deps{
 		Health:     options.Health,
@@ -86,8 +87,9 @@ func New(options Options) (*Server, error) {
 		}
 	}
 	return &Server{
-		address: address,
-		report:  report,
+		address:         address,
+		report:          report,
+		shutdownTimeout: timeout,
 		http: &http.Server{
 			Addr:              address,
 			Handler:           routes(api, web),
@@ -113,7 +115,7 @@ func (s *Server) Run(ctx context.Context) error {
 func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	serveErr := make(chan error, 1)
 	go func() {
-		s.report("AgentFlow Web 服务已启动: http://" + listener.Addr().String())
+		s.report("AgentFlow 服务已启动: http://" + listener.Addr().String())
 		err := s.http.Serve(listener)
 		if errors.Is(err, http.ErrServerClosed) {
 			err = nil
@@ -122,10 +124,13 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	}()
 	select {
 	case err := <-serveErr:
-		return err
+		if err != nil {
+			return fmt.Errorf("HTTP 服务异常退出: %w", err)
+		}
+		return nil
 	case <-ctx.Done():
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultShutdownTimeout)
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.shutdownTimeout)
 	defer cancel()
 	if err := s.http.Shutdown(shutdownCtx); err != nil {
 		// 关闭失败时立即断开连接，避免进程无法退出。
@@ -135,7 +140,7 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	if err := <-serveErr; err != nil {
 		return fmt.Errorf("HTTP 服务异常退出: %w", err)
 	}
-	s.report("AgentFlow Web 服务已关闭")
+	s.report("AgentFlow 服务已关闭")
 	return nil
 }
 

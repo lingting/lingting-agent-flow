@@ -4,32 +4,24 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/lingting/agentflow/internal/httpapi"
 	"github.com/lingting/agentflow/internal/webui"
 )
 
-// apiPrefix 是 API 的路径前缀，与 httpapi 保持一致。
-const apiPrefix = httpapi.APIPrefix
-
 // routes 组合 API 与前端处理器。
 //
-// /api/ 下的请求全部交给 API 处理器，其余请求交给静态资源处理器；这样未知 API
-// 路径只会得到 JSON 404，不会落到前端的 SPA 回退上。
+// /api 保留路径空间下的请求全部交给 API 处理器，其余请求交给静态资源处理器；这样
+// 未知 API 路径只会得到 JSON 404，不会落到前端的 SPA 回退上。判定使用
+// httpapi.IsAPIPath 的路径段边界规则，因此 /apiary、/apix 仍按页面路径处理。
 func routes(api http.Handler, web http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isAPIPath(r.URL.Path) {
+		if httpapi.IsAPIPath(r.URL.Path) {
 			api.ServeHTTP(w, r)
 			return
 		}
 		web.ServeHTTP(w, r)
 	})
-}
-
-// isAPIPath 判断请求路径是否属于 API 命名空间。
-func isAPIPath(path string) bool {
-	return path == apiPrefix || strings.HasPrefix(path, apiPrefix+"/")
 }
 
 // buildWebHandler 构造前端静态资源处理器。

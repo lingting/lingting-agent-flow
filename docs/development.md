@@ -36,9 +36,9 @@ make test-e2e     # CLI 端到端测试
 make test-race    # 竞态检测（单元测试与 SSH 连接层）
 make build        # 构建 bin/agentflow（不重建前端）
 make release      # 单文件生产构建：前端构建 + Go 编译
-make run          # go run ./cmd/agentflow web serve
-make web-dev      # 前端开发服务器（另开终端运行 make web-serve）
-make web-serve    # 本地 HTTP 服务（API + 内嵌页面）
+make run          # go run ./cmd/agentflow server
+make web-dev      # 前端开发服务器（另开终端运行 make serve）
+make serve        # 统一服务入口（API + 内嵌页面 + 后台服务）
 make test-packaging  # 单文件打包冒烟测试
 make check        # fmt-check + vet + build
 ```

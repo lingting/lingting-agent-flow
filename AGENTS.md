@@ -252,9 +252,36 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
 - 前端连接状态只能来自真实健康检查响应，禁止使用固定假数据；首次检查完成前不得显示已连接。
   连接指示器只表示 AgentFlow HTTP API 的可用性，不得表达为 SSH、Docker、远程机器或 Pi Agent
   已连接。
-- `/api/` 下的未知路径必须返回统一 JSON 错误，不得回退到前端入口页面；缺失的 `.js`、`.css`
+- `/api` 下的未知路径必须返回统一 JSON 错误，不得回退到前端入口页面；缺失的 `.js`、`.css`
   等静态资源必须返回 404，不得伪装成成功的 HTML。
 - Go HTTP 服务默认只监听 `127.0.0.1`，未实现远程访问认证前不得默认监听所有网卡。
+
+## 统一服务入口与请求分发约束
+
+- `agentflow server` 是 Web 服务与后台服务的唯一启动入口：同一个 Go 进程内依次初始化配置、
+  数据库与后台服务，再启动 HTTP 服务，并由同一处生命周期代码负责启动失败清理与优雅关闭。
+- 后台服务通过 `internal/lifecycle` 的 `Service` 契约（`Name`/`Start`/`Stop`）注册，启动顺序
+  与注册顺序一致，停止顺序相反；禁止在 HTTP Handler 内创建长期运行的后台服务。
+- 数据库是必需组件：初始化失败时服务必须返回错误并停止启动，不得带着未初始化的存储在
+  后台服务或 HTTP 层继续运行。
+- 启动顺序固定为：配置 → 日志与公共依赖 → 数据库 → 后台服务 → HTTP 服务；关闭顺序相反。
+  任一必需组件失败或关键后台服务异常退出时，已启动组件必须按逆序清理，不留监听端口与
+  goroutine。
+- 所有后端 HTTP 接口必须使用 `/api` 前缀，当前版本接口挂在 `/api/v1` 下；新增接口不得
+  使用 `/api` 之外的路径空间。
+- `/api` 与 `/api/...` 是保留路径空间，永远不能回退为 `index.html`；`/api` 本身返回 API
+  风格的错误响应。
+- API 路径判定必须按路径段边界进行（`/api`、`/api/...`），禁止用 `strings.HasPrefix(path, "/api")`
+  之类的判断，否则 `/apiary`、`/apix` 会被误判为 API。
+- 请求分发顺序固定为：API 保留路径 → 真实存在的静态资源 → 缺失静态资源 404 → 只有符合
+  页面规则的 GET/HEAD 请求才允许 SPA 回退到 `index.html`。非 GET/HEAD 的页面请求返回 405，
+  不得回退为 HTML。
+- 静态资源以文件系统真实存在为准；`assets/` 目录下的路径即使没有扩展名也视为资源，缺失时
+  必须返回 404。带内容哈希的产物使用长期缓存，`index.html` 使用重新验证策略。
+- 正式构建必须先生成前端产物再编译 Go；缺少 `index.html` 时发布构建必须失败，不得产出
+  空白页面或仅含占位资源的可执行文件。
+- `agentflow server` 默认开启 `RequireWebUI`，使缺少前端产物的二进制在启动阶段直接失败；
+  只有开发模式（页面由 Vite+ 提供）才允许显式 `--require-web-ui=false`。
 
 ## 文档同步
 
@@ -281,11 +308,11 @@ pnpm test                 # 单元测试（vp test run）
 pnpm exec playwright test # 基础布局与连接状态浏览器测试
 ```
 
-Go 侧 Web 相关命令在仓库根目录执行：
-
+Go 侧服务相关命令在仓库根目录执行：
 ```bash
-go run ./cmd/agentflow web serve                     # 启动本地 HTTP 服务（API + 内嵌页面）
-go run ./cmd/agentflow web serve --address 127.0.0.1:26380
+go run ./cmd/agentflow server                        # 启动完整服务（API + 内嵌页面 + 后台服务）
+go run ./cmd/agentflow server --address 127.0.0.1:26380
+make serve                                           # 开发模式后端（--require-web-ui=false）
 make web-build                                       # 前端生产构建（按锁文件安装依赖）
 make release                                         # 单文件生产构建：前端 + Go
 go test -count=1 ./tests/e2e/packaging/...           # 单文件打包冒烟测试

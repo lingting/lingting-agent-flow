@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -102,7 +104,7 @@ func startServer(t *testing.T, runDir, configPath string) (string, func()) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	binary := filepath.Join(runDir, binaryName())
-	command := exec.CommandContext(ctx, binary, "web", "serve", "--config", configPath, "--address", "127.0.0.1:0")
+	command := exec.CommandContext(ctx, binary, "server", "--config", configPath, "--address", "127.0.0.1:0")
 	// 工作目录设为独立目录：程序不得依赖仓库目录或前端 dist 目录才能提供页面。
 	command.Dir = runDir
 	stdout, err := command.StdoutPipe()
@@ -131,9 +133,13 @@ func startServer(t *testing.T, runDir, configPath string) (string, func()) {
 			}
 		}
 	}()
+	var stopOnce sync.Once
 	stop := func() {
-		cancel()
-		_ = command.Wait()
+		// 停止必须是幂等的：用例失败时的 Cleanup 与正常结束都会调用它。
+		stopOnce.Do(func() {
+			cancel()
+			_ = command.Wait()
+		})
 	}
 	select {
 	case url := <-address:
@@ -142,6 +148,21 @@ func startServer(t *testing.T, runDir, configPath string) (string, func()) {
 		stop()
 		t.Fatalf("等待服务启动超时\n标准错误: %s", stderr.String())
 		return "", func() {}
+	}
+}
+
+// stopServer 在限定时间内停止服务进程，确认进程确实退出。
+func stopServer(t *testing.T, stop func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("停止服务超时，进程可能仍在运行")
 	}
 }
 
@@ -284,12 +305,59 @@ func TestSingleBinaryPackaging(t *testing.T) {
 	}
 
 	// 7. 未知 API 路径不得返回前端页面。
-	status, _, body = fetch(t, baseURL+httpapi.APIPrefix+"/unknown")
+	status, header, body = fetch(t, baseURL+httpapi.APIPrefix+"/unknown")
 	if status != http.StatusNotFound {
 		t.Fatalf("未知 API 路径应返回 404，实际 %d", status)
 	}
+	if !strings.HasPrefix(header.Get("Content-Type"), "application/json") {
+		t.Fatalf("未知 API 路径应返回 JSON，实际 %q", header.Get("Content-Type"))
+	}
 	if strings.Contains(body, `id="root"`) {
 		t.Fatal("未知 API 路径不应返回前端入口页面")
+	}
+
+	// 8. API 根路径同样属于保留路径空间，不返回页面。
+	status, _, body = fetch(t, baseURL+httpapi.APIRoot)
+	if status != http.StatusNotFound {
+		t.Fatalf("API 根路径应返回 404，实际 %d", status)
+	}
+	if strings.Contains(body, `id="root"`) {
+		t.Fatal("API 根路径不应返回前端入口页面")
+	}
+
+	// 9. 未知前端页面路径仍能加载前端入口，由前端路由展示 404。
+	status, _, body = fetch(t, baseURL+"/not-a-real-page")
+	if status != http.StatusOK {
+		t.Fatalf("未知页面应回退到入口页面，实际 %d", status)
+	}
+	if !strings.Contains(body, `id="root"`) {
+		t.Fatal("未知页面应返回前端入口页面")
+	}
+
+	// 10. 相似前缀不是 API，按页面路径处理。
+	status, _, body = fetch(t, baseURL+"/apiary")
+	if status != http.StatusOK {
+		t.Fatalf("/apiary 应按页面路径处理，实际 %d", status)
+	}
+	if !strings.Contains(body, `id="root"`) {
+		t.Fatal("/apiary 应返回前端入口页面")
+	}
+
+	// 11. 缺失的静态资源必须返回 404，不能伪装成 HTML。
+	status, _, body = fetch(t, baseURL+"/assets/missing-file.js")
+	if status != http.StatusNotFound {
+		t.Fatalf("缺失静态资源应返回 404，实际 %d", status)
+	}
+	if strings.Contains(body, `id="root"`) {
+		t.Fatal("缺失静态资源不应返回前端入口页面")
+	}
+
+	// 12. 停止服务：进程必须在限定时间内退出，且端口不再监听。
+	stopServer(t, stop)
+	address := strings.TrimPrefix(baseURL, "http://")
+	if connection, err := net.DialTimeout("tcp", address, 500*time.Millisecond); err == nil {
+		_ = connection.Close()
+		t.Fatal("服务停止后监听端口仍然可用")
 	}
 
 	t.Logf("打包结果: 可执行文件=%s，运行目录=%s", filepath.Join(runDir, binaryName()), runDir)

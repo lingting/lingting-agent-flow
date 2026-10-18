@@ -46,6 +46,6 @@ func NewRootCommand(a *app.App) *cobra.Command {
 	root.AddCommand(newSourceCommand(a))
 	root.AddCommand(newCodeCommand(a))
 	root.AddCommand(newTaskCommand(a))
-	root.AddCommand(newWebCommand(a))
+	root.AddCommand(newServerCommand(a))
 	return root
 }

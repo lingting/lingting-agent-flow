@@ -3,6 +3,7 @@ package config_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lingting/agentflow/internal/config"
 )
@@ -51,6 +52,44 @@ server:
 	}
 	if !strings.Contains(err.Error(), "server.port") {
 		t.Fatalf("错误信息应指出 server.port，实际: %v", err)
+	}
+}
+
+// TestShutdownTimeoutUsesDefault 校验未配置关闭超时时使用默认值。
+func TestShutdownTimeoutUsesDefault(t *testing.T) {
+	t.Parallel()
+	var server config.ServerConfig
+
+	if got := server.ShutdownTimeout(); got != config.DefaultShutdownTimeout {
+		t.Fatalf("默认关闭超时应为 %s，实际 %s", config.DefaultShutdownTimeout, got)
+	}
+}
+
+// TestShutdownTimeoutHonoursConfig 校验显式配置的关闭超时生效。
+func TestShutdownTimeoutHonoursConfig(t *testing.T) {
+	t.Parallel()
+	server := config.ServerConfig{ShutdownTimeoutSeconds: 3}
+
+	if got := server.ShutdownTimeout(); got != 3*time.Second {
+		t.Fatalf("关闭超时应为 3s，实际 %s", got)
+	}
+}
+
+// TestValidateRejectsNegativeShutdownTimeout 校验负数关闭超时被拒绝。
+func TestValidateRejectsNegativeShutdownTimeout(t *testing.T) {
+	t.Parallel()
+	path := writeConfig(t, validYAML+`
+server:
+  host: 127.0.0.1
+  port: 26380
+  shutdown_timeout_seconds: -1
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("负数关闭超时应当校验失败")
+	}
+	if !strings.Contains(err.Error(), "server.shutdown_timeout_seconds") {
+		t.Fatalf("错误信息应指出 server.shutdown_timeout_seconds，实际: %v", err)
 	}
 }
 

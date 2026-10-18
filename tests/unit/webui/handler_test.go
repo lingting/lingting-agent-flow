@@ -140,6 +140,35 @@ func TestAPIPathIsNeverIndex(t *testing.T) {
 	}
 }
 
+// TestMissingAssetDirectoryReturns404 校验 assets 目录下缺失的无扩展名文件也返回 404。
+func TestMissingAssetDirectoryReturns404(t *testing.T) {
+	t.Parallel()
+	for _, target := range []string{"/assets/missing", "/assets/", "/assets/deep/missing.js"} {
+		recorder := do(newHandler(t, newFS()), http.MethodGet, target)
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("%s 应返回 404，实际 %d", target, recorder.Code)
+		}
+		if strings.Contains(recorder.Body.String(), `id="root"`) {
+			t.Fatalf("%s 不应返回入口页面", target)
+		}
+	}
+}
+
+// TestSimilarPrefixIsPage 校验 /apiary 这类相似前缀不被当作 API 路径。
+func TestSimilarPrefixIsPage(t *testing.T) {
+	t.Parallel()
+	handler := newHandler(t, newFS())
+	for _, target := range []string{"/apiary", "/apix", "/ap"} {
+		recorder := do(handler, http.MethodGet, target)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s 应按页面路径处理并返回 200，实际 %d", target, recorder.Code)
+		}
+		if !strings.Contains(recorder.Body.String(), `id="root"`) {
+			t.Fatalf("%s 应返回入口页面", target)
+		}
+	}
+}
+
 // TestUnsupportedMethodIsRejected 校验非 GET/HEAD 请求被拒绝。
 func TestUnsupportedMethodIsRejected(t *testing.T) {
 	t.Parallel()

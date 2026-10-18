@@ -100,6 +100,46 @@ func TestRootHelp(t *testing.T) {
 	}
 }
 
+// TestServerCommandHelp 校验 server 命令说明统一入口与配置项。
+func TestServerCommandHelp(t *testing.T) {
+	t.Parallel()
+	code, stdout, stderr := run(t, "server", "--help")
+	if code != 0 {
+		t.Fatalf("server --help 应成功退出，实际退出码 %d，错误: %s", code, stderr)
+	}
+	for _, expected := range []string{"--config", "--address", "shutdown_timeout_seconds", "127.0.0.1"} {
+		if !strings.Contains(stdout, expected) {
+			t.Fatalf("server 帮助输出缺少 %q，实际: %s", expected, stdout)
+		}
+	}
+}
+
+// TestWebCommandRemoved 校验旧的 web 命令已由 server 取代。
+func TestWebCommandRemoved(t *testing.T) {
+	t.Parallel()
+	code, stdout, _ := run(t, "web")
+	if code == 0 {
+		t.Fatalf("web 命令应已移除，实际成功输出: %s", stdout)
+	}
+}
+
+// TestServerFailsOnMissingConfig 校验配置缺失时服务不启动。
+func TestServerFailsOnMissingConfig(t *testing.T) {
+	t.Parallel()
+	workspace := testkit.New(t)
+	missing := filepath.Join(workspace.Root(), "missing.yaml")
+	code, stdout, stderr := run(t, "server", "--config", missing, "--address", "127.0.0.1:0")
+	if code == 0 {
+		t.Fatalf("配置缺失时 server 应失败，实际成功输出: %s", stdout)
+	}
+	if !strings.Contains(stderr, "配置文件不存在") {
+		t.Fatalf("错误信息应说明配置不存在，实际: %s", stderr)
+	}
+	if strings.Contains(stdout, "服务已启动") {
+		t.Fatalf("配置失败时不应打印启动成功: %s", stdout)
+	}
+}
+
 // TestConfigValidateSuccess 校验合法配置的校验命令输出。
 func TestConfigValidateSuccess(t *testing.T) {
 	t.Parallel()

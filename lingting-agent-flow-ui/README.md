@@ -57,7 +57,7 @@ pnpm exec playwright test   # 基础布局与连接状态浏览器测试
 
 ```bash
 # 仓库根目录
-make web-serve
+make serve
 ```
 
 需要其他后端地址时设置 `AGENTFLOW_DEV_API_TARGET`（例如 `http://127.0.0.1:26381`）。该变量

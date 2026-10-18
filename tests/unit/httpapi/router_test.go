@@ -146,6 +146,65 @@ func TestUnsupportedMethodReturnsJSONError(t *testing.T) {
 	}
 }
 
+// TestAPIPathBoundary 校验 /api 保留路径空间的判定按路径段边界进行。
+func TestAPIPathBoundary(t *testing.T) {
+	t.Parallel()
+	cases := map[string]bool{
+		"/api":           true,
+		"/api/":          true,
+		"/api/health":    true,
+		"/api/v1/tasks":  true,
+		"/apiary":        false,
+		"/apix":          false,
+		"/ap":            false,
+		"/":              false,
+		"/tasks":         false,
+		"/assets/app.js": false,
+	}
+	for path, want := range cases {
+		if got := httpapi.IsAPIPath(path); got != want {
+			t.Fatalf("IsAPIPath(%q) 应为 %v，实际 %v", path, want, got)
+		}
+	}
+}
+
+// TestAPIRootReturnsJSONError 校验 /api 与 /api/ 返回 API 风格的错误，而不是页面。
+func TestAPIRootReturnsJSONError(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{"/api", "/api/", "/api/v1"} {
+		recorder := do(t, newHandler(nil), http.MethodGet, path)
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("%s 应返回 404，实际 %d", path, recorder.Code)
+		}
+		if !strings.HasPrefix(recorder.Header().Get("Content-Type"), "application/json") {
+			t.Fatalf("%s 应返回 JSON，实际 %q", path, recorder.Header().Get("Content-Type"))
+		}
+		var body httpapi.ErrorResponse
+		decodeBody(t, recorder, &body)
+		if body.Error.Code != httpapi.CodeNotFound {
+			t.Fatalf("%s 错误代码应为 %q，实际 %q", path, httpapi.CodeNotFound, body.Error.Code)
+		}
+	}
+}
+
+// TestHealthWithoutServiceReportsUnavailable 校验未注入健康检查服务时不 panic，返回 503。
+func TestHealthWithoutServiceReportsUnavailable(t *testing.T) {
+	t.Parallel()
+	handler := httpapi.NewHandler(httpapi.Deps{
+		SystemInfo: func() app.SystemInfo { return app.SystemInfo{} },
+	})
+	recorder := do(t, handler, http.MethodGet, httpapi.PathHealth)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("缺少健康检查服务时应返回 503，实际 %d", recorder.Code)
+	}
+	var body httpapi.ErrorResponse
+	decodeBody(t, recorder, &body)
+	if body.Error.Code != httpapi.CodeInternal {
+		t.Fatalf("错误代码应为 %q，实际 %q", httpapi.CodeInternal, body.Error.Code)
+	}
+}
+
 // TestTrailingSlashIsNotFound 校验带尾斜杠的未知路径同样返回 404，不会被当作页面。
 func TestTrailingSlashIsNotFound(t *testing.T) {
 	t.Parallel()

@@ -9,6 +9,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/logging"
@@ -35,6 +36,8 @@ const (
 	DefaultServerHost = "127.0.0.1"
 	// DefaultServerPort 是未配置监听端口时使用的端口。
 	DefaultServerPort = 26380
+	// DefaultShutdownTimeout 是未配置优雅关闭超时时使用的等待时间。
+	DefaultShutdownTimeout = 10 * time.Second
 )
 
 // Config 是 AgentFlow 的完整配置。
@@ -65,6 +68,8 @@ type ServerConfig struct {
 	Host string `yaml:"host"`
 	// Port 是监听端口，必须大于 0；端口是否被占用由启动阶段判断。
 	Port int `yaml:"port"`
+	// ShutdownTimeoutSeconds 是优雅关闭的最长等待秒数，零值使用默认值。
+	ShutdownTimeoutSeconds int `yaml:"shutdown_timeout_seconds"`
 }
 
 // StorageConfig 描述持久化位置。
@@ -186,6 +191,7 @@ func (a AppConfig) validate(problems *issues) {
 }
 
 // validate 校验 HTTP 服务监听设置。
+// validate 校验 HTTP 服务监听设置。
 //
 // 端口 0 表示使用默认端口，因此只在负值时报告问题；监听地址只在启动阶段解析。
 func (s ServerConfig) validate(problems *issues) {
@@ -194,6 +200,9 @@ func (s ServerConfig) validate(problems *issues) {
 	}
 	if strings.ContainsAny(s.Host, " \t\r\n") {
 		problems.add("server.host", "不能包含空白字符")
+	}
+	if s.ShutdownTimeoutSeconds < 0 {
+		problems.add("server.shutdown_timeout_seconds", "不得为负数")
 	}
 }
 
@@ -208,6 +217,14 @@ func (s ServerConfig) Address() string {
 		port = DefaultServerPort
 	}
 	return net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+// ShutdownTimeout 返回优雅关闭的最长等待时间，未配置时使用默认值。
+func (s ServerConfig) ShutdownTimeout() time.Duration {
+	if s.ShutdownTimeoutSeconds <= 0 {
+		return DefaultShutdownTimeout
+	}
+	return time.Duration(s.ShutdownTimeoutSeconds) * time.Second
 }
 
 // validate 校验持久化路径。

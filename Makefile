@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check vet test test-unit test-local test-pi test-ssh test-e2e test-packaging test-race build release run web-install web-build web-dev web-serve clean check
+.PHONY: fmt fmt-check vet test test-unit test-local test-pi test-ssh test-e2e test-packaging test-race build release run web-install web-build web-dev web-verify serve clean check
 
 VERSION ?= dev
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
@@ -51,24 +51,31 @@ web-install:
 web-build: web-install
 	cd lingting-agent-flow-ui && pnpm build
 
-# web-dev 启动前端开发服务器（另开一个终端运行 make web-serve 提供 API）。
+# web-verify 校验前端产物完整性：缺少入口页面、脚本或样式时构建立即失败，
+# 避免产出"编译成功但页面空白"的可执行文件。
+web-verify:
+	@test -f internal/webui/dist/index.html || (echo "错误: 前端构建产物缺少 index.html，请执行 make web-build" && exit 1)
+	@ls internal/webui/dist/assets/*.js >/dev/null 2>&1 || (echo "错误: 前端构建产物缺少脚本资源" && exit 1)
+	@ls internal/webui/dist/assets/*.css >/dev/null 2>&1 || (echo "错误: 前端构建产物缺少样式资源" && exit 1)
+
+# web-dev 启动前端开发服务器（另开一个终端运行 make serve 提供 API）。
 web-dev:
 	cd lingting-agent-flow-ui && pnpm dev
 
-# web-serve 启动 Go HTTP 服务，开发模式下由前端代理转发 /api 请求。
-web-serve:
-	go run ./cmd/agentflow web serve
+# serve 启动完整应用服务（HTTP API、内嵌页面与后台服务）。
+# 开发模式下页面由 Vite+ 提供，因此关闭内嵌产物的强校验：全新检出也能直接启动后端。
+serve:
+	go run ./cmd/agentflow server --require-web-ui=false
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/agentflow
 
 # release 是唯一推荐的单文件生产构建入口：先构建前端，再编译 Go，
-# 保证二进制中的 UI 与当前源码一致。
-release: web-build
+# 保证二进制中的 UI 与当前源码一致；顺序不可颠倒。
+release: web-build web-verify
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/agentflow
 
-run:
-	go run ./cmd/agentflow web serve
+run: serve
 
 clean:
 	rm -rf bin
