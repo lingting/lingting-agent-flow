@@ -127,6 +127,28 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
 - SourceProvider 只负责获取代码与初始化任务分支，不负责 Push、Merge 或删除容器。
 - Runner 不负责工作流重试决策，也不决定整个任务的成功清理策略。
 
+
+### 代码保存（CodeSaver）约束
+
+- CodeSaver 只操作当前受管理容器内、经过核验的任务 Git 工作区；不得把容器内代码复制
+  到宿主机或本机目录后再提交。
+- 任务分支统一由 `domain.TaskBranchName` 生成并校验，固定为 `agent/<task-id>`；
+  SourceProvider 与 CodeSaver 不得各自拼接分支名。
+- 容器已停止、已删除或已 detached 时直接报错，不得为保存代码而启动或重新接管容器。
+- 工作区没有变更时记录 `no_changes`，禁止创建空提交。
+- 提交、推送与合并状态必须分别持久化到 `code_saves`，不得用单一 `saved` 布尔字段代替。
+- 禁止默认 Force Push（`--force`、`--force-with-lease`）；远程历史冲突一律作为
+  `conflict` 返回，不得覆盖他人提交。
+- 推送结果不确定时必须先核验远程分支实际 commit，再决定状态；状态确认前禁止重试。
+- 合并默认关闭（`merge_after_push = false`），只有任务配置或调用参数显式授权时才执行；
+  开启代码保存本身不代表同意合并主分支。
+- 合并出现冲突时不得自动选择 ours 或 theirs，不得伪造成功合并，也不得重置整个仓库。
+- Push 成功而 Merge 失败时，任务分支的保存状态仍为成功；只有任务分支推送成功才算
+  "已安全保存到远程"。
+- 禁止把 Git Token、密码、私钥写入日志、SQLite 普通字段、仓库 URL、Dockerfile 或镜像层；
+  凭据只允许在单次操作期间以内存形式存在。
+- CodeSaver 不负责容器生命周期、任务调度与重试决策，也不包含模型调用。
+
 ### 结果报告
 
 - 修改测试相关基础设施后，必须运行与修改范围相关的测试，并如实报告通过、失败、跳过与

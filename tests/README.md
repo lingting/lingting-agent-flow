@@ -21,6 +21,7 @@ tests/
 │   ├── image/          # 构建上下文哈希、Dockerfile 校验与语言模板
 │   ├── process/        # 子进程监管
 │   ├── source/         # Git Clone 代码来源（容器执行替身）
+│   │   └── codesaver/  # 代码保存：提交、推送、合并与状态记录
 │   ├── ssh/            # SSH 主机密钥、认证配置、路径与结果状态
 │   ├── store/          # SQLite 仓储与数据库约束
 │   └── testkit/        # testkit 自身的测试
@@ -30,12 +31,14 @@ tests/
 │   │   ├── docker/     # 远程 Docker 命令构造与结果解析（使用执行替身）
 │   │   ├── environment/# 环境版本文件写入与清单读写（真实文件系统）
 │   │   ├── session/    # Session 提取与持久化边界（真实文件系统）
+│   │   ├── codesaver/  # 真实 Git 提交、推送与合并（本机 bare 仓库）
 │   │   ├── source/     # 容器内 Git Clone 与任务分支（真实 Git）
 │   │   ├── ssh/        # 本地模拟 SSH/SFTP 服务端
 │   │   └── sshprobe/   # 本机 TCP 探测
 │   ├── pi/             # 需要本机真实 Pi CLI
 │   ├── remote/
 │   │   ├── agent/      # 需要真实远程容器与容器内真实 Pi CLI
+│   │   ├── codesaver/  # 需要真实远程容器与容器内 Git
 │   │   └── docker/     # 需要真实远程 Linux 机器与真实 Docker Engine
 │   └── ssh/            # 需要真实远程 Linux 机器
 └── e2e/
@@ -52,6 +55,9 @@ go test -count=1 -v -p 8 -parallel 8 ./tests/unit/...
 
 # 本机集成测试
 go test -count=1 -v -p 8 -parallel 8 ./tests/integration/local/...
+
+# 本机 Git 代码保存集成测试
+go test -count=1 -v ./tests/integration/local/codesaver/...
 
 # 真实 Pi 集成测试
 go test -count=1 -v ./tests/integration/pi/...
@@ -73,6 +79,8 @@ go test -count=1 -v -p 8 -parallel 8 ./tests/...
 
 # 竞态检测
 go test -race -count=1 ./tests/unit/...
+# 竞态检测（代码保存的并发隔离）
+go test -race -count=1 ./tests/unit/source/codesaver/ ./tests/unit/store/
 # 竞态检测（SSH 连接管理与并发操作，需要真实协议交互）
 go test -race -count=1 ./tests/integration/local/ssh/...
 ```
@@ -214,6 +222,44 @@ AGENTFLOW_TEST_REMOTE_DOCKER=1 AGENTFLOW_TEST_SSH_HOST=10.0.0.10 AGENTFLOW_TEST_
 
 本机 Git 缺失时，`tests/integration/local/source/` 的用例输出 `WARN [SKIP]` 并跳过，
 其余用例仍会执行。
+
+## 代码保存测试分层
+
+| 目录 | 内容 | 外部依赖 |
+|---|---|---|
+| `tests/unit/source/codesaver/` | 容器登记与实际 ID 不一致、detached 容器、任务分支不匹配、非 Git 工作区、无变更、既有冲突、提交身份缺失、提交信息与作者参数传递、提交成功与 SHA 读取、提交异常但 HEAD 已变化、既有暂存内容不被重置、只推送任务分支、禁止强制推送、远程缺失、内嵌凭据拒绝、认证失败、非快进冲突、推送超时但远程已收到、远程与本地不一致、无法核验远程、合并默认关闭、推送失败禁止合并、基础分支识别失败、合并冲突、主分支推送失败、合并结果不确定、记录先于远程操作落盘、并发隔离、取消不影响其他任务 | 无（使用容器执行替身） |
+| `tests/unit/store/` | `code_saves` 写入与更新、状态字段约束（成功必须带 SHA）、未请求合并不能记录合并结果、按任务查询、并发写入独立 | 无 |
+| `tests/integration/local/codesaver/` | 真实 Git 提交、任务分支真实 Push 到 bare 仓库、远程引用核验、默认不合并、显式合并后基础分支包含任务提交、推送失败不误报成功、合并冲突保留现场、无变更不制造空提交、并发仓库隔离 | 本机 `git` |
+| `tests/integration/remote/codesaver/` | 真实远程容器内提交、推送与合并，远程任务分支与基础分支 commit 核验 | 环境变量指定的 SSH 目标、真实 Docker 与容器内 Git |
+
+本机 Git 缺失时，`tests/integration/local/codesaver/` 的用例输出 `WARN [SKIP]` 并跳过，
+`tests/unit/source/codesaver/` 与 `tests/unit/store/` 的用例仍然执行。
+
+### 代码保存测试的环境变量
+
+| 变量 | 用途 | 必填 |
+|---|---|---|
+| `AGENTFLOW_TEST_REMOTE_DOCKER` | 显式启用真实远程容器测试，必须为 `1` | 是 |
+| `AGENTFLOW_TEST_SSH_HOST` | SSH 服务器地址 | 是 |
+| `AGENTFLOW_TEST_SSH_USER` | 登录用户名 | 是 |
+| `AGENTFLOW_TEST_SSH_PORT` | SSH 端口 | 否，默认 `22` |
+| `AGENTFLOW_TEST_SSH_KEY_PATH` | 私钥路径 | 否，为空时使用 SSH Agent |
+| `AGENTFLOW_TEST_SSH_KNOWN_HOSTS` | 只读 known_hosts 文件 | 否 |
+| `AGENTFLOW_TEST_REMOTE_GIT_IMAGE` | 远程代码保存测试使用的容器镜像（需包含 `git`） | 是 |
+
+```bash
+# 本机 Git 集成测试（不依赖公网）
+go test -count=1 -v ./tests/integration/local/codesaver/...
+
+# 真实远程容器代码保存测试（必须显式启用）
+AGENTFLOW_TEST_REMOTE_DOCKER=1 AGENTFLOW_TEST_SSH_HOST=10.0.0.10 AGENTFLOW_TEST_SSH_USER=deploy AGENTFLOW_TEST_SSH_KEY_PATH=$HOME/.ssh/id_ed25519 AGENTFLOW_TEST_REMOTE_GIT_IMAGE=alpine/git:2.45.2 go test -count=1 -v ./tests/integration/remote/codesaver/...
+```
+
+开关未设置时输出 `WARN [SKIP]`；开关已启用但 SSH 目标或镜像变量缺失时说明缺少的变量
+并跳过；目标完整但连接、认证、主机密钥校验失败或断言不成立时必须让测试失败。
+
+远程代码保存测试只在本次测试创建并已核验所有权的容器内操作，只使用带随机后缀的容器
+名称与容器内临时目录，不执行全局 prune，也不在用户的真实主分支上执行合并。
 
 ### 远程 Agent 测试镜像
 

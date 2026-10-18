@@ -23,6 +23,7 @@ type dbStore struct {
 	eventStore
 	environmentVersionStore
 	containerStore
+	codeSaveStore
 }
 
 // txStore 把事务上的各实体仓储组合成 storage.Tx。
@@ -38,6 +39,7 @@ type txStore struct {
 	eventStore
 	environmentVersionStore
 	containerStore
+	codeSaveStore
 }
 
 // newDBStore 构造连接池仓储。
@@ -55,6 +57,7 @@ func newDBStore(db *sql.DB) *dbStore {
 		eventStore:              eventStore{q: pool},
 		environmentVersionStore: environmentVersionStore{q: pool},
 		containerStore:          containerStore{q: pool},
+		codeSaveStore:           codeSaveStore{q: pool},
 	}
 }
 
@@ -72,6 +75,7 @@ func newTxStore(tx *sql.Tx) *txStore {
 		eventStore:              eventStore{q: tx},
 		environmentVersionStore: environmentVersionStore{q: tx},
 		containerStore:          containerStore{q: tx},
+		codeSaveStore:           codeSaveStore{q: tx},
 	}
 }
 

@@ -218,6 +218,20 @@ type ContainerStore interface {
 	ListContainers(ctx context.Context, filter domain.ContainerFilter) ([]domain.Container, error)
 }
 
+// CodeSaveStore 保存代码保存操作的记录。
+//
+// Commit、Push 与 Merge 的结果在同一条记录内分别保存；远程 Git 操作与本机
+// 数据库无法共享事务，因此每次状态推进后都要单独写入，使中断后仍能定位最后
+// 一个已确认完成的阶段。
+type CodeSaveStore interface {
+	CreateCodeSaveRecord(ctx context.Context, record domain.CodeSaveRecord) error
+	// UpdateCodeSaveRecord 按主键更新记录，不存在时返回 storage.ErrNotFound。
+	UpdateCodeSaveRecord(ctx context.Context, record domain.CodeSaveRecord) error
+	GetCodeSaveRecord(ctx context.Context, id domain.ID) (*domain.CodeSaveRecord, error)
+	// ListCodeSaveRecordsByTask 按任务列出记录，最新的在前。
+	ListCodeSaveRecordsByTask(ctx context.Context, taskID string) ([]domain.CodeSaveRecord, error)
+}
+
 type Tx interface {
 	RoleStore
 	ExecutionHostStore
@@ -230,6 +244,7 @@ type Tx interface {
 	EventStore
 	EnvironmentVersionStore
 	ContainerStore
+	CodeSaveStore
 }
 
 // Store 是持久化的统一入口。

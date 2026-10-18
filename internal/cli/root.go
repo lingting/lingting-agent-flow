@@ -44,5 +44,6 @@ func NewRootCommand(a *app.App) *cobra.Command {
 	root.AddCommand(newHostCommand(a))
 	root.AddCommand(newDockerCommand(a))
 	root.AddCommand(newSourceCommand(a))
+	root.AddCommand(newCodeCommand(a))
 	return root
 }
