@@ -1,6 +1,7 @@
 package sshclient
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -92,8 +93,29 @@ type FileTransfer interface {
 	Rename(ctx context.Context, oldPath, newPath string) error
 	// Remove 删除远程文件，目标不存在或不是普通文件时返回错误。
 	Remove(ctx context.Context, remotePath string) error
+	// ReadFile 读取远程普通文件内容，超过 maxBytes 时返回 ErrRemoteSizeExceeded。
+	//
+	// 读取前先按远程文件大小判断上限，不会因为文件过大而先把内容读入内存。
+	ReadFile(ctx context.Context, remotePath string, maxBytes int64) ([]byte, error)
+	// WriteFile 以原子方式写入远程普通文件。
+	//
+	// 内容先写入同目录临时文件，校验写入字节数后再提交到目标路径；
+	// Overwrite 为 false 时目标已存在返回 ErrRemotePathExists。
+	WriteFile(ctx context.Context, remotePath string, content []byte, options WriteOptions) error
+	// RemoveAll 递归删除远程目录或文件，目标不存在时视为成功。
+	RemoveAll(ctx context.Context, remotePath string) error
 	// Close 关闭 SFTP 通道。
 	Close() error
+}
+
+// WriteOptions 约束一次远程文件写入。
+type WriteOptions struct {
+	// Overwrite 允许覆盖已存在的目标文件；为 false 时目标存在即返回 ErrRemotePathExists。
+	Overwrite bool
+	// Mode 是目标文件权限位，零值使用 0o644。
+	Mode os.FileMode
+	// CreateParent 表示自动递归创建目标文件的父目录。
+	CreateParent bool
 }
 
 // UploadOptions 约束一次上传。
@@ -591,6 +613,199 @@ func (t *transfer) copyRemoteToLocal(
 			written,
 			expectedSize,
 		)
+	}
+	return nil
+}
+
+// ReadFile 读取远程普通文件内容。
+//
+// 先读取属性判断类型与大小：目录、符号链接与特殊文件一律拒绝，超过上限时
+// 在读取前返回 ErrRemoteSizeExceeded，避免把超大文件读入内存。
+func (t *transfer) ReadFile(
+	ctx context.Context,
+	remotePath string,
+	maxBytes int64,
+) ([]byte, error) {
+	if err := t.ensureOpen(); err != nil {
+		return nil, err
+	}
+	target, err := NormalizeRemotePath(remotePath)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctxErr(ctx); err != nil {
+		return nil, err
+	}
+	info, err := t.client.Stat(target)
+	if err != nil {
+		return nil, fmt.Errorf("sshclient: 读取远程文件属性失败: %s: %w", target, err)
+	}
+	kind := fileKindOf(info)
+	if kind != FileKindRegular {
+		return nil, fmt.Errorf(
+			"%w: 读取失败: 远程路径 %s 是 %s",
+			ErrUnsupportedRemoteType,
+			target,
+			kindLabel(kind),
+		)
+	}
+	if maxBytes > 0 && info.Size() > maxBytes {
+		return nil, fmt.Errorf(
+			"%w: 读取失败: %s 大小 %d 字节超过上限 %d 字节",
+			ErrRemoteSizeExceeded,
+			target,
+			info.Size(),
+			maxBytes,
+		)
+	}
+	file, err := t.client.Open(target)
+	if err != nil {
+		return nil, fmt.Errorf("sshclient: 打开远程文件失败: %s: %w", target, err)
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+	buffer := bytes.Buffer{}
+	if _, err := copyWithLimit(ctx, &buffer, file, maxBytes); err != nil {
+		return nil, fmt.Errorf("sshclient: 读取远程文件失败: %s: %w", target, err)
+	}
+	return buffer.Bytes(), nil
+}
+
+// WriteFile 以原子方式写入远程普通文件。
+//
+// 内容先写入同目录临时文件，校验写入字节数后再提交到目标路径，因此失败或中断
+// 不会留下内容不完整的最终文件。
+func (t *transfer) WriteFile(
+	ctx context.Context,
+	remotePath string,
+	content []byte,
+	options WriteOptions,
+) error {
+	if err := t.ensureOpen(); err != nil {
+		return err
+	}
+	target, err := NormalizeRemotePath(remotePath)
+	if err != nil {
+		return err
+	}
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	if !options.Overwrite {
+		exists, existsErr := t.remoteExists(target)
+		if existsErr != nil {
+			return existsErr
+		}
+		if exists {
+			return fmt.Errorf("%w: %s", ErrRemotePathExists, target)
+		}
+	}
+	if options.CreateParent {
+		if err := t.client.MkdirAll(path.Dir(target)); err != nil {
+			return fmt.Errorf("sshclient: 创建远程目录失败: %s: %w", path.Dir(target), err)
+		}
+	}
+	mode := options.Mode
+	if mode == 0 {
+		mode = 0o644
+	}
+	tempPath, err := t.tempRemotePath(target)
+	if err != nil {
+		return err
+	}
+	if err := t.writeTemp(ctx, tempPath, content, mode); err != nil {
+		t.removeQuietly(tempPath)
+		return err
+	}
+	if err := t.commitTemp(tempPath, target, options.Overwrite); err != nil {
+		t.removeQuietly(tempPath)
+		return err
+	}
+	return nil
+}
+
+// writeTemp 把内容写入远程临时文件并校验写入结果。
+func (t *transfer) writeTemp(
+	ctx context.Context,
+	remotePath string,
+	content []byte,
+	mode os.FileMode,
+) error {
+	file, err := t.client.OpenFile(remotePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+	if err != nil {
+		return fmt.Errorf("sshclient: 创建远程临时文件失败: %s: %w", remotePath, err)
+	}
+	written, writeErr := copyWithContext(ctx, file, bytes.NewReader(content))
+	closeErr := file.Close()
+	if writeErr != nil {
+		return fmt.Errorf("sshclient: 写入远程临时文件失败: %s: %w", remotePath, writeErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("sshclient: 关闭远程临时文件失败: %s: %w", remotePath, closeErr)
+	}
+	if written != int64(len(content)) {
+		return fmt.Errorf(
+			"sshclient: 写入远程临时文件失败: %s: 写入字节数 %d 与内容长度 %d 不一致",
+			remotePath,
+			written,
+			len(content),
+		)
+	}
+	if err := t.client.Chmod(remotePath, mode); err != nil {
+		return fmt.Errorf("sshclient: 设置远程文件权限失败: %s: %w", remotePath, err)
+	}
+	return nil
+}
+
+// RemoveAll 递归删除远程目录或文件。
+//
+// 目标不存在视为成功，使删除操作具备幂等性；符号链接只删除链接本身，
+// 不会跟随链接删除链接指向的内容。
+func (t *transfer) RemoveAll(ctx context.Context, remotePath string) error {
+	if err := t.ensureOpen(); err != nil {
+		return err
+	}
+	target, err := NormalizeRemotePath(remotePath)
+	if err != nil {
+		return err
+	}
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	info, err := t.client.Lstat(target)
+	if err != nil {
+		if isSFTPNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("sshclient: 读取远程路径属性失败: %s: %w", target, err)
+	}
+	if fileKindOf(info) != FileKindDirectory {
+		if err := t.client.Remove(target); err != nil {
+			if isSFTPNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("sshclient: 删除远程路径失败: %s: %w", target, err)
+		}
+		return nil
+	}
+	entries, err := t.client.ReadDir(target)
+	if err != nil {
+		return fmt.Errorf("sshclient: 列出远程目录失败: %s: %w", target, err)
+	}
+	for _, entry := range entries {
+		if err := ctxErr(ctx); err != nil {
+			return err
+		}
+		if err := t.RemoveAll(ctx, path.Join(target, entry.Name())); err != nil {
+			return err
+		}
+	}
+	if err := t.client.RemoveDirectory(target); err != nil {
+		if isSFTPNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("sshclient: 删除远程目录失败: %s: %w", target, err)
 	}
 	return nil
 }

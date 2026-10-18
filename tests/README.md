@@ -15,7 +15,10 @@ tests/
 │   │   └── pi/         # Pi Runner 单元测试（使用 fakepi 替身）
 │   ├── app/            # 应用服务层
 │   ├── config/         # 配置加载与校验
+│   ├── container/      # 容器状态、生命周期策略与 Docker 命令参数构造
 │   ├── domain/         # 领域模型与状态迁移
+│   ├── environment/    # 环境类型、版本号与镜像引用规则
+│   ├── image/          # 构建上下文哈希、Dockerfile 校验与语言模板
 │   ├── process/        # 子进程监管
 │   ├── ssh/            # SSH 主机密钥、认证配置、路径与结果状态
 │   ├── store/          # SQLite 仓储与数据库约束
@@ -23,9 +26,13 @@ tests/
 ├── integration/
 │   ├── local/          # 本机集成测试，不依赖外部服务
 │   │   ├── database/   # 持久化工作流全链路
+│   │   ├── docker/     # 远程 Docker 命令构造与结果解析（使用执行替身）
+│   │   ├── environment/# 环境版本文件写入与清单读写（真实文件系统）
 │   │   ├── ssh/        # 本地模拟 SSH/SFTP 服务端
 │   │   └── sshprobe/   # 本机 TCP 探测
 │   ├── pi/             # 需要本机真实 Pi CLI
+│   ├── remote/
+│   │   └── docker/     # 需要真实远程 Linux 机器与真实 Docker Engine
 │   └── ssh/            # 需要真实远程 Linux 机器
 └── e2e/
     └── cli/            # CLI 完整用户操作路径
@@ -47,6 +54,9 @@ go test -count=1 -v ./tests/integration/pi/...
 
 # 真实 SSH 集成测试
 go test -count=1 -v ./tests/integration/ssh/...
+
+# 真实远程 Docker 集成测试（必须显式启用）
+AGENTFLOW_TEST_REMOTE_DOCKER=1 go test -count=1 -v ./tests/integration/remote/docker/...
 
 # CLI 端到端测试
 go test -count=1 -v ./tests/e2e/...
@@ -94,6 +104,25 @@ Unix 套接字时该用例输出 `WARN [SKIP]` 并跳过，其余用例仍会执
 
 所有 SSH 测试都禁止关闭主机密钥校验，禁止自动接受未知主机密钥。
 
+## Docker 测试分层
+
+| 目录 | 内容 | 外部依赖 |
+|---|---|---|
+| `tests/unit/environment/` | 环境类型、版本号递增、构建状态迁移、镜像引用与 ID 校验 | 无 |
+| `tests/unit/image/` | 构建上下文确定性哈希、Dockerfile 静态校验、语言模板、构建配置哈希 | 无 |
+| `tests/unit/container/` | 容器状态迁移、detached 语义、生命周期策略、缓存卷命名、创建参数安全边界、JSON 解析 | 无 |
+| `tests/integration/local/docker/` | 预检错误分类、命令构造与转义、幂等删除、状态不确定分类、清单读写 | 无（使用 SSH 执行替身） |
+| `tests/integration/local/environment/` | 版本文件不可覆盖、清单落盘一致性、构建上下文上传与清理 | 无（远程路径映射到本机目录） |
+| `tests/integration/remote/docker/` | 真实远程预检、镜像构建、容器创建/启动/执行/停止/删除 | 环境变量指定的 SSH 目标与真实 Docker |
+
+本机 Docker 测试使用可控的 SSH 执行替身：替身记录收到的远程命令并返回预设输出，
+因此命令构造、参数转义、结果解析与错误分类都经过真实代码路径，但不需要 Docker Engine。
+本机环境测试把远程绝对路径映射到测试工作空间中的目录，因此文件写入、原子替换与
+"历史版本不可覆盖"都在真实文件系统上验证。
+
+真实远程 Docker 测试只使用带随机后缀的测试镜像标签、容器名称与远程目录，并只清理
+自己创建并已核验所有权的测试容器；不会执行全局 prune，也不会删除共享镜像或缓存卷。
+
 ## 环境变量
 
 ### 真实 Pi
@@ -132,6 +161,27 @@ go test -count=1 -v ./tests/integration/ssh/...
 主机密钥校验失败时必须让测试失败。真实 SSH 测试始终执行主机密钥校验，不会自动接受
 未知主机密钥。远程文件操作只发生在随机生成的远程临时目录内。
 
+### 真实远程 Docker
+
+| 变量 | 用途 | 必填 |
+|---|---|---|
+| `AGENTFLOW_TEST_REMOTE_DOCKER` | 显式启用真实远程 Docker 测试，必须为 `1` | 是 |
+| `AGENTFLOW_TEST_SSH_HOST` | SSH 服务器地址 | 是 |
+| `AGENTFLOW_TEST_SSH_USER` | 登录用户名 | 是 |
+| `AGENTFLOW_TEST_SSH_PORT` | SSH 端口 | 否，默认 `22` |
+| `AGENTFLOW_TEST_SSH_KEY_PATH` | 私钥路径 | 否，为空时使用 SSH Agent |
+| `AGENTFLOW_TEST_SSH_KNOWN_HOSTS` | 只读 known_hosts 文件 | 否 |
+
+示例：
+
+```bash
+AGENTFLOW_TEST_REMOTE_DOCKER=1 AGENTFLOW_TEST_SSH_HOST=10.0.0.10 AGENTFLOW_TEST_SSH_USER=deploy AGENTFLOW_TEST_SSH_KEY_PATH=$HOME/.ssh/id_ed25519 go test -count=1 -v ./tests/integration/remote/docker/...
+```
+
+开关未设置时输出 `WARN [SKIP]`，普通测试不会修改真实远程 Docker；开关已启用但 SSH
+目标缺失时说明缺少的变量并跳过；目标完整但认证失败、Docker 不可用或断言不成立时
+必须让测试失败。
+
 ## 编写测试的约定
 
 - 使用 `testkit.New(t)` 创建工作空间，用 `testkit.Dir(t)` 取代 `t.TempDir()`。
@@ -141,3 +191,6 @@ go test -count=1 -v ./tests/integration/ssh/...
 - 需要真实外部依赖时，由测试自身检查依赖并在缺失时输出警告后跳过。
 - 成功判定必须基于具体业务结果（退出码、数据库记录、文件内容、状态字段），不能只
   依赖日志文本。
+- Docker 相关测试必须显式启用 `AGENTFLOW_TEST_REMOTE_DOCKER=1` 才允许修改真实远程
+  Docker；本机测试一律使用执行替身或路径映射，不依赖本机是否安装 Docker。
+- 测试结束不得删除测试工作空间与产物；真实远程测试的远程测试目录同样保留。

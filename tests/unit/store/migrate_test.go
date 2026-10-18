@@ -14,7 +14,7 @@ import (
 )
 
 // latestSchemaVersion 是当前程序内置迁移的最新版本号。
-const latestSchemaVersion = 4
+const latestSchemaVersion = 5
 
 // migrationTableName 是记录已应用迁移版本的元数据表名。
 const migrationTableName = "schema_migrations"
@@ -22,6 +22,8 @@ const migrationTableName = "schema_migrations"
 // expectedTables 是迁移应当创建的业务表。
 var expectedTables = []string{
 	"attempts",
+	"containers",
+	"environment_versions",
 	"events",
 	"execution_hosts",
 	"requirements",
@@ -124,6 +126,8 @@ func TestMigrateUpgradesExistingDatabase(t *testing.T) {
 	requirement := mustRequirement(t, db)
 	task := mustTask(t, db, requirement.ID)
 	// 模拟旧版本数据库：删除新增的表与对应迁移记录，重新打开后应自动补建。
+	testkit.MustExec(t, rawDB(t, db), `DROP TABLE containers`)
+	testkit.MustExec(t, rawDB(t, db), `DROP TABLE environment_versions`)
 	testkit.MustExec(t, rawDB(t, db), `DROP TABLE execution_hosts`)
 	// 会话产出字段同样需要回退，才能重新执行对应的迁移。
 	for _, statement := range []string{
@@ -139,7 +143,7 @@ func TestMigrateUpgradesExistingDatabase(t *testing.T) {
 	} {
 		testkit.MustExec(t, rawDB(t, db), statement)
 	}
-	testkit.MustExec(t, rawDB(t, db), `DELETE FROM `+migrationTableName+` WHERE version IN (2, 3, 4)`)
+	testkit.MustExec(t, rawDB(t, db), `DELETE FROM `+migrationTableName+` WHERE version IN (2, 3, 4, 5)`)
 	if version, err := db.SchemaVersion(ctx); err != nil || version != 1 {
 		t.Fatalf("模拟旧库版本失败: %d, %v", version, err)
 	}

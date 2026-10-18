@@ -102,11 +102,32 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
 - 本机集成测试的 SSH/SFTP 服务端只能由测试代码在进程内启动，不得要求用户预先启动服务，
   也不得用"配置解析正确"代替真实握手、认证与传输验证。
 - 远程命令的取消与超时测试必须验证会话确实被关闭，不能只验证本地停止等待。
+- 真实远程 Docker 集成测试必须显式设置 `AGENTFLOW_TEST_REMOTE_DOCKER=1`；未设置时输出
+  `WARN [SKIP]`，普通测试不得修改真实远程 Docker。
+- 真实远程 Docker 测试放在 `tests/integration/remote/docker/`，目标机器通过
+  `AGENTFLOW_TEST_SSH_*` 获取；开关已启用但目标缺失时说明缺少的变量并跳过，目标完整
+  但认证失败、Docker 不可用或断言不成立时必须让测试失败。
+- 真实远程 Docker 测试只允许操作带随机后缀、属于本次测试的镜像标签、容器与远程目录；
+  禁止执行全局 `docker system prune`、`docker image prune`、`docker volume prune`。
 
 ### 结果报告
 
 - 修改测试相关基础设施后，必须运行与修改范围相关的测试，并如实报告通过、失败、跳过与
   未执行的测试；不得把未执行、被跳过或失败的测试报告为通过。
+
+## Docker 与容器管理约束
+
+- 远程 Docker 操作只能通过已验证的 SSH 执行层进行，不开放 Docker TCP 端口，不创建
+  反向隧道，也不要求本机访问远程 Docker Socket。
+- 禁止把 Docker Socket、用户 Home、SSH 私钥或远程项目配置目录挂载到任务容器。
+- 项目代码只存在于任务容器内部（`/workspace/project`），不得绑定挂载到宿主机目录，也不
+  得写入远程项目配置目录。
+- 环境 Dockerfile 的历史版本不得覆盖；每次保存只能生成新的递增版本号。
+- 删除任务容器不得删除共享镜像、共享缓存卷或远程项目配置目录；默认禁止全局 prune。
+- 失败任务与默认中断任务必须保留容器；重新开始必须创建新容器，旧容器只能显式
+  `delete` 或 `detach`。
+- Detached 容器不得被 AgentFlow 自动重新接管，也不得被自动启动、停止或删除。
+- 只有构建成功并核实到实际镜像 ID 的版本才能用于创建容器；构建失败不得标记为可用。
 
 ## 文档同步
 

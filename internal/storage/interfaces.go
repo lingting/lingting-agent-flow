@@ -169,6 +169,55 @@ type RoleSeeder interface {
 // Tx 在一个事务内提供各实体的存储能力。
 //
 // 通过 WithTx 取得，事务的提交与回滚由存储层管理，调用方不直接持有事务对象。
+// EnvironmentVersionFilter 约束环境版本查询条件，零值表示不限制。
+type EnvironmentVersionFilter struct {
+	// HostID 限制版本所属节点。
+	HostID domain.ID
+	// Ref 限制版本所属环境，Name 为空表示不限制名称。
+	Ref *domain.EnvironmentRef
+	// Statuses 限制构建状态，为空表示不限制。
+	Statuses []domain.BuildStatus
+	// Limit 限制返回条数，小于等于 0 表示不限制。
+	Limit int
+}
+
+// EnvironmentVersionStore 保存不可覆盖的环境配置版本。
+//
+// 版本记录只追加不覆盖：CreateEnvironmentVersion 遇到已存在的版本号返回
+// storage.ErrConflict，历史版本内容与哈希不得被新版本修改。
+type EnvironmentVersionStore interface {
+	CreateEnvironmentVersion(ctx context.Context, version domain.EnvironmentVersion) error
+	// UpdateEnvironmentVersion 只更新构建状态、镜像 ID、构建时间与错误摘要。
+	UpdateEnvironmentVersion(ctx context.Context, version domain.EnvironmentVersion) error
+	GetEnvironmentVersion(
+		ctx context.Context,
+		hostID domain.ID,
+		ref domain.EnvironmentRef,
+		number int,
+	) (*domain.EnvironmentVersion, error)
+	ListEnvironmentVersions(
+		ctx context.Context,
+		filter EnvironmentVersionFilter,
+	) ([]domain.EnvironmentVersion, error)
+	// NextEnvironmentVersionNumber 返回该环境下已用最大版本号加一。
+	NextEnvironmentVersionNumber(
+		ctx context.Context,
+		hostID domain.ID,
+		ref domain.EnvironmentRef,
+	) (int, error)
+}
+
+// ContainerStore 保存 AgentFlow 管理的远程容器登记记录。
+type ContainerStore interface {
+	CreateContainer(ctx context.Context, container domain.Container) error
+	// UpdateContainer 按主键更新容器记录，不存在时返回 storage.ErrNotFound。
+	UpdateContainer(ctx context.Context, container domain.Container) error
+	GetContainer(ctx context.Context, id domain.ID) (*domain.Container, error)
+	// GetContainerByName 按节点与容器名称查询，用于恢复远程操作后的状态。
+	GetContainerByName(ctx context.Context, hostID domain.ID, name string) (*domain.Container, error)
+	ListContainers(ctx context.Context, filter domain.ContainerFilter) ([]domain.Container, error)
+}
+
 type Tx interface {
 	RoleStore
 	ExecutionHostStore
@@ -179,6 +228,8 @@ type Tx interface {
 	SessionStore
 	VerificationStore
 	EventStore
+	EnvironmentVersionStore
+	ContainerStore
 }
 
 // Store 是持久化的统一入口。
