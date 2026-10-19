@@ -111,7 +111,8 @@ func ContainerCreateArgs(spec CreateContainerSpec) ([]string, error) {
 	}
 	args := []string{
 		"--name", name,
-		"--detach",
+		// docker create 只创建容器，不启动工作负载，因此不接受 --detach：
+		// 该参数只属于 docker run，传入会被 CLI 直接拒绝（unknown flag）。
 		"--workdir", workDir,
 		"--label", OwnershipLabelKey + "=true",
 		"--label", HostLabelKey + "=" + spec.Container.HostID.String(),
@@ -682,4 +683,42 @@ func (r *Runner) ListAgentFlowContainers(
 		ids = append(ids, trimmed)
 	}
 	return ids, nil
+}
+
+// CopyFromContainer 用 docker cp 把容器内文件复制到远程宿主机路径。
+//
+// 该方法统一走本包的 Docker 命令构造入口，使 docker cp 与其余命令使用相同的 API 基准，
+// 业务层不再自行拼接 Docker 命令行。
+func (r *Runner) CopyFromContainer(
+	ctx context.Context,
+	dockerID, containerPath, hostPath string,
+	timeout time.Duration,
+) (CommandResult, error) {
+	if strings.TrimSpace(dockerID) == "" {
+		return CommandResult{}, newError(CodeInvalidArgument, "docker cp", "容器 ID 不能为空", nil)
+	}
+	if !strings.HasPrefix(containerPath, "/") {
+		return CommandResult{}, newError(
+			CodeInvalidArgument,
+			"docker cp",
+			fmt.Sprintf("容器内路径 %q 必须是绝对路径", containerPath),
+			nil,
+		)
+	}
+	if !strings.HasPrefix(hostPath, "/") {
+		return CommandResult{}, newError(
+			CodeInvalidArgument,
+			"docker cp",
+			fmt.Sprintf("宿主机路径 %q 必须是绝对路径", hostPath),
+			nil,
+		)
+	}
+	command, err := dockerCommand("cp", dockerID+":"+containerPath, hostPath)
+	if err != nil {
+		return CommandResult{}, err
+	}
+	if timeout <= 0 {
+		timeout = DefaultMutateTimeout
+	}
+	return r.Run(ctx, "docker cp", command, timeout)
 }

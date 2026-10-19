@@ -205,11 +205,13 @@ func TestParseDfAvailableKilobytes(t *testing.T) {
 func TestDockerVersionParsing(t *testing.T) {
 	t.Parallel()
 	cases := map[string]bool{
-		"24.0.7":  true,
-		"20.10.0": true,
-		"26.1.4":  true,
+		"29.0.0":  true,
+		"29.0.1":  true,
+		"29.1.0":  true,
+		"30.0.0":  true,
+		"29.10.0": true,
+		"28.5.2":  false,
 		"19.03.8": false,
-		"20.9.0":  false,
 		"":        false,
 		"abc":     false,
 	}

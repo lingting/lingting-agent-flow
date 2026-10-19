@@ -63,6 +63,7 @@ export function checkStatusMeta(status: ValidationCheckStatus): { label: string;
 /** 校验项的中文标题，与 Go 端的检查项名称对应 */
 export const VALIDATION_CHECK_TITLES: Record<string, string> = {
   ssh_connection: "SSH 连接",
+  docker_version: "Docker 版本与 API 兼容性",
   docker_cli_help: "Docker CLI 帮助信息",
   base_image_metadata: "基础镜像元数据",
 };

@@ -1,5 +1,6 @@
 .idea/
 
+.plan/
 # 构建产物
 /bin/
 

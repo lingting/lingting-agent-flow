@@ -9,9 +9,9 @@ AgentFlow 是一个使用 Go 编写的本地优先 AI 编码工作流编排器�
 AgentFlow 处于**执行节点接入阶段**。当前仓库包含工程骨架、可运行的 CLI、配置加载与校验、结构化日志封装、SQLite 数据模型与版本化迁移，以及执行节点管理与完整的 SSH 连接层。
 
 执行节点已支持本机私钥认证、严格的主机密钥校验、带超时与取消的远程命令执行、SFTP
-文件传输、远程 Home 与工作空间解析，以及**执行节点环境预检**（SSH 连接、Docker CLI
-帮助信息、基础 Dockerfile 的外部 `FROM` 镜像元数据）。**远程代码仓库操作与工作流引擎尚未
-实现**。文档只会在对应能力落地后才声明其可用。
+文件传输、远程 Home 与工作空间解析，以及**执行节点环境预检**（SSH 连接、Docker 版本与
+API 兼容性、Docker CLI 帮助信息、基础 Dockerfile 的外部 `FROM` 镜像元数据）。**远程代码仓库
+操作与工作流引擎尚未实现**。文档只会在对应能力落地后才声明其可用。
 
 ## 第一版功能范围
 
@@ -37,8 +37,10 @@ AgentFlow 处于**执行节点接入阶段**。当前仓库包含工程骨架、
 - SFTP 文件操作：创建目录、属性查询（含符号链接识别）、目录列举、上传、下载、重命名与删除；上传先写同目录临时文件并校验字节数，覆盖提交优先使用 `posix-rename` 原子替换；下载支持大小上限，失败不留下最终文件。
 - 远程 Home 与工作空间：通过已认证连接解析远程登录用户 Home，把 `~/.lingting/agentflow` 或自定义路径解析为远程绝对路径，并检查存在性与可写性。
 - 执行节点环境预检：新建与有效修改后自动进入 `checking`，由后台服务依次执行 SSH 连接、
-  Docker CLI 帮助信息与基础镜像元数据三项检查，全部通过才写 `normal`；未通过校验的节点
-  不能用于真实远程操作。第一版 Docker 检查只基于 CLI 帮助信息，不验证 Engine 运行契约。
+  Docker 版本与 API 兼容性、Docker CLI 帮助信息与基础镜像元数据四项检查，全部通过才写
+  `normal`；未通过校验的节点不能用于真实远程操作。Docker 兼容性检查不验证 Engine 运行契约。
+- Docker 兼容性基线：CLI 与 Engine 最低 `29.0.0`，Engine API 基准固定 `1.52`；所有 Docker
+  调用统一固定 API 基准，详见 [`docs/docker-compatibility.md`](docs/docker-compatibility.md)。
 - 统一服务入口：`agentflow server` 在同一个进程内启动 HTTP API、内嵌 Web 页面与后台服务，按依赖顺序初始化并按逆序优雅关闭，默认只监听 `127.0.0.1:26380`。
 - 只读与资源接口：`GET /api/v1/health` 报告 HTTP API 与 SQLite 可用性，`GET /api/v1/system/info`
   返回构建信息，`/api/v1/tasks` 提供任务管理，`/api/v1/hosts` 提供执行节点管理与环境预检
@@ -646,20 +648,24 @@ go run ./cmd/agentflow --help
 单项结果使用独立的状态：`passed`、`failed`、`timed_out`、`skipped`、`not_run`。
 它们只出现在校验详情里，不新增总体状态；`skipped` 与 `not_run` 一律**不算通过**。
 
-三项必需检查按顺序执行，前一项失败时后续检查记为 `not_run`：
+四项必需检查按顺序执行，前一项失败时后续检查记为 `not_run`：
 
 1. **SSH 连接**：连接、握手、认证，并执行一条无副作用的非交互远程命令（`true`）取得退出码。
-2. **Docker CLI 帮助信息**：对 `internal/docker` 中实际使用的命令逐条执行
+2. **Docker 版本与 API 兼容性**：分别检查实际 CLI 版本与 Engine 版本不低于 `29.0.0`，并通过
+   `GET /v1.52/version` 确认固定 API 基准 `1.52` 落在 Engine 声明的
+   `[MinAPIVersion, APIVersion]` 区间内。版本探测使用 `env -u DOCKER_API_VERSION` 隔离远端
+   遗留变量。
+3. **Docker CLI 帮助信息**：对 `internal/docker` 中实际使用的命令逐条执行
    `docker <command> --help`，核对所需参数选项是否出现在帮助文本中（同时读取标准输出与
    标准错误）。
-3. **基础镜像元数据**：解析当前节点最新的基础环境 Dockerfile，提取全部外部 `FROM` 镜像，
-   通过远端 Docker Engine 的 `GET /distribution/{name}/json` 查询元数据（摘要与平台）。
+4. **基础镜像元数据**：解析当前节点最新的基础环境 Dockerfile，提取全部外部 `FROM` 镜像，
+   通过远端 Docker Engine 的 `GET /v1.52/distribution/{name}/json` 查询元数据（摘要与平台）。
 
 ```bash
 ./bin/agentflow host validate node-build-01
 ```
 
-该命令同步执行一次完整预检并输出三项结果与能力边界说明；退出码非零表示预检未通过。
+该命令同步执行一次完整预检并输出四项结果与能力边界说明；退出码非零表示预检未通过。
 
 #### 触发时机
 
@@ -674,8 +680,9 @@ go run ./cmd/agentflow --help
 
 #### 能力边界（第一版）
 
-- Docker 检查**只**基于 CLI 帮助信息，不执行 `docker version`、API 能力探测或任何实际容器
-  操作，因此 `normal` **不代表**该 Docker Engine 一定能成功创建并运行 AgentFlow 所需的容器。
+- Docker 兼容性检查**只**包含版本与 API 基准探测，以及 CLI 帮助信息核对；不执行
+  `create`、`run`、`pull` 等任何创建容器、启动工作负载或下载镜像层的操作，因此 `normal`
+  **不代表**该 Docker Engine 一定能成功创建并运行 AgentFlow 所需的容器。
 - 镜像检查**只**查询元数据：不 `docker pull`、不执行完整 `docker build`、不创建临时容器、
   不运行镜像内程序，也不改变远端镜像缓存、容器与卷状态。
 - 查询经由已认证 SSH 连接直接访问远端 Docker Engine 的 Unix 套接字（OpenSSH
@@ -683,8 +690,8 @@ go run ./cmd/agentflow --help
   `curl` 等额外工具。不使用 `docker pull` 作为回退手段。
 - 无法解析的 `FROM` 动态引用（例如依赖构建期参数的变量）判为失败并记录原因；`scratch`
   与内部构建阶段别名不产生网络查询。
-- 超时集中定义在 `internal/docker/validation.go`：单步 SSH 检查 10 秒、单镜像查询 8 秒、
-  整体 30 秒。
+- 超时集中定义在 `internal/docker/validation.go`：单步 SSH 检查 10 秒、版本与 API 检查 15 秒、
+  单镜像查询 8 秒、整体 45 秒。
 
 #### 使用限制
 
@@ -891,9 +898,9 @@ AgentFlow 的最终形态会**执行外部程序并修改项目文件**，请注
 - SFTP 上传覆盖优先使用 `posix-rename` 原子替换；服务端不支持该扩展时会退化为"删除旧
   文件后重命名"，此时替换不是原子的，请避免在关键文件上依赖强原子性。
 - 本地 HTTP 服务默认只监听 `127.0.0.1`，且不存储模型凭据。Web 连接指示器只表示 HTTP API 可用，不代表 SSH、Docker 或 Pi Agent 已就绪。
-- 环境预检的 `normal` **不是**"远端 Docker Engine 已验证可用"：Docker 检查只基于 CLI 帮助
-  信息，不创建或启动容器，因此仍可能出现 `normal` 但 `docker create` 因参数不被该 CLI
-  版本支持而失败的情况。镜像检查也只查询元数据，不保证镜像层可下载、构建可成功。
+- 环境预检的 `normal` **不是**"远端 Docker Engine 已验证可用"：Docker 检查基于实际版本、
+  API 基准与 CLI 帮助信息，不创建或启动容器，因此仍可能出现 `normal` 但容器创建因运行时
+  条件不满足而失败的情况。镜像检查也只查询元数据，不保证镜像层可下载、构建可成功。
 - 预检不会改变远端镜像缓存、容器与卷状态，但会产生正常的远端网络查询与 Docker 日志。
 
 ## 许可证

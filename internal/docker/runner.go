@@ -205,11 +205,35 @@ func (r *Runner) RunMutate(ctx context.Context, op, command string) (CommandResu
 	return r.Run(ctx, op, command, r.mutateTimeout)
 }
 
-// dockerCommand 构造 docker 子命令的远程命令字符串。
+// dockerCommand 构造业务调用的 docker 子命令远程命令字符串。
 //
-// 子命令与参数都经过校验与转义：子命令只能是固定字面量，参数逐个用
-// POSIX shell 规则转义。
+// 所有业务调用统一显式设置 DOCKER_API_VERSION=<API 基准>，使实际请求固定在 AgentFlow
+// 的 API 基准上，不依赖远端环境中的隐式默认值。固定版本与 Engine 不兼容时 Docker 会
+// 直接返回错误，不会静默降级到旧 API 或升级到新 API。
+//
+// 子命令与参数都经过校验与转义：子命令只能是固定字面量，参数逐个用 POSIX shell 规则转义。
 func dockerCommand(subcommand string, args ...string) (string, error) {
+	return dockerCommandWithEnv(
+		[]string{dockerAPIVersionEnv + "=" + EngineAPIBaseVersion},
+		subcommand,
+		args...,
+	)
+}
+
+// dockerProbeCommand 构造版本探测使用的 docker 子命令远程命令字符串。
+//
+// 探测阶段必须隔离远端可能遗留的 DOCKER_API_VERSION：该变量会关闭 CLI 的自动版本协商，
+// 使探测结果无法反映真实的客户端与服务端能力。因此这里显式取消该变量，探测与业务调用的
+// 环境变量策略完全分离。
+func dockerProbeCommand(subcommand string, args ...string) (string, error) {
+	return dockerCommandWithEnv([]string{"-u", dockerAPIVersionEnv}, subcommand, args...)
+}
+
+// dockerCommandWithEnv 构造带环境变量控制的 docker 子命令远程命令字符串。
+//
+// env 中的每一项都会被单独转义；它只用于明确设置或取消 DOCKER_API_VERSION，
+// 不接受来自业务数据的任意环境变量。
+func dockerCommandWithEnv(env []string, subcommand string, args ...string) (string, error) {
 	if strings.TrimSpace(subcommand) == "" {
 		return "", newError(CodeInvalidArgument, "docker", "docker 子命令不能为空", nil)
 	}
@@ -227,7 +251,11 @@ func dockerCommand(subcommand string, args ...string) (string, error) {
 			)
 		}
 	}
-	command, err := sshclient.ShellCommand("docker", append([]string{subcommand}, args...)...)
+	parts := make([]string, 0, len(env)+len(args)+2)
+	parts = append(parts, env...)
+	parts = append(parts, "docker", subcommand)
+	parts = append(parts, args...)
+	command, err := sshclient.ShellCommand("env", parts...)
 	if err != nil {
 		return "", newError(CodeInvalidArgument, "docker", "构造远程命令失败", err)
 	}

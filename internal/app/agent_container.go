@@ -254,16 +254,13 @@ func (e *containerSessionExecutor) CopyFromContainer(
 	if err := e.session.transfer.MkdirAll(ctx, path.Dir(hostPath)); err != nil {
 		return fmt.Errorf("创建宿主机临时目录失败: %w", err)
 	}
-	command, err := sshclient.ShellCommand(
-		"docker",
-		"cp",
-		dockerID+":"+containerPath,
+	run, runErr := e.session.runner.CopyFromContainer(
+		ctx,
+		dockerID,
+		containerPath,
 		hostPath,
+		containerCopyTimeout,
 	)
-	if err != nil {
-		return fmt.Errorf("构造 docker cp 命令失败: %w", err)
-	}
-	run, runErr := e.session.runner.Run(ctx, "docker cp", command, containerCopyTimeout)
 	if runErr != nil {
 		return fmt.Errorf("docker cp 失败: %w", runErr)
 	}

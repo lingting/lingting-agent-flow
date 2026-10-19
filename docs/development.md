@@ -199,6 +199,17 @@ make build VERSION=0.1.0
   路径，也不得用字符串前缀判断目录包含关系。
 ## 与 Docker 交互的注意事项
 
+- 兼容性基线（CLI / Engine `29.0.0`、API `1.52`）与操作细则见
+  [`docker-compatibility.md`](docker-compatibility.md)；基线取值只在
+  `internal/docker/compatibility.go` 定义，不得在别处重复硬编码。
+- 所有 Docker 命令必须经 `internal/docker` 的命令构造入口生成：业务调用走
+  `dockerCommand`（显式 `DOCKER_API_VERSION=1.52`），版本探测走 `dockerProbeCommand`
+  （`env -u DOCKER_API_VERSION` 隔离远端遗留变量）。业务层不得自行拼接 Docker 命令行。
+- 版本与 API 兼容性检查使用 `docker.ProbeVersion`：CLI 版本、Engine 版本分别检查，固定 API
+  基准必须落在 Engine 声明的 `[MinAPIVersion, APIVersion]` 区间内，不得把最低接受版本与
+  基准做「大于等于」比较。
+- 直接 Engine API 调用统一使用 `/v1.52/` 前缀（由 `EngineAPIBaseVersion` 派生），且只允许
+  只读请求：`GET /version` 与 `GET /distribution/{name}/json`。
 - 帮助检查只允许执行 `docker <command> --help`，禁止在其中执行 `create`、`run`、`start`、
   `pull` 等任何创建容器、启动工作负载或下载镜像层的命令。
 - 帮助检查的命令与参数清单必须与 `internal/docker` 中真实的命令构造一致

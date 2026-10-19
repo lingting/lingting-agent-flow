@@ -78,7 +78,6 @@ func RequiredCLICommands() []CLICommand {
 			Subcommand: "create",
 			Options: []CLIOption{
 				{Name: "--name", Source: "ContainerCreateArgs"},
-				{Name: "--detach", Source: "ContainerCreateArgs"},
 				{Name: "--workdir", Source: "ContainerCreateArgs"},
 				{Name: "--label", Source: "ContainerCreateArgs"},
 				{Name: "--mount", Source: "ContainerCreateArgs"},
@@ -177,6 +176,10 @@ func RequiredCLICommands() []CLICommand {
 				{Name: "--format", Source: "checkEngine"},
 			},
 			Source: "Preflight",
+		},
+		{
+			Subcommand: "cp",
+			Source:     "CopyFromContainer",
 		},
 	}
 }

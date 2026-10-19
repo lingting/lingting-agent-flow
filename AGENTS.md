@@ -167,16 +167,17 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
   `InvalidateValidation`：状态回到 `checking`、清空旧摘要与详情、代次加一。
 - 校验结果必须通过 `UpdateExecutionHostValidation` 以代次为条件写入；代次不一致时
   丢弃结果，不得覆盖新配置。`RecordValidationResult` 与 `FailValidation` 同样校验代次。
-- 三项必需检查按顺序执行：SSH 连接 → Docker CLI 帮助信息 → 基础 Dockerfile 的外部
-  `FROM` 镜像元数据。前一项失败时后续检查记为 `not_run`，不得伪装成已验证。
+- 四项必需检查按顺序执行：SSH 连接 → Docker 版本与 API 兼容性 → Docker CLI 帮助信息 →
+  基础 Dockerfile 的外部 `FROM` 镜像元数据。前一项失败时后续检查记为 `not_run`，不得伪装成已验证。
 - 只有当前代次全部必需检查都通过才允许写入 `normal`；`skipped` 与 `not_run` 一律不算通过。
 - 无法开始校验（调度失败、服务未运行等）时不得永久停留在 `checking`：要么保持可恢复的
   待校验状态并由启动恢复重新调度，要么收敛为 `abnormal` 并给出可读原因。
-- `normal` 的含义仅限本方案实际执行的检查：Docker 兼容性只基于 CLI 帮助信息，不验证
-  Engine 的实际运行契约，因此不得把 `normal` 表述为"容器创建与运行已验证"。
+- `normal` 的含义仅限本方案实际执行的检查：Docker 兼容性基于实际 CLI / Engine / API 版本与
+  CLI 帮助信息，不验证 Engine 的实际运行契约，因此不得把 `normal` 表述为"容器创建与运行已验证"。
 - Docker CLI 帮助检查只允许执行 `docker <command> --help`：禁止在该检查中执行
-  `create`、`run`、`start`、`pull` 等任何创建容器、启动工作负载或下载镜像层的命令，
-  也不得执行 `docker version`、API 能力探测或实际容器操作。
+  `create`、`run`、`start`、`pull` 等任何创建容器、启动工作负载或下载镜像层的命令。
+  版本与 API 兼容性检查由独立的 `docker_version` 检查项通过只读的 `docker version` 与
+  `/v1.52/version` 完成，帮助检查本身不得执行其他 Docker 操作。
 - 帮助检查的命令与参数清单必须与 `internal/docker` 中真实的命令构造保持一致
   （`docker.RequiredCLICommands`）；新增 Docker 调用必须同步更新清单。
 - 镜像预检只允许查询 `FROM` 镜像元数据（Docker Engine 的 Distribution Inspect），
@@ -315,6 +316,39 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
   `delete` 或 `detach`。
 - Detached 容器不得被 AgentFlow 自动重新接管，也不得被自动启动、停止或删除。
 - 只有构建成功并核实到实际镜像 ID 的版本才能用于创建容器；构建失败不得标记为可用。
+
+### Docker 兼容性基线（强制规则）
+
+1. Docker CLI 最低支持版本为 29.0.0。
+2. Docker Engine 最低支持版本为 29.0.0。
+3. AgentFlow 使用的 Docker Engine API 基准版本固定为 1.52。
+4. 所有新增 Docker 命令、子命令和参数，都必须以 Docker CLI 29.0.0 为兼容性基准。
+5. 所有新增 Docker Engine API 路由、请求字段、响应字段和行为，都必须以 API 1.52 为兼容性基准。
+6. 不得因开发环境安装了较新 Docker 而依赖更高版本才支持的功能。
+7. 高版本 Docker 可以使用，但 AgentFlow 的实际命令和 API 使用必须保持兼容最低基线。
+8. 所有 Docker 调用必须经过项目统一的命令执行或 API 访问入口；禁止在业务代码中随意拼接并执行未经过兼容性审查的 Docker 命令。
+9. AgentFlow 发起的 Docker CLI 操作必须统一使用 API 基准 1.52；版本发现和兼容性探测阶段除外，且必须明确控制 DOCKER_API_VERSION 环境变量。
+10. 直接调用 Docker Engine API 时，必须使用 /v1.52/ 路径，不得擅自使用更高 API 版本。
+11. SSHConfig 的 Docker 兼容性预检必须同时检查实际使用的 CLI 版本、Engine 版本和 API 版本信息。
+12. Docker CLI --help 只能用于辅助检查命令和参数，不得作为 Engine 实际运行能力的证明。
+13. Docker 兼容性预检第一版禁止执行 docker create、docker run、docker pull 等会创建容器、启动工作负载或下载完整镜像层的操作。
+14. 基础 FROM 镜像检查只查询镜像元数据，不下载镜像层。
+15. 所有 Docker 命令新增、修改和移除都必须检查对最低基线的兼容性，并通过对应测试。
+16. 不得为了让单个测试通过而私自提高最低版本要求或依赖高版本专属参数。
+17. 修改最低支持版本或 API 基准必须经过明确的架构决策，并同步更新规则、代码、测试和文档。
+18. 未真实运行的 Docker 测试不得报告为通过；跳过测试必须说明原因。
+
+#### 基线的落地位置
+
+- 基线取值只在 `internal/docker/compatibility.go` 中定义（`MinimumCLIVersion`、
+  `MinimumEngineVersion`、`EngineAPIBaseVersion`），规则文件、代码、测试与文档必须完全一致。
+- 版本发现与业务调用的环境变量策略必须分离：探测阶段用 `env -u DOCKER_API_VERSION` 隔离遗留变量，
+  业务调用统一显式设置 `DOCKER_API_VERSION=1.52`；不得修改远端用户 Shell 配置来实现固定版本。
+- 固定 API 版本与 Engine 不兼容时必须返回明确错误，不得静默降级到旧 API 或升级到新 API。
+- 区分 Engine 声明的最高 API 版本与最低接受版本：基准必须落在 `[MinAPIVersion, APIVersion]` 区间内，
+  不得把最低接受版本与基准做"大于等于"比较。
+- 不得在业务代码中直接调用 `docker` 命令：`internal/docker` 之外禁止构造 Docker 命令行，
+  `internal/docker` 内部也必须经由 `Runner` 的统一执行入口。
 
 ## 前端工程约束
 

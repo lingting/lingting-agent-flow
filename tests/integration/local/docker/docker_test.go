@@ -8,7 +8,10 @@ package docker_local
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -29,6 +32,11 @@ type fakeClient struct {
 	commands []string
 	// responder 根据命令返回结果；未匹配时返回退出码 0 与空输出。
 	responder func(command string) (sshclient.CommandResult, error)
+	// apiRequests 记录 Engine API 收到的请求行。
+	apiRequests []string
+	// apiStatus 与 apiBody 覆盖 Engine 版本接口的响应，零值使用 200 与满足基线的响应体。
+	apiStatus int
+	apiBody   string
 	closed    bool
 }
 
@@ -99,6 +107,63 @@ func (c *fakeClient) recorded() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]string(nil), c.commands...)
+}
+
+// DialUnixSocket 用本机管道模拟远端 Docker Engine 套接字，返回固定的版本响应。
+//
+// 预检的 API 基准检查通过 GET /v1.52/version 完成，因此这里必须真实响应一次
+// HTTP 请求，而不是让替身只返回命令输出。
+func (c *fakeClient) DialUnixSocket(
+	ctx context.Context,
+	socketPath string,
+) (net.Conn, error) {
+	if socketPath != docker.DefaultDockerSocketPath {
+		return nil, errors.New("套接字路径不符: " + socketPath)
+	}
+	server, client := net.Pipe()
+	go func() {
+		defer func() {
+			_ = server.Close()
+		}()
+		buffer := make([]byte, 4096)
+		count, readErr := server.Read(buffer)
+		if readErr != nil {
+			return
+		}
+		request := string(buffer[:count])
+		line := request
+		if index := strings.Index(request, "\r\n"); index >= 0 {
+			line = request[:index]
+		}
+		c.mu.Lock()
+		c.apiRequests = append(c.apiRequests, line)
+		status := c.apiStatus
+		body := c.apiBody
+		c.mu.Unlock()
+		if status == 0 {
+			status = http.StatusOK
+		}
+		if body == "" {
+			body = `{"ApiVersion":"1.52","MinAPIVersion":"1.24","Version":"29.0.0"}`
+		}
+		response := fmt.Sprintf(
+			"HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n"+
+				"Connection: close\r\n\r\n%s",
+			status,
+			http.StatusText(status),
+			len(body),
+			body,
+		)
+		_, _ = server.Write([]byte(response))
+	}()
+	return client, nil
+}
+
+// apiRequestLines 返回收到的 Engine API 请求行副本。
+func (c *fakeClient) apiRequestLines() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.apiRequests...)
 }
 
 // newRunner 构造一个使用替身连接的 Docker 命令执行器。
@@ -192,7 +257,7 @@ func TestPreflightReportsEachFailureCategory(t *testing.T) {
 					return failWith(1, "permission denied while trying to connect to the Docker daemon socket")
 				}
 				if strings.Contains(command, "docker version") {
-					return succeed("24.0.7\n")
+					return succeed(docker.MinimumCLIVersion + "\n")
 				}
 				return succeed("")
 			},
@@ -249,9 +314,9 @@ func TestPreflightUsesFixedCommands(t *testing.T) {
 	client := &fakeClient{responder: func(command string) (sshclient.CommandResult, error) {
 		switch {
 		case strings.Contains(command, "docker version"):
-			return succeed("24.0.7\n")
+			return succeed(docker.MinimumCLIVersion + "\n")
 		case strings.Contains(command, "docker info"):
-			return succeed("24.0.7\n")
+			return succeed(docker.MinimumCLIVersion + "\n")
 		case strings.HasPrefix(command, "test -w"):
 			return succeed("")
 		case strings.HasPrefix(command, "df -Pk"):
@@ -291,9 +356,9 @@ func TestPreflightRejectsUnwritableWorkspace(t *testing.T) {
 	client := &fakeClient{responder: func(command string) (sshclient.CommandResult, error) {
 		switch {
 		case strings.Contains(command, "docker version"):
-			return succeed("24.0.7\n")
+			return succeed(docker.MinimumCLIVersion + "\n")
 		case strings.Contains(command, "docker info"):
-			return succeed("24.0.7\n")
+			return succeed(docker.MinimumCLIVersion + "\n")
 		case strings.HasPrefix(command, "test -w"):
 			return failWith(1, "")
 		default:
@@ -367,7 +432,7 @@ func TestContainerOperationsAreIdempotent(t *testing.T) {
 	ws := testkit.New(t)
 	ws.Report()
 	client := &fakeClient{responder: func(command string) (sshclient.CommandResult, error) {
-		if strings.HasPrefix(command, "docker rm") {
+		if strings.Contains(command, "docker rm") {
 			return failWith(1, "Error response from daemon: No such container: abc")
 		}
 		return succeed("")

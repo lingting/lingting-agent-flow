@@ -33,6 +33,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -159,6 +160,121 @@ func resolveImage() string {
 		image = DefaultImage
 	}
 	return image
+}
+
+// ensureImage 确认测试镜像在远端存在，缺失时按需在远端构建。
+//
+// 该镜像由 tests/integration/remote/agent/Dockerfile 定义，基础镜像固定为
+// node:22.19.0-bookworm-slim。远端机器通常无法访问 Docker Hub，因此这里只在
+// 镜像确实缺失时才执行构建，并直接使用远端本地已有的基础镜像。
+//
+// 构建失败时让测试失败：镜像不可用属于真实环境问题，不能当成跳过。
+func ensureImage(
+	t *testing.T,
+	ctx context.Context,
+	client sshclient.Client,
+	runner *docker.Runner,
+	image string,
+) {
+	t.Helper()
+	if _, err := runner.InspectImageID(ctx, image); err == nil {
+		t.Logf("TEST_IMAGE_PRESENT=%s", image)
+		return
+	}
+	dockerfile, err := os.ReadFile(dockerfilePath(t))
+	if err != nil {
+		t.Fatalf("读取测试 Dockerfile 失败: %v", err)
+	}
+	buildContext, err := docker.NewContext([]docker.ContextFile{
+		{
+			RelativePath: docker.DockerfileName,
+			Content:      dockerfile,
+			Mode:         0o644,
+		},
+	})
+	if err != nil {
+		t.Fatalf("构造测试镜像构建上下文失败: %v", err)
+	}
+	transfer, err := client.SFTP()
+	if err != nil {
+		t.Fatalf("打开 SFTP 通道失败: %v", err)
+	}
+	t.Cleanup(func() {
+		if closeErr := transfer.Close(); closeErr != nil {
+			t.Logf("WARN 关闭 SFTP 通道失败: %v", closeErr)
+		}
+	})
+	remoteDir := path.Join(remoteTempRoot(t, ctx, client), "agent-image-"+randomSuffix(t))
+	version := domain.EnvironmentVersion{
+		HostID:           "remote-agent-test-host",
+		Ref:              domain.EnvironmentRef{Type: domain.EnvironmentTypeBase, Name: "base"},
+		Number:           1,
+		DockerfileSHA256: buildContext.Hash(),
+		ContextSHA256:    buildContext.Hash(),
+		ImageRef:         image,
+		Status:           domain.BuildStatusBuilding,
+		CreatedAt:        time.Now().UTC(),
+	}
+	version.BuildConfigSHA256 = docker.BuildConfigHash(version, "")
+	result, buildErr := runner.BuildImage(ctx, transfer, docker.BuildSpec{
+		Version:          version,
+		Context:          buildContext,
+		RemoteContextDir: path.Join(remoteDir, "context"),
+		LogPath:          path.Join(remoteDir, "build.log"),
+	})
+	if buildErr != nil {
+		t.Fatalf(
+			"按需构建测试镜像失败: %v\n远程日志: %s\n日志末尾:\n%s",
+			buildErr,
+			result.LogPath,
+			result.LogTail,
+		)
+	}
+	if result.ImageID == "" {
+		t.Fatalf("构建成功但未取得实际镜像 ID: %+v", result)
+	}
+	t.Logf("TEST_IMAGE_BUILT=%s IMAGE_ID=%s", image, result.ImageID)
+}
+
+// dockerfilePath 返回测试 Dockerfile 的绝对路径。
+func dockerfilePath(t *testing.T) string {
+	t.Helper()
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("无法定位测试源码路径")
+	}
+	return filepath.Join(filepath.Dir(currentFile), "Dockerfile")
+}
+
+// remoteTempRoot 返回本次用例在远端 Home 下的专属临时根目录。
+func remoteTempRoot(t *testing.T, ctx context.Context, client sshclient.Client) string {
+	t.Helper()
+	home, err := sshclient.ResolveHome(ctx, client, remoteOpTimeout)
+	if err != nil {
+		t.Fatalf("解析远程 Home 失败: %v", err)
+	}
+	root := path.Join(home, "agentflow-tests", "agent")
+	if err := ensureRemoteDir(ctx, client, root); err != nil {
+		t.Fatalf("创建远程测试目录失败: %v", err)
+	}
+	t.Logf("REMOTE_TEST_ROOT=%s", root)
+	return root
+}
+
+// ensureRemoteDir 在远端创建目录。
+func ensureRemoteDir(ctx context.Context, client sshclient.Client, dir string) error {
+	command, err := sshclient.ShellCommand("mkdir", "-p", dir)
+	if err != nil {
+		return err
+	}
+	run, runErr := client.Run(ctx, command, sshclient.RunOptions{Timeout: remoteOpTimeout})
+	if runErr != nil {
+		return runErr
+	}
+	if !run.Succeeded() {
+		return fmt.Errorf("mkdir 退出码 %d: %s", run.ExitCode, run.Stderr)
+	}
+	return nil
 }
 
 // resolveRepository 返回测试使用的仓库地址。
@@ -305,13 +421,15 @@ func (e *remoteExecutor) CopyFromContainer(
 	if err := e.transfer.MkdirAll(ctx, path.Dir(hostPath)); err != nil {
 		return err
 	}
-	command, err := sshclient.ShellCommand(
-		"docker", "cp", dockerID+":"+containerPath, hostPath,
+	// 统一走 docker.Runner 的命令构造入口：测试替身不得自行拼接 Docker 命令行，
+	// 否则会绕过 DOCKER_API_VERSION 的统一控制。
+	run, runErr := e.runner.CopyFromContainer(
+		ctx,
+		dockerID,
+		containerPath,
+		hostPath,
+		remoteOpTimeout,
 	)
-	if err != nil {
-		return err
-	}
-	run, runErr := e.runner.Run(ctx, "docker cp", command, remoteOpTimeout)
 	if runErr != nil {
 		return runErr
 	}
@@ -389,6 +507,7 @@ func createContainer(
 ) domain.Container {
 	t.Helper()
 	image := resolveImage()
+	ensureImage(t, ctx, exec.client, exec.runner, image)
 	containerID := domain.NewID()
 	name := "agentflow-test-agent-" + suffix
 	record, err := domain.NewContainer(
@@ -453,6 +572,60 @@ func createContainer(
 	})
 	t.Logf("TEST_CONTAINER=%s (%s)", record.ID, dockerID)
 	return record
+}
+
+// requireContainerModel 确认容器内 Pi 已配置可用模型，否则明确跳过。
+//
+// 容器内 Pi 的模型凭据来自镜像内的用户配置，属于测试无法自行提供的外部依赖：
+// 本机环境变量不会、也不应被注入测试容器。凭据缺失时输出 WARN [SKIP] 并说明原因，
+// 不能把它记成通过，也不能把它伪装成 Docker 兼容性问题。
+func requireContainerModel(
+	t *testing.T,
+	ctx context.Context,
+	exec *remoteExecutor,
+	dockerID, model string,
+) {
+	t.Helper()
+	list, listErr := exec.runner.ExecCommand(
+		ctx, dockerID, []string{"pi", "--list-models"}, remoteOpTimeout,
+	)
+	if listErr != nil || !list.Succeeded() {
+		reason := fmt.Sprintf(
+			"WARN [SKIP] remote agent integration tests: 容器内 pi --list-models 失败: %v（退出码 %d）: %s",
+			listErr,
+			list.ExitCode,
+			summarize(list.Stderr),
+		)
+		fmt.Fprintln(os.Stdout, reason)
+		t.Skip(reason)
+	}
+	available := strings.TrimSpace(list.Stdout)
+	if strings.Contains(available, "No models available") {
+		reason := "WARN [SKIP] remote agent integration tests: 容器内 Pi 未配置模型凭据" +
+			"（No models available），无法执行真实模型调用。"
+		fmt.Fprintln(os.Stdout, reason)
+		t.Skip(reason)
+	}
+	if !strings.Contains(available, model) {
+		reason := fmt.Sprintf(
+			"WARN [SKIP] remote agent integration tests: 容器内 Pi 未提供模型 %s。可用模型:\n%s",
+			model,
+			available,
+		)
+		fmt.Fprintln(os.Stdout, reason)
+		t.Skip(reason)
+	}
+	t.Logf("CONTAINER_MODEL=%s", model)
+}
+
+// summarize 截断容器内命令输出，避免把整份模型列表写进失败信息。
+func summarize(output string) string {
+	trimmed := strings.TrimSpace(output)
+	const limit = 300
+	if len(trimmed) > limit {
+		return trimmed[:limit] + "..."
+	}
+	return trimmed
 }
 
 // probeContainerTools 确认容器内 Git 与 Pi 可用。
@@ -556,6 +729,7 @@ func TestRemoteAgentRunSessions(t *testing.T) {
 	suffix := randomSuffix(t)
 	record := createContainer(t, ctx, exec, suffix)
 	probeContainerTools(t, ctx, exec, record.DockerID)
+	requireContainerModel(t, ctx, exec, record.DockerID, model)
 
 	sessionRoot := ws.SessionRoot()
 	runner, err := pi.NewContainerRunner(pi.Options{

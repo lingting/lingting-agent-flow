@@ -187,7 +187,11 @@ func (v *HostValidator) FailWithoutChecks(
 	return err
 }
 
-// runChecks 依次执行三项必需检查。
+// runChecks 依次执行四项必需检查。
+//
+// 顺序为 SSH 连接 → Docker 版本与 API 兼容性 → Docker CLI 帮助信息 → 基础镜像元数据。
+// 前一项失败时后续检查记为 not_run：版本不兼容时命令帮助与镜像元数据检查都没有意义，
+// 不能因为它们可能通过就判定节点可用。
 func (v *HostValidator) runChecks(
 	ctx context.Context,
 	host domain.ExecutionHost,
@@ -195,6 +199,7 @@ func (v *HostValidator) runChecks(
 ) domain.ValidationDetails {
 	details := domain.ValidationDetails{
 		Capabilities: []string{
+			domain.CapabilityDockerVersionChecked,
 			domain.CapabilityDockerCLIHelpOnly,
 			domain.CapabilityImageMetadataOnly,
 		},
@@ -202,16 +207,24 @@ func (v *HostValidator) runChecks(
 	sshCheck, client, home := v.checkSSH(ctx, host, startedAt)
 	details.Checks = append(details.Checks, sshCheck)
 	if !sshCheck.Status.Passed() {
-		details.Checks = append(details.Checks, notRunCheck(
-			domain.ValidationCheckDockerCLIHelp,
-			"Docker CLI 帮助信息",
-			"SSH 检查未通过，未执行 Docker CLI 帮助检查",
-		))
-		details.Checks = append(details.Checks, notRunCheck(
-			domain.ValidationCheckBaseImageMetadata,
-			"基础镜像元数据",
-			"SSH 检查未通过，未查询基础镜像元数据",
-		))
+		details.Checks = append(
+			details.Checks,
+			notRunCheck(
+				domain.ValidationCheckDockerVersion,
+				"Docker 版本与 API 兼容性",
+				"SSH 检查未通过，未执行 Docker 版本检查",
+			),
+			notRunCheck(
+				domain.ValidationCheckDockerCLIHelp,
+				"Docker CLI 帮助信息",
+				"SSH 检查未通过，未执行 Docker CLI 帮助检查",
+			),
+			notRunCheck(
+				domain.ValidationCheckBaseImageMetadata,
+				"基础镜像元数据",
+				"SSH 检查未通过，未查询基础镜像元数据",
+			),
+		)
 		return details
 	}
 	defer func() {
@@ -220,9 +233,51 @@ func (v *HostValidator) runChecks(
 		}
 	}()
 
-	dockerCheck, runner := v.checkDockerCLI(ctx, client, startedAt)
-	details.Checks = append(details.Checks, dockerCheck)
-	if !dockerCheck.Status.Passed() {
+	runner, runnerErr := docker.NewRunner(client, docker.RunnerOptions{})
+	if runnerErr != nil {
+		details.Checks = append(
+			details.Checks,
+			notRunCheck(
+				domain.ValidationCheckDockerVersion,
+				"Docker 版本与 API 兼容性",
+				"构造远程 Docker 执行器失败，未执行 Docker 版本检查",
+			),
+			notRunCheck(
+				domain.ValidationCheckDockerCLIHelp,
+				"Docker CLI 帮助信息",
+				"构造远程 Docker 执行器失败，未执行 Docker CLI 帮助检查",
+			),
+			notRunCheck(
+				domain.ValidationCheckBaseImageMetadata,
+				"基础镜像元数据",
+				"构造远程 Docker 执行器失败，未查询基础镜像元数据",
+			),
+		)
+		return details
+	}
+
+	versionCheck := v.checkDockerVersion(ctx, runner, startedAt)
+	details.Checks = append(details.Checks, versionCheck)
+	if !versionCheck.Status.Passed() {
+		details.Checks = append(
+			details.Checks,
+			notRunCheck(
+				domain.ValidationCheckDockerCLIHelp,
+				"Docker CLI 帮助信息",
+				"Docker 版本与 API 兼容性检查未通过，未执行 Docker CLI 帮助检查",
+			),
+			notRunCheck(
+				domain.ValidationCheckBaseImageMetadata,
+				"基础镜像元数据",
+				"Docker 版本与 API 兼容性检查未通过，未查询基础镜像元数据",
+			),
+		)
+		return details
+	}
+
+	helpCheck := v.checkDockerCLIHelp(ctx, runner, startedAt)
+	details.Checks = append(details.Checks, helpCheck)
+	if !helpCheck.Status.Passed() {
 		details.Checks = append(details.Checks, notRunCheck(
 			domain.ValidationCheckBaseImageMetadata,
 			"基础镜像元数据",
@@ -236,6 +291,101 @@ func (v *HostValidator) runChecks(
 		v.checkBaseImages(ctx, client, runner, host, home, startedAt),
 	)
 	return details
+}
+
+// checkDockerVersion 执行 Docker CLI、Engine 与固定 API 基准的兼容性检查。
+//
+// 检查通过 docker.Preflight 的版本部分完成：CLI 版本与 Engine 版本分别检查，
+// API 基准通过只读的 GET /v1.52/version 验证。该检查不创建容器、不拉取镜像。
+func (v *HostValidator) checkDockerVersion(
+	ctx context.Context,
+	runner *docker.Runner,
+	startedAt time.Time,
+) domain.ValidationCheck {
+	check := domain.ValidationCheck{
+		Name:      domain.ValidationCheckDockerVersion,
+		Title:     "Docker 版本与 API 兼容性",
+		Status:    domain.CheckStatusFailed,
+		StartedAt: startedAt,
+	}
+	started := time.Now()
+	defer func() {
+		completed := time.Now().UTC()
+		check.CompletedAt = &completed
+		check.DurationMillis = time.Since(started).Milliseconds()
+	}()
+	versionCtx, cancel := context.WithTimeout(ctx, v.versionTimeout())
+	defer cancel()
+	probe := runner.ProbeVersion(versionCtx)
+	check.Details = append(check.Details, fmt.Sprintf(
+		"最低 Docker CLI 版本: %s（实际 %s）",
+		docker.MinimumCLIVersion,
+		unknownIfEmpty(probe.CLIVersion),
+	))
+	check.Details = append(check.Details, fmt.Sprintf(
+		"最低 Docker Engine 版本: %s（实际 %s）",
+		docker.MinimumEngineVersion,
+		unknownIfEmpty(probe.EngineVersion),
+	))
+	check.Details = append(check.Details, fmt.Sprintf(
+		"AgentFlow API 基准: %s（Engine 最高 %s，最低接受 %s）",
+		docker.EngineAPIBaseVersion,
+		unknownIfEmpty(probe.APIVersion),
+		unknownIfEmpty(probe.MinAPIVersion),
+	))
+	if probe.Succeeded() {
+		check.Status = domain.CheckStatusPassed
+		check.Message = probe.Message
+		return check
+	}
+	check.ErrorCode = probe.Status
+	check.Message = probe.Message
+	if probe.TimedOut {
+		check.Status = domain.CheckStatusTimedOut
+	}
+	return check
+}
+
+// checkDockerCLIHelp 执行 Docker CLI 帮助检查。
+func (v *HostValidator) checkDockerCLIHelp(
+	ctx context.Context,
+	runner *docker.Runner,
+	startedAt time.Time,
+) domain.ValidationCheck {
+	check := domain.ValidationCheck{
+		Name:      domain.ValidationCheckDockerCLIHelp,
+		Title:     "Docker CLI 帮助信息",
+		Status:    domain.CheckStatusFailed,
+		StartedAt: startedAt,
+	}
+	started := time.Now()
+	defer func() {
+		completed := time.Now().UTC()
+		check.CompletedAt = &completed
+		check.DurationMillis = time.Since(started).Milliseconds()
+	}()
+	result := runner.CheckCLIHelp(ctx, docker.RequiredCLICommands(), v.imageTimeout())
+	check.ErrorCode = result.Status
+	if result.Succeeded() {
+		check.Status = domain.CheckStatusPassed
+		check.Message = result.Message
+		return check
+	}
+	if result.Status == docker.CLIHelpCodeTimeout {
+		check.Status = domain.CheckStatusTimedOut
+	}
+	check.Message = result.Message
+	for _, item := range result.Checks {
+		if item.Succeeded() {
+			continue
+		}
+		detail := item.Command.Label() + ": " + item.Message
+		if len(item.MissingOptions) > 0 {
+			detail += "（缺少 " + strings.Join(item.MissingOptions, ", ") + "）"
+		}
+		check.Details = append(check.Details, detail)
+	}
+	return check
 }
 
 // checkSSH 执行 SSH 连接检查并返回可复用的连接。
@@ -320,59 +470,6 @@ func (v *HostValidator) checkSSH(
 	check.Status = domain.CheckStatusPassed
 	check.Message = "SSH 握手、身份认证与远程命令执行均正常"
 	return check, client, home
-}
-
-// checkDockerCLI 执行 Docker CLI 帮助检查。
-func (v *HostValidator) checkDockerCLI(
-	ctx context.Context,
-	client sshclient.Client,
-	startedAt time.Time,
-) (domain.ValidationCheck, *docker.Runner) {
-	check := domain.ValidationCheck{
-		Name:      domain.ValidationCheckDockerCLIHelp,
-		Title:     "Docker CLI 帮助信息",
-		Status:    domain.CheckStatusFailed,
-		StartedAt: startedAt,
-	}
-	started := time.Now()
-	defer func() {
-		completed := time.Now().UTC()
-		check.CompletedAt = &completed
-		check.DurationMillis = time.Since(started).Milliseconds()
-	}()
-	runner, err := docker.NewRunner(client, docker.RunnerOptions{})
-	if err != nil {
-		check.Message = "构造远程 Docker 执行器失败"
-		check.ErrorCode = docker.CLIHelpCodeCommandFailed
-		return check, nil
-	}
-	result := runner.CheckCLIHelp(ctx, docker.RequiredCLICommands(), v.imageTimeout())
-	check.ErrorCode = result.Status
-	if result.Succeeded() {
-		check.Status = domain.CheckStatusPassed
-		check.Message = result.Message
-		return check, runner
-	}
-	switch result.Status {
-	case docker.CLIHelpCodeTimeout:
-		check.Status = domain.CheckStatusTimedOut
-	case docker.CLIHelpCodeCancelled:
-		check.Status = domain.CheckStatusFailed
-	default:
-		check.Status = domain.CheckStatusFailed
-	}
-	check.Message = result.Message
-	for _, item := range result.Checks {
-		if item.Succeeded() {
-			continue
-		}
-		detail := item.Command.Label() + ": " + item.Message
-		if len(item.MissingOptions) > 0 {
-			detail += "（缺少 " + strings.Join(item.MissingOptions, ", ") + "）"
-		}
-		check.Details = append(check.Details, detail)
-	}
-	return check, runner
 }
 
 // checkBaseImages 解析基础 Dockerfile 并查询全部外部 FROM 镜像元数据。
@@ -609,6 +706,24 @@ func (v *HostValidator) imageTimeout() time.Duration {
 		seconds = docker.ValidationImageTimeoutSeconds
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+// versionTimeout 返回 Docker 版本与 API 兼容性检查的超时。
+func (v *HostValidator) versionTimeout() time.Duration {
+	seconds := v.timeouts.VersionSeconds
+	if seconds <= 0 {
+		seconds = docker.ValidationVersionTimeoutSeconds
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// unknownIfEmpty 把空值转换为可读占位符，避免界面出现空白版本字段。
+func unknownIfEmpty(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "未取得"
+	}
+	return trimmed
 }
 
 // totalTimeout 返回整体校验超时。

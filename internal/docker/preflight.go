@@ -12,12 +12,10 @@ import (
 	"github.com/pkg/sftp"
 )
 
-// 远程 Docker 预检的最低版本要求。
+// 远程 Docker 预检的剩余空间要求。
+//
+// Docker CLI、Engine 与 API 的基线集中定义在 compatibility.go，本文件不再重复声明版本值。
 const (
-	// MinDockerMajor 是支持的最低 Docker 主版本。
-	MinDockerMajor = 20
-	// MinDockerMinor 是主版本等于 MinDockerMajor 时的最低次版本。
-	MinDockerMinor = 10
 	// MinFreeDiskBytes 是构建与运行容器所需的最小剩余空间。
 	MinFreeDiskBytes = 3 << 30
 )
@@ -30,12 +28,18 @@ type Preflight struct {
 	SSHOK bool
 	// CLIPresent 表示远程存在 docker 命令。
 	CLIPresent bool
-	// CLIVersion 是 docker CLI 版本，形如 24.0.7。
+	// CLIVersion 是实际执行命令的 docker CLI 版本，形如 29.0.0。
 	CLIVersion string
 	// EngineReachable 表示 Docker Engine 可访问。
 	EngineReachable bool
 	// EngineVersion 是 Docker Engine 版本。
 	EngineVersion string
+	// APIVersion 是 Engine 声明的最高 API 版本，形如 1.52。
+	APIVersion string
+	// MinAPIVersion 是 Engine 接受的最低 API 版本，形如 1.24。
+	MinAPIVersion string
+	// APIVersionCheckOK 表示固定 API 基准落在 Engine 声明的版本区间内。
+	APIVersionCheckOK bool
 	// PermissionOK 表示当前 SSH 用户有使用 Docker 的权限。
 	PermissionOK bool
 	// WorkspaceRoot 是解析后的远程工作空间绝对路径。
@@ -51,11 +55,14 @@ type Preflight struct {
 }
 
 // Ready 判断预检是否全部通过。
+//
+// API 基准兼容性是必需条件：CLI 帮助信息包含所需命令并不能说明固定 API 1.52 可用。
 func (p Preflight) Ready() bool {
 	return p.ErrorCode == CodeOK &&
 		p.SSHOK &&
 		p.CLIPresent &&
 		p.EngineReachable &&
+		p.APIVersionCheckOK &&
 		p.PermissionOK &&
 		p.WorkspaceWritable
 }
@@ -101,8 +108,11 @@ func (r *Runner) Preflight(
 }
 
 // checkCLI 检查 docker CLI 是否存在及其版本。
+//
+// 探测命令使用 dockerProbeCommand：显式取消 DOCKER_API_VERSION，避免远端遗留变量
+// 关闭 CLI 的自动版本协商，从而得到真实的客户端版本。
 func (r *Runner) checkCLI(ctx context.Context, result *Preflight) error {
-	command, err := dockerCommand("version", "--format", "{{.Client.Version}}")
+	command, err := dockerProbeCommand("version", "--format", "{{.Client.Version}}")
 	if err != nil {
 		result.ErrorCode = CodeInvalidArgument
 		result.Detail = err.Error()
@@ -119,12 +129,20 @@ func (r *Runner) checkCLI(ctx context.Context, result *Preflight) error {
 	}
 	result.CLIPresent = true
 	result.CLIVersion = strings.TrimSpace(run.Stdout)
+	if check := CheckMinimumVersion("Docker CLI", result.CLIVersion, MinimumCLIVersion); !check.Succeeded() {
+		result.ErrorCode = CodeVersionUnsupported
+		result.Detail = check.Err.Error()
+		return check.Err
+	}
 	return nil
 }
 
-// checkEngine 检查 Docker Engine 是否可访问并取得其版本。
+// checkEngine 检查 Docker Engine 是否可访问并取得其版本与 API 版本区间。
+//
+// CLI 版本与 Engine 版本分别检查：二者可能来自不同版本，不能把 CLI 版本当成 Engine 版本。
+// 探测同样隔离 DOCKER_API_VERSION，使服务端声明的最高与最低 API 版本反映真实能力。
 func (r *Runner) checkEngine(ctx context.Context, result *Preflight) error {
-	command, err := dockerCommand("info", "--format", "{{.ServerVersion}}")
+	command, err := dockerProbeCommand("info", "--format", "{{.ServerVersion}}")
 	if err != nil {
 		result.ErrorCode = CodeInvalidArgument
 		result.Detail = err.Error()
@@ -142,12 +160,29 @@ func (r *Runner) checkEngine(ctx context.Context, result *Preflight) error {
 	result.EngineReachable = true
 	result.PermissionOK = true
 	result.EngineVersion = strings.TrimSpace(run.Stdout)
-	if err := CheckVersionSupport(result.CLIVersion); err != nil {
+	if check := CheckMinimumVersion("Docker Engine", result.EngineVersion, MinimumEngineVersion); !check.Succeeded() {
 		result.ErrorCode = CodeVersionUnsupported
-		result.Detail = err.Error()
-		return err
+		result.Detail = check.Err.Error()
+		return check.Err
 	}
-	return nil
+	return r.checkEngineAPI(ctx, result)
+}
+
+// checkEngineAPI 探测固定 API 基准是否在 Engine 上可用。
+//
+// 通过固定基准路径的只读 GET /v1.52/version 完成：既取得服务端声明的最高与最低 API
+// 版本，也直接验证基准路径本身可用，不依赖 CLI 自动协商成功来推断。
+func (r *Runner) checkEngineAPI(ctx context.Context, result *Preflight) error {
+	probe := r.ProbeAPIVersion(ctx, DefaultDistributionTimeout)
+	result.APIVersion = probe.APIVersion
+	result.MinAPIVersion = probe.MinAPIVersion
+	if probe.Succeeded() {
+		result.APIVersionCheckOK = true
+		return nil
+	}
+	result.ErrorCode = CodeVersionUnsupported
+	result.Detail = probe.Message
+	return fmt.Errorf("docker: API 基准 %s 不可用: %s", EngineAPIBaseVersion, probe.Message)
 }
 
 // checkWorkspace 检查远程工作空间可写。
@@ -273,55 +308,6 @@ func classifyPreflightCode(run CommandResult, runErr error) ErrorCode {
 		return CodeCLIMissing
 	}
 	return ClassifyDockerMessage(run.Stderr + "\n" + run.Stdout)
-}
-
-// CheckVersionSupport 校验 Docker 版本是否满足最低要求。
-func CheckVersionSupport(raw string) error {
-	major, minor, ok := parseDockerVersion(raw)
-	if !ok {
-		return fmt.Errorf("docker: 无法解析 Docker 版本 %q", raw)
-	}
-	if major > MinDockerMajor {
-		return nil
-	}
-	if major == MinDockerMajor && minor >= MinDockerMinor {
-		return nil
-	}
-	return fmt.Errorf(
-		"docker: Docker 版本 %d.%d 低于要求的 %d.%d",
-		major,
-		minor,
-		MinDockerMajor,
-		MinDockerMinor,
-	)
-}
-
-// parseDockerVersion 解析 24.0.7 形式的版本号。
-func parseDockerVersion(raw string) (int, int, bool) {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return 0, 0, false
-	}
-	parts := strings.SplitN(trimmed, ".", 3)
-	if len(parts) < 2 {
-		return 0, 0, false
-	}
-	major, err := strconv.Atoi(strings.TrimSpace(parts[0]))
-	if err != nil {
-		return 0, 0, false
-	}
-	minorText := strings.TrimSpace(parts[1])
-	for index, char := range minorText {
-		if char < '0' || char > '9' {
-			minorText = minorText[:index]
-			break
-		}
-	}
-	minor, err := strconv.Atoi(minorText)
-	if err != nil {
-		return 0, 0, false
-	}
-	return major, minor, true
 }
 
 // ParseDfAvailableKilobytes 从 df -Pk 输出中解析可用块数。

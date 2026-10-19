@@ -8,16 +8,22 @@ import "sort"
 const (
 	// ValidationSSHTimeout 是 SSH 连接检查（含握手、认证与一条远程命令）的上限。
 	ValidationSSHTimeoutSeconds = 10
+	// ValidationVersionTimeout 是 Docker CLI、Engine 与 API 兼容性检查的上限。
+	//
+	// 该检查包含两条远程 CLI 命令与一次基准路径的 Engine API 探测，因此比单镜像查询宽松。
+	ValidationVersionTimeoutSeconds = 15
 	// ValidationImageTimeout 是单个镜像元数据查询的上限。
 	ValidationImageTimeoutSeconds = 8
-	// ValidationTotalTimeout 是一次完整校验（三项检查）的总时限。
-	ValidationTotalTimeoutSeconds = 30
+	// ValidationTotalTimeout 是一次完整校验（四项检查）的总时限。
+	ValidationTotalTimeoutSeconds = 45
 )
 
 // ValidationTimeouts 汇总一次校验使用的超时设置。
 type ValidationTimeouts struct {
 	// SSH 是 SSH 连接检查的上限。
 	SSHSeconds int
+	// Version 是 Docker 版本与 API 兼容性检查的上限。
+	VersionSeconds int
 	// Image 是单镜像元数据查询的上限。
 	ImageSeconds int
 	// Total 是整体校验的上限。
@@ -27,9 +33,10 @@ type ValidationTimeouts struct {
 // DefaultValidationTimeouts 返回默认超时设置。
 func DefaultValidationTimeouts() ValidationTimeouts {
 	return ValidationTimeouts{
-		SSHSeconds:   ValidationSSHTimeoutSeconds,
-		ImageSeconds: ValidationImageTimeoutSeconds,
-		TotalSeconds: ValidationTotalTimeoutSeconds,
+		SSHSeconds:     ValidationSSHTimeoutSeconds,
+		VersionSeconds: ValidationVersionTimeoutSeconds,
+		ImageSeconds:   ValidationImageTimeoutSeconds,
+		TotalSeconds:   ValidationTotalTimeoutSeconds,
 	}
 }
 

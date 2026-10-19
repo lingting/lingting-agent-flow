@@ -22,8 +22,6 @@ const (
 	DefaultDockerSocketPath = "/var/run/docker.sock"
 	// maxDistributionBodyBytes 是镜像元数据响应体的读取上限。
 	maxDistributionBodyBytes = 1 << 20
-	// dockerAPIVersionPrefix 是 Engine API 的版本化路径前缀。
-	dockerAPIVersionPrefix = "/v1.24"
 )
 
 // 镜像元数据查询的错误分类。

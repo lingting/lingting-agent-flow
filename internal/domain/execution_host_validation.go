@@ -93,10 +93,12 @@ const (
 	// ValidatorVersion 是当前校验器实现的版本标识。
 	//
 	// 版本号参与校验详情，便于区分"旧版本校验结果"与"新版本校验结果"。
-	ValidatorVersion = "v1"
+	// v2 增加了 Docker CLI / Engine / API 基线检查，因此 v1 的 normal 结果不再被视为有效。
+	ValidatorVersion = "v2"
 
 	// 校验项名称，与界面展示一一对应。
 	ValidationCheckSSHConnection     = "ssh_connection"
+	ValidationCheckDockerVersion     = "docker_version"
 	ValidationCheckDockerCLIHelp     = "docker_cli_help"
 	ValidationCheckBaseImageMetadata = "base_image_metadata"
 )
@@ -106,8 +108,10 @@ const (
 // 这些文案同时写入校验详情与界面，避免用户把 normal 误读为"已经证明远端 Docker
 // Engine 能成功创建并运行 AgentFlow 所需的容器"。
 const (
+	// CapabilityDockerVersionChecked 说明版本检查覆盖的范围。
+	CapabilityDockerVersionChecked = "Docker 兼容性检查校验实际 CLI 版本、Engine 版本与固定 API 基准是否落在 Engine 支持的版本区间内。"
 	// CapabilityDockerCLIHelpOnly 说明 Docker 检查只基于 CLI 帮助信息。
-	CapabilityDockerCLIHelpOnly = "当前 Docker 兼容性检查基于 CLI 帮助信息，尚未执行容器创建、启动或实际参数兼容性验证。"
+	CapabilityDockerCLIHelpOnly = "Docker 命令与参数检查基于 CLI 帮助信息，尚未执行容器创建、启动或实际参数兼容性验证。"
 	// CapabilityImageMetadataOnly 说明镜像检查只查询元数据。
 	CapabilityImageMetadataOnly = "基础镜像检查只查询 FROM 镜像元数据，不下载镜像层、不拉取完整镜像，也不创建或运行容器。"
 )
