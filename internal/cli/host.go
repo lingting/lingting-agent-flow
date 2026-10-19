@@ -18,9 +18,9 @@ func newHostCommand(a *app.App) *cobra.Command {
 		Short: "管理远程 SSH 执行节点",
 		Long: "维护执行节点的名称、主机地址、SSH 端口、登录用户名、认证方式与远程\n" +
 			"工作空间，并测试完整的 SSH 身份认证连接。\n" +
-			"密码与私钥口令只在连接时于内存中传递，不会写入数据库或日志；\n" +
+			"认证只使用节点配置中的无口令私钥，命令层不收集任何凭据；\n" +
 			"未知主机密钥必须核验指纹后显式信任，密钥变化时会拒绝连接。\n" +
-			"本版本不提供 Docker、容器生命周期或任务调度能力。",
+			"host validate 执行环境预检（SSH 连接、Docker CLI 帮助信息、基础镜像元数据）。",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return cmd.Help()
@@ -52,12 +52,12 @@ func newHostAddCommand(a *app.App) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "add",
 		Short: "新增执行节点配置",
-		Long: "保存一个执行节点的连接目标、认证方式与远程工作空间配置。\n" +
+		Long: "保存一个执行节点的连接目标与远程工作空间配置。\n" +
 			"该命令不执行 SSH 登录，也不创建远程目录；工作空间路径中的 ~ 指远程\n" +
 			"SSH 登录用户的 Home。未指定 --port 时使用 22，未指定 --workspace 时使用\n" +
 			domain.DefaultWorkspaceRoot + "。\n" +
-			"认证方式默认 agent；--auth private_key 时必须同时给出 --key。\n" +
-			"该命令不接受密码或私钥口令，凭据只在连接时于内存中提供。",
+			"认证方式只支持 private_key，必须同时给出 --key，且私钥必须是无口令私钥。\n" +
+			"新建节点的校验状态为 checking，由后台服务异步完成环境预检。",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			host, err := withHostService(cmd.Context(), a, hostConfigPath(cmd), func(
@@ -99,13 +99,13 @@ func newHostAddCommand(a *app.App) *cobra.Command {
 		&authMethod,
 		"auth",
 		string(domain.AuthMethodPrivateKey),
-		"认证方式：agent、private_key 或 password",
+		"认证方式：只支持 private_key",
 	)
 	command.Flags().StringVar(
 		&privateKeyPath,
 		"key",
 		"",
-		"本机私钥文件路径，仅 --auth private_key 时使用",
+		"本机私钥文件路径（必填，无口令私钥）",
 	)
 	command.PreRunE = func(cmd *cobra.Command, args []string) error {
 		method, err := domain.ParseAuthMethod(authMethod)
@@ -238,9 +238,9 @@ func newHostUpdateCommand(a *app.App) *cobra.Command {
 		Use:   "update <id>",
 		Short: "修改执行节点的连接参数或认证方式",
 		Long: "只修改显式给出的参数，未给出的配置保持原值。\n" +
-			"该命令不执行 SSH 登录，也不接受密码或私钥口令。\n" +
-			"切换认证方式时请同时给出该方式所需的参数，例如\n" +
-			"--auth private_key --key ~/.ssh/id_ed25519。",
+			"该命令不执行 SSH 登录，也不接受任何凭据输入。\n" +
+			"影响连接目标、认证方式、私钥路径、工作空间或启用状态的修改会使旧校验结果失效，\n" +
+			"状态回到 checking 并重新提交后台环境预检；仅修改名称不会失效。",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			request.ID = args[0]

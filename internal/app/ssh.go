@@ -30,8 +30,8 @@ type SSHOptions struct {
 
 // SSHService 提供已认证的 SSH 连接、远程命令执行与文件传输能力。
 //
-// 凭据只在调用期间通过内存中的 CredentialProvider 传递，本服务不保存、不记录
-// 任何密码、私钥原文或私钥口令。
+// 认证只使用节点配置中的无口令私钥：本服务不接收、不保存、不记录任何凭据内容，
+// 私钥文件只被读取。
 type SSHService struct {
 	store    storage.Store
 	dialer   *sshclient.Dialer

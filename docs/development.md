@@ -71,7 +71,7 @@ go test -race -count=1 ./tests/integration/local/ssh/...            # 竞态检�
 真实 Pi 与真实 SSH 入口在依赖缺失时输出 `WARN [SKIP]` 并跳过；本机集成测试与快速单元
 测试只使用本机回环地址上的服务，不依赖真实 SSH 服务器、外部网络或模型凭据。本机 SSH/SFTP
 集成测试在进程内启动真实服务端，因此主机密钥校验、认证、命令执行与文件传输都经过真实协议
-交互；SSH Agent 用例依赖 Unix 套接字，平台不支持时单独跳过。
+交互。测试用私钥统一由 `tests/internal/testkit` 的 `PrivateKeyPath` 生成，只生成无口令私钥。
 
 `make build` 会通过 `-ldflags -X` 注入 `version`、`commit`、`buildDate`；直接 `go build` 时三者取默认的开发值 `dev` / `none` / `unknown`。可以用环境变量覆盖版本号：
 
@@ -107,9 +107,11 @@ make build VERSION=0.1.0
 - `host probe` 只验证 TCP 可达性与 SSH 协议标识，**不执行身份认证**。
 - `host trust` 只探测主机密钥并展示指纹，写入信任记录必须显式给出已核验的 `--fingerprint`
   与非交互场景的 `--yes`。
-- `host test`、`host workspace`、`host transfer` 执行完整的主机密钥校验与身份认证，是唯一
-  可以执行远程命令与文件传输的路径。凭据通过 `--password-stdin`、`--passphrase-stdin` 或
-  交互式 `--ask-pass` 提供，非交互环境缺少凭据时立即失败而不是等待输入。
+- `host test`、`host workspace`、`host transfer`、`host validate` 执行完整的主机密钥校验与
+  身份认证，是唯一可以执行远程命令与文件传输的路径。认证只使用节点配置中的无口令私钥，
+  命令层不收集任何凭据。
+- `host validate` 同步执行一次环境预检（SSH 连接、Docker CLI 帮助信息、基础镜像元数据），
+  退出码非零表示未通过；它不受"节点必须为 normal"的准入限制约束。
 
 `config validate` 未指定 `--config` 时读取 `configs/agentflow.yaml`；该文件不存在视为错误，不会回退到内置默认值。
 
@@ -183,8 +185,11 @@ make build VERSION=0.1.0
 - 主机密钥类型由 `KnownHostsStore.RecordedHostKeyTypes` 提供：`Dialer` 按记录顺序逐个
   用单一类型握手，取第一个校验通过的结果；全部失败时返回首个结论。没有记录时交给
   `golang.org/x/crypto/ssh` 自行协商。逐类型重试只针对主机密钥类失败。
-- 凭据只在内存中传递，用完调用 `Credential.Clear()`；不得把密码、口令或私钥内容写入
-  错误信息、日志、数据库或命令行参数。
+- 认证只使用无口令私钥：不得把私钥内容写入错误信息、日志、数据库或命令行参数，也不得
+  复制私钥文件。遇到加密私钥必须返回明确的不支持错误，而不是要求交互输入口令。
+- 远端 Unix 套接字通道（`DialUnixSocket`）用于访问远端 Docker Engine；SSH 通道不支持
+  `SetDeadline`，因此截止时间只能通过关闭通道生效。自定义 HTTP 传输必须显式监听请求上下文，
+  否则取消与超时不会真正中断查询。
 - 远程命令必须用 `ShellCommand` 构造（程序名 + 参数数组 + 逐参数转义），禁止拼接用户输入。
 - 取消与超时不仅要停止本端等待，还要关闭远程会话通道并释放本端 goroutine；无法确认远程
   进程已终止时，必须在结果中如实标记，不能声称命令已终止。
@@ -192,6 +197,18 @@ make build VERSION=0.1.0
   文件；覆盖需要调用方显式声明。
 - 远程路径只使用 POSIX 规则（`NormalizeRemotePath`），不得把本机 `filepath` 语义套用到远程
   路径，也不得用字符串前缀判断目录包含关系。
+## 与 Docker 交互的注意事项
+
+- 帮助检查只允许执行 `docker <command> --help`，禁止在其中执行 `create`、`run`、`start`、
+  `pull` 等任何创建容器、启动工作负载或下载镜像层的命令。
+- 帮助检查的命令与参数清单必须与 `internal/docker` 中真实的命令构造一致
+  （`docker.RequiredCLICommands`）；新增 Docker 调用必须同步更新清单，否则预检会漏检。
+- 帮助文本可能写入标准输出或标准错误，核对时必须同时读取两个流；退出码为 0 但没有输出
+  时不能判为通过。
+- 镜像预检只查询 `FROM` 元数据，禁止 `docker pull`、完整 `docker build`、创建临时容器或
+  运行镜像内程序，也不得改变远端镜像缓存、容器与卷状态。
+- 校验超时集中定义在 `internal/docker/validation.go`，不得分散写入 Handler 或业务方法。
+
 ## 提交约定
 
 - 提交信息使用简体中文，一行标题说明改动的目的。

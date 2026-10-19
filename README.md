@@ -8,7 +8,10 @@ AgentFlow 是一个使用 Go 编写的本地优先 AI 编码工作流编排器�
 
 AgentFlow 处于**执行节点接入阶段**。当前仓库包含工程骨架、可运行的 CLI、配置加载与校验、结构化日志封装、SQLite 数据模型与版本化迁移，以及执行节点管理与完整的 SSH 连接层。
 
-执行节点已支持完整的 SSH 身份认证（SSH Agent、本机私钥、内存密码）、严格的主机密钥校验、带超时与取消的远程命令执行、SFTP 文件传输，以及远程 Home 与工作空间解析。**Docker 环境、远程代码仓库操作与工作流引擎尚未实现**。文档只会在对应能力落地后才声明其可用。
+执行节点已支持本机私钥认证、严格的主机密钥校验、带超时与取消的远程命令执行、SFTP
+文件传输、远程 Home 与工作空间解析，以及**执行节点环境预检**（SSH 连接、Docker CLI
+帮助信息、基础 Dockerfile 的外部 `FROM` 镜像元数据）。**远程代码仓库操作与工作流引擎尚未
+实现**。文档只会在对应能力落地后才声明其可用。
 
 ## 第一版功能范围
 
@@ -24,15 +27,22 @@ AgentFlow 处于**执行节点接入阶段**。当前仓库包含工程骨架、
 - 存储接口与事务边界：`storage.Store` / `storage.Tx` 提供跨实体原子更新，错误可按类别判断。
 - 执行节点管理：`agentflow host` 命令组支持新增、列出、查看、设置默认与删除执行节点，节点保存在 SQLite 的 `execution_hosts` 表中。
 - SSH 服务探测：`agentflow host probe` 使用 Go 代码建立 TCP 连接并校验服务端 SSH 协议标识，不依赖本机 `ssh` 命令，也不执行身份认证。
-- SSH 身份认证：支持 SSH Agent、本机私钥（含加密私钥口令）与内存密码三种方式；密码与私钥口令只在连接时于内存中传递，不写入数据库、日志或命令行参数。
+- SSH 身份认证：只支持本机私钥认证（`private_key`）。节点配置只保存私钥文件路径，
+  私钥文件只被读取，不复制、不修改、不写入数据库或日志；不支持 SSH Agent、密码认证
+  与加密私钥（口令）。
 - 主机密钥校验：复用 OpenSSH `known_hosts` 并维护 AgentFlow 自己的信任记录文件；未知主机必须核验 SHA-256 指纹后显式信任，已信任密钥发生变化时拒绝连接，禁止跳过校验。
 - 主机密钥类型协商：按 `known_hosts` 中该主机已记录的类型依次尝试握手，取第一个校验
   通过的；没有任何记录时交给 `golang.org/x/crypto/ssh` 自身协商。
 - 远程命令执行：返回退出码、标准输出、标准错误、耗时与结果状态，区分成功、非零退出、超时、取消与连接中断；输出超过上限时标记截断，取消与超时只关闭对应会话而不影响同连接的其他操作。
 - SFTP 文件操作：创建目录、属性查询（含符号链接识别）、目录列举、上传、下载、重命名与删除；上传先写同目录临时文件并校验字节数，覆盖提交优先使用 `posix-rename` 原子替换；下载支持大小上限，失败不留下最终文件。
 - 远程 Home 与工作空间：通过已认证连接解析远程登录用户 Home，把 `~/.lingting/agentflow` 或自定义路径解析为远程绝对路径，并检查存在性与可写性。
+- 执行节点环境预检：新建与有效修改后自动进入 `checking`，由后台服务依次执行 SSH 连接、
+  Docker CLI 帮助信息与基础镜像元数据三项检查，全部通过才写 `normal`；未通过校验的节点
+  不能用于真实远程操作。第一版 Docker 检查只基于 CLI 帮助信息，不验证 Engine 运行契约。
 - 统一服务入口：`agentflow server` 在同一个进程内启动 HTTP API、内嵌 Web 页面与后台服务，按依赖顺序初始化并按逆序优雅关闭，默认只监听 `127.0.0.1:26380`。
-- 最小只读接口：`GET /api/v1/health` 分别报告 HTTP API 与 SQLite 的可用性，`GET /api/v1/system/info` 返回构建信息；错误响应统一为 `{"error": {...}}`。
+- 只读与资源接口：`GET /api/v1/health` 报告 HTTP API 与 SQLite 可用性，`GET /api/v1/system/info`
+  返回构建信息，`/api/v1/tasks` 提供任务管理，`/api/v1/hosts` 提供执行节点管理与环境预检
+  状态；错误响应统一为 `{"error": {...}}`。
 - 单文件交付：前端生产构建产物通过 `//go:embed` 嵌入 Go 可执行文件，`make release` 是唯一推荐的生产构建入口。
 
 第一版目标（尚未实现）：
@@ -48,6 +58,7 @@ AgentFlow 处于**执行节点接入阶段**。当前仓库包含工程骨架、
 ## 技术栈
 
 - Go（版本要求见 `go.mod`）
+- `golang.org/x/crypto/ssh`（SSH 握手、主机密钥校验、私钥认证与远端 Unix 套接字通道）
 - Cobra（CLI）
 - `gopkg.in/yaml.v3`（配置）
 - `log/slog`（日志）
@@ -173,11 +184,48 @@ make web-dev            # 等价于 cd lingting-agent-flow-ui && pnpm dev
 | GET    | `/api/v1/tasks/{taskID}`        | 任务详情                                              |
 | POST   | `/api/v1/tasks/{taskID}/cancel` | 请求取消任务                                          |
 | DELETE | `/api/v1/tasks/{taskID}`        | 逻辑删除任务，成功返回 204                            |
+| GET    | `/api/v1/hosts`                 | 执行节点列表（含校验状态与详情）                       |
+| POST   | `/api/v1/hosts`                 | 新增执行节点，返回 201 与真实初始状态 `checking`       |
+| GET    | `/api/v1/hosts/{hostID}`        | 执行节点详情                                          |
+| PATCH  | `/api/v1/hosts/{hostID}`        | 修改执行节点；影响校验输入的修改会重新进入 `checking`  |
+| DELETE | `/api/v1/hosts/{hostID}`        | 逻辑删除执行节点，成功返回 204                         |
+| POST   | `/api/v1/hosts/{hostID}/validate` | 手动重新校验，立即返回 202 与 `checking`             |
 
 `/api/v1/health` 的 `checks` 分别表达 `http_api` 与 `database`，不会因为 HTTP 服务已启动就
 认为数据库一定可用。错误响应统一为 `{"error": {"code", "message", "request_id"}}`，
 错误代码取值为 `invalid_request`、`not_found`、`state_conflict`、`method_not_allowed`、
 `internal_error`，分别对应 HTTP 400、404、409、405、500。
+
+#### 执行节点接口
+
+`POST /api/v1/hosts` 只接受连接目标与私钥路径，**不接受**任何校验字段（`validation_status`、
+`validation_generation` 等）；请求体包含未知字段时返回 400。
+
+```json
+{
+  "host": "192.0.2.10",
+  "port": 22,
+  "username": "deploy",
+  "workspace_root": "~/.lingting/agentflow",
+  "private_key_path": "/home/me/.ssh/id_ed25519",
+  "name": "构建节点",
+  "default": false
+}
+```
+
+响应在节点字段之外额外提供：
+
+| 字段 | 说明 |
+|---|---|
+| `validation_status` | `checking`、`normal` 或 `abnormal` |
+| `validation_message` | 最新校验结果的摘要或失败原因 |
+| `validation_details` | 结构化详情：校验器版本、代次、三项检查、逐镜像结果、能力边界说明 |
+| `validation_started_at` / `validation_completed_at` | 最近一次校验的时间范围 |
+| `validation_generation` | 校验代次，用于识别结果是否属于当前配置 |
+| `usable_for_remote_task` | 服务端按与准入校验相同的规则计算，前端据此禁用操作 |
+
+`usable_for_remote_task` 只是给界面的提示：真正的限制由后端在建立远程会话前强制实施，
+篡改前端状态无法绕过。
 
 #### 任务状态
 
@@ -301,7 +349,7 @@ DELETE /api/v1/tasks/{taskID}
 
 - 不会调用 Pi CLI、不会创建 Docker 容器、不会连接 SSH、不会克隆 Git 仓库。
 - 没有执行器，因此没有任务会被自动推进到 `running` 或 `succeeded` 等执行状态。
-- 执行节点与角色没有查询接口，创建任务时需要手工填写其标识。
+- 角色没有查询接口，创建任务时需要手工填写其标识；执行节点已提供 `/api/v1/hosts` 接口。
 
 `/api` 下的未知路径返回 JSON 404，不会回退到前端页面；`/api` 之外的未知页面路径进入 SPA
 回退，因此浏览器刷新任意前端路由都能正常打开页面。
@@ -312,12 +360,13 @@ DELETE /api/v1/tasks/{taskID}
 
 ### 尚未实现的接口
 
-项目、机器、环境、容器、代码保存与 Agent 调度均**没有** HTTP 接口。Web 页面中的对应入口仍为
+项目、环境、容器、代码保存与 Agent 调度均**没有** HTTP 接口。Web 页面中的对应入口仍为
 占位说明，连接指示器只表示 HTTP API 的可用性，不代表 SSH、Docker 或 Pi Agent 已就绪。
-任务页面已接入真实接口，但只能创建、查看、取消与删除任务记录，不能启动执行。
+任务页面已接入真实接口，但只能创建、查看、取消与删除任务记录，不能启动执行。机器页面
+已接入执行节点接口与环境预检结果展示。
 
-后台服务目前只有生命周期框架：任务调度器、任务执行器、SSH 与 Docker 运维均尚未接入，
-`agentflow server` 启动后只提供 API 与页面。
+后台服务目前只注册了执行节点环境预检：任务调度器、任务执行器与 Docker 运维均尚未接入，
+`agentflow server` 启动后提供 API、页面与环境预检。
 
 ## 前端工程
 
@@ -355,11 +404,12 @@ go run ./cmd/agentflow --help
 ./bin/agentflow server --config configs/example.yaml --address 127.0.0.1:26380
 
 # 执行节点：配置、认证、主机密钥与远程工作空间
-./bin/agentflow host add --id node-a --host 192.0.2.10 --user deploy --auth agent
-./bin/agentflow host probe node-a     # 只探测 TCP 与 SSH 协议标识
-./bin/agentflow host trust node-a     # 探测并展示主机密钥指纹
-./bin/agentflow host test node-a      # 完整 SSH 身份认证
-./bin/agentflow host workspace node-a # 解析远程 Home 与工作空间
+./bin/agentflow host add --id node-a --host 192.0.2.10 --user deploy --key ~/.ssh/id_ed25519
+./bin/agentflow host probe node-a      # 只探测 TCP 与 SSH 协议标识
+./bin/agentflow host trust node-a      # 探测并展示主机密钥指纹
+./bin/agentflow host test node-a       # 完整 SSH 身份认证
+./bin/agentflow host workspace node-a  # 解析远程 Home 与工作空间
+./bin/agentflow host validate node-a   # 环境预检：SSH、Docker CLI 帮助、镜像元数据
 ```
 
 配置路径规则：
@@ -379,8 +429,8 @@ go run ./cmd/agentflow --help
 ## 执行节点管理
 
 执行节点是通过 SSH 管理的远程 Linux 机器。AgentFlow 控制程序运行在本机，通过 SSH 连接
-远程节点；节点记录只保存连接目标、认证方式种类、本机私钥文件路径与远程工作空间配置，
-**不保存密码、私钥原文或私钥口令**。
+远程节点；节点记录只保存连接目标、本机私钥文件路径与远程工作空间配置，**不保存任何
+凭据内容**。SSH 认证只支持无口令私钥。
 
 `host` 命令组复用 `config validate` 的配置加载流程，因此同样接受 `--config`；
 未指定时读取 `configs/agentflow.yaml`，数据库路径取自该配置的 `storage.database_path`。
@@ -388,7 +438,11 @@ go run ./cmd/agentflow --help
 ### 新增执行节点
 
 ```bash
-./bin/agentflow host add   --id node-build-01   --name 构建节点   --host 192.0.2.10   --port 22   --user deploy   --workspace "~/.lingting/agentflow"   --default
+./bin/agentflow host add \
+  --id node-build-01 --name 构建节点 \
+  --host 192.0.2.10 --port 22 --user deploy \
+  --workspace "~/.lingting/agentflow" \
+  --key ~/.ssh/id_ed25519 --default
 ```
 
 | 参数 | 说明 |
@@ -399,22 +453,25 @@ go run ./cmd/agentflow --help
 | `--port` | SSH 端口，默认 `22`，取值范围 1-65535 |
 | `--user` | SSH 登录用户名，必填 |
 | `--workspace` | 远程工作空间路径，默认 `~/.lingting/agentflow` |
-| `--auth` | 认证方式，`agent`（默认）、`private_key` 或 `password` |
-| `--key` | 本机私钥文件路径，仅 `--auth private_key` 时使用，且该方式必填 |
+| `--auth` | 认证方式，只支持 `private_key`（也是默认值） |
+| `--key` | 本机私钥文件路径，**必填** |
 | `--default` | 同时设为默认执行节点 |
 
 该命令只写入本机数据库，**不会**连接目标机器、不会创建远程目录，也不代表可以登录。
-该命令不接受密码或私钥口令，凭据只在连接时于内存中提供。
+新建节点的校验状态一律为 `checking`，由后台服务异步完成环境预检；客户端不能指定
+`validation_status` 等校验字段。该命令不接受任何凭据输入参数。
 
 ### 修改执行节点
 
 ```bash
 ./bin/agentflow host update node-build-01 --port 2222
-./bin/agentflow host update node-build-01 --auth private_key --key ~/.ssh/id_ed25519
+./bin/agentflow host update node-build-01 --key ~/.ssh/id_ed25519
 ```
 
-只修改显式给出的参数，未给出的配置保持原值。切换认证方式时需要同时给出该方式所需的
-参数，例如 `--auth private_key --key ...`。该命令同样不执行登录，也不接受密码或口令。
+只修改显式给出的参数，未给出的配置保持原值。任何影响连接目标、认证方式、私钥路径、
+远程工作空间或启用状态的修改都会使旧校验结果失效：状态回到 `checking`、清空旧摘要与
+详情、`validation_generation` 加一，并重新提交后台校验。仅修改名称不会使结果失效。
+该命令同样不执行登录，也不接受任何凭据。
 
 ### 列出与查看
 
@@ -437,22 +494,18 @@ go run ./cmd/agentflow --help
 
 ### SSH 身份认证
 
-三种认证方式都通过统一的凭据接口在连接时提供材料，凭据不落盘、不进数据库、不进日志：
+只支持本机私钥认证，且私钥必须是**未加密**的：
 
 | 认证方式 | 凭据来源 | 说明 |
 |---|---|---|
-| `agent` | 系统 SSH Agent（`SSH_AUTH_SOCK`） | 默认方式，不在配置中保存任何机密材料 |
-| `private_key` | 节点配置中的本机私钥文件路径 | 支持加密私钥，口令在连接时提供 |
-| `password` | 调用方在内存中提供 | 默认不持久化 |
+| `private_key` | 节点配置中的本机私钥文件路径 | 唯一支持的认证方式，无口令私钥 |
 
-凭据输入方式（`host test`、`host workspace`、`host transfer`）：
-
-- `--password-stdin`：从标准输入读取一行密码。
-- `--passphrase-stdin`：从标准输入读取一行私钥口令。
-- `--ask-pass`：在交互式终端中强制使用隐藏输入。
-
-**非交互环境不会挂起等待输入**：没有可用凭据时立即返回「没有可用的凭据」，
-并提示可用的输入参数。
+- 私钥文件只被读取，不会被复制到工作空间、写入数据库或日志，也不会修改其权限或内容。
+- 不支持 SSH Agent、密码认证与加密私钥（passphrase）。遇到受口令保护的私钥时返回明确的
+  「不支持受口令保护的私钥，请改用无口令私钥文件」，**不会挂起等待口令输入**。
+- 命令层不再提供 `--password-stdin`、`--passphrase-stdin`、`--ask-pass` 等凭据输入参数。
+- 存量数据库中 `auth_method` 为 `agent` 或 `password` 的记录保留原值，不写迁移改写；
+  这类节点在环境预检时因认证方式不受支持而判为 `abnormal`，需要显式改成私钥。
 
 ### 主机密钥校验
 
@@ -504,9 +557,7 @@ go run ./cmd/agentflow --help
 | `host_key_mismatch` | 主机密钥与已信任记录不一致 |
 | `host_key_revoked` | 主机密钥已被标记为吊销 |
 | `auth_failed` | 登录认证被拒绝 |
-| `no_credential` | 没有可用的凭据 |
-| `private_key_error` | 私钥文件不存在、格式不支持或口令错误 |
-| `agent_unavailable` | SSH Agent 不可用或没有身份 |
+| `private_key_error` | 私钥文件不存在、格式不支持或是受口令保护的私钥 |
 | `timeout` | 连接或认证超时 |
 | `cancelled` | 调用被取消 |
 
@@ -582,6 +633,66 @@ go run ./cmd/agentflow --help
 - `host add` 只保存配置；`host workspace` 才会通过已认证连接解析远程 Home 并转换为绝对
   路径。目录创建只发生在解析出的工作空间路径内，且必须显式给出 `--create`。
 
+### 环境预检（validation）
+
+执行节点在用于真实远程操作之前必须通过环境预检。预检状态只有三种：
+
+| 状态 | 中文 | 含义 |
+|---|---|---|
+| `checking` | 校验中 | 尚未完成当前配置版本的预检 |
+| `normal` | 正常 | 当前版本的全部必需预检项均通过 |
+| `abnormal` | 异常 | 至少一项必需检查失败，或无法完成必要检查 |
+
+单项结果使用独立的状态：`passed`、`failed`、`timed_out`、`skipped`、`not_run`。
+它们只出现在校验详情里，不新增总体状态；`skipped` 与 `not_run` 一律**不算通过**。
+
+三项必需检查按顺序执行，前一项失败时后续检查记为 `not_run`：
+
+1. **SSH 连接**：连接、握手、认证，并执行一条无副作用的非交互远程命令（`true`）取得退出码。
+2. **Docker CLI 帮助信息**：对 `internal/docker` 中实际使用的命令逐条执行
+   `docker <command> --help`，核对所需参数选项是否出现在帮助文本中（同时读取标准输出与
+   标准错误）。
+3. **基础镜像元数据**：解析当前节点最新的基础环境 Dockerfile，提取全部外部 `FROM` 镜像，
+   通过远端 Docker Engine 的 `GET /distribution/{name}/json` 查询元数据（摘要与平台）。
+
+```bash
+./bin/agentflow host validate node-build-01
+```
+
+该命令同步执行一次完整预检并输出三项结果与能力边界说明；退出码非零表示预检未通过。
+
+#### 触发时机
+
+- `host add`：写入 `checking` 后立即提交后台校验。
+- `host update`：影响连接目标、认证方式、私钥路径、工作空间或启用状态的修改会使旧结果
+  失效（状态回到 `checking`、清空详情、代次加一）并重新提交校验；仅改名不失效。
+- `POST /api/v1/hosts/{id}/validate`：手动重新校验，立即返回 `202` 与 `checking`。
+- `agentflow server` 启动时重新调度仍停留在 `checking` 的记录。
+
+校验结果以 `validation_generation` 为条件写回：用户在校验期间再次修改配置时，较早的
+结果会被丢弃，不会覆盖新版本状态。
+
+#### 能力边界（第一版）
+
+- Docker 检查**只**基于 CLI 帮助信息，不执行 `docker version`、API 能力探测或任何实际容器
+  操作，因此 `normal` **不代表**该 Docker Engine 一定能成功创建并运行 AgentFlow 所需的容器。
+- 镜像检查**只**查询元数据：不 `docker pull`、不执行完整 `docker build`、不创建临时容器、
+  不运行镜像内程序，也不改变远端镜像缓存、容器与卷状态。
+- 查询经由已认证 SSH 连接直接访问远端 Docker Engine 的 Unix 套接字（OpenSSH
+  `direct-streamlocal@openssh.com`），因此走该 Engine 配置的镜像解析路径，且不要求远端安装
+  `curl` 等额外工具。不使用 `docker pull` 作为回退手段。
+- 无法解析的 `FROM` 动态引用（例如依赖构建期参数的变量）判为失败并记录原因；`scratch`
+  与内部构建阶段别名不产生网络查询。
+- 超时集中定义在 `internal/docker/validation.go`：单步 SSH 检查 10 秒、单镜像查询 8 秒、
+  整体 30 秒。
+
+#### 使用限制
+
+任何使用持久化执行节点执行真实远程操作的入口都会先经过统一准入校验：节点必须存在、
+未禁用，且当前配置版本的状态为 `normal`。处于 `checking` 或 `abnormal` 时返回明确错误并
+提示执行 `agentflow host validate`。该校验由后端强制实施，**不能**通过篡改前端状态绕过；
+只有预检本身与只读预检允许在节点未通过校验时执行。
+
 ### 删除节点
 
 ```bash
@@ -617,8 +728,8 @@ go run ./cmd/agentflow --help
 
 `tools_policy` 当前只是配置声明，用于后续阶段定义角色权限，**并不代表 Pi 已经执行了对应限制**。
 
-`ssh` 段只保存路径与超时，**不保存任何凭据**；密码与私钥口令只能在连接时通过内存中的凭据
-提供器传入。
+`ssh` 段只保存路径与超时，**不保存任何凭据**；认证只使用本机私钥文件，私钥路径保存在
+执行节点记录中，私钥内容既不进配置也不进数据库。
 ## 数据库
 
 ### 文件位置
@@ -649,7 +760,14 @@ storage:
 - 每个迁移在独立事务内执行：失败时回滚，不会记录成功版本，也不会留下半建的 schema。
 - 启动语义幂等：已完成的迁移不会重复执行，重复打开数据库不会重复建表。
 - 数据库版本高于程序支持的最新版本时，`Open` 返回 `storage.ErrUnsupportedSchema`。
-- 修改 schema 必须新增更高版本的脚本（例如 `0002_add_retry_policy.sql`），已发布的迁移不得修改。
+- 修改 schema 必须新增更高版本的脚本（例如 `0011_execution_host_validation.sql`），已发布的
+  迁移不得修改。
+- 增量迁移只新增列与索引，不重建表、不清空数据，也不添加外键或枚举白名单。
+
+当前最新版本为 `0011`，它给 `execution_hosts` 增加 `validation_status`、
+`validation_message`、`validation_details_json`、`validation_started_at`、
+`validation_completed_at`、`validation_generation` 六个字段与一个按校验状态的部分索引。
+已有记录一律补齐为 `checking`（代次 1），**不会被当作 `normal`**，必须重新执行校验。
 
 ### 表结构
 
@@ -663,7 +781,7 @@ storage:
 | `sessions` | 每次 Agent 会话的元数据 | 可空 `step_id` / `attempt_id` 支持任务级会话；关联 Attempt 时必须给出 `step_id` |
 | `verification_results` | 每次验证的结构化结果 | `passed` 只能为 0/1；失败必须带失败摘要；只追加，不覆盖历史 |
 | `events` | 工作流关键事件 | 自增主键；只追加写入；`(task_id, id)` 联合索引支持任务时间线查询 |
-| `execution_hosts` | 通过 SSH 管理的执行节点 | `port` 限定 1-65535；`is_default` / `enabled` 只能为 0/1；`auth_method` 限定 `agent`/`private_key`/`password`；私钥认证必须给出 `private_key_path`；指纹必须以 `SHA256:` 开头；`last_connect_error` 只保存稳定分类代码；部分唯一索引保证最多一个默认节点；**不保存任何凭据字段** |
+| `execution_hosts` | 通过 SSH 管理的执行节点 | `port` 限定 1-65535；私钥认证必须给出 `private_key_path`；指纹必须以 `SHA256:` 开头；`last_connect_error` 只保存稳定分类代码；`validation_generation` 必须大于 0；`validation_details_json` 必须为合法 JSON；部分唯一索引保证最多一个默认节点；**不保存任何凭据字段** |
 | `schema_migrations` | 迁移版本记录 | `version` 主键，记录迁移名与应用时间 |
 
 通用约定：
@@ -671,7 +789,9 @@ storage:
 - 主键为 TEXT，由应用层生成（`events` 使用自增 INTEGER）。
 - 时间统一为 UTC Unix 毫秒时间戳，字段以 `_at` 结尾。
 - JSON 统一以 UTF-8 文本保存，并通过 `json_valid` 约束校验。
-- 所有外键使用 `ON DELETE RESTRICT`，禁止级联删除历史记录。
+- 业务 Schema 不声明外键，引用完整性、状态迁移与生命周期由应用层显式承担。
+- 枚举式字段不使用数据库 `CHECK` 白名单，新增取值可在不修改 Schema 的情况下写入；
+  读取层保留未知取值，不自动映射为默认状态。
 
 ### 存储接口
 
@@ -680,7 +800,9 @@ storage:
 - `storage.Store`：各实体的读写方法与 `WithTx`、`Close`。
 - `storage.Tx`：事务内可用的同一组实体方法。
 - `storage.RoleSeeder`：角色初始化入口，仅在 `roles` 为空时导入，不覆盖已有角色。
-- `storage.ExecutionHostStore`：执行节点读写与 `SetDefaultExecutionHost`，默认节点切换在单个事务内完成。
+- `storage.ExecutionHostStore`：执行节点读写、`SetDefaultExecutionHost`（默认节点切换在单个
+  事务内完成）、`UpdateExecutionHostValidation`（以代次为条件写入校验结果）与
+  `ListExecutionHostsByValidationStatus`（服务启动时恢复待校验节点）。
 - 错误通过 `errors.Is` 判断：`ErrNotFound`、`ErrConflict`、`ErrForeignKey`、`ErrInvalidData`、
   `ErrBusy`、`ErrUnsupportedSchema`。
 
@@ -758,8 +880,9 @@ AgentFlow 的最终形态会**执行外部程序并修改项目文件**，请注
 - 请使用相互隔离的工作区，并配置合理的 Agent 权限；提示词不是权限边界。
 - 审查任何可能修改或删除数据的操作，尤其是工作区清理与 Git 操作。
 - 不要在配置或仓库中保存真实 API Key；模型凭据由 Pi 及其 Provider 管理。
-- 执行节点表只保存连接目标、认证方式种类、本机私钥文件路径与工作空间，**不保存密码、
-  私钥原文或私钥口令**；私钥文件只被读取，不会被复制到工作空间或远程机器。
+- 执行节点表只保存连接目标、本机私钥文件路径与工作空间，**不保存任何凭据内容**；私钥文件
+  只被读取，不会被复制到工作空间或远程机器。SSH 认证只支持无口令私钥，因此 AgentFlow
+  不收集、不保存、不转发任何密码或口令。
 - 主机密钥校验不可关闭。未知主机必须核验 SHA-256 指纹后显式信任，已信任密钥发生变化时
   连接会被拒绝；不要为了让连接"先跑通"而手工删除信任记录。
 - `host probe` 只验证 SSH 服务可达性，**不代表已经登录成功或远程环境已验证**。
@@ -768,6 +891,10 @@ AgentFlow 的最终形态会**执行外部程序并修改项目文件**，请注
 - SFTP 上传覆盖优先使用 `posix-rename` 原子替换；服务端不支持该扩展时会退化为"删除旧
   文件后重命名"，此时替换不是原子的，请避免在关键文件上依赖强原子性。
 - 本地 HTTP 服务默认只监听 `127.0.0.1`，且不存储模型凭据。Web 连接指示器只表示 HTTP API 可用，不代表 SSH、Docker 或 Pi Agent 已就绪。
+- 环境预检的 `normal` **不是**"远端 Docker Engine 已验证可用"：Docker 检查只基于 CLI 帮助
+  信息，不创建或启动容器，因此仍可能出现 `normal` 但 `docker create` 因参数不被该 CLI
+  版本支持而失败的情况。镜像检查也只查询元数据，不保证镜像层可下载、构建可成功。
+- 预检不会改变远端镜像缓存、容器与卷状态，但会产生正常的远端网络查询与 Docker 日志。
 
 ## 许可证
 

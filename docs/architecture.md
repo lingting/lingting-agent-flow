@@ -2,7 +2,7 @@
 
 本文件描述 AgentFlow 的架构边界与依赖方向，用于判断“新代码应该放在哪里”以及“哪些依赖不允许出现”。
 
-> 下文的架构图为**目标架构**，仅说明分层意图。当前代码实现了 CLI 骨架、配置加载与校验、日志封装、SQLite 数据层、执行节点管理、SSH 服务探测与完整的 SSH 连接层（主机密钥校验、身份认证、远程命令执行与 SFTP 传输），图中调度、Agent 执行与 UI 部分尚未实现。
+> 下文的架构图为**目标架构**，仅说明分层意图。当前代码实现了 CLI 骨架、配置加载与校验、日志封装、SQLite 数据层、执行节点管理与环境预检、SSH 服务探测与 SSH 连接层（主机密钥校验、私钥认证、远程命令执行、SFTP 传输与远端 Unix 套接字通道），图中调度、Agent 执行与 UI 部分尚未实现。
 
 ## 目标架构
 
@@ -102,19 +102,25 @@ cmd/agentflow → cli → app → config / logging / storage / sshprobe / sshcli
 ```
 
 - `main.go` 只注入构建信息、处理信号并返回退出码。
-- `cli` 只做参数解析、结果输出与退出码转换，不包含校验规则；凭据输入（隐藏输入、
-  标准输入读取）也只在命令层发生，转换后立即交给 `sshclient` 的凭据提供器。
+- `cli` 只做参数解析、结果输出与退出码转换，不包含校验规则。SSH 认证只使用节点配置中的
+  本机私钥文件，命令层不收集任何凭据，也不存在隐藏输入或标准输入读取路径。
 - `app` 组装配置与日志，并把配置校验编排成一次应用服务调用；同时负责把配置中的角色转换为存储层的初始化定义，以及把节点配置转换为 SSH 连接目标与认证配置。
 - `config` 负责 YAML 解析、未知字段拒绝与字段级校验。
 - `logging` 封装 `log/slog`，日志统一输出到标准错误流。
 - `storage` 只定义接口与存储错误，不依赖具体驱动；`storage/sqlite` 实现连接、迁移与各实体仓储。
 - `sshprobe` 只做网络与协议标识探测，不进行身份认证，不依赖 `cli` 或 `storage`。
-- `sshclient` 提供 SSH 连接层，内部按职责分为：凭据提供器（`CredentialProvider`）、
-  主机密钥信任（`HostKeyStore` / `KnownHostsStore`，含按 known_hosts 记录提供的
-  主机密钥类型 `HostKeyTypeProvider`）、连接管理（`Dialer` / `Client`）、
-  远程执行（`Run` 与 `CommandResult`）、SFTP 传输（`FileTransfer`）与远程工作空间
-  （`ResolveHome` / `ResolveWorkspace` / `EnsureWorkspace`）。它不依赖 `cli`、`storage`
-  或 `app`，业务代码通过接口注入依赖，不在各处直接创建 SSH 客户端。
+- `sshclient` 提供 SSH 连接层，内部按职责分为：私钥认证（`AuthConfig` 与
+  `buildAuthMethods`）、主机密钥信任（`HostKeyStore` / `KnownHostsStore`，含按 known_hosts
+  记录提供的主机密钥类型 `HostKeyTypeProvider`）、连接管理（`Dialer` / `Client`）、
+  远程执行（`Run` 与 `CommandResult`）、SFTP 传输（`FileTransfer`）、远程工作空间
+  （`ResolveHome` / `ResolveWorkspace` / `EnsureWorkspace`）与远端 Unix 套接字通道
+  （`DialUnixSocket`）。它不依赖 `cli`、`storage` 或 `app`，业务代码通过接口注入依赖，
+  不在各处直接创建 SSH 客户端。
+- `dockerfile` 只做 Dockerfile 静态解析（多阶段、`AS` 别名、`ARG` 替换、`--platform`），
+  不访问网络也不调用 Docker；`docker` 负责远程 Docker 命令构造、帮助信息核对与镜像元数据
+  查询，并集中定义校验超时。
+- `app` 中的 `HostValidator` 编排三项必需检查，`HostValidationService` 作为后台服务接入
+  `internal/lifecycle`，两者都不在 HTTP Handler 内创建长期 goroutine。
 
 ## 领域模型边界
 
@@ -133,10 +139,13 @@ cmd/agentflow → cli → app → config / logging / storage / sshprobe / sshcli
 - 重试必须产生新的 Attempt 与新的 Session，历史记录只追加不覆盖。
 - 状态只能通过 `Transition`（或实体自身的结束方法）变更，不允许直接赋值绕过校验。
 - 角色名称由用户自由命名，工作流只依据角色类型识别职责。
-- `ExecutionHost` 只保存连接目标、认证方式种类、本机私钥文件路径、远程工作空间与主机密钥
-  信任信息，**不保存任何凭据材料**；密码与私钥口令只能通过内存中的凭据提供器在连接时提供。
-- `AuthMethod` 只描述认证方式种类（`agent`、`private_key`、`password`），与具体凭据内容解耦，
-  便于后续接入系统密钥链或其他凭据存储而不改动数据模型。
+- `ExecutionHost` 只保存连接目标、本机私钥文件路径、远程工作空间、主机密钥信任信息与
+  环境预检状态，**不保存任何凭据材料**。
+- `AuthMethod` 只有 `private_key` 一个取值：SSH Agent、密码认证与加密私钥均已移除，
+  不得重新引入，也不得回落到其他认证方式。
+- `ValidationStatus`（`checking` / `normal` / `abnormal`）表达总体预检状态，
+  `CheckStatus`（`passed` / `failed` / `timed_out` / `skipped` / `not_run`）只用于单项结果；
+  两者不得合并，也不得新增第二套总体状态名。
 
 ## 配置与领域的关系
 
@@ -171,12 +180,18 @@ cmd/agentflow → cli → app → config / logging / storage / sshprobe / sshcli
   "跳过校验"的开关，也不允许用 `ssh.InsecureIgnoreHostKey()` 作为产品默认策略。
 - 主机密钥的读取来源（用户 `known_hosts`）与写入目标（AgentFlow 自己的记录文件）分离：
   用户既有文件只读，新记录以独占锁 + 临时文件 + 原子重命名写入，避免并发写坏记录。
-- 凭据边界：`CredentialProvider` 只负责在连接时提供材料，`Credential.Clear` 在使用后清零
-  内存；密码、私钥口令与私钥原文不得进入数据库、配置文件、命令行参数或日志。
+- 凭据边界：只支持无口令私钥，连接过程不接收任何凭据输入。私钥文件只被读取，其路径
+  可以进入节点记录，但私钥原文、密码与口令一律不得进入数据库、配置文件、命令行参数或日志。
+- 私钥边界：不得把私钥复制到工作空间或远程机器，也不得修改其权限或内容；遇到加密私钥
+  必须返回明确的不支持错误，而不是要求交互输入口令。
 - 远程命令执行以结构化命令描述（程序名 + 参数数组）构造，参数统一经过 POSIX Shell 转义，
   禁止把用户输入直接拼接进命令字符串。
 - 超时与取消只关闭对应的远程会话，不关闭整条连接，避免一个命令影响同连接上的其他操作。
-- 日志中不得出现密码、私钥或其他凭据材料。
+- 日志中不得出现私钥内容、认证头或其他凭据材料。
+- 环境预检边界：Docker 兼容性只基于 CLI 帮助信息，不执行容器创建、启动或镜像层下载；
+  镜像预检只查询 `FROM` 元数据。`normal` 不得被表述为"远端 Docker Engine 已验证可用"。
+- 执行节点准入边界：任何使用持久化执行节点执行真实远程操作的入口都必须先确认
+  `validation_status` 为 `normal`；该限制由后端强制实施，不能只依赖界面禁用。
 
 ## 工作区边界
 
