@@ -146,16 +146,17 @@ func TestRealSSHRejectsUntrustedHostKey(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), remoteOpTimeout)
 	defer cancel()
-	auth := sshclient.AuthConfig{Method: sshclient.AuthMethodAgent}
-	if target.keyPath != "" {
-		auth = sshclient.AuthConfig{
-			Method:         sshclient.AuthMethodPrivateKey,
-			PrivateKeyPath: target.keyPath,
-		}
+	// 本版本只支持私钥认证：真实远程测试必须提供私钥路径。
+	if target.keyPath == "" {
+		t.Fatalf("真实远程测试必须设置私钥路径（本版本只支持私钥认证）")
+	}
+	auth := sshclient.AuthConfig{
+		Method:         sshclient.AuthMethodPrivateKey,
+		PrivateKeyPath: target.keyPath,
 	}
 	result, dialErr := dialer.Dial(ctx, sshclient.Endpoint{
 		Host: target.host, Port: target.port, Username: target.user,
-	}, auth, nil)
+	}, auth)
 	if result.Client != nil {
 		_ = result.Client.Close()
 	}

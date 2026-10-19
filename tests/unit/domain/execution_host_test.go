@@ -7,12 +7,16 @@ import (
 	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
+	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
 // TestNewExecutionHostAppliesDefaults 验证默认端口、默认工作空间与启用状态。
 func TestNewExecutionHostAppliesDefaults(t *testing.T) {
 	t.Parallel()
-	host, err := domain.NewExecutionHost("", "测试节点", "10.0.0.10", 0, "deploy", "", time.Now())
+	host, err := domain.NewExecutionHost(
+		"", "测试节点", "10.0.0.10", 0, "deploy", "", time.Now(),
+		domain.WithPrivateKey(testPrivateKeyPath(t)),
+	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
 	}
@@ -47,6 +51,7 @@ func TestNewExecutionHostKeepsExplicitWorkspace(t *testing.T) {
 		"ci",
 		"/srv/agentflow/",
 		time.Now(),
+		domain.WithPrivateKey(testPrivateKeyPath(t)),
 	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
@@ -65,7 +70,10 @@ func TestNewExecutionHostKeepsExplicitWorkspace(t *testing.T) {
 // TestExecutionHostAddressHandlesIPv6 验证 IPv6 地址会被正确加方括号。
 func TestExecutionHostAddressHandlesIPv6(t *testing.T) {
 	t.Parallel()
-	host, err := domain.NewExecutionHost("", "节点", "[2001:db8::1]", 22, "root", "", time.Now())
+	host, err := domain.NewExecutionHost(
+		"", "节点", "[2001:db8::1]", 22, "root", "", time.Now(),
+		domain.WithPrivateKey(testPrivateKeyPath(t)),
+	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
 	}
@@ -109,6 +117,7 @@ func TestExecutionHostRejectsInvalidFields(t *testing.T) {
 			testCase.username,
 			testCase.workspace,
 			time.Now(),
+			domain.WithPrivateKey(testPrivateKeyPath(t)),
 		)
 		if err == nil {
 			t.Fatalf("%s 应当被拒绝", name)
@@ -138,6 +147,7 @@ func TestExecutionHostValidateAcceptsIPv4AndHostname(t *testing.T) {
 			"deploy",
 			"",
 			time.Now(),
+			domain.WithPrivateKey(testPrivateKeyPath(t)),
 		); err != nil {
 			t.Fatalf("地址 %s 应当被接受: %v", address, err)
 		}
@@ -169,4 +179,12 @@ func TestDefaultWorkspaceRootIsPOSIX(t *testing.T) {
 	if strings.ContainsRune(domain.DefaultWorkspaceRoot, '\\') {
 		t.Fatalf("默认工作空间不应包含 Windows 分隔符: %s", domain.DefaultWorkspaceRoot)
 	}
+}
+
+// testPrivateKeyPath 返回测试工作空间中的一个私钥文件路径。
+//
+// 本版本只支持私钥认证，构造执行节点时必须提供该路径。
+func testPrivateKeyPath(t *testing.T) string {
+	t.Helper()
+	return testkit.PrivateKeyPath(t)
 }

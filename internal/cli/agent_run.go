@@ -47,17 +47,7 @@ func newAgentRunCommand(a *app.App) *cobra.Command {
 				ctx context.Context,
 				service *app.ContainerService,
 			) error {
-				provider, providerErr := credentialProviderForArgs(
-					ctx,
-					service.SSHService(),
-					args[0],
-					flags,
-				)
-				if providerErr != nil {
-					return providerErr
-				}
 				request.ContainerID = args[0]
-				request.Credentials = provider
 				result, runErr := service.RunAgent(ctx, request)
 				if printErr := printContainerAgentResult(a, result); printErr != nil {
 					return printErr

@@ -55,15 +55,6 @@ func newSourceFetchCommand(a *app.App) *cobra.Command {
 				ctx context.Context,
 				service *app.ContainerService,
 			) error {
-				provider, providerErr := credentialProviderForArgs(
-					ctx,
-					service.SSHService(),
-					args[0],
-					flags,
-				)
-				if providerErr != nil {
-					return providerErr
-				}
 				result, fetchErr := service.FetchSource(ctx, app.FetchSourceRequest{
 					ContainerID:   args[0],
 					TaskID:        taskID,
@@ -71,7 +62,6 @@ func newSourceFetchCommand(a *app.App) *cobra.Command {
 					BaseBranch:    baseBranch,
 					WorkDir:       workDir,
 					Timeout:       parsedTimeout,
-					Credentials:   provider,
 				})
 				if printErr := printSourceResult(a, result); printErr != nil {
 					return printErr

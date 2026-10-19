@@ -130,20 +130,10 @@ func newDockerEnvShowCommand(a *app.App) *cobra.Command {
 				if !withContent {
 					return nil
 				}
-				provider, providerErr := credentialProviderForArgs(
-					ctx,
-					service.SSHService(),
-					flags.Machine,
-					flagsCredentials,
-				)
-				if providerErr != nil {
-					return providerErr
-				}
 				content, readErr := service.ReadDockerfile(ctx, app.ReadDockerfileRequest{
 					MachineID:     flags.Machine,
 					Ref:           ref,
 					VersionNumber: flags.Version,
-					Credentials:   provider,
 				})
 				if readErr != nil {
 					return readErr
@@ -222,21 +212,11 @@ func newDockerEnvBuildCommand(a *app.App) *cobra.Command {
 				ctx context.Context,
 				service *app.EnvironmentService,
 			) error {
-				provider, providerErr := credentialProviderForArgs(
-					ctx,
-					service.SSHService(),
-					flags.Machine,
-					flagsCredentials,
-				)
-				if providerErr != nil {
-					return providerErr
-				}
 				result, buildErr := service.Build(ctx, app.BuildRequest{
 					MachineID:     flags.Machine,
 					Ref:           ref,
 					VersionNumber: flags.Version,
 					NoCache:       noCache,
-					Credentials:   provider,
 				})
 				if printErr := printBuildResult(a, result); printErr != nil {
 					return printErr
@@ -248,7 +228,6 @@ func newDockerEnvBuildCommand(a *app.App) *cobra.Command {
 						VersionNumber: result.Version.Number,
 						LocalPath:     downloadLog,
 						Overwrite:     overwrite,
-						Credentials:   provider,
 					}); err != nil {
 						return err
 					}
@@ -287,22 +266,12 @@ func newDockerEnvLogCommand(a *app.App) *cobra.Command {
 				ctx context.Context,
 				service *app.EnvironmentService,
 			) error {
-				provider, providerErr := credentialProviderForArgs(
-					ctx,
-					service.SSHService(),
-					flags.Machine,
-					flagsCredentials,
-				)
-				if providerErr != nil {
-					return providerErr
-				}
 				remotePath, err := service.DownloadBuildLog(ctx, app.DownloadBuildLogRequest{
 					MachineID:     flags.Machine,
 					Ref:           ref,
 					VersionNumber: flags.Version,
 					LocalPath:     output,
 					Overwrite:     overwrite,
-					Credentials:   provider,
 				})
 				if err != nil {
 					return err

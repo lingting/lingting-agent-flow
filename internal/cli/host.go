@@ -34,6 +34,7 @@ func newHostCommand(a *app.App) *cobra.Command {
 	command.AddCommand(newHostProbeCommand(a))
 	command.AddCommand(newHostTestCommand(a))
 	command.AddCommand(newHostTrustCommand(a))
+	command.AddCommand(newHostValidateCommand(a))
 	command.AddCommand(newHostWorkspaceCommand(a))
 	command.AddCommand(newHostTransferCommand(a))
 	command.AddCommand(newHostRemoveCommand(a))
@@ -97,7 +98,7 @@ func newHostAddCommand(a *app.App) *cobra.Command {
 	command.Flags().StringVar(
 		&authMethod,
 		"auth",
-		string(domain.AuthMethodAgent),
+		string(domain.AuthMethodPrivateKey),
 		"认证方式：agent、private_key 或 password",
 	)
 	command.Flags().StringVar(

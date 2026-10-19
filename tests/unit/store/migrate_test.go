@@ -14,7 +14,7 @@ import (
 )
 
 // latestSchemaVersion 是当前程序内置迁移的最新版本号。
-const latestSchemaVersion = 10
+const latestSchemaVersion = 11
 
 // migrationTableName 是记录已应用迁移版本的元数据表名。
 const migrationTableName = "schema_migrations"
@@ -106,7 +106,10 @@ func TestMigrateIsIdempotent(t *testing.T) {
 		t.Fatalf("重复迁移破坏了已有数据: %+v", roles)
 	}
 	// 迁移后应当可以在同一个数据库上继续读写执行节点。
-	host, err := domain.NewExecutionHost("", "迁移节点", "10.0.0.1", 0, "deploy", "", time.Now())
+	host, err := domain.NewExecutionHost(
+		"", "迁移节点", "10.0.0.1", 0, "deploy", "", time.Now(),
+		domain.WithPrivateKey(testPrivateKeyPath(t)),
+	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
 	}
@@ -153,7 +156,7 @@ func TestMigrateUpgradesExistingDatabase(t *testing.T) {
 	testkit.MustExec(
 		t,
 		rawDB(t, db),
-		`DELETE FROM `+migrationTableName+` WHERE version IN (2, 3, 4, 5, 6, 7, 8, 9, 10)`,
+		`DELETE FROM `+migrationTableName+` WHERE version IN (2, 3, 4, 5, 6, 7, 8, 9, 10, 11)`,
 	)
 	if version, err := db.SchemaVersion(ctx); err != nil || version != 1 {
 		t.Fatalf("模拟旧库版本失败: %d, %v", version, err)
@@ -170,7 +173,10 @@ func TestMigrateUpgradesExistingDatabase(t *testing.T) {
 	if version != latestSchemaVersion {
 		t.Fatalf("升级后版本不符: %d", version)
 	}
-	host, err := domain.NewExecutionHost("", "迁移节点", "10.0.0.1", 0, "deploy", "", time.Now())
+	host, err := domain.NewExecutionHost(
+		"", "迁移节点", "10.0.0.1", 0, "deploy", "", time.Now(),
+		domain.WithPrivateKey(testPrivateKeyPath(t)),
+	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
 	}

@@ -56,13 +56,8 @@ func newDockerPreflightCommand(a *app.App) *cobra.Command {
 				ctx context.Context,
 				service *app.EnvironmentService,
 			) error {
-				provider, err := credentialProviderForArgs(ctx, service.SSHService(), args[0], flags)
-				if err != nil {
-					return err
-				}
 				result, preflightErr := service.Preflight(ctx, app.InitOptions{
-					MachineID:   args[0],
-					Credentials: provider,
+					MachineID: args[0],
 				})
 				if printErr := printPreflightResult(a, result); printErr != nil {
 					return printErr
@@ -91,13 +86,8 @@ func newDockerInitCommand(a *app.App) *cobra.Command {
 				ctx context.Context,
 				service *app.EnvironmentService,
 			) error {
-				provider, err := credentialProviderForArgs(ctx, service.SSHService(), args[0], flags)
-				if err != nil {
-					return err
-				}
 				result, initErr := service.Init(ctx, app.InitOptions{
 					MachineID:     args[0],
-					Credentials:   provider,
 					WithLanguages: languages,
 				})
 				if printErr := printInitResult(a, result); printErr != nil {

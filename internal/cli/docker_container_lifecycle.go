@@ -7,7 +7,6 @@ import (
 
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/domain"
-	"github.com/lingting/agentflow/internal/sshclient"
 	"github.com/spf13/cobra"
 )
 
@@ -39,24 +38,10 @@ func newContainerLifecycleCommand(a *app.App) *cobra.Command {
 				ctx context.Context,
 				service *app.ContainerService,
 			) error {
-				container, err := service.GetContainerRecord(ctx, args[0])
-				if err != nil {
-					return err
-				}
-				provider, providerErr := credentialProviderForArgs(
-					ctx,
-					service.SSHService(),
-					container.HostID.String(),
-					flags,
-				)
-				if providerErr != nil {
-					return providerErr
-				}
 				result, applyErr := service.ApplyLifecycle(ctx, app.ApplyLifecycleRequest{
 					ContainerID:     args[0],
 					Outcome:         parsed,
 					KeepInterrupted: keepInterrupted,
-					Credentials:     provider,
 				})
 				if printErr := printLifecycleResult(a, result); printErr != nil {
 					return printErr
@@ -112,26 +97,15 @@ func newContainerRestartCommand(a *app.App) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				provider, providerErr := credentialProviderForArgs(
-					ctx,
-					service.SSHService(),
-					old.HostID.String(),
-					flags,
-				)
-				if providerErr != nil {
-					return providerErr
-				}
 				detail, restartErr := service.RestartContainer(ctx, app.RestartContainerRequest{
 					PreviousContainerID: previous,
 					Disposition:         parsed,
 					Create: app.CreateContainerRequest{
-						MachineID:   old.HostID.String(),
-						Ref:         old.Environment,
-						ProjectID:   projectID,
-						Caches:      caches,
-						Credentials: provider,
+						MachineID: old.HostID.String(),
+						Ref:       old.Environment,
+						ProjectID: projectID,
+						Caches:    caches,
 					},
-					Credentials: provider,
 				})
 				if printErr := printContainerDetail(a, detail); printErr != nil {
 					return printErr
@@ -159,10 +133,9 @@ func newContainerRestartCommand(a *app.App) *cobra.Command {
 	return command
 }
 
-// runContainerAction 读取容器记录、构造凭据并执行一次容器操作。
+// runContainerAction 读取容器记录并执行一次容器操作。
 //
-// 容器所属节点由登记记录决定，因此这里统一读取记录后再按该节点的认证方式
-// 收集凭据，避免命令层重复实现。
+// 容器所属节点由登记记录决定；认证方式固定为私钥，命令层不再收集凭据。
 func runContainerAction(
 	ctx context.Context,
 	a *app.App,
@@ -172,27 +145,17 @@ func runContainerAction(
 	run func(
 		context.Context,
 		*app.ContainerService,
-		sshclient.CredentialProvider,
 	) (app.ContainerDetail, error),
 ) error {
 	return withContainerService(ctx, a, configPath, func(
 		ctx context.Context,
 		service *app.ContainerService,
 	) error {
-		container, err := service.GetContainerRecord(ctx, containerID)
-		if err != nil {
+		// 先确认容器登记记录存在，使"容器不存在"与"操作失败"可以区分。
+		if _, err := service.GetContainerRecord(ctx, containerID); err != nil {
 			return err
 		}
-		provider, providerErr := credentialProviderForArgs(
-			ctx,
-			service.SSHService(),
-			container.HostID.String(),
-			flags,
-		)
-		if providerErr != nil {
-			return providerErr
-		}
-		detail, runErr := run(ctx, service, provider)
+		detail, runErr := run(ctx, service)
 		if printErr := printContainerDetail(a, detail); printErr != nil {
 			return printErr
 		}

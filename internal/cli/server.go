@@ -7,6 +7,7 @@ import (
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/config"
 	"github.com/lingting/agentflow/internal/server"
+	"github.com/lingting/agentflow/internal/storage"
 	"github.com/spf13/cobra"
 )
 
@@ -45,11 +46,17 @@ func newServerCommand(a *app.App) *cobra.Command {
 }
 
 // runServer 构造统一服务实例并运行到退出。
+//
+// 执行节点环境预检依赖 SSH 服务：这里在打开数据库后构造 SSH 服务并注入 Server，
+// 由 Server 统一把它接入后台校验服务，命令层不自行启动任何长期 goroutine。
 func runServer(cmd *cobra.Command, a *app.App, configPath, address string, requireWebUI bool) error {
 	ctx := cmd.Context()
 	instance, err := server.New(server.Options{
-		Address:      address,
-		OpenStore:    a.OpenStore,
+		Address:   address,
+		OpenStore: a.OpenStore,
+		SSHFactory: func(store storage.Store, cfg *config.Config) (*app.SSHService, error) {
+			return app.NewSSHService(store, a.Logger(), sshOptionsFrom(cfg))
+		},
 		SystemInfo:   a.SystemInfo,
 		RequireWebUI: requireWebUI,
 		Logger:       a.Logger().Slog(),

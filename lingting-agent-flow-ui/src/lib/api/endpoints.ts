@@ -7,12 +7,16 @@
 import { API_PREFIX, ApiError, apiRequest, type ApiRequestOptions } from "./client";
 import type { ApiErrorBody, ApiErrorResponse } from "./client";
 import type {
+  CreateHostRequest,
   CreateTaskRequest,
   HealthResponse,
+  Host,
+  HostListResponse,
   SystemInfoResponse,
   Task,
   TaskListQuery,
   TaskListResponse,
+  UpdateHostRequest,
 } from "./types";
 
 /** 健康检查路径 */
@@ -95,6 +99,119 @@ export function cancelTask(taskID: string, options: ApiRequestOptions = {}) {
  */
 export async function deleteTask(taskID: string, options: ApiRequestOptions = {}) {
   const path = taskPath(taskID);
+  const method = "DELETE";
+  const controller = new AbortController();
+  const externalSignal = options.signal;
+  const abortFromCaller = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      throw new ApiError("aborted", "请求已取消");
+    }
+    externalSignal.addEventListener("abort", abortFromCaller, { once: true });
+  }
+  try {
+    let response: Response;
+    try {
+      response = await fetch(path, {
+        headers: { Accept: "application/json", ...options.headers },
+        method,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (externalSignal?.aborted) {
+        throw new ApiError("aborted", "请求已取消", { cause: error });
+      }
+      throw new ApiError("network", "无法连接 AgentFlow 服务", { cause: error });
+    }
+    if (response.ok) {
+      return { request: { method, path } };
+    }
+    const text = await response.text();
+    let detail: ApiErrorBody | undefined;
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      if (typeof parsed === "object" && parsed !== null && "error" in parsed) {
+        detail = (parsed as ApiErrorResponse).error;
+      }
+    } catch {
+      detail = undefined;
+    }
+    throw new ApiError("http", detail?.message ?? `服务返回错误状态 ${response.status}`, {
+      code: detail?.code,
+      requestId: detail?.request_id ?? response.headers.get("X-Request-Id") ?? undefined,
+      status: response.status,
+    });
+  } finally {
+    externalSignal?.removeEventListener("abort", abortFromCaller);
+  }
+}
+
+/** 执行节点集合路径 */
+export const HOSTS_PATH = `${API_PREFIX}/hosts`;
+
+/** 单个执行节点的路径 */
+export function hostPath(hostID: string): string {
+  if (!hostID.trim()) {
+    throw new Error("执行节点标识不能为空");
+  }
+  return `${HOSTS_PATH}/${encodeURIComponent(hostID)}`;
+}
+
+/** 重新校验执行节点的路径 */
+export function hostValidatePath(hostID: string): string {
+  return `${hostPath(hostID)}/validate`;
+}
+
+/** 查询全部执行节点 */
+export function fetchHosts(options: ApiRequestOptions = {}) {
+  return apiRequest<HostListResponse>(HOSTS_PATH, options);
+}
+
+/** 查询单个执行节点 */
+export function fetchHost(hostID: string, options: ApiRequestOptions = {}) {
+  return apiRequest<Host>(hostPath(hostID), options);
+}
+
+/** 新增执行节点；成功时返回 201 与真实初始状态（checking） */
+export function createHost(body: CreateHostRequest, options: ApiRequestOptions = {}) {
+  return apiRequest<Host>(HOSTS_PATH, {
+    ...options,
+    body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json", ...options.headers },
+    method: "POST",
+  });
+}
+
+/** 修改执行节点 */
+export function updateHost(
+  hostID: string,
+  body: UpdateHostRequest,
+  options: ApiRequestOptions = {},
+) {
+  return apiRequest<Host>(hostPath(hostID), {
+    ...options,
+    body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json", ...options.headers },
+    method: "PATCH",
+  });
+}
+
+/**
+ * 请求重新校验执行节点。
+ *
+ * 服务端立即返回 202 与 checking 状态，校验在后台执行，调用方需要轮询详情。
+ */
+export function validateHost(hostID: string, options: ApiRequestOptions = {}) {
+  return apiRequest<Host>(hostValidatePath(hostID), { ...options, method: "POST" });
+}
+
+/**
+ * 删除执行节点（逻辑删除）。
+ *
+ * 服务端成功时返回 204 且无响应体，因此这里不使用 `apiRequest`。
+ */
+export async function deleteHost(hostID: string, options: ApiRequestOptions = {}) {
+  const path = hostPath(hostID);
   const method = "DELETE";
   const controller = new AbortController();
   const externalSignal = options.signal;

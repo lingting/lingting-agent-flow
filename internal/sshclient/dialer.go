@@ -89,7 +89,6 @@ func (d *Dialer) Dial(
 	ctx context.Context,
 	endpoint Endpoint,
 	config AuthConfig,
-	provider CredentialProvider,
 ) (DialResult, error) {
 	started := time.Now()
 	if err := validateEndpoint(endpoint); err != nil {
@@ -119,7 +118,7 @@ func (d *Dialer) Dial(
 			err,
 		)
 	}
-	auth, err := buildAuthMethods(ctx, config, provider)
+	auth, err := buildAuthMethods(config)
 	if err != nil {
 		// 认证方式准备阶段的错误还没有连接地址，这里补上目标地址，
 		// 使错误信息始终能定位到具体节点。

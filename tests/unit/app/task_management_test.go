@@ -84,7 +84,10 @@ func createManagementHost(
 	now time.Time,
 ) domain.ExecutionHost {
 	t.Helper()
-	host, err := domain.NewExecutionHost("", "测试节点", "10.0.0.1", 22, "deploy", "/srv/agentflow", now)
+	host, err := domain.NewExecutionHost(
+		"", "测试节点", "10.0.0.1", 22, "deploy", "/srv/agentflow", now,
+		domain.WithPrivateKey(testPrivateKeyPath(t)),
+	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
 	}

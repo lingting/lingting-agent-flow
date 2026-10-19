@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"path"
 	"path/filepath"
@@ -16,7 +15,6 @@ import (
 	"github.com/lingting/agentflow/internal/sshclient"
 	"github.com/lingting/agentflow/tests/internal/testkit"
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/agent"
 )
 
 // dialTestServer 按给定的主机密钥库连接测试服务并返回已认证连接。
@@ -28,10 +26,10 @@ func dialTestServer(
 	t.Helper()
 	host, port := server.endpoint()
 	dialer := newDialer(t, store)
-	config, provider := passwordAuth(testPassword)
+	config := privateKeyAuth(t)
 	result, err := dialer.Dial(testContext(t), sshclient.Endpoint{
 		Host: host, Port: port, Username: testUser,
-	}, config, provider)
+	}, config)
 	if err != nil {
 		t.Fatalf("建立测试连接失败: %v", err)
 	}
@@ -240,6 +238,8 @@ func TestConcurrentClientsIndependent(t *testing.T) {
 	server := newTestServer(t)
 	host, port := server.endpoint()
 	store := newStore(t, writeKnownHosts(t, host, port, server.hostKey.PublicKey()))
+	// 私钥认证不需要凭据输入，因此并发拨号共享同一个私钥配置。
+	keyPath := writePrivateKey(t, "", false)
 	const count = 4
 	clients := make([]sshclient.Client, count)
 	errs := make([]error, count)
@@ -249,12 +249,14 @@ func TestConcurrentClientsIndependent(t *testing.T) {
 		go func(index int) {
 			defer waitGroup.Done()
 			dialer := newDialer(t, store)
-			config, provider := passwordAuth(testPassword)
+			config := sshclient.AuthConfig{
+				Method:         sshclient.AuthMethodPrivateKey,
+				PrivateKeyPath: keyPath,
+			}
 			result, err := dialer.Dial(
 				context.Background(),
 				sshclient.Endpoint{Host: host, Port: port, Username: testUser},
 				config,
-				provider,
 			)
 			if err != nil {
 				errs[index] = err
@@ -287,50 +289,6 @@ func TestConcurrentClientsIndependent(t *testing.T) {
 		"全部连接关闭后服务端连接应当释放")
 }
 
-// TestAgentAuthentication 验证通过 SSH Agent 完成认证。
-func TestAgentAuthentication(t *testing.T) {
-	server := newTestServer(t)
-	host, port := server.endpoint()
-	store := newStore(t, writeKnownHosts(t, host, port, server.hostKey.PublicKey()))
-	socket := startTestAgent(t)
-	config := sshclient.AuthConfig{
-		Method:      sshclient.AuthMethodAgent,
-		AgentSocket: socket,
-	}
-	dialer := newDialer(t, store)
-	result, err := dialer.Dial(testContext(t), sshclient.Endpoint{
-		Host: host, Port: port, Username: testUser,
-	}, config, nil)
-	if err != nil {
-		t.Fatalf("SSH Agent 认证应成功: %v", err)
-	}
-	if err := result.Client.Close(); err != nil {
-		t.Errorf("关闭连接失败: %v", err)
-	}
-}
-
-// TestAgentWithoutIdentity 验证 Agent 没有身份时返回明确错误。
-func TestAgentWithoutIdentity(t *testing.T) {
-	server := newTestServer(t)
-	host, port := server.endpoint()
-	store := newStore(t, writeKnownHosts(t, host, port, server.hostKey.PublicKey()))
-	socket := startEmptyAgent(t)
-	config := sshclient.AuthConfig{
-		Method:      sshclient.AuthMethodAgent,
-		AgentSocket: socket,
-	}
-	dialer := newDialer(t, store)
-	_, err := dialer.Dial(testContext(t), sshclient.Endpoint{
-		Host: host, Port: port, Username: testUser,
-	}, config, nil)
-	if err == nil {
-		t.Fatal("Agent 没有身份时应当失败")
-	}
-	if code := sshclient.ErrorCodeOf(err); code != sshclient.CodeAgentUnavailable {
-		t.Fatalf("错误类别应为 agent_unavailable，实际: %s", code)
-	}
-}
-
 // TestPrivateKeyRejectedByServer 验证私钥不被服务端接受时归类为认证失败。
 func TestPrivateKeyRejectedByServer(t *testing.T) {
 	t.Parallel()
@@ -349,7 +307,7 @@ func TestPrivateKeyRejectedByServer(t *testing.T) {
 	}
 	_, err := dialer.Dial(testContext(t), sshclient.Endpoint{
 		Host: host, Port: port, Username: testUser,
-	}, config, nil)
+	}, config)
 	if err == nil {
 		t.Fatal("服务端拒绝私钥时应当认证失败")
 	}
@@ -588,53 +546,6 @@ func mustParsePrivateKey(t *testing.T, path string) ssh.Signer {
 		t.Fatalf("解析测试私钥失败: %v", err)
 	}
 	return signer
-}
-
-// startTestAgent 在测试工作空间中启动一个包含一把身份的 SSH Agent。
-func startTestAgent(t *testing.T) string {
-	t.Helper()
-	keyring := agent.NewKeyring()
-	_, privateKey := generateEd25519KeyPair(t)
-	// Agent 需要原始私钥对象而不是 ssh.Signer 包装，否则会因类型不受支持而失败。
-	if err := keyring.Add(agent.AddedKey{PrivateKey: privateKey}); err != nil {
-		t.Fatalf("向测试 Agent 添加身份失败: %v", err)
-	}
-	return serveTestAgent(t, keyring)
-}
-
-// startEmptyAgent 在测试工作空间中启动一个没有任何身份的 SSH Agent。
-func startEmptyAgent(t *testing.T) string {
-	t.Helper()
-	return serveTestAgent(t, agent.NewKeyring())
-}
-
-// serveTestAgent 在 Unix 套接字上提供 SSH Agent 协议服务。
-func serveTestAgent(t *testing.T, keyring agent.Agent) string {
-	socket := filepath.Join(testkit.Dir(t), "agent.sock")
-	listener, err := net.Listen("unix", socket)
-	if err != nil {
-		t.Skipf("WARN [SKIP] 当前环境不支持 Unix 套接字，无法验证 SSH Agent: %v", err)
-	}
-	t.Cleanup(func() {
-		if closeErr := listener.Close(); closeErr != nil {
-			t.Logf("关闭测试 Agent 监听失败: %v", closeErr)
-		}
-	})
-	go func() {
-		for {
-			conn, acceptErr := listener.Accept()
-			if acceptErr != nil {
-				return
-			}
-			go func(conn net.Conn) {
-				defer func() {
-					_ = conn.Close()
-				}()
-				_ = agent.ServeAgent(keyring, conn)
-			}(conn)
-		}
-	}()
-	return socket
 }
 
 // TestRunTerminationConfirmation 验证正常结束与中断的终止确认状态。

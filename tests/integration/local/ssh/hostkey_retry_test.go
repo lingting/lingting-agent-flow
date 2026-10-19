@@ -23,12 +23,13 @@ import (
 func newMultiKeyServer(t *testing.T, keys ...ssh.Signer) *testServer {
 	t.Helper()
 	server := &testServer{t: t, done: make(chan struct{})}
+	// 本版本只支持私钥认证：测试服务只校验用户名，公钥由客户端私钥提供。
 	server.config = &ssh.ServerConfig{
-		PasswordCallback: func(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
-			if conn.User() == testUser && string(password) == testPassword {
-				return nil, nil
+		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			if conn.User() != testUser {
+				return nil, errors.New("认证失败")
 			}
-			return nil, errors.New("认证失败")
+			return nil, nil
 		},
 	}
 	for _, key := range keys {
@@ -101,10 +102,10 @@ func TestDialFallsBackToNextRecordedHostKeyType(t *testing.T) {
 
 	store := newStore(t, knownHosts)
 	dialer := newDialer(t, store)
-	config, provider := passwordAuth(testPassword)
+	config := privateKeyAuth(t)
 	result, err := dialer.Dial(testContext(t), sshclient.Endpoint{
 		Host: host, Port: port, Username: testUser,
-	}, config, provider)
+	}, config)
 	if err != nil {
 		t.Fatalf("存在有效记录时应连接成功，实际失败: %v", err)
 	}
@@ -142,10 +143,10 @@ func TestDialPrefersFirstRecordedHostKeyType(t *testing.T) {
 	})
 
 	dialer := newDialer(t, newStore(t, knownHosts))
-	config, provider := passwordAuth(testPassword)
+	config := privateKeyAuth(t)
 	result, err := dialer.Dial(testContext(t), sshclient.Endpoint{
 		Host: host, Port: port, Username: testUser,
-	}, config, provider)
+	}, config)
 	if err != nil {
 		t.Fatalf("连接失败: %v", err)
 	}
@@ -175,10 +176,10 @@ func TestDialReportsFirstHostKeyFailureWhenAllTypesFail(t *testing.T) {
 	})
 
 	dialer := newDialer(t, newStore(t, knownHosts))
-	config, provider := passwordAuth(testPassword)
+	config := privateKeyAuth(t)
 	_, err := dialer.Dial(testContext(t), sshclient.Endpoint{
 		Host: host, Port: port, Username: testUser,
-	}, config, provider)
+	}, config)
 	if err == nil {
 		t.Fatal("所有已记录类型都不可信时应当失败")
 	}

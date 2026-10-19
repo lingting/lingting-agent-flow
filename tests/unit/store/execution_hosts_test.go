@@ -15,7 +15,10 @@ import (
 // mustExecutionHost 创建并写入一个测试执行节点。
 func mustExecutionHost(t *testing.T, db *sqlite.DB, name, host string, isDefault bool) domain.ExecutionHost {
 	t.Helper()
-	entity, err := domain.NewExecutionHost("", name, host, 0, "deploy", "", time.Now())
+	entity, err := domain.NewExecutionHost(
+		"", name, host, 0, "deploy", "", time.Now(),
+		domain.WithPrivateKey(testPrivateKeyPath(t)),
+	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
 	}
@@ -103,7 +106,10 @@ func TestUpdateExecutionHost(t *testing.T) {
 func TestUpdateMissingExecutionHostReturnsNotFound(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
-	entity, err := domain.NewExecutionHost("", "节点", "10.0.0.11", 0, "deploy", "", time.Now())
+	entity, err := domain.NewExecutionHost(
+		"", "节点", "10.0.0.11", 0, "deploy", "", time.Now(),
+		domain.WithPrivateKey(testPrivateKeyPath(t)),
+	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
 	}
@@ -231,7 +237,10 @@ func TestCreateExecutionHostRejectsSecondDefault(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	mustExecutionHost(t, db, "第一个", "10.0.0.1", true)
-	second, err := domain.NewExecutionHost("", "第二个", "10.0.0.2", 0, "deploy", "", time.Now())
+	second, err := domain.NewExecutionHost(
+		"", "第二个", "10.0.0.2", 0, "deploy", "", time.Now(),
+		domain.WithPrivateKey(testPrivateKeyPath(t)),
+	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
 	}
@@ -263,7 +272,10 @@ func TestDeleteDefaultExecutionHostLeavesNoDefault(t *testing.T) {
 func TestCreateExecutionHostRejectsInvalidPort(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
-	entity, err := domain.NewExecutionHost("", "节点", "10.0.0.1", 0, "deploy", "", time.Now())
+	entity, err := domain.NewExecutionHost(
+		"", "节点", "10.0.0.1", 0, "deploy", "", time.Now(),
+		domain.WithPrivateKey(testPrivateKeyPath(t)),
+	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
 	}
@@ -278,7 +290,10 @@ func TestCreateExecutionHostRejectsDuplicateID(t *testing.T) {
 	db := newTestDB(t)
 	ctx := testContext(t)
 	first := mustExecutionHost(t, db, "第一个", "10.0.0.1", false)
-	duplicated, err := domain.NewExecutionHost(first.ID, "重复", "10.0.0.2", 0, "deploy", "", time.Now())
+	duplicated, err := domain.NewExecutionHost(
+		first.ID, "重复", "10.0.0.2", 0, "deploy", "", time.Now(),
+		domain.WithPrivateKey(testPrivateKeyPath(t)),
+	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
 	}
@@ -291,7 +306,10 @@ func TestExecutionHostTransactionRollback(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	ctx := testContext(t)
-	entity, err := domain.NewExecutionHost("", "节点", "10.0.0.1", 0, "deploy", "", time.Now())
+	entity, err := domain.NewExecutionHost(
+		"", "节点", "10.0.0.1", 0, "deploy", "", time.Now(),
+		domain.WithPrivateKey(testPrivateKeyPath(t)),
+	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
 	}
@@ -425,7 +443,10 @@ func TestExecutionHostPrivateKeyRequiresPath(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	ctx := testContext(t)
-	entity, err := domain.NewExecutionHost("", "节点", "10.0.0.13", 0, "deploy", "", time.Now())
+	entity, err := domain.NewExecutionHost(
+		"", "节点", "10.0.0.13", 0, "deploy", "", time.Now(),
+		domain.WithPrivateKey(testPrivateKeyPath(t)),
+	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
 	}

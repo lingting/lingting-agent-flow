@@ -171,7 +171,10 @@ func seedFixture(
 	planner := createRole(t, db, ctx, domain.RoleTypePlanner, "规划师-"+now.String(), now)
 	developer := createRole(t, db, ctx, domain.RoleTypeDeveloper, "开发-"+now.String(), now)
 	validator := createRole(t, db, ctx, domain.RoleTypeValidator, "验证-"+now.String(), now)
-	host, err := domain.NewExecutionHost("", "节点-"+now.String(), "127.0.0.1", 0, "deploy", "", now)
+	host, err := domain.NewExecutionHost(
+		"", "节点-"+now.String(), "127.0.0.1", 0, "deploy", "", now,
+		domain.WithPrivateKey(testPrivateKeyPath(t)),
+	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
 	}
@@ -281,4 +284,12 @@ func developmentSteps(steps []domain.Step) []domain.Step {
 		}
 	}
 	return development
+}
+
+// testPrivateKeyPath 返回测试工作空间中的一个私钥文件路径。
+//
+// 本版本只支持私钥认证，构造执行节点时必须提供该路径。
+func testPrivateKeyPath(t *testing.T) string {
+	t.Helper()
+	return testkit.PrivateKeyPath(t)
 }

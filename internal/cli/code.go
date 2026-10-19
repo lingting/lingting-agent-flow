@@ -196,15 +196,6 @@ func runCodeSaveCommand(
 		ctx context.Context,
 		service *app.ContainerService,
 	) error {
-		provider, providerErr := credentialProviderForArgs(
-			ctx,
-			service.SSHService(),
-			containerID,
-			flags.credentialFlags,
-		)
-		if providerErr != nil {
-			return providerErr
-		}
 		result, saveErr := service.SaveCode(ctx, app.CodeSaveRequest{
 			ContainerID:    containerID,
 			TaskID:         flags.TaskID,
@@ -214,7 +205,6 @@ func runCodeSaveCommand(
 			CommitMessage:  flags.CommitMessage,
 			Author:         author,
 			RemoteName:     flags.RemoteName,
-			Credentials:    provider,
 			Operation:      operation,
 		})
 		if printErr := printCodeSaveResult(a, result); printErr != nil {

@@ -8,7 +8,6 @@ import (
 
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/config"
-	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/sshclient"
 	"github.com/spf13/cobra"
 )
@@ -34,18 +33,9 @@ func newHostTestCommand(a *app.App) *cobra.Command {
 				ctx context.Context,
 				service *app.SSHService,
 			) error {
-				host, err := service.Host(ctx, args[0])
-				if err != nil {
-					return err
-				}
-				provider, err := credentialProviderFor(host.AuthMethod, flags)
-				if err != nil {
-					return err
-				}
 				testCtx, cancel := withOptionalTimeout(ctx, timeout)
 				defer cancel()
 				result, testErr := service.TestConnection(testCtx, args[0], app.TestConnectionOptions{
-					Credentials:     provider,
 					CheckWorkspace:  checkWorkspace || createWorkspace,
 					CreateWorkspace: createWorkspace,
 				})
@@ -187,15 +177,7 @@ func newHostWorkspaceCommand(a *app.App) *cobra.Command {
 				ctx context.Context,
 				service *app.SSHService,
 			) error {
-				host, err := service.Host(ctx, args[0])
-				if err != nil {
-					return err
-				}
-				provider, err := credentialProviderFor(host.AuthMethod, flags)
-				if err != nil {
-					return err
-				}
-				result, ensureErr := service.EnsureWorkspace(ctx, args[0], provider, create)
+				result, ensureErr := service.EnsureWorkspace(ctx, args[0], create)
 				if printErr := printWorkspaceResult(a, result); printErr != nil {
 					return printErr
 				}
@@ -243,20 +225,15 @@ func newHostUploadCommand(a *app.App) *cobra.Command {
 				ctx context.Context,
 				service *app.SSHService,
 			) error {
-				provider, err := credentialProviderForArgs(ctx, service, args[0], flags)
-				if err != nil {
-					return err
-				}
-				err = service.UploadFile(ctx, args[0], args[1], args[2], app.TransferOptions{
-					Credentials:  provider,
+				uploadErr := service.UploadFile(ctx, args[0], args[1], args[2], app.TransferOptions{
 					Overwrite:    overwrite,
 					CreateParent: createParent,
 				})
-				if err != nil {
-					return err
+				if uploadErr != nil {
+					return uploadErr
 				}
-				_, err = fmt.Fprintf(a.Stdout(), "上传成功: %s -> %s\n", args[1], args[2])
-				return err
+				_, writeErr := fmt.Fprintf(a.Stdout(), "上传成功: %s -> %s\n", args[1], args[2])
+				return writeErr
 			})
 		},
 	}
@@ -283,21 +260,16 @@ func newHostDownloadCommand(a *app.App) *cobra.Command {
 				ctx context.Context,
 				service *app.SSHService,
 			) error {
-				provider, err := credentialProviderForArgs(ctx, service, args[0], flags)
-				if err != nil {
-					return err
-				}
-				err = service.DownloadFile(ctx, args[0], args[1], args[2], app.TransferOptions{
-					Credentials:      provider,
+				downloadErr := service.DownloadFile(ctx, args[0], args[1], args[2], app.TransferOptions{
 					Overwrite:        overwrite,
 					CreateParent:     createParent,
 					MaxDownloadBytes: maxBytes,
 				})
-				if err != nil {
-					return err
+				if downloadErr != nil {
+					return downloadErr
 				}
-				_, err = fmt.Fprintf(a.Stdout(), "下载成功: %s -> %s\n", args[1], args[2])
-				return err
+				_, writeErr := fmt.Fprintf(a.Stdout(), "下载成功: %s -> %s\n", args[1], args[2])
+				return writeErr
 			})
 		},
 	}
@@ -311,43 +283,6 @@ func newHostDownloadCommand(a *app.App) *cobra.Command {
 		"允许下载的远程文件大小上限（字节），0 表示不限制",
 	)
 	return command
-}
-
-// credentialProviderForArgs 读取节点配置并构造凭据提供器。
-func credentialProviderForArgs(
-	ctx context.Context,
-	service *app.SSHService,
-	id string,
-	flags credentialFlags,
-) (sshclient.CredentialProvider, error) {
-	host, err := service.Host(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	return credentialProviderFor(host.AuthMethod, flags)
-}
-
-// credentialProviderFor 按认证方式构造凭据提供器。
-func credentialProviderFor(
-	method domain.AuthMethod,
-	flags credentialFlags,
-) (sshclient.CredentialProvider, error) {
-	return newCredentialProvider(credentialOptions{
-		Method:       sshclient.AuthMethod(method),
-		Flags:        flags,
-		Stdin:        osStdin(),
-		Prompt:       osStderr(),
-		IsTerminal:   defaultIsTerminal,
-		ReadPassword: defaultReadPassword,
-	})
-}
-
-// withOptionalTimeout 在 timeout 大于零时附加超时。
-func withOptionalTimeout(ctx context.Context, timeout time.Duration) (context.Context, func()) {
-	if timeout <= 0 {
-		return ctx, func() {}
-	}
-	return context.WithTimeout(ctx, timeout)
 }
 
 // printConnectionResult 输出连接测试结果。

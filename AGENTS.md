@@ -147,6 +147,53 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
 - 未知主机必须返回 `CodeHostKeyUnknown` 并给出算法与 SHA-256 指纹；密钥变化必须返回
   `CodeHostKeyMismatch` 并给出已信任记录，不得静默接受或自动覆盖。
 - 信任记录只写入 AgentFlow 自己的 known_hosts 文件，用户 OpenSSH 的 known_hosts 只读。
+- SSH 认证方式固定为无口令私钥：`domain.AuthMethod` 与 `sshclient.AuthMethod` 只有
+  `private_key` 一个取值，节点配置必须给出 `private_key_path`。不得重新引入 SSH Agent、
+  密码认证或私钥口令（passphrase）支持，也不得注册 `--password-stdin`、
+  `--passphrase-stdin`、`--ask-pass` 等凭据输入参数。
+- 私钥文件只被读取：不得复制到工作空间、写入数据库或日志，也不得修改其权限或内容。
+  加密私钥必须返回明确的不支持错误，而不是挂起等待口令输入。
+- 存量数据库中 `auth_method` 为 `agent` 或 `password` 的记录保留原值，不写迁移改写；
+  这类节点在校验时因认证方式不受支持而判为 `abnormal`，由用户显式改成私钥。
+
+### 执行节点环境预检约束
+
+- 执行节点（`execution_hosts`）的校验状态只有 `checking`、`normal`、`abnormal` 三种，
+  定义在 `domain.ValidationStatus`；单项结果使用 `domain.CheckStatus`，不得新增第二套
+  总体状态名，也不得把 `checking` 显示为成功。
+- 新建节点一律由服务端置为 `checking` 并提交后台校验，客户端不能指定
+  `validation_status`、`validation_generation` 等校验字段。
+- 任何影响连接目标、认证方式、私钥路径、远程工作空间或启用状态的修改都必须调用
+  `InvalidateValidation`：状态回到 `checking`、清空旧摘要与详情、代次加一。
+- 校验结果必须通过 `UpdateExecutionHostValidation` 以代次为条件写入；代次不一致时
+  丢弃结果，不得覆盖新配置。`RecordValidationResult` 与 `FailValidation` 同样校验代次。
+- 三项必需检查按顺序执行：SSH 连接 → Docker CLI 帮助信息 → 基础 Dockerfile 的外部
+  `FROM` 镜像元数据。前一项失败时后续检查记为 `not_run`，不得伪装成已验证。
+- 只有当前代次全部必需检查都通过才允许写入 `normal`；`skipped` 与 `not_run` 一律不算通过。
+- 无法开始校验（调度失败、服务未运行等）时不得永久停留在 `checking`：要么保持可恢复的
+  待校验状态并由启动恢复重新调度，要么收敛为 `abnormal` 并给出可读原因。
+- `normal` 的含义仅限本方案实际执行的检查：Docker 兼容性只基于 CLI 帮助信息，不验证
+  Engine 的实际运行契约，因此不得把 `normal` 表述为"容器创建与运行已验证"。
+- Docker CLI 帮助检查只允许执行 `docker <command> --help`：禁止在该检查中执行
+  `create`、`run`、`start`、`pull` 等任何创建容器、启动工作负载或下载镜像层的命令，
+  也不得执行 `docker version`、API 能力探测或实际容器操作。
+- 帮助检查的命令与参数清单必须与 `internal/docker` 中真实的命令构造保持一致
+  （`docker.RequiredCLICommands`）；新增 Docker 调用必须同步更新清单。
+- 镜像预检只允许查询 `FROM` 镜像元数据（Docker Engine 的 Distribution Inspect），
+  禁止 `docker pull`、完整 `docker build`、创建临时容器或运行镜像内程序，也不得改变
+  远端镜像缓存、容器与卷状态。查询经由已认证 SSH 连接直接访问远端 Docker Engine 的
+  Unix 套接字，不要求远端安装 curl 等额外工具，也不得用 `docker pull` 作为回退手段。
+- 无法解析的 `FROM` 动态引用（例如依赖构建期参数的变量）必须判为失败并记录原因，
+  不得跳过并判为成功；`scratch` 与内部阶段别名不产生网络查询。
+- 校验超时集中定义在 `internal/docker/validation.go`：单步 SSH 检查、单镜像查询与整体
+  时限都不得分散写入 Handler 或业务方法，且整体时限必须大于单步时限。
+- 后台校验作为 `agentflow server` 的后台服务注册进 `internal/lifecycle`：由统一 Server
+  启动与停止，不得在 HTTP Handler 内创建不受管理的长期 goroutine。停止时必须取消在途
+  校验并等待其释放 SSH 连接；启动时必须重新调度停留在 `checking` 的记录。
+- 任何使用持久化执行节点执行真实远程操作的入口都必须经过
+  `app.EnsureHostUsableForRemoteTask`（`withRemoteSession` 已统一调用）；不得只依赖
+  Web UI 禁用按钮。只有校验本身与只读预检允许在节点未通过校验时执行。
+- 校验错误与日志必须截断并脱敏：不得写入密码、令牌、私钥内容、认证头或完整环境变量。
 
 ### 远程执行与 Session 约束
 

@@ -76,7 +76,10 @@ func seedTaskPrerequisites(
 		}
 	})
 	now := time.Now().UTC()
-	host, err := domain.NewExecutionHost("", "测试节点", "127.0.0.1", 0, "deploy", "", now)
+	host, err := domain.NewExecutionHost(
+		"", "测试节点", "127.0.0.1", 0, "deploy", "", now,
+		domain.WithPrivateKey(testPrivateKeyPath(t)),
+	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
 	}
@@ -363,4 +366,12 @@ func extractTaskID(t *testing.T, stdout string) string {
 	}
 	t.Fatalf("输出中没有任务标识: %s", stdout)
 	return ""
+}
+
+// testPrivateKeyPath 返回测试工作空间中的一个私钥文件路径。
+//
+// 本版本只支持私钥认证，构造执行节点时必须提供该路径。
+func testPrivateKeyPath(t *testing.T) string {
+	t.Helper()
+	return testkit.PrivateKeyPath(t)
 }

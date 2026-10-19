@@ -9,7 +9,6 @@ import (
 
 	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/source"
-	"github.com/lingting/agentflow/internal/sshclient"
 )
 
 // FetchSourceRequest 是把项目代码获取到任务容器内部的输入。
@@ -26,8 +25,6 @@ type FetchSourceRequest struct {
 	WorkDir string
 	// Timeout 是本次代码获取的超时时间。
 	Timeout time.Duration
-	// Credentials 提供本次 SSH 连接所需的凭据。
-	Credentials sshclient.CredentialProvider
 }
 
 // FetchSource 在受管理的任务容器内部获取仓库代码并初始化任务分支。
@@ -49,7 +46,6 @@ func (s *ContainerService) FetchSource(
 	err = s.withRemoteDocker(
 		ctx,
 		container.HostID.String(),
-		request.Credentials,
 		false,
 		func(ctx context.Context, session *remoteDocker) error {
 			unlock := s.locks.Lock(container.ID.String())

@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/lingting/agentflow/internal/sshclient"
 )
 
 // 环境预检的超时时间。
@@ -47,7 +45,6 @@ func (p EnvironmentProbe) Ready() bool {
 func (s *ContainerService) ProbeEnvironment(
 	ctx context.Context,
 	containerID string,
-	credentials sshclient.CredentialProvider,
 ) (EnvironmentProbe, error) {
 	container, err := s.loadContainer(ctx, containerID)
 	if err != nil {
@@ -63,7 +60,6 @@ func (s *ContainerService) ProbeEnvironment(
 	err = s.withRemoteDocker(
 		ctx,
 		container.HostID.String(),
-		credentials,
 		false,
 		func(ctx context.Context, session *remoteDocker) error {
 			unlock := s.locks.Lock(container.ID.String())

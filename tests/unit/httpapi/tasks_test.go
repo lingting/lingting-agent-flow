@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -94,6 +95,7 @@ func apiHost(
 	now time.Time,
 ) domain.ExecutionHost {
 	t.Helper()
+	// 本版本只支持私钥认证，因此测试节点必须带私钥路径。
 	host, err := domain.NewExecutionHost(
 		"",
 		"测试节点",
@@ -102,6 +104,7 @@ func apiHost(
 		"deploy",
 		"/srv/agentflow",
 		now,
+		domain.WithPrivateKey(filepath.Join(testkit.Dir(t), "id_ed25519")),
 	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)

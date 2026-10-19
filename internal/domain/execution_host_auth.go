@@ -7,22 +7,18 @@ import (
 
 // AuthMethod 标识执行节点使用的 SSH 身份认证方式。
 //
-// 该类型只描述认证方式的种类，不保存任何凭据：密码、私钥口令等敏感材料只能
-// 通过内存中的凭据提供器传递，禁止写入数据库、配置文件或日志。
+// 本版本只支持本机私钥文件认证：SSH Agent 与密码认证已移除。该类型只描述认证
+// 方式的种类，不保存任何凭据内容；私钥文件本身始终留在本机，AgentFlow 只保存
+// 其路径并只读访问。
 type AuthMethod string
 
 // 受支持的 SSH 认证方式。
 const (
-	// AuthMethodAgent 表示通过标准 SSH Agent 获取签名身份。
-	//
-	// 这是新建节点的默认认证方式：它不需要在配置中保存任何机密材料。
-	AuthMethodAgent AuthMethod = "agent"
 	// AuthMethodPrivateKey 表示使用本机私钥文件认证。
-	AuthMethodPrivateKey AuthMethod = "private_key"
-	// AuthMethodPassword 表示使用密码认证。
 	//
-	// 密码默认不持久化，只在单次连接过程中通过凭据提供器在内存中传递。
-	AuthMethodPassword AuthMethod = "password"
+	// 这是新建节点的唯一认证方式：它不需要在配置中保存密码或口令，
+	// 私钥文件也不会被复制或修改。
+	AuthMethodPrivateKey AuthMethod = "private_key"
 )
 
 // String 返回认证方式的字符串形式。
@@ -32,12 +28,14 @@ func (m AuthMethod) String() string {
 
 // Validate 校验认证方式是否受支持。
 func (m AuthMethod) Validate() error {
-	switch m {
-	case AuthMethodAgent, AuthMethodPrivateKey, AuthMethodPassword:
+	if m == AuthMethodPrivateKey {
 		return nil
-	default:
-		return invalidField("ExecutionHost", "auth_method", "不支持的认证方式 "+string(m))
 	}
+	return invalidField(
+		"ExecutionHost",
+		"auth_method",
+		"不支持的认证方式 "+string(m)+"（本版本只支持 "+string(AuthMethodPrivateKey)+"）",
+	)
 }
 
 // ParseAuthMethod 解析命令行或配置中给出的认证方式名称。
@@ -145,7 +143,7 @@ func validateAuthConfig(host ExecutionHost) error {
 	if err := validatePrivateKeyPath(host.PrivateKeyPath); err != nil {
 		return err
 	}
-	if host.AuthMethod == AuthMethodPrivateKey && strings.TrimSpace(host.PrivateKeyPath) == "" {
+	if strings.TrimSpace(host.PrivateKeyPath) == "" {
 		return invalidField("ExecutionHost", "private_key_path", "私钥认证必须指定私钥文件路径")
 	}
 	return nil
@@ -158,10 +156,15 @@ type HostOption func(*ExecutionHost)
 
 // WithAuth 指定认证方式与私钥文件路径。
 //
-// 该方法只写入非机密的认证配置；密码与私钥口令永远不会进入实体。
+// 该方法只写入非机密的认证配置；本版本只接受私钥认证，其他方式在校验时被拒绝。
 func WithAuth(method AuthMethod, privateKeyPath string) HostOption {
 	return func(host *ExecutionHost) {
 		host.AuthMethod = method
 		host.PrivateKeyPath = strings.TrimSpace(privateKeyPath)
 	}
+}
+
+// WithPrivateKey 指定本机私钥文件路径，认证方式固定为私钥。
+func WithPrivateKey(privateKeyPath string) HostOption {
+	return WithAuth(AuthMethodPrivateKey, privateKeyPath)
 }

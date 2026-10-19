@@ -23,8 +23,6 @@ type BuildRequest struct {
 	VersionNumber int
 	// NoCache 表示禁用 Docker 构建缓存。
 	NoCache bool
-	// Credentials 提供本次连接所需的凭据。
-	Credentials sshclient.CredentialProvider
 }
 
 // BuildResult 是一次环境构建的结果。
@@ -54,7 +52,6 @@ func (s *EnvironmentService) Build(
 	err := s.withRemoteDocker(
 		ctx,
 		request.MachineID,
-		request.Credentials,
 		false,
 		func(ctx context.Context, session *remoteDocker) error {
 			unlock := s.locks.Lock(lockKey(session.host.ID, request.Ref))
@@ -281,8 +278,6 @@ type DownloadBuildLogRequest struct {
 	LocalPath string
 	// Overwrite 允许覆盖已存在的本机文件。
 	Overwrite bool
-	// Credentials 提供本次连接所需的凭据。
-	Credentials sshclient.CredentialProvider
 }
 
 // DownloadBuildLog 把远程构建日志下载到本机指定位置。
@@ -297,7 +292,6 @@ func (s *EnvironmentService) DownloadBuildLog(
 	err := s.withRemoteDocker(
 		ctx,
 		request.MachineID,
-		request.Credentials,
 		false,
 		func(ctx context.Context, session *remoteDocker) error {
 			version, err := s.resolveVersion(ctx, session.host.ID, request.Ref, request.VersionNumber)

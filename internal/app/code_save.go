@@ -8,7 +8,6 @@ import (
 
 	"github.com/lingting/agentflow/internal/codesaver"
 	"github.com/lingting/agentflow/internal/domain"
-	"github.com/lingting/agentflow/internal/sshclient"
 	"github.com/lingting/agentflow/internal/storage"
 )
 
@@ -34,8 +33,6 @@ type CodeSaveRequest struct {
 	Author domain.GitAuthor
 	// RemoteName 是 Git 远程名称，空值使用 origin。
 	RemoteName string
-	// Credentials 提供本次 SSH 连接所需的凭据。
-	Credentials sshclient.CredentialProvider
 	// Operation 是本次要执行的操作组合，零值等价于 save。
 	Operation codesaver.Operation
 }
@@ -70,7 +67,6 @@ func (s *ContainerService) SaveCode(
 	err = s.withRemoteDocker(
 		ctx,
 		container.HostID.String(),
-		request.Credentials,
 		false,
 		func(ctx context.Context, session *remoteDocker) error {
 			unlock := s.locks.Lock(container.ID.String())

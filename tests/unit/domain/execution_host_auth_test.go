@@ -9,18 +9,34 @@ import (
 	"github.com/lingting/agentflow/internal/domain"
 )
 
-// TestNewExecutionHostDefaultsToAgentAuth 验证未指定认证方式时使用 SSH Agent。
-func TestNewExecutionHostDefaultsToAgentAuth(t *testing.T) {
+// TestNewExecutionHostRequiresPrivateKey 验证认证方式固定为私钥且必须给出私钥路径。
+//
+// 本版本只支持私钥认证：不提供 --key 的节点配置必须被拒绝，而不是回落到
+// 某个隐式默认认证方式。
+func TestNewExecutionHostRequiresPrivateKey(t *testing.T) {
 	t.Parallel()
-	host, err := domain.NewExecutionHost("", "节点", "10.0.0.10", 0, "deploy", "", time.Now())
-	if err != nil {
-		t.Fatalf("构造执行节点失败: %v", err)
+	_, err := domain.NewExecutionHost("", "节点", "10.0.0.10", 0, "deploy", "", time.Now())
+	if err == nil {
+		t.Fatal("未给出私钥路径时应当被拒绝")
 	}
-	if host.AuthMethod != domain.AuthMethodAgent {
-		t.Fatalf("默认认证方式应为 agent，实际: %s", host.AuthMethod)
+	if !errors.Is(err, domain.ErrInvalidValue) {
+		t.Fatalf("应当是字段校验错误，实际: %v", err)
 	}
-	if host.PrivateKeyPath != "" {
-		t.Fatalf("默认不应有私钥路径，实际: %s", host.PrivateKeyPath)
+	host, hostErr := domain.NewExecutionHost(
+		"",
+		"节点",
+		"10.0.0.10",
+		0,
+		"deploy",
+		"",
+		time.Now(),
+		domain.WithPrivateKey("/home/user/.ssh/id_ed25519"),
+	)
+	if hostErr != nil {
+		t.Fatalf("构造执行节点失败: %v", hostErr)
+	}
+	if host.AuthMethod != domain.AuthMethodPrivateKey {
+		t.Fatalf("认证方式应为 private_key，实际: %s", host.AuthMethod)
 	}
 	if host.LastConnectStatus != domain.ConnectStatusUnknown {
 		t.Fatalf("新建节点不应有连接结果，实际: %s", host.LastConnectStatus)
@@ -75,17 +91,19 @@ func TestNewExecutionHostRejectsPrivateKeyWithoutPath(t *testing.T) {
 // TestAuthMethodValidate 验证认证方式取值约束。
 func TestAuthMethodValidate(t *testing.T) {
 	t.Parallel()
-	for _, method := range []domain.AuthMethod{
-		domain.AuthMethodAgent,
-		domain.AuthMethodPrivateKey,
-		domain.AuthMethodPassword,
-	} {
-		if err := method.Validate(); err != nil {
-			t.Fatalf("认证方式 %s 应当受支持: %v", method, err)
-		}
+	if err := domain.AuthMethodPrivateKey.Validate(); err != nil {
+		t.Fatalf("私钥认证应当受支持: %v", err)
 	}
-	if err := domain.AuthMethod("kerberos").Validate(); err == nil {
-		t.Fatal("未知认证方式应当返回错误")
+	// 已移除的认证方式与未知取值都必须被拒绝。
+	for _, method := range []domain.AuthMethod{
+		"agent",
+		"password",
+		"kerberos",
+		"",
+	} {
+		if err := method.Validate(); err == nil {
+			t.Fatalf("认证方式 %q 应当被拒绝", method)
+		}
 	}
 }
 
@@ -107,7 +125,10 @@ func TestParseAuthMethod(t *testing.T) {
 // TestExecutionHostRejectsNonSHA256Fingerprint 验证主机密钥指纹格式约束。
 func TestExecutionHostRejectsNonSHA256Fingerprint(t *testing.T) {
 	t.Parallel()
-	host, err := domain.NewExecutionHost("", "节点", "10.0.0.10", 22, "deploy", "", time.Now())
+	host, err := domain.NewExecutionHost(
+		"", "节点", "10.0.0.10", 22, "deploy", "", time.Now(),
+		domain.WithPrivateKey(testPrivateKeyPath(t)),
+	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
 	}
@@ -120,7 +141,10 @@ func TestExecutionHostRejectsNonSHA256Fingerprint(t *testing.T) {
 // TestRecordConnectResult 验证连接结果记录与敏感信息约束。
 func TestRecordConnectResult(t *testing.T) {
 	t.Parallel()
-	host, err := domain.NewExecutionHost("", "节点", "10.0.0.10", 22, "deploy", "", time.Now())
+	host, err := domain.NewExecutionHost(
+		"", "节点", "10.0.0.10", 22, "deploy", "", time.Now(),
+		domain.WithPrivateKey(testPrivateKeyPath(t)),
+	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
 	}
@@ -149,7 +173,10 @@ func TestRecordConnectResult(t *testing.T) {
 // TestRecordConnectResultRejectsFreeText 验证连接错误字段不能写入任意文本。
 func TestRecordConnectResultRejectsFreeText(t *testing.T) {
 	t.Parallel()
-	host, err := domain.NewExecutionHost("", "节点", "10.0.0.10", 22, "deploy", "", time.Now())
+	host, err := domain.NewExecutionHost(
+		"", "节点", "10.0.0.10", 22, "deploy", "", time.Now(),
+		domain.WithPrivateKey(testPrivateKeyPath(t)),
+	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
 	}
@@ -169,7 +196,10 @@ func TestRecordConnectResultRejectsFreeText(t *testing.T) {
 // TestTrustHostKey 验证主机密钥信任记录。
 func TestTrustHostKey(t *testing.T) {
 	t.Parallel()
-	host, err := domain.NewExecutionHost("", "节点", "10.0.0.10", 22, "deploy", "", time.Now())
+	host, err := domain.NewExecutionHost(
+		"", "节点", "10.0.0.10", 22, "deploy", "", time.Now(),
+		domain.WithPrivateKey(testPrivateKeyPath(t)),
+	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
 	}

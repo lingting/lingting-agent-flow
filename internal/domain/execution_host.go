@@ -50,9 +50,26 @@ type ExecutionHost struct {
 	// LastConnectError 是最近一次连接失败的分类代码，不包含敏感内容。
 	LastConnectError string `json:"last_connect_error,omitempty"`
 	// LastConnectedAt 是最近一次连接测试的时间，未测试时为空。
+	// LastConnectedAt 是最近一次连接测试的时间，未测试时为空。
 	LastConnectedAt *time.Time `json:"last_connected_at,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	// ValidationStatus 是环境预检的总体状态。
+	//
+	// 取值见 ValidationStatus 常量；只有 normal 允许用于真实远程任务执行。
+	// 该字段不参与 Validate 的取值校验：数据库不声明枚举白名单，读取层必须原样
+	// 保留未知取值，不能把它映射成某个已知状态。
+	ValidationStatus ValidationStatus `json:"validation_status"`
+	// ValidationMessage 是最新校验结果的摘要或失败原因，不包含凭据内容。
+	ValidationMessage string `json:"validation_message,omitempty"`
+	// ValidationDetails 是各项校验的结构化结果，未完成校验时为空。
+	ValidationDetails *ValidationDetails `json:"validation_details,omitempty"`
+	// ValidationStartedAt 是最近一次校验的开始时间。
+	ValidationStartedAt *time.Time `json:"validation_started_at,omitempty"`
+	// ValidationCompletedAt 是最近一次校验的结束时间，未完成时为空。
+	ValidationCompletedAt *time.Time `json:"validation_completed_at,omitempty"`
+	// ValidationGeneration 是校验代次，用于阻止旧结果覆盖新配置。
+	ValidationGeneration int64     `json:"validation_generation"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 // NewExecutionHost 创建并校验执行节点。
@@ -82,10 +99,14 @@ func NewExecutionHost(
 		Username:      strings.TrimSpace(username),
 		WorkspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		Enabled:       true,
-		// 未指定认证方式时使用 SSH Agent：它不需要在配置中保存任何机密材料。
-		AuthMethod: AuthMethodAgent,
-		CreatedAt:  createdAt,
-		UpdatedAt:  createdAt,
+		// 认证方式固定为私钥：本版本不再支持 SSH Agent 与密码认证。
+		AuthMethod: AuthMethodPrivateKey,
+		// 新建节点尚未完成预检，由服务端统一置为 checking；客户端不能指定为 normal。
+		// 代次从 1 开始，使首次校验拥有明确的代次基线。
+		ValidationStatus:     ValidationStatusChecking,
+		ValidationGeneration: 1,
+		CreatedAt:            createdAt,
+		UpdatedAt:            createdAt,
 	}
 	for _, option := range options {
 		if option != nil {
@@ -127,7 +148,11 @@ func (h ExecutionHost) Validate() error {
 	if err := h.LastConnectStatus.Validate(); err != nil {
 		return err
 	}
-	return validateConnectErrorCode(h.LastConnectError)
+	if err := validateConnectErrorCode(h.LastConnectError); err != nil {
+		return err
+	}
+	// validation_status 不校验取值：数据库不声明枚举白名单，读取层必须保留未知值。
+	return nil
 }
 
 // RecordConnectResult 记录最近一次连接测试的结果。

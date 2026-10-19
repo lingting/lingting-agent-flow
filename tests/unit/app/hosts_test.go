@@ -70,9 +70,10 @@ func TestCreateExecutionHostWithDefaults(t *testing.T) {
 	t.Parallel()
 	service, _ := newService(t)
 	created, err := service.Create(testContext(t), app.CreateExecutionHostRequest{
-		Name:     "构建节点",
-		Host:     "10.0.0.11",
-		Username: "deploy",
+		Name:           "构建节点",
+		Host:           "10.0.0.11",
+		Username:       "deploy",
+		PrivateKeyPath: testPrivateKeyPath(t),
 	})
 	if err != nil {
 		t.Fatalf("新增执行节点失败: %v", err)
@@ -96,12 +97,13 @@ func TestCreateExecutionHostWithExplicitWorkspace(t *testing.T) {
 	t.Parallel()
 	service, _ := newService(t)
 	created, err := service.Create(testContext(t), app.CreateExecutionHostRequest{
-		ID:            "node-a",
-		Name:          "构建节点",
-		Host:          "10.0.0.11",
-		Port:          2222,
-		Username:      "ci",
-		WorkspaceRoot: "/srv/agentflow",
+		ID:             "node-a",
+		Name:           "构建节点",
+		Host:           "10.0.0.11",
+		Port:           2222,
+		Username:       "ci",
+		WorkspaceRoot:  "/srv/agentflow",
+		PrivateKeyPath: testPrivateKeyPath(t),
 	})
 	if err != nil {
 		t.Fatalf("新增执行节点失败: %v", err)
@@ -120,19 +122,21 @@ func TestCreateExecutionHostAsDefault(t *testing.T) {
 	service, _ := newService(t)
 	ctx := testContext(t)
 	first, err := service.Create(ctx, app.CreateExecutionHostRequest{
-		Name:     "第一个",
-		Host:     "10.0.0.1",
-		Username: "deploy",
-		Default:  true,
+		Name:           "第一个",
+		Host:           "10.0.0.1",
+		Username:       "deploy",
+		Default:        true,
+		PrivateKeyPath: testPrivateKeyPath(t),
 	})
 	if err != nil {
 		t.Fatalf("新增执行节点失败: %v", err)
 	}
 	second, err := service.Create(ctx, app.CreateExecutionHostRequest{
-		Name:     "第二个",
-		Host:     "10.0.0.2",
-		Username: "deploy",
-		Default:  true,
+		Name:           "第二个",
+		Host:           "10.0.0.2",
+		Username:       "deploy",
+		Default:        true,
+		PrivateKeyPath: testPrivateKeyPath(t),
 	})
 	if err != nil {
 		t.Fatalf("新增执行节点失败: %v", err)
@@ -178,9 +182,10 @@ func TestSetDefaultRejectsDisabledHost(t *testing.T) {
 	service, _ := newService(t)
 	ctx := testContext(t)
 	created, err := service.Create(ctx, app.CreateExecutionHostRequest{
-		Name:     "构建节点",
-		Host:     "10.0.0.11",
-		Username: "deploy",
+		Name:           "构建节点",
+		Host:           "10.0.0.11",
+		Username:       "deploy",
+		PrivateKeyPath: testPrivateKeyPath(t),
 	})
 	if err != nil {
 		t.Fatalf("新增执行节点失败: %v", err)
@@ -213,9 +218,10 @@ func TestUpdateExecutionHostChangesFields(t *testing.T) {
 	service, _ := newService(t)
 	ctx := testContext(t)
 	created, err := service.Create(ctx, app.CreateExecutionHostRequest{
-		Name:     "构建节点",
-		Host:     "10.0.0.11",
-		Username: "deploy",
+		Name:           "构建节点",
+		Host:           "10.0.0.11",
+		Username:       "deploy",
+		PrivateKeyPath: testPrivateKeyPath(t),
 	})
 	if err != nil {
 		t.Fatalf("新增执行节点失败: %v", err)
@@ -248,12 +254,14 @@ func TestUpdateExecutionHostSwitchesDefault(t *testing.T) {
 	ctx := testContext(t)
 	first, err := service.Create(ctx, app.CreateExecutionHostRequest{
 		Name: "第一个", Host: "10.0.0.1", Username: "deploy", Default: true,
+		PrivateKeyPath: testPrivateKeyPath(t),
 	})
 	if err != nil {
 		t.Fatalf("新增执行节点失败: %v", err)
 	}
 	second, err := service.Create(ctx, app.CreateExecutionHostRequest{
 		Name: "第二个", Host: "10.0.0.2", Username: "deploy",
+		PrivateKeyPath: testPrivateKeyPath(t),
 	})
 	if err != nil {
 		t.Fatalf("新增执行节点失败: %v", err)
@@ -288,6 +296,7 @@ func TestRemoveExecutionHost(t *testing.T) {
 	ctx := testContext(t)
 	created, err := service.Create(ctx, app.CreateExecutionHostRequest{
 		Name: "构建节点", Host: "10.0.0.11", Username: "deploy", Default: true,
+		PrivateKeyPath: testPrivateKeyPath(t),
 	})
 	if err != nil {
 		t.Fatalf("新增执行节点失败: %v", err)
@@ -314,6 +323,7 @@ func TestRemoveExecutionHostRejectedWithActiveTask(t *testing.T) {
 	ctx := testContext(t)
 	created, err := service.Create(ctx, app.CreateExecutionHostRequest{
 		Name: "构建节点", Host: "10.0.0.12", Username: "deploy",
+		PrivateKeyPath: testPrivateKeyPath(t),
 	})
 	if err != nil {
 		t.Fatalf("新增执行节点失败: %v", err)
@@ -368,6 +378,7 @@ func TestRemoveExecutionHostKeepsHistoryReferences(t *testing.T) {
 	ctx := testContext(t)
 	created, err := service.Create(ctx, app.CreateExecutionHostRequest{
 		Name: "构建节点", Host: "10.0.0.13", Username: "deploy",
+		PrivateKeyPath: testPrivateKeyPath(t),
 	})
 	if err != nil {
 		t.Fatalf("新增执行节点失败: %v", err)
@@ -447,6 +458,7 @@ func TestProbeExecutionHostDetectsSSH(t *testing.T) {
 	host, port := startSSHServer(t, "SSH-2.0-OpenSSH_9.6\r\n")
 	created, err := service.Create(ctx, app.CreateExecutionHostRequest{
 		Name: "本地节点", Host: host, Port: port, Username: "deploy",
+		PrivateKeyPath: testPrivateKeyPath(t),
 	})
 	if err != nil {
 		t.Fatalf("新增执行节点失败: %v", err)
@@ -477,6 +489,7 @@ func TestProbeExecutionHostNotSSH(t *testing.T) {
 	host, port := startSSHServer(t, "HTTP/1.1 400 Bad Request\r\n\r\n")
 	created, err := service.Create(ctx, app.CreateExecutionHostRequest{
 		Name: "本地节点", Host: host, Port: port, Username: "deploy",
+		PrivateKeyPath: testPrivateKeyPath(t),
 	})
 	if err != nil {
 		t.Fatalf("新增执行节点失败: %v", err)
@@ -539,7 +552,12 @@ func mustHost(t *testing.T, store storage.Store, request app.CreateExecutionHost
 	ctx := testContext(t)
 	method := request.AuthMethod
 	if method == "" {
-		method = domain.AuthMethodAgent
+		// 本版本只支持私钥认证。
+		method = domain.AuthMethodPrivateKey
+	}
+	privateKeyPath := request.PrivateKeyPath
+	if privateKeyPath == "" {
+		privateKeyPath = writeTestPrivateKey(t)
 	}
 	host, err := domain.NewExecutionHost(
 		domain.ID(request.ID),
@@ -549,7 +567,7 @@ func mustHost(t *testing.T, store storage.Store, request app.CreateExecutionHost
 		request.Username,
 		request.WorkspaceRoot,
 		time.Now(),
-		domain.WithAuth(method, request.PrivateKeyPath),
+		domain.WithAuth(method, privateKeyPath),
 	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
@@ -632,6 +650,7 @@ func TestTestConnectionRejectsDisabledHost(t *testing.T) {
 	ctx := testContext(t)
 	id := mustHost(t, store, app.CreateExecutionHostRequest{
 		ID: "node-disabled", Name: "禁用节点", Host: "10.0.0.31", Username: "deploy",
+		PrivateKeyPath: testPrivateKeyPath(t),
 	})
 	host, err := store.GetExecutionHost(ctx, id)
 	if err != nil {
@@ -644,7 +663,7 @@ func TestTestConnectionRejectsDisabledHost(t *testing.T) {
 	if _, testErr := service.TestConnection(ctx, id.String(), app.TestConnectionOptions{}); testErr == nil {
 		t.Fatal("禁用节点应当返回错误")
 	}
-	if _, connectErr := service.Connect(ctx, id.String(), nil); connectErr == nil {
+	if _, connectErr := service.Connect(ctx, id.String()); connectErr == nil {
 		t.Fatal("禁用节点不应允许建立连接")
 	}
 }
@@ -667,7 +686,7 @@ func TestTestConnectionMissingHost(t *testing.T) {
 func TestEnsureWorkspaceMissingHost(t *testing.T) {
 	t.Parallel()
 	service, _ := newSSHService(t)
-	_, err := service.EnsureWorkspace(testContext(t), domain.NewID().String(), nil, false)
+	_, err := service.EnsureWorkspace(testContext(t), domain.NewID().String(), false)
 	if !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("应当返回记录不存在，实际: %v", err)
 	}
@@ -679,6 +698,7 @@ func TestTrustHostKeyRequiresFingerprint(t *testing.T) {
 	service, store := newSSHService(t)
 	id := mustHost(t, store, app.CreateExecutionHostRequest{
 		ID: "node-trust", Name: "信任节点", Host: "10.0.0.32", Username: "deploy",
+		PrivateKeyPath: testPrivateKeyPath(t),
 	})
 	if _, err := service.TrustHostKey(testContext(t), id.String(), "  "); err == nil {
 		t.Fatal("缺少指纹时应当返回错误")

@@ -106,8 +106,6 @@ func resolveStorePath(options SSHOptions) string {
 
 // TestConnectionOptions 约束一次连接测试。
 type TestConnectionOptions struct {
-	// Credentials 提供本次认证所需的凭据，密码与私钥口令认证必填。
-	Credentials sshclient.CredentialProvider
 	// CheckWorkspace 表示连接成功后同时解析并检查远程工作空间。
 	CheckWorkspace bool
 	// CreateWorkspace 表示检查工作空间时按需创建目录。
@@ -169,7 +167,7 @@ func (s *SSHService) TestConnection(
 		result.Detail = err.Error()
 		return result, fmt.Errorf("测试 SSH 连接失败: %w", err)
 	}
-	dialResult, dialErr := s.dialer.Dial(ctx, endpoint, authConfig, options.Credentials)
+	dialResult, dialErr := s.dialer.Dial(ctx, endpoint, authConfig)
 	result.HostKey = dialResult.HostKey
 	result.HostKeyVerdict = dialResult.HostKeyVerdict
 	result.Duration = dialResult.Duration
@@ -401,7 +399,6 @@ func (c *SSHConnection) Close() error {
 func (s *SSHService) Connect(
 	ctx context.Context,
 	id string,
-	provider sshclient.CredentialProvider,
 ) (*SSHConnection, error) {
 	host, err := s.loadHost(ctx, id)
 	if err != nil {
@@ -414,7 +411,7 @@ func (s *SSHService) Connect(
 	if err != nil {
 		return nil, fmt.Errorf("连接执行节点失败: %w", err)
 	}
-	dialResult, dialErr := s.dialer.Dial(ctx, endpoint, authConfig, provider)
+	dialResult, dialErr := s.dialer.Dial(ctx, endpoint, authConfig)
 	if dialErr != nil {
 		s.recordResult(ctx, host, domain.ConnectStatusFailed, sshclient.ErrorCodeOf(dialErr).String())
 		return nil, fmt.Errorf("连接执行节点失败: %w", dialErr)
@@ -450,10 +447,9 @@ type WorkspaceResult struct {
 func (s *SSHService) EnsureWorkspace(
 	ctx context.Context,
 	id string,
-	provider sshclient.CredentialProvider,
 	create bool,
 ) (WorkspaceResult, error) {
-	connection, err := s.Connect(ctx, id, provider)
+	connection, err := s.Connect(ctx, id)
 	if err != nil {
 		return WorkspaceResult{}, err
 	}
@@ -477,8 +473,6 @@ func (s *SSHService) EnsureWorkspace(
 
 // TransferOptions 约束一次文件传输。
 type TransferOptions struct {
-	// Credentials 提供本次认证所需的凭据。
-	Credentials sshclient.CredentialProvider
 	// Overwrite 允许覆盖已存在的目标文件。
 	Overwrite bool
 	// CreateParent 表示自动创建目标文件的父目录。
@@ -495,7 +489,7 @@ func (s *SSHService) UploadFile(
 	id, localPath, remotePath string,
 	options TransferOptions,
 ) error {
-	return s.withTransfer(ctx, id, options.Credentials, func(transfer sshclient.FileTransfer) error {
+	return s.withTransfer(ctx, id, func(transfer sshclient.FileTransfer) error {
 		return transfer.Upload(ctx, localPath, remotePath, sshclient.UploadOptions{
 			Overwrite:    options.Overwrite,
 			CreateParent: options.CreateParent,
@@ -509,7 +503,7 @@ func (s *SSHService) DownloadFile(
 	id, remotePath, localPath string,
 	options TransferOptions,
 ) error {
-	return s.withTransfer(ctx, id, options.Credentials, func(transfer sshclient.FileTransfer) error {
+	return s.withTransfer(ctx, id, func(transfer sshclient.FileTransfer) error {
 		return transfer.Download(ctx, remotePath, localPath, sshclient.DownloadOptions{
 			Overwrite:    options.Overwrite,
 			CreateParent: options.CreateParent,
@@ -522,10 +516,9 @@ func (s *SSHService) DownloadFile(
 func (s *SSHService) withTransfer(
 	ctx context.Context,
 	id string,
-	provider sshclient.CredentialProvider,
 	run func(transfer sshclient.FileTransfer) error,
 ) error {
-	connection, err := s.Connect(ctx, id, provider)
+	connection, err := s.Connect(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -583,17 +576,17 @@ func endpointFor(host domain.ExecutionHost) (sshclient.Endpoint, sshclient.AuthC
 }
 
 // toSSHAuthMethod 把领域层的认证方式转换为 SSH 客户端的认证方式。
+//
+// 本版本只支持私钥认证：其他取值一律返回明确错误，而不是回落到某个默认方式。
 func toSSHAuthMethod(method domain.AuthMethod) (sshclient.AuthMethod, error) {
-	switch method {
-	case domain.AuthMethodPassword:
-		return sshclient.AuthMethodPassword, nil
-	case domain.AuthMethodPrivateKey:
-		return sshclient.AuthMethodPrivateKey, nil
-	case domain.AuthMethodAgent:
-		return sshclient.AuthMethodAgent, nil
-	default:
-		return "", fmt.Errorf("不支持的认证方式 %q", method)
+	if method != domain.AuthMethodPrivateKey {
+		return "", fmt.Errorf(
+			"不支持的认证方式 %q（本版本只支持 %s）",
+			method,
+			domain.AuthMethodPrivateKey,
+		)
 	}
+	return sshclient.AuthMethodPrivateKey, nil
 }
 
 // debug 输出调试日志；未配置日志器时忽略。

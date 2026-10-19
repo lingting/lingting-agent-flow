@@ -28,8 +28,6 @@ const (
 type ContainerAgentRequest struct {
 	// ContainerID 是容器登记记录 ID。
 	ContainerID string
-	// Credentials 提供本次连接所需的凭据。
-	Credentials sshclient.CredentialProvider
 	// TaskID 是本次调用所属任务，用于确定 Session 目录归属。
 	TaskID string
 	// StepID 是本次调用所属步骤，可为空。
@@ -95,7 +93,6 @@ func (s *ContainerService) RunAgent(
 	err = s.withRemoteDocker(
 		ctx,
 		container.HostID.String(),
-		request.Credentials,
 		false,
 		func(ctx context.Context, session *remoteDocker) error {
 			unlock := s.locks.Lock(container.ID.String())

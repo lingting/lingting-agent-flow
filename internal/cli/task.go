@@ -8,7 +8,6 @@ import (
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/config"
 	"github.com/lingting/agentflow/internal/domain"
-	"github.com/lingting/agentflow/internal/sshclient"
 	"github.com/lingting/agentflow/internal/storage"
 	"github.com/lingting/agentflow/internal/workflow"
 	"github.com/spf13/cobra"
@@ -62,23 +61,8 @@ func withTaskServices(
 		ctx context.Context,
 		services dockerServices,
 	) error {
-		var credentialsErr error
-		var credentials sshclient.CredentialProvider
-		// 未显式指定 --host 时按默认执行节点收集凭据：任务本身已记录所属节点，
-		// 缺少凭据只会在真正需要远程连接时暴露，不会被静默跳过。
-		targetHost := strings.TrimSpace(hostID)
-		if targetHost == "" {
-			if host, hostErr := services.store.GetDefaultExecutionHost(ctx); hostErr == nil {
-				targetHost = host.ID.String()
-			}
-		}
-		if targetHost != "" {
-			provider, err := credentialProviderForArgs(ctx, services.ssh, targetHost, flags)
-			if err != nil {
-				credentialsErr = err
-			}
-			credentials = provider
-		}
+		// 认证方式固定为无口令私钥，任务执行不需要额外收集凭据；
+		// 节点是否可用由执行节点准入校验在执行阶段统一确认。
 		sessions, err := app.NewSessionService(
 			services.store,
 			app.SessionRoot(services.config),
@@ -88,11 +72,10 @@ func withTaskServices(
 			return err
 		}
 		workflowService, err := app.NewWorkflowService(app.WorkflowOptions{
-			Containers:  services.containers,
-			Sessions:    sessions,
-			Store:       services.store,
-			Logger:      a.Logger().Slog(),
-			Credentials: credentials,
+			Containers: services.containers,
+			Sessions:   sessions,
+			Store:      services.store,
+			Logger:     a.Logger().Slog(),
 		})
 		if err != nil {
 			return err
@@ -123,14 +106,6 @@ func withTaskServices(
 		})
 		if err != nil {
 			return err
-		}
-		if credentialsErr != nil {
-			a.Logger().Slog().WarnContext(
-				ctx,
-				"未能准备 SSH 凭据，远程阶段会失败",
-				"error",
-				credentialsErr,
-			)
 		}
 		return run(ctx, taskServices{tasks: tasks, engine: engine, recovery: recovery})
 	})

@@ -9,7 +9,6 @@ import (
 
 	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
-	"github.com/lingting/agentflow/internal/sshclient"
 	"github.com/lingting/agentflow/internal/storage"
 )
 
@@ -57,8 +56,6 @@ type CreateContainerRequest struct {
 	Command []string
 	// SkipRunContractCheck 跳过运行契约预检，仅用于已知镜像已满足契约的场景。
 	SkipRunContractCheck bool
-	// Credentials 提供本次连接所需的凭据。
-	Credentials sshclient.CredentialProvider
 }
 
 // ContainerDetail 是容器记录与远程观测结果的组合。
@@ -88,7 +85,6 @@ func (s *ContainerService) CreateContainer(
 	err := s.withRemoteDocker(
 		ctx,
 		request.MachineID,
-		request.Credentials,
 		false,
 		func(ctx context.Context, session *remoteDocker) error {
 			unlock := s.createLocks.Lock(session.host.ID.String())

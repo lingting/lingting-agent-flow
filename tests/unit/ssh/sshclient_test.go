@@ -124,20 +124,18 @@ func TestHostKeyTrustRequiresKey(t *testing.T) {
 	}
 }
 
-// TestAuthMethodValidate 验证只接受受支持的认证方式。
+// TestAuthMethodValidate 验证只接受私钥认证。
+//
+// 本版本已移除 SSH Agent 与密码认证，因此它们与未知取值一样必须被拒绝。
 func TestAuthMethodValidate(t *testing.T) {
 	t.Parallel()
-	for _, method := range []sshclient.AuthMethod{
-		sshclient.AuthMethodPassword,
-		sshclient.AuthMethodPrivateKey,
-		sshclient.AuthMethodAgent,
-	} {
-		if err := method.Validate(); err != nil {
-			t.Fatalf("认证方式 %s 应当被接受: %v", method, err)
-		}
+	if err := sshclient.AuthMethodPrivateKey.Validate(); err != nil {
+		t.Fatalf("私钥认证应当被接受: %v", err)
 	}
-	if err := sshclient.AuthMethod("kerberos").Validate(); err == nil {
-		t.Fatal("未知认证方式应当被拒绝")
+	for _, method := range []sshclient.AuthMethod{"agent", "password", "kerberos", ""} {
+		if err := method.Validate(); err == nil {
+			t.Fatalf("认证方式 %q 应当被拒绝", method)
+		}
 	}
 }
 
@@ -145,8 +143,6 @@ func TestAuthMethodValidate(t *testing.T) {
 func TestAuthConfigValidate(t *testing.T) {
 	t.Parallel()
 	valid := []sshclient.AuthConfig{
-		{Method: sshclient.AuthMethodAgent},
-		{Method: sshclient.AuthMethodPassword},
 		{Method: sshclient.AuthMethodPrivateKey, PrivateKeyPath: "/home/deploy/.ssh/id_ed25519"},
 	}
 	for _, config := range valid {
@@ -158,70 +154,13 @@ func TestAuthConfigValidate(t *testing.T) {
 		{Method: sshclient.AuthMethodPrivateKey},
 		{Method: sshclient.AuthMethodPrivateKey, PrivateKeyPath: "   "},
 		{Method: "kerberos"},
+		{Method: "agent"},
+		{Method: "password"},
 	}
 	for _, config := range invalid {
 		if err := config.Validate(); err == nil {
 			t.Fatalf("配置 %+v 应当被拒绝", config)
 		}
-	}
-}
-
-// TestCredentialProvidersMatchMethod 验证凭据提供器与认证方式匹配。
-func TestCredentialProvidersMatchMethod(t *testing.T) {
-	t.Parallel()
-	password := sshclient.PasswordProvider{Password: []byte("secret")}
-	if password.Method() != sshclient.AuthMethodPassword {
-		t.Fatalf("密码提供器的认证方式不符: %s", password.Method())
-	}
-	passphrase := sshclient.PassphraseProvider{Passphrase: []byte("secret")}
-	if passphrase.Method() != sshclient.AuthMethodPrivateKey {
-		t.Fatalf("口令提供器的认证方式不符: %s", passphrase.Method())
-	}
-}
-
-// TestCredentialProviderReturnsCopy 验证凭据是副本，清除后不影响提供器。
-func TestCredentialProviderReturnsCopy(t *testing.T) {
-	t.Parallel()
-	source := []byte("secret")
-	provider := sshclient.PasswordProvider{Password: source}
-	credential, err := provider.Credential(context.Background())
-	if err != nil {
-		t.Fatalf("读取凭据失败: %v", err)
-	}
-	credential.Clear()
-	if string(source) != "secret" {
-		t.Fatalf("清除副本不应影响提供器持有的内容: %q", string(source))
-	}
-	if !credential.Empty() {
-		t.Fatalf("清除后凭据应当为空: %+v", credential)
-	}
-}
-
-// TestCredentialProviderRejectsEmptySecret 验证没有凭据时立即失败而不是挂起。
-func TestCredentialProviderRejectsEmptySecret(t *testing.T) {
-	t.Parallel()
-	if _, err := (sshclient.PasswordProvider{}).Credential(context.Background()); !errors.Is(
-		err,
-		sshclient.ErrNoCredential,
-	) {
-		t.Fatalf("空密码应返回 ErrNoCredential，实际: %v", err)
-	}
-	if _, err := (sshclient.PassphraseProvider{}).Credential(context.Background()); !errors.Is(
-		err,
-		sshclient.ErrNoCredential,
-	) {
-		t.Fatalf("空口令应返回 ErrNoCredential，实际: %v", err)
-	}
-}
-
-// TestCredentialProviderRespectsCancellation 验证已取消的上下文立即失败。
-func TestCredentialProviderRespectsCancellation(t *testing.T) {
-	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	provider := sshclient.PasswordProvider{Password: []byte("secret")}
-	if _, err := provider.Credential(ctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("应当返回上下文取消错误，实际: %v", err)
 	}
 }
 
@@ -256,8 +195,10 @@ func TestEndpointValidation(t *testing.T) {
 		_, dialErr := dialer.Dial(
 			context.Background(),
 			endpoint,
-			sshclient.AuthConfig{Method: sshclient.AuthMethodAgent},
-			nil,
+			sshclient.AuthConfig{
+				Method:         sshclient.AuthMethodPrivateKey,
+				PrivateKeyPath: "/home/deploy/.ssh/id_ed25519",
+			},
 		)
 		if dialErr == nil {
 			t.Fatalf("非法目标 %+v 应当被拒绝", endpoint)
@@ -280,8 +221,10 @@ func TestDialRespectsCancelledContext(t *testing.T) {
 	_, dialErr := dialer.Dial(
 		ctx,
 		sshclient.Endpoint{Host: "10.0.0.1", Port: 22, Username: "deploy"},
-		sshclient.AuthConfig{Method: sshclient.AuthMethodAgent},
-		nil,
+		sshclient.AuthConfig{
+			Method:         sshclient.AuthMethodPrivateKey,
+			PrivateKeyPath: "/home/deploy/.ssh/id_ed25519",
+		},
 	)
 	if !errors.Is(dialErr, context.Canceled) {
 		t.Fatalf("应当返回上下文取消错误，实际: %v", dialErr)
@@ -475,9 +418,7 @@ func TestErrorCodes(t *testing.T) {
 		sshclient.CodeHostKeyMismatch,
 		sshclient.CodeHostKeyRevoked,
 		sshclient.CodeAuthFailed,
-		sshclient.CodeNoCredential,
 		sshclient.CodePrivateKey,
-		sshclient.CodeAgentUnavailable,
 		sshclient.CodeTimeout,
 		sshclient.CodeCancelled,
 	}

@@ -13,10 +13,12 @@ import (
 const executionHostColumns = `id, name, host, port, username, workspace_root,
 	is_default, enabled, auth_method, private_key_path, host_key_algorithm,
 	host_key_fingerprint, host_key_trusted_at, last_connect_status,
-	last_connect_error, last_connected_at, created_at, updated_at`
+	last_connect_error, last_connected_at, validation_status, validation_message,
+	validation_details_json, validation_started_at, validation_completed_at,
+	validation_generation, created_at, updated_at`
 
 // executionHostInsertCount 是写入执行节点时的参数个数。
-const executionHostInsertCount = 18
+const executionHostInsertCount = 24
 
 // executionHostStore 实现 storage.ExecutionHostStore。
 type executionHostStore struct {
@@ -59,6 +61,8 @@ UPDATE execution_hosts SET
 	is_default = ?, enabled = ?, auth_method = ?, private_key_path = ?,
 	host_key_algorithm = ?, host_key_fingerprint = ?, host_key_trusted_at = ?,
 	last_connect_status = ?, last_connect_error = ?, last_connected_at = ?,
+	validation_status = ?, validation_message = ?, validation_details_json = ?,
+	validation_started_at = ?, validation_completed_at = ?, validation_generation = ?,
 	updated_at = ?
 WHERE id = ?`
 	result, err := s.q.ExecContext(
@@ -79,6 +83,12 @@ WHERE id = ?`
 		nullIfBlank(host.LastConnectStatus.String()),
 		nullIfBlank(host.LastConnectError),
 		toMillisPtr(host.LastConnectedAt),
+		validationStatusValue(host.ValidationStatus),
+		nullIfBlank(host.ValidationMessage),
+		validationDetailsJSON(host.ValidationDetails),
+		toMillisPtr(host.ValidationStartedAt),
+		toMillisPtr(host.ValidationCompletedAt),
+		validationGenerationValue(host.ValidationGeneration),
 		toMillis(host.UpdatedAt),
 		toIDParam(host.ID),
 	)
@@ -109,6 +119,12 @@ func executionHostArgs(host domain.ExecutionHost) []any {
 		nullIfBlank(host.LastConnectStatus.String()),
 		nullIfBlank(host.LastConnectError),
 		toMillisPtr(host.LastConnectedAt),
+		validationStatusValue(host.ValidationStatus),
+		nullIfBlank(host.ValidationMessage),
+		validationDetailsJSON(host.ValidationDetails),
+		toMillisPtr(host.ValidationStartedAt),
+		toMillisPtr(host.ValidationCompletedAt),
+		validationGenerationValue(host.ValidationGeneration),
 		toMillis(host.CreatedAt),
 		toMillis(host.UpdatedAt),
 	}
@@ -247,20 +263,26 @@ func (s executionHostStore) GetDefaultExecutionHost(
 // scanExecutionHost 从一行结果读取执行节点。
 func scanExecutionHost(row scanner) (*domain.ExecutionHost, error) {
 	var (
-		host             domain.ExecutionHost
-		rawID            string
-		isDefault        int
-		enabled          int
-		authMethod       string
-		privateKeyPath   sql.NullString
-		hostKeyAlgorithm sql.NullString
-		hostKeyPrint     sql.NullString
-		hostKeyTrustedAt sql.NullInt64
-		connectStatus    sql.NullString
-		connectError     sql.NullString
-		connectedAt      sql.NullInt64
-		createdAt        int64
-		updatedAt        int64
+		host              domain.ExecutionHost
+		rawID             string
+		isDefault         int
+		enabled           int
+		authMethod        string
+		privateKeyPath    sql.NullString
+		hostKeyAlgorithm  sql.NullString
+		hostKeyPrint      sql.NullString
+		hostKeyTrustedAt  sql.NullInt64
+		connectStatus     sql.NullString
+		connectError      sql.NullString
+		connectedAt       sql.NullInt64
+		validationStatus  string
+		validationMessage sql.NullString
+		validationDetails sql.NullString
+		validationStart   sql.NullInt64
+		validationDone    sql.NullInt64
+		validationGen     int64
+		createdAt         int64
+		updatedAt         int64
 	)
 	err := row.Scan(
 		&rawID,
@@ -279,6 +301,12 @@ func scanExecutionHost(row scanner) (*domain.ExecutionHost, error) {
 		&connectStatus,
 		&connectError,
 		&connectedAt,
+		&validationStatus,
+		&validationMessage,
+		&validationDetails,
+		&validationStart,
+		&validationDone,
+		&validationGen,
 		&createdAt,
 		&updatedAt,
 	)
@@ -296,6 +324,12 @@ func scanExecutionHost(row scanner) (*domain.ExecutionHost, error) {
 	host.LastConnectStatus = domain.ConnectStatus(connectStatus.String)
 	host.LastConnectError = connectError.String
 	host.LastConnectedAt = fromMillisPtr(connectedAt)
+	host.ValidationStatus = domain.ValidationStatus(validationStatus)
+	host.ValidationMessage = validationMessage.String
+	host.ValidationDetails = decodeValidationDetails(validationDetails.String)
+	host.ValidationStartedAt = fromMillisPtr(validationStart)
+	host.ValidationCompletedAt = fromMillisPtr(validationDone)
+	host.ValidationGeneration = validationGen
 	host.CreatedAt = fromMillis(createdAt)
 	host.UpdatedAt = fromMillis(updatedAt)
 	return &host, nil

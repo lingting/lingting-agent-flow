@@ -21,10 +21,10 @@ func newAuthenticatedClient(t *testing.T) (*testServer, sshclient.Client) {
 	host, port := server.endpoint()
 	store := newStore(t, writeKnownHosts(t, host, port, server.hostKey.PublicKey()))
 	dialer := newDialer(t, store)
-	config, provider := passwordAuth(testPassword)
+	config := privateKeyAuth(t)
 	result, err := dialer.Dial(testContext(t), sshclient.Endpoint{
 		Host: host, Port: port, Username: testUser,
-	}, config, provider)
+	}, config)
 	if err != nil {
 		t.Fatalf("建立测试连接失败: %v", err)
 	}

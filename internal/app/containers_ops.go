@@ -9,7 +9,6 @@ import (
 
 	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
-	"github.com/lingting/agentflow/internal/sshclient"
 	"github.com/lingting/agentflow/internal/storage"
 )
 
@@ -45,8 +44,6 @@ func (s *ContainerService) ListContainers(
 type InspectContainerRequest struct {
 	// ContainerID 是容器登记记录 ID。
 	ContainerID string
-	// Credentials 提供本次连接所需的凭据。
-	Credentials sshclient.CredentialProvider
 	// Sync 表示同时更新本地记录的 Docker 状态观测结果。
 	Sync bool
 }
@@ -66,7 +63,6 @@ func (s *ContainerService) InspectContainer(
 	err = s.withRemoteDocker(
 		ctx,
 		container.HostID.String(),
-		request.Credentials,
 		false,
 		func(ctx context.Context, session *remoteDocker) error {
 			unlock := s.locks.Lock(container.ID.String())
@@ -171,8 +167,6 @@ func ensureManaged(container domain.Container) error {
 type StartContainerRequest struct {
 	// ContainerID 是容器登记记录 ID。
 	ContainerID string
-	// Credentials 提供本次连接所需的凭据。
-	Credentials sshclient.CredentialProvider
 }
 
 // StartContainer 启动受管理容器并核验运行状态。
@@ -180,7 +174,7 @@ func (s *ContainerService) StartContainer(
 	ctx context.Context,
 	request StartContainerRequest,
 ) (ContainerDetail, error) {
-	return s.withContainerLock(ctx, request.ContainerID, request.Credentials, func(
+	return s.withContainerLock(ctx, request.ContainerID, func(
 		ctx context.Context,
 		session *remoteDocker,
 		container domain.Container,
@@ -227,8 +221,6 @@ type StopContainerRequest struct {
 	ContainerID string
 	// TimeoutSeconds 是停止等待秒数，零值使用 10 秒。
 	TimeoutSeconds int
-	// Credentials 提供本次连接所需的凭据。
-	Credentials sshclient.CredentialProvider
 }
 
 // StopContainer 停止受管理容器，保留容器现场。
@@ -236,7 +228,7 @@ func (s *ContainerService) StopContainer(
 	ctx context.Context,
 	request StopContainerRequest,
 ) (ContainerDetail, error) {
-	return s.withContainerLock(ctx, request.ContainerID, request.Credentials, func(
+	return s.withContainerLock(ctx, request.ContainerID, func(
 		ctx context.Context,
 		session *remoteDocker,
 		container domain.Container,
@@ -271,8 +263,6 @@ type DeleteContainerRequest struct {
 	ContainerID string
 	// Reason 是生命周期结束原因，空值使用 manual。
 	Reason domain.ContainerEndReason
-	// Credentials 提供本次连接所需的凭据。
-	Credentials sshclient.CredentialProvider
 }
 
 // DeleteContainer 删除受管理容器及其任务级临时资源。
@@ -283,7 +273,7 @@ func (s *ContainerService) DeleteContainer(
 	ctx context.Context,
 	request DeleteContainerRequest,
 ) (ContainerDetail, error) {
-	return s.withContainerLock(ctx, request.ContainerID, request.Credentials, func(
+	return s.withContainerLock(ctx, request.ContainerID, func(
 		ctx context.Context,
 		session *remoteDocker,
 		container domain.Container,
@@ -339,8 +329,6 @@ func (s *ContainerService) deleteLocked(
 type DetachContainerRequest struct {
 	// ContainerID 是容器登记记录 ID。
 	ContainerID string
-	// Credentials 提供本次连接所需的凭据。
-	Credentials sshclient.CredentialProvider
 }
 
 // DetachContainer 把容器脱离 AgentFlow 自动管理并保留现场。
@@ -351,7 +339,7 @@ func (s *ContainerService) DetachContainer(
 	ctx context.Context,
 	request DetachContainerRequest,
 ) (ContainerDetail, error) {
-	return s.withContainerLock(ctx, request.ContainerID, request.Credentials, func(
+	return s.withContainerLock(ctx, request.ContainerID, func(
 		ctx context.Context,
 		session *remoteDocker,
 		container domain.Container,
@@ -390,8 +378,6 @@ type ContainerLogsRequest struct {
 	ContainerID string
 	// TailLines 是返回的末尾行数，零值使用 200。
 	TailLines int
-	// Credentials 提供本次连接所需的凭据。
-	Credentials sshclient.CredentialProvider
 }
 
 // ContainerLogs 读取容器日志。
@@ -409,7 +395,6 @@ func (s *ContainerService) ContainerLogs(
 	err = s.withRemoteDocker(
 		ctx,
 		container.HostID.String(),
-		request.Credentials,
 		false,
 		func(ctx context.Context, session *remoteDocker) error {
 			target := container.DockerID
@@ -438,8 +423,6 @@ type ExecRequest struct {
 	Command []string
 	// Timeout 是执行超时时间，零值使用默认值。
 	Timeout time.Duration
-	// Credentials 提供本次连接所需的凭据。
-	Credentials sshclient.CredentialProvider
 }
 
 // ExecResult 是容器内命令的执行结果。
@@ -463,7 +446,6 @@ func (s *ContainerService) Exec(
 	err = s.withRemoteDocker(
 		ctx,
 		container.HostID.String(),
-		request.Credentials,
 		false,
 		func(ctx context.Context, session *remoteDocker) error {
 			if err := ensureManaged(container); err != nil {
@@ -500,8 +482,6 @@ type ApplyLifecycleRequest struct {
 	Outcome domain.ContainerOutcome
 	// KeepInterrupted 表示中断时保留容器。
 	KeepInterrupted bool
-	// Credentials 提供本次连接所需的凭据。
-	Credentials sshclient.CredentialProvider
 }
 
 // ApplyLifecycleResult 是生命周期策略的执行结果。
@@ -533,7 +513,6 @@ func (s *ContainerService) ApplyLifecycle(
 		detail, deleteErr := s.DeleteContainer(ctx, DeleteContainerRequest{
 			ContainerID: request.ContainerID,
 			Reason:      decision.EndReason,
-			Credentials: request.Credentials,
 		})
 		result.Container = detail.Container
 		if deleteErr != nil {
@@ -542,7 +521,6 @@ func (s *ContainerService) ApplyLifecycle(
 	case domain.ContainerRetentionDetach:
 		detail, detachErr := s.DetachContainer(ctx, DetachContainerRequest{
 			ContainerID: request.ContainerID,
-			Credentials: request.Credentials,
 		})
 		result.Container = detail.Container
 		if detachErr != nil {
@@ -566,8 +544,6 @@ type RestartContainerRequest struct {
 	Disposition domain.RestartDisposition
 	// Create 是创建新容器的输入；新容器总是从配置的镜像版本重新创建。
 	Create CreateContainerRequest
-	// Credentials 提供本次连接所需的凭据。
-	Credentials sshclient.CredentialProvider
 }
 
 // RestartContainer 处置旧容器并创建全新的任务容器。
@@ -602,14 +578,12 @@ func (s *ContainerService) RestartContainer(
 		if _, err := s.DeleteContainer(ctx, DeleteContainerRequest{
 			ContainerID: previous.ID.String(),
 			Reason:      domain.ContainerEndReasonTaskFailed,
-			Credentials: request.Credentials,
 		}); err != nil {
 			return ContainerDetail{}, fmt.Errorf("处置旧容器失败: %w", err)
 		}
 	case domain.RestartDispositionDetach:
 		if _, err := s.DetachContainer(ctx, DetachContainerRequest{
 			ContainerID: previous.ID.String(),
-			Credentials: request.Credentials,
 		}); err != nil {
 			return ContainerDetail{}, fmt.Errorf("处置旧容器失败: %w", err)
 		}
@@ -629,7 +603,6 @@ func (s *ContainerService) RestartContainer(
 func (s *ContainerService) withContainerLock(
 	ctx context.Context,
 	containerID string,
-	provider sshclient.CredentialProvider,
 	run func(ctx context.Context, session *remoteDocker, container domain.Container) (ContainerDetail, error),
 ) (ContainerDetail, error) {
 	container, err := s.loadContainer(ctx, containerID)
@@ -640,7 +613,6 @@ func (s *ContainerService) withContainerLock(
 	err = s.withRemoteDocker(
 		ctx,
 		container.HostID.String(),
-		provider,
 		false,
 		func(ctx context.Context, session *remoteDocker) error {
 			unlock := s.locks.Lock(container.ID.String())

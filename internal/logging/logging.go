@@ -50,6 +50,8 @@ func ParseLevel(name string) (slog.Level, error) {
 type Logger struct {
 	logger *slog.Logger
 	level  *slog.LevelVar
+	// wrapped 表示该日志器包装了外部传入的 slog.Logger。
+	wrapped bool
 }
 
 // New 创建输出到 w 的日志器。
@@ -64,6 +66,22 @@ func New(w io.Writer, level string) (*Logger, error) {
 	return &Logger{logger: slog.New(handler), level: levelVar}, nil
 }
 
+// FromSlog 把已有的 slog 日志器包装为应用层日志器。
+//
+// 该函数用于上层已经持有 slog.Logger 的场景（例如 internal/server）：包装后的日志器
+// 与传入日志器共用同一个 handler，因此输出目标与级别完全一致。
+//
+// 包装结果不接受 SetLevel：级别由调用方持有的 handler 决定，这里不复制也不覆盖它，
+// 避免出现"设置了级别却没有生效"的假象。
+func FromSlog(logger *slog.Logger) *Logger {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	level := new(slog.LevelVar)
+	level.Set(slog.LevelInfo)
+	return &Logger{logger: logger, level: level, wrapped: true}
+}
+
 // Slog 返回底层 slog 日志器，供各层记录结构化日志。
 func (l *Logger) Slog() *slog.Logger {
 	return l.logger
@@ -71,6 +89,11 @@ func (l *Logger) Slog() *slog.Logger {
 
 // SetLevel 调整日志级别，用于加载配置后应用 app.log_level。
 func (l *Logger) SetLevel(level string) error {
+	if l.wrapped {
+		// 包装的日志器级别由外部 handler 决定，这里只校验取值是否合法。
+		_, err := ParseLevel(level)
+		return err
+	}
 	parsed, err := ParseLevel(level)
 	if err != nil {
 		return fmt.Errorf("logging: %w", err)

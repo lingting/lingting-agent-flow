@@ -135,6 +135,7 @@ func seedServerHost(
 		"deploy",
 		"/srv/agentflow",
 		now,
+		domain.WithPrivateKey(testPrivateKeyPath(t)),
 	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
@@ -324,4 +325,12 @@ func TestTaskAPIConflictStatusOverHTTP(t *testing.T) {
 	if failure.Error.Code != httpapi.CodeConflict {
 		t.Fatalf("错误代码应为 %q，实际 %q", httpapi.CodeConflict, failure.Error.Code)
 	}
+}
+
+// testPrivateKeyPath 返回测试工作空间中的一个私钥文件路径。
+//
+// 本版本只支持私钥认证，构造执行节点时必须提供该路径。
+func testPrivateKeyPath(t *testing.T) string {
+	t.Helper()
+	return testkit.PrivateKeyPath(t)
 }

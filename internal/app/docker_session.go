@@ -94,6 +94,11 @@ type sessionOptions struct {
 	//
 	// 只读预检需要它：预检的职责之一就是报告工作空间是否存在与可写。
 	AllowMissingWorkspace bool
+	// AllowUnvalidated 表示跳过执行节点准入校验。
+	//
+	// 只允许只读预检与校验器自身使用：校验的职责之一就是确认节点是否可用，
+	// 因此它必须能在节点尚未通过校验时执行。
+	AllowUnvalidated bool
 }
 
 // withRemoteDocker 建立连接并在会话内执行一次操作。
@@ -102,27 +107,32 @@ type sessionOptions struct {
 func (s *remoteDockerService) withRemoteDocker(
 	ctx context.Context,
 	hostID string,
-	provider sshclient.CredentialProvider,
 	createWorkspace bool,
 	run func(ctx context.Context, session *remoteDocker) error,
 ) error {
-	return s.withRemoteSession(ctx, hostID, provider, sessionOptions{
+	return s.withRemoteSession(ctx, hostID, sessionOptions{
 		CreateWorkspace: createWorkspace,
 	}, run)
 }
 
 // withRemoteSession 按给定选项建立连接并执行一次操作。
+//
+// 这是全部真实远程操作的唯一入口，因此执行节点准入校验也在这里实施：只有当前
+// 配置版本的环境预检通过（validation_status = normal）的节点才允许建立远程会话。
+// 校验本身与只读预检（AllowUnvalidated）不受该限制约束。
 func (s *remoteDockerService) withRemoteSession(
 	ctx context.Context,
 	hostID string,
-	provider sshclient.CredentialProvider,
 	options sessionOptions,
 	run func(ctx context.Context, session *remoteDocker) error,
 ) error {
 	if run == nil {
 		return fmt.Errorf("远程 Docker 操作失败: 回调不能为空")
 	}
-	connection, err := s.ssh.Connect(ctx, hostID, provider)
+	if err := s.ensureHostUsable(ctx, hostID, options); err != nil {
+		return err
+	}
+	connection, err := s.ssh.Connect(ctx, hostID)
 	if err != nil {
 		return err
 	}
@@ -170,6 +180,69 @@ func (s *remoteDockerService) withRemoteSession(
 	}
 	session.runner = runner
 	return run(ctx, session)
+}
+
+// ensureHostUsable 校验执行节点是否允许用于真实远程操作。
+//
+// 规则：节点必须存在且未删除，并且当前配置版本的 validation_status 必须是 normal。
+// 处于 checking 或 abnormal 的节点一律拒绝，并给出可定位的原因与后续操作提示。
+func (s *remoteDockerService) ensureHostUsable(
+	ctx context.Context,
+	hostID string,
+	options sessionOptions,
+) error {
+	if options.AllowUnvalidated {
+		return nil
+	}
+	return s.ensureHostValidated(ctx, hostID)
+}
+
+// ensureHostValidated 是准入校验的实际实现，供远程操作与任务执行入口共用。
+func (s *remoteDockerService) ensureHostValidated(ctx context.Context, hostID string) error {
+	host, err := s.loadHost(ctx, hostID)
+	if err != nil {
+		return err
+	}
+	return EnsureHostUsableForRemoteTask(host)
+}
+
+// EnsureHostUsableForRemoteTask 判断执行节点是否允许用于真实远程任务执行。
+//
+// 任何使用持久化执行节点执行真实远程操作的入口都必须调用本函数（或经由
+// withRemoteSession 间接调用），不能只依赖 Web UI 禁用按钮。
+func EnsureHostUsableForRemoteTask(host domain.ExecutionHost) error {
+	if !host.Enabled {
+		return fmt.Errorf(
+			"%w: 执行节点 %s 已禁用，请先启用该节点",
+			ErrHostValidationUnavailable,
+			host.ID,
+		)
+	}
+	switch host.ValidationStatus {
+	case domain.ValidationStatusNormal:
+		return nil
+	case domain.ValidationStatusChecking:
+		return fmt.Errorf(
+			"%w: 执行节点 %s 的环境预检尚未完成（状态 checking），请等待校验结束后重试；"+
+				"可用 agentflow host validate %s 重新触发校验",
+			ErrHostValidationUnavailable,
+			host.ID,
+			host.ID,
+		)
+	default:
+		message := strings.TrimSpace(host.ValidationMessage)
+		if message == "" {
+			message = "环境预检未通过"
+		}
+		return fmt.Errorf(
+			"%w: 执行节点 %s 不可用（状态 %s）：%s；请修复后执行 agentflow host validate %s",
+			ErrHostValidationUnavailable,
+			host.ID,
+			host.ValidationStatus,
+			message,
+			host.ID,
+		)
+	}
 }
 
 // SSHService 返回命令层用于构造凭据提供器的 SSH 服务。

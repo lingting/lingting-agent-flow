@@ -19,6 +19,7 @@ import (
 	"github.com/lingting/agentflow/internal/config"
 	"github.com/lingting/agentflow/internal/httpserver"
 	"github.com/lingting/agentflow/internal/lifecycle"
+	"github.com/lingting/agentflow/internal/logging"
 	"github.com/lingting/agentflow/internal/storage"
 )
 
@@ -55,6 +56,18 @@ type Options struct {
 	Tasks *app.TaskService
 	// Services 是按依赖顺序排列的后台服务，可留空。
 	Services []Service
+	// Hosts 是执行节点服务，为空时由已打开的数据库自动构造。
+	//
+	// 执行节点接口与后台环境预检都依赖它；构造后由 Server 接入统一生命周期，
+	// 因此后台校验服务不需要单独启动。
+	Hosts *app.ExecutionHostService
+	// SSH 是 SSH 服务，用于构造执行节点环境预检能力；为空时跳过自动构造。
+	SSH *app.SSHService
+	// SSHFactory 在数据库打开后构造 SSH 服务。
+	//
+	// SSH 服务需要数据库与配置（known_hosts 路径、超时），因此不能在构造 Server
+	// 时创建。工厂返回错误时启动失败，已启动组件按逆序清理。
+	SSHFactory func(store storage.Store, cfg *config.Config) (*app.SSHService, error)
 	// RequireWebUI 为 true 时缺少前端构建产物将导致启动失败。
 	//
 	// 正式发布构建应当置为 true；开发时先启动后端再构建前端属于正常流程，
@@ -70,9 +83,13 @@ type Options struct {
 type Server struct {
 	address    string
 	openStore  StoreOpener
+	sshFactory func(store storage.Store, cfg *config.Config) (*app.SSHService, error)
 	systemInfo func() app.SystemInfo
 	tasks      *app.TaskService
 	services   []Service
+	hosts      *app.ExecutionHostService
+	ssh        *app.SSHService
+	validation *app.HostValidationService
 	requireWeb bool
 	logger     *slog.Logger
 	report     func(message string)
@@ -117,9 +134,12 @@ func New(options Options) (*Server, error) {
 	return &Server{
 		address:    options.Address,
 		openStore:  options.OpenStore,
+		sshFactory: options.SSHFactory,
 		systemInfo: options.SystemInfo,
 		tasks:      options.Tasks,
 		services:   options.Services,
+		hosts:      options.Hosts,
+		ssh:        options.SSH,
 		requireWeb: options.RequireWebUI,
 		logger:     options.Logger,
 		report:     report,
@@ -171,19 +191,101 @@ func (s *Server) openDatabase(ctx context.Context) error {
 		return fmt.Errorf("初始化数据库失败: %w", err)
 	}
 	s.store = store
+	if s.ssh == nil && s.sshFactory != nil {
+		sshService, err := s.sshFactory(store, s.cfg)
+		if err != nil {
+			return fmt.Errorf("初始化 SSH 服务失败: %w", err)
+		}
+		s.ssh = sshService
+	}
 	s.logger.DebugContext(ctx, "数据库已就绪", slog.String("path", s.cfg.Storage.DatabasePath))
 	return nil
 }
 
-// startServices 注册并启动后台服务。
+// startServices 构造执行节点服务与后台校验服务，并按注册顺序启动。
+//
+// 环境预检作为后台服务注册进统一生命周期：由这里启动与停止，不在 HTTP Handler
+// 内创建不受管理的长期 goroutine。
 func (s *Server) startServices(ctx context.Context) error {
-	if len(s.services) == 0 {
+	hosts, err := s.hostService()
+	if err != nil {
+		return err
+	}
+	services := append([]Service(nil), s.services...)
+	if hosts != nil {
+		validation, validationErr := s.hostValidationService(hosts)
+		if validationErr != nil {
+			return validationErr
+		}
+		if validation != nil {
+			services = append(services, validation)
+		}
+	}
+	if len(services) == 0 {
 		return nil
 	}
-	if err := s.manager.Register(s.services...); err != nil {
+	if err := s.manager.Register(services...); err != nil {
 		return err
 	}
 	return s.manager.Start(ctx)
+}
+
+// loggerWrapper 把 slog 日志器适配为应用层日志器。
+//
+// server 层只持有 slog.Logger；应用服务需要 logging.Logger 才能记录结构化日志。
+// 包装后两者共用同一个 handler，输出目标与级别一致，不会产生第二套日志格式。
+func (s *Server) loggerWrapper() *logging.Logger {
+	return logging.FromSlog(s.logger)
+}
+
+// hostService 返回执行节点服务。
+//
+// 未显式注入时用已打开的数据库构造，并接入后台校验服务与同步校验器，
+// 使新增与修改节点后能自动触发预检。
+func (s *Server) hostService() (*app.ExecutionHostService, error) {
+	if s.hosts != nil {
+		return s.hosts, nil
+	}
+	if s.store == nil {
+		return nil, nil
+	}
+	hosts, err := app.NewExecutionHostService(s.store, s.loggerWrapper())
+	if err != nil {
+		return nil, fmt.Errorf("初始化执行节点服务失败: %w", err)
+	}
+	s.hosts = hosts
+	return hosts, nil
+}
+
+// hostValidationService 构造后台环境预检服务并接入执行节点服务。
+//
+// SSH 服务缺失时无法执行预检，此时返回 nil：执行节点接口仍然可用，
+// 新增节点会停留在 checking，直到通过 CLI 或配置修正后重新校验。
+func (s *Server) hostValidationService(
+	hosts *app.ExecutionHostService,
+) (*app.HostValidationService, error) {
+	if s.ssh == nil || s.store == nil {
+		return nil, nil
+	}
+	validator, err := app.NewHostValidator(app.HostValidationOptions{
+		SSH:    s.ssh,
+		Store:  s.store,
+		Logger: s.loggerWrapper(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("初始化执行节点校验器失败: %w", err)
+	}
+	validation, err := app.NewHostValidationService(app.HostValidationServiceOptions{
+		Validator: validator,
+		Store:     s.store,
+		Logger:    s.loggerWrapper(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("初始化校验服务失败: %w", err)
+	}
+	hosts.WithValidation(validation, validator)
+	s.validation = validation
+	return validation, nil
 }
 
 // taskService 返回任务管理服务。
@@ -218,6 +320,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		Health:          app.NewHealthService(s.store),
 		SystemInfo:      s.systemInfo,
 		Tasks:           tasks,
+		Hosts:           s.hosts,
 		RequireWebUI:    s.requireWeb,
 		ShutdownTimeout: s.shutdownTimeout,
 		Report:          s.report,

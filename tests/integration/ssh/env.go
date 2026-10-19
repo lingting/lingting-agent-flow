@@ -136,16 +136,17 @@ func dial(t *testing.T, ws *testkit.Workspace, tg target) sshclient.DialResult {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
 
-	auth := sshclient.AuthConfig{Method: sshclient.AuthMethodAgent}
-	if tg.keyPath != "" {
-		auth = sshclient.AuthConfig{
-			Method:         sshclient.AuthMethodPrivateKey,
-			PrivateKeyPath: tg.keyPath,
-		}
+	// 本版本只支持私钥认证，因此真实远程测试必须提供私钥路径。
+	if tg.keyPath == "" {
+		t.Fatalf("真实 SSH 测试必须设置私钥路径（本版本只支持私钥认证）")
+	}
+	auth := sshclient.AuthConfig{
+		Method:         sshclient.AuthMethodPrivateKey,
+		PrivateKeyPath: tg.keyPath,
 	}
 	result, err := dialer.Dial(ctx, sshclient.Endpoint{
 		Host: tg.host, Port: tg.port, Username: tg.user,
-	}, auth, nil)
+	}, auth)
 	if err != nil {
 		if sshclient.ErrorCodeOf(err) == sshclient.CodeHostKeyUnknown {
 			storePath := filepath.Join(ws.Root(), "known_hosts")

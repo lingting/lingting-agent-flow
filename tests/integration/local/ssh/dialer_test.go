@@ -3,7 +3,6 @@ package sshclient_test
 import (
 	"context"
 	"encoding/pem"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,10 +48,15 @@ func newDialer(t *testing.T, store sshclient.HostKeyStore) *sshclient.Dialer {
 	return dialer
 }
 
-// passwordAuth 返回密码认证配置与提供器。
-func passwordAuth(password string) (sshclient.AuthConfig, sshclient.CredentialProvider) {
-	return sshclient.AuthConfig{Method: sshclient.AuthMethodPassword},
-		sshclient.PasswordProvider{Password: []byte(password)}
+// privateKeyAuth 返回私钥认证配置。
+//
+// 本版本只支持私钥认证，因此所有连接测试都通过私钥文件完成认证。
+func privateKeyAuth(t *testing.T) sshclient.AuthConfig {
+	t.Helper()
+	return sshclient.AuthConfig{
+		Method:         sshclient.AuthMethodPrivateKey,
+		PrivateKeyPath: writePrivateKey(t, "", false),
+	}
 }
 
 // TestDialRequiresHostKeyStore 验证未提供主机密钥校验时不允许建立连接器。
@@ -69,10 +73,10 @@ func TestDialUnknownHostKey(t *testing.T) {
 	server := newTestServer(t)
 	host, port := server.endpoint()
 	dialer := newDialer(t, newStore(t))
-	config, provider := passwordAuth(testPassword)
+	config := privateKeyAuth(t)
 	result, err := dialer.Dial(testContext(t), sshclient.Endpoint{
 		Host: host, Port: port, Username: testUser,
-	}, config, provider)
+	}, config)
 	if err == nil {
 		t.Fatal("未知主机密钥应当拒绝连接")
 	}
@@ -90,17 +94,17 @@ func TestDialUnknownHostKey(t *testing.T) {
 	}
 }
 
-// TestDialTrustedHostKeySucceeds 验证已信任主机密钥可以完成密码认证。
+// TestDialTrustedHostKeySucceeds 验证已信任主机密钥可以完成私钥认证。
 func TestDialTrustedHostKeySucceeds(t *testing.T) {
 	t.Parallel()
 	server := newTestServer(t)
 	host, port := server.endpoint()
 	store := newStore(t, writeKnownHosts(t, host, port, server.hostKey.PublicKey()))
 	dialer := newDialer(t, store)
-	config, provider := passwordAuth(testPassword)
+	config := privateKeyAuth(t)
 	result, err := dialer.Dial(testContext(t), sshclient.Endpoint{
 		Host: host, Port: port, Username: testUser,
-	}, config, provider)
+	}, config)
 	if err != nil {
 		t.Fatalf("已信任主机应连接成功: %v", err)
 	}
@@ -127,10 +131,10 @@ func TestDialHostKeyMismatch(t *testing.T) {
 	other := newTestServer(t)
 	store := newStore(t, writeKnownHosts(t, host, port, other.hostKey.PublicKey()))
 	dialer := newDialer(t, store)
-	config, provider := passwordAuth(testPassword)
+	config := privateKeyAuth(t)
 	_, err := dialer.Dial(testContext(t), sshclient.Endpoint{
 		Host: host, Port: port, Username: testUser,
-	}, config, provider)
+	}, config)
 	if err == nil {
 		t.Fatal("主机密钥变化时应当拒绝连接")
 	}
@@ -144,22 +148,25 @@ func TestDialHostKeyMismatch(t *testing.T) {
 	}
 }
 
-// TestDialAuthFailure 验证认证失败与握手失败的区分。
-func TestDialAuthFailure(t *testing.T) {
+// TestDialRejectsUnsupportedAuthMethod 验证已移除的认证方式被明确拒绝。
+//
+// 本版本只支持私钥认证：agent 与 password 既没有实现，也不允许回落到其他方式。
+func TestDialRejectsUnsupportedAuthMethod(t *testing.T) {
 	t.Parallel()
 	server := newTestServer(t)
 	host, port := server.endpoint()
 	store := newStore(t, writeKnownHosts(t, host, port, server.hostKey.PublicKey()))
 	dialer := newDialer(t, store)
-	config, provider := passwordAuth("wrong-password")
-	_, err := dialer.Dial(testContext(t), sshclient.Endpoint{
-		Host: host, Port: port, Username: testUser,
-	}, config, provider)
-	if err == nil {
-		t.Fatal("错误密码应当认证失败")
-	}
-	if code := sshclient.ErrorCodeOf(err); code != sshclient.CodeAuthFailed {
-		t.Fatalf("错误类别应为 auth_failed，实际: %s", code)
+	for _, method := range []sshclient.AuthMethod{"agent", "password"} {
+		_, err := dialer.Dial(testContext(t), sshclient.Endpoint{
+			Host: host, Port: port, Username: testUser,
+		}, sshclient.AuthConfig{Method: method})
+		if err == nil {
+			t.Fatalf("认证方式 %s 应当被拒绝", method)
+		}
+		if code := sshclient.ErrorCodeOf(err); code != sshclient.CodeInvalidConfig {
+			t.Fatalf("认证方式 %s 的错误类别应为 invalid_config，实际: %s", method, code)
+		}
 	}
 }
 
@@ -170,10 +177,10 @@ func TestDialUnreachable(t *testing.T) {
 	host, port := listener.endpoint()
 	listener.close()
 	dialer := newDialer(t, newStore(t))
-	config, provider := passwordAuth(testPassword)
+	config := privateKeyAuth(t)
 	_, err := dialer.Dial(testContext(t), sshclient.Endpoint{
 		Host: host, Port: port, Username: testUser,
-	}, config, provider)
+	}, config)
 	if err == nil {
 		t.Fatal("不可达地址应当连接失败")
 	}
@@ -188,59 +195,16 @@ func TestDialHandshakeFailed(t *testing.T) {
 	address, stop := startPlainTCPServer(t, "HTTP/1.1 400 Bad Request\r\n\r\n")
 	defer stop()
 	dialer := newDialer(t, newStore(t))
-	config, provider := passwordAuth(testPassword)
+	config := privateKeyAuth(t)
 	_, err := dialer.Dial(testContext(t), sshclient.Endpoint{
 		Host: address.Host, Port: address.Port, Username: testUser,
-	}, config, provider)
+	}, config)
 	if err == nil {
 		t.Fatal("非 SSH 服务应当握手失败")
 	}
 	code := sshclient.ErrorCodeOf(err)
 	if code != sshclient.CodeHandshakeFailed && code != sshclient.CodeTimeout {
 		t.Fatalf("错误类别应为 handshake_failed，实际: %s", code)
-	}
-}
-
-// TestDialMissingCredential 验证没有凭据时立即失败而不是挂起。
-func TestDialMissingCredential(t *testing.T) {
-	t.Parallel()
-	server := newTestServer(t)
-	host, port := server.endpoint()
-	store := newStore(t, writeKnownHosts(t, host, port, server.hostKey.PublicKey()))
-	dialer := newDialer(t, store)
-	config := sshclient.AuthConfig{Method: sshclient.AuthMethodPassword}
-	_, err := dialer.Dial(testContext(t), sshclient.Endpoint{
-		Host: host, Port: port, Username: testUser,
-	}, config, nil)
-	if err == nil {
-		t.Fatal("缺少凭据提供器时应当失败")
-	}
-	if code := sshclient.ErrorCodeOf(err); code != sshclient.CodeNoCredential {
-		t.Fatalf("错误类别应为 no_credential，实际: %s", code)
-	}
-}
-
-// TestPasswordProviderReportsNoCredential 验证空密码返回 ErrNoCredential。
-func TestPasswordProviderReportsNoCredential(t *testing.T) {
-	t.Parallel()
-	provider := sshclient.PasswordProvider{}
-	_, err := provider.Credential(context.Background())
-	if !errors.Is(err, sshclient.ErrNoCredential) {
-		t.Fatalf("应当返回 ErrNoCredential，实际: %v", err)
-	}
-}
-
-// TestCredentialClear 验证凭据材料可以被清除。
-func TestCredentialClear(t *testing.T) {
-	t.Parallel()
-	credential := sshclient.Credential{
-		Method:     sshclient.AuthMethodPassword,
-		Secret:     []byte("secret"),
-		Passphrase: []byte("pass"),
-	}
-	credential.Clear()
-	if credential.Secret != nil || credential.Passphrase != nil {
-		t.Fatalf("凭据应当被清除: %+v", credential)
 	}
 }
 
@@ -258,60 +222,12 @@ func TestPrivateKeyAuth(t *testing.T) {
 	}
 	result, err := dialer.Dial(testContext(t), sshclient.Endpoint{
 		Host: host, Port: port, Username: testUser,
-	}, config, nil)
+	}, config)
 	if err != nil {
 		t.Fatalf("私钥认证应成功: %v", err)
 	}
 	if err := result.Client.Close(); err != nil {
 		t.Errorf("关闭连接失败: %v", err)
-	}
-}
-
-// TestPrivateKeyAuthWithPassphrase 验证受口令保护的私钥可以解锁。
-func TestPrivateKeyAuthWithPassphrase(t *testing.T) {
-	t.Parallel()
-	server := newTestServer(t)
-	host, port := server.endpoint()
-	store := newStore(t, writeKnownHosts(t, host, port, server.hostKey.PublicKey()))
-	dialer := newDialer(t, store)
-	keyPath := writePrivateKey(t, "test-passphrase", true)
-	config := sshclient.AuthConfig{
-		Method:         sshclient.AuthMethodPrivateKey,
-		PrivateKeyPath: keyPath,
-	}
-	provider := sshclient.PassphraseProvider{Passphrase: []byte("test-passphrase")}
-	result, err := dialer.Dial(testContext(t), sshclient.Endpoint{
-		Host: host, Port: port, Username: testUser,
-	}, config, provider)
-	if err != nil {
-		t.Fatalf("带口令的私钥认证应成功: %v", err)
-	}
-	if err := result.Client.Close(); err != nil {
-		t.Errorf("关闭连接失败: %v", err)
-	}
-}
-
-// TestPrivateKeyWrongPassphrase 验证错误口令返回可诊断错误。
-func TestPrivateKeyWrongPassphrase(t *testing.T) {
-	t.Parallel()
-	server := newTestServer(t)
-	host, port := server.endpoint()
-	store := newStore(t, writeKnownHosts(t, host, port, server.hostKey.PublicKey()))
-	dialer := newDialer(t, store)
-	keyPath := writePrivateKey(t, "test-passphrase", true)
-	config := sshclient.AuthConfig{
-		Method:         sshclient.AuthMethodPrivateKey,
-		PrivateKeyPath: keyPath,
-	}
-	provider := sshclient.PassphraseProvider{Passphrase: []byte("wrong")}
-	_, err := dialer.Dial(testContext(t), sshclient.Endpoint{
-		Host: host, Port: port, Username: testUser,
-	}, config, provider)
-	if err == nil {
-		t.Fatal("错误口令应当失败")
-	}
-	if code := sshclient.ErrorCodeOf(err); code != sshclient.CodePrivateKey {
-		t.Fatalf("错误类别应为 private_key_error，实际: %s", code)
 	}
 }
 
@@ -328,7 +244,7 @@ func TestPrivateKeyMissingFile(t *testing.T) {
 	}
 	_, err := dialer.Dial(testContext(t), sshclient.Endpoint{
 		Host: host, Port: port, Username: testUser,
-	}, config, nil)
+	}, config)
 	if err == nil {
 		t.Fatal("私钥文件不存在时应当失败")
 	}
@@ -354,53 +270,12 @@ func TestPrivateKeyInvalidFormat(t *testing.T) {
 	}
 	_, err := dialer.Dial(testContext(t), sshclient.Endpoint{
 		Host: host, Port: port, Username: testUser,
-	}, config, nil)
+	}, config)
 	if err == nil {
 		t.Fatal("非法私钥应当失败")
 	}
 	if code := sshclient.ErrorCodeOf(err); code != sshclient.CodePrivateKey {
 		t.Fatalf("错误类别应为 private_key_error，实际: %s", code)
-	}
-}
-
-// TestAgentUnavailable 验证 SSH Agent 不可用时返回明确错误。
-func TestAgentUnavailable(t *testing.T) {
-	t.Parallel()
-	server := newTestServer(t)
-	host, port := server.endpoint()
-	store := newStore(t, writeKnownHosts(t, host, port, server.hostKey.PublicKey()))
-	dialer := newDialer(t, store)
-	config := sshclient.AuthConfig{
-		Method:      sshclient.AuthMethodAgent,
-		AgentSocket: filepath.Join(testkit.Dir(t), "missing-agent.sock"),
-	}
-	_, err := dialer.Dial(testContext(t), sshclient.Endpoint{
-		Host: host, Port: port, Username: testUser,
-	}, config, nil)
-	if err == nil {
-		t.Fatal("Agent 不可用时应当失败")
-	}
-	if code := sshclient.ErrorCodeOf(err); code != sshclient.CodeAgentUnavailable {
-		t.Fatalf("错误类别应为 agent_unavailable，实际: %s", code)
-	}
-}
-
-// TestAgentWithoutSocket 验证未配置 Agent 套接字时返回明确错误。
-func TestAgentWithoutSocket(t *testing.T) {
-	t.Setenv("SSH_AUTH_SOCK", "")
-	server := newTestServer(t)
-	host, port := server.endpoint()
-	store := newStore(t, writeKnownHosts(t, host, port, server.hostKey.PublicKey()))
-	dialer := newDialer(t, store)
-	config := sshclient.AuthConfig{Method: sshclient.AuthMethodAgent}
-	_, err := dialer.Dial(testContext(t), sshclient.Endpoint{
-		Host: host, Port: port, Username: testUser,
-	}, config, nil)
-	if err == nil {
-		t.Fatal("缺少 Agent 套接字时应当失败")
-	}
-	if code := sshclient.ErrorCodeOf(err); code != sshclient.CodeAgentUnavailable {
-		t.Fatalf("错误类别应为 agent_unavailable，实际: %s", code)
 	}
 }
 

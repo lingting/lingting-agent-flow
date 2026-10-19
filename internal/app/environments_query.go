@@ -7,7 +7,6 @@ import (
 
 	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
-	"github.com/lingting/agentflow/internal/sshclient"
 	"github.com/lingting/agentflow/internal/storage"
 )
 
@@ -100,8 +99,6 @@ type ReadDockerfileRequest struct {
 	Ref domain.EnvironmentRef
 	// VersionNumber 是版本号，0 表示当前最新版本。
 	VersionNumber int
-	// Credentials 提供本次连接所需的凭据。
-	Credentials sshclient.CredentialProvider
 }
 
 // DockerfileContent 是读取到的 Dockerfile 内容及其来源信息。
@@ -123,7 +120,6 @@ func (s *EnvironmentService) ReadDockerfile(
 	err := s.withRemoteDocker(
 		ctx,
 		request.MachineID,
-		request.Credentials,
 		false,
 		func(ctx context.Context, session *remoteDocker) error {
 			version, err := s.resolveVersion(ctx, session.host.ID, request.Ref, request.VersionNumber)

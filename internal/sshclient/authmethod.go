@@ -4,13 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"os"
-	"strings"
-	"time"
 
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/agent"
 )
 
 // authResult 是一次认证方式的准备结果。
@@ -21,57 +17,29 @@ type authResult struct {
 	cleanup func()
 }
 
-// buildAuthMethods 按认证配置与凭据构造 SSH 认证方式。
+// buildAuthMethods 按认证配置构造 SSH 认证方式。
 //
-// 每种认证方式都有独立的失败类别，避免把私钥不可读、Agent 不可用或凭据缺失
-// 包装成含糊的"连接失败"。
-func buildAuthMethods(
-	ctx context.Context,
-	config AuthConfig,
-	provider CredentialProvider,
-) (authResult, error) {
+// 本版本只支持本机私钥文件认证，因此不存在"凭据缺失"或"Agent 不可用"这两类
+// 失败路径；失败只会来自私钥路径非法、文件不可读或私钥格式不受支持。
+func buildAuthMethods(config AuthConfig) (authResult, error) {
 	switch config.Method {
-	case AuthMethodPassword:
-		return buildPasswordAuth(ctx, provider)
 	case AuthMethodPrivateKey:
-		return buildPrivateKeyAuth(ctx, config, provider)
-	case AuthMethodAgent:
-		return buildAgentAuth(config)
+		return buildPrivateKeyAuth(config)
 	default:
 		return authResult{}, newConnectError(
 			CodeInvalidConfig,
 			"",
-			"不支持的认证方式 "+config.Method.String(),
+			"不支持的认证方式 "+config.Method.String()+"（本版本只支持 private_key）",
 			nil,
 		)
 	}
 }
 
-// buildPasswordAuth 构造密码认证。
-//
-// 密码只在内存中传递，不会出现在错误信息、日志或数据库里。
-func buildPasswordAuth(ctx context.Context, provider CredentialProvider) (authResult, error) {
-	credential, err := requestCredential(ctx, provider, AuthMethodPassword)
-	if err != nil {
-		return authResult{}, err
-	}
-	secret := string(credential.Secret)
-	credential.Clear()
-	return authResult{
-		methods: []ssh.AuthMethod{ssh.Password(secret)},
-		cleanup: func() {},
-	}, nil
-}
-
 // buildPrivateKeyAuth 构造私钥文件认证。
 //
-// 私钥文件只被读取，不会被复制或修改；受口令保护的私钥需要提供器给出 passphrase。
-// 路径会先规范化为本机绝对路径，避免把私钥复制到工作空间或依赖当前工作目录。
-func buildPrivateKeyAuth(
-	ctx context.Context,
-	config AuthConfig,
-	provider CredentialProvider,
-) (authResult, error) {
+// 私钥文件只被读取，不会被复制或修改；不支持受口令保护的私钥，遇到加密私钥时
+// 返回明确错误，而不是挂起等待口令输入。
+func buildPrivateKeyAuth(config AuthConfig) (authResult, error) {
 	path, err := NormalizePrivateKeyPath(config.PrivateKeyPath)
 	if err != nil {
 		return authResult{}, err
@@ -85,10 +53,10 @@ func buildPrivateKeyAuth(
 			err,
 		)
 	}
-	signer, err := parsePrivateKey(data, provider, ctx)
+	signer, parseErr := parsePrivateKey(data)
 	clearBytes(data)
-	if err != nil {
-		return authResult{}, err
+	if parseErr != nil {
+		return authResult{}, parseErr
 	}
 	return authResult{
 		methods: []ssh.AuthMethod{ssh.PublicKeys(signer)},
@@ -96,156 +64,32 @@ func buildPrivateKeyAuth(
 	}, nil
 }
 
-// parsePrivateKey 解析私钥，必要时用提供器给出的口令解锁。
-func parsePrivateKey(
-	data []byte,
-	provider CredentialProvider,
-	ctx context.Context,
-) (ssh.Signer, error) {
+// parsePrivateKey 解析未加密的私钥。
+//
+// 受口令保护的私钥不在支持范围内：返回明确的不支持说明，而不是要求交互输入口令。
+func parsePrivateKey(data []byte) (ssh.Signer, error) {
 	signer, err := ssh.ParsePrivateKey(data)
 	if err == nil {
 		return signer, nil
 	}
 	var missing *ssh.PassphraseMissingError
-	if !errors.As(err, &missing) {
+	if errors.As(err, &missing) {
 		return nil, newConnectError(
 			CodePrivateKey,
 			"",
-			"私钥格式不受支持: "+describeKeyError(err),
+			"不支持受口令保护的私钥，请改用无口令私钥文件",
 			err,
 		)
 	}
-	credential, credentialErr := requestCredential(ctx, provider, AuthMethodPrivateKey)
-	if credentialErr != nil {
-		return nil, newConnectError(
-			CodePrivateKey,
-			"",
-			"私钥受口令保护，但没有可用的口令",
-			credentialErr,
-		)
-	}
-	passphrase := credential.Passphrase
-	signer, err = ssh.ParsePrivateKeyWithPassphrase(data, passphrase)
-	clearBytes(passphrase)
-	credential.Clear()
-	if err != nil {
-		return nil, newConnectError(
-			CodePrivateKey,
-			"",
-			"私钥口令错误或私钥不可用: "+describeKeyError(err),
-			err,
-		)
-	}
-	return signer, nil
+	return nil, newConnectError(
+		CodePrivateKey,
+		"",
+		"私钥格式不受支持: "+describeKeyError(err),
+		err,
+	)
 }
 
-// buildAgentAuth 构造 SSH Agent 认证。
-func buildAgentAuth(config AuthConfig) (authResult, error) {
-	socket := strings.TrimSpace(config.AgentSocket)
-	if socket == "" {
-		socket = strings.TrimSpace(os.Getenv("SSH_AUTH_SOCK"))
-	}
-	if socket == "" {
-		return authResult{}, newConnectError(
-			CodeAgentUnavailable,
-			"",
-			"未找到 SSH Agent（环境变量 SSH_AUTH_SOCK 为空）",
-			nil,
-		)
-	}
-	conn, err := net.DialTimeout("unix", socket, DefaultAgentDialTimeout)
-	if err != nil {
-		return authResult{}, newConnectError(
-			CodeAgentUnavailable,
-			"",
-			"无法连接 SSH Agent: "+describeFileError(err),
-			err,
-		)
-	}
-	agentClient := agent.NewClient(conn)
-	identities, err := agentClient.List()
-	if err != nil {
-		_ = conn.Close()
-		return authResult{}, newConnectError(
-			CodeAgentUnavailable,
-			"",
-			"读取 SSH Agent 身份列表失败: "+describeKeyError(err),
-			err,
-		)
-	}
-	if len(identities) == 0 {
-		_ = conn.Close()
-		return authResult{}, newConnectError(
-			CodeAgentUnavailable,
-			"",
-			"SSH Agent 中没有可用身份",
-			nil,
-		)
-	}
-	return authResult{
-		methods: []ssh.AuthMethod{ssh.PublicKeysCallback(agentClient.Signers)},
-		cleanup: func() {
-			_ = conn.Close()
-		},
-	}, nil
-}
-
-// DefaultAgentDialTimeout 是连接 SSH Agent 的超时时间。
-const DefaultAgentDialTimeout = 5 * time.Second
-
-// requestCredential 从提供器获取凭据并校验其与认证方式匹配。
-func requestCredential(
-	ctx context.Context,
-	provider CredentialProvider,
-	method AuthMethod,
-) (Credential, error) {
-	if provider == nil {
-		return Credential{}, newConnectError(
-			CodeNoCredential,
-			"",
-			"未提供凭据提供器，无法完成"+methodLabel(method)+"认证",
-			ErrNoCredential,
-		)
-	}
-	if declared := provider.Method(); declared != method {
-		return Credential{}, newConnectError(
-			CodeInvalidConfig,
-			"",
-			fmt.Sprintf("凭据提供器支持 %s，与认证方式 %s 不匹配", declared, method),
-			nil,
-		)
-	}
-	credential, err := provider.Credential(ctx)
-	if err != nil {
-		code := CodeNoCredential
-		if errors.Is(err, ErrCredentialCancelled) || errors.Is(err, context.Canceled) {
-			code = CodeCancelled
-		}
-		return Credential{}, newConnectError(
-			code,
-			"",
-			"获取"+methodLabel(method)+"凭据失败: "+err.Error(),
-			err,
-		)
-	}
-	return credential, nil
-}
-
-// methodLabel 返回认证方式的中文名称。
-func methodLabel(method AuthMethod) string {
-	switch method {
-	case AuthMethodPassword:
-		return "密码"
-	case AuthMethodPrivateKey:
-		return "私钥"
-	case AuthMethodAgent:
-		return "SSH Agent"
-	default:
-		return string(method)
-	}
-}
-
-// describeFileError 把文件与套接字错误转换为不含敏感内容的说明。
+// describeFileError 把文件错误转换为不含敏感内容的说明。
 func describeFileError(err error) string {
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -278,4 +122,14 @@ func clearBytes(data []byte) {
 	for index := range data {
 		data[index] = 0
 	}
+}
+
+// ctxErr 返回上下文错误，未取消时返回 nil。
+//
+// 该辅助函数被远程命令执行与文件传输共同使用，因此保留在本包内。
+func ctxErr(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	return ctx.Err()
 }

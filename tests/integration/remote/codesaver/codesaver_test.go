@@ -141,18 +141,18 @@ func (t target) dial(t2 *testing.T, workspace *testkit.Workspace) sshclient.Clie
 	if err != nil {
 		t2.Fatalf("构造连接器失败: %v", err)
 	}
-	auth := sshclient.AuthConfig{Method: sshclient.AuthMethodAgent}
-	if t.keyPath != "" {
-		auth = sshclient.AuthConfig{
-			Method:         sshclient.AuthMethodPrivateKey,
-			PrivateKeyPath: t.keyPath,
-		}
+	// 本版本只支持私钥认证：真实远程测试必须提供私钥路径。
+	if t.keyPath == "" {
+		t2.Fatalf("真实远程测试必须设置私钥路径（本版本只支持私钥认证）")
+	}
+	auth := sshclient.AuthConfig{
+		Method:         sshclient.AuthMethodPrivateKey,
+		PrivateKeyPath: t.keyPath,
 	}
 	result, err := dialer.Dial(
 		context.Background(),
 		sshclient.Endpoint{Host: t.host, Port: t.port, Username: t.user},
 		auth,
-		nil,
 	)
 	if err != nil {
 		t2.Fatalf(

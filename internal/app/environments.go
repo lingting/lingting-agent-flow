@@ -75,8 +75,6 @@ type EnvironmentSummary struct {
 type InitOptions struct {
 	// MachineID 是目标执行节点。
 	MachineID string
-	// Credentials 提供本次连接所需的凭据。
-	Credentials sshclient.CredentialProvider
 	// WithLanguages 是同时初始化模板的语言环境名称列表。
 	WithLanguages []string
 }
@@ -106,8 +104,8 @@ func (s *EnvironmentService) Preflight(
 	err := s.withRemoteSession(
 		ctx,
 		options.MachineID,
-		options.Credentials,
-		sessionOptions{AllowMissingWorkspace: true},
+		// 只读预检不受准入校验限制：它的职责正是报告节点是否可用。
+		sessionOptions{AllowMissingWorkspace: true, AllowUnvalidated: true},
 		func(ctx context.Context, session *remoteDocker) error {
 			result.Host = session.host
 			result.WorkspaceRoot = session.layout.Root
@@ -147,7 +145,6 @@ func (s *EnvironmentService) Init(ctx context.Context, options InitOptions) (Ini
 	err := s.withRemoteDocker(
 		ctx,
 		options.MachineID,
-		options.Credentials,
 		true,
 		func(ctx context.Context, session *remoteDocker) error {
 			result.Host = session.host
@@ -330,8 +327,6 @@ type CreateVersionRequest struct {
 	ParentVersion string
 	// ExtraFiles 是构建上下文中的额外文件，相对路径必须已规范化。
 	ExtraFiles []docker.ContextFile
-	// Credentials 提供本次连接所需的凭据。
-	Credentials sshclient.CredentialProvider
 }
 
 // CreateVersion 保存一个新的不可覆盖的环境版本。
@@ -353,7 +348,6 @@ func (s *EnvironmentService) CreateVersion(
 	err := s.withRemoteDocker(
 		ctx,
 		request.MachineID,
-		request.Credentials,
 		false,
 		func(ctx context.Context, session *remoteDocker) error {
 			unlock := s.locks.Lock(lockKey(session.host.ID, request.Ref))

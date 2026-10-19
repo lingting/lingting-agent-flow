@@ -22,6 +22,10 @@ type ExecutionHostService struct {
 	store  storage.Store
 	prober *sshprobe.Prober
 	logger *logging.Logger
+	// validator 是后台校验服务的提交入口，为空时校验由调用方显式触发。
+	validator HostValidationSubmitter
+	// hostValidator 是同步校验执行器，供 CLI 使用一次性凭据时调用。
+	hostValidator *HostValidator
 }
 
 // NewExecutionHostService 构造执行节点服务。
@@ -37,6 +41,22 @@ func NewExecutionHostService(
 		return nil, fmt.Errorf("执行节点服务初始化失败: %w", err)
 	}
 	return &ExecutionHostService{store: store, prober: prober, logger: logger}, nil
+}
+
+// WithValidation 接入环境预检能力。
+//
+// 后台服务负责异步校验，校验器负责在提供一次性凭据时同步执行；两者都可以为空，
+// 此时新增与修改节点只会把状态置为 checking，不会自动推进。
+func (s *ExecutionHostService) WithValidation(
+	submitter HostValidationSubmitter,
+	validator *HostValidator,
+) *ExecutionHostService {
+	if s == nil {
+		return s
+	}
+	s.validator = submitter
+	s.hostValidator = validator
+	return s
 }
 
 // CreateExecutionHostRequest 是新增执行节点的输入。
@@ -76,7 +96,8 @@ func (s *ExecutionHostService) Create(
 	}
 	method := request.AuthMethod
 	if method == "" {
-		method = domain.AuthMethodAgent
+		// 本版本只支持私钥认证：新建节点必须显式给出私钥路径。
+		method = domain.AuthMethodPrivateKey
 	}
 	host, err := domain.NewExecutionHost(
 		domain.ID(strings.TrimSpace(request.ID)),
@@ -107,7 +128,8 @@ func (s *ExecutionHostService) Create(
 	if err != nil {
 		return domain.ExecutionHost{}, fmt.Errorf("新增执行节点失败: %w", err)
 	}
-	return *created, nil
+	// 事务提交后再提交后台校验：HTTP 请求不会等待远程连接与镜像查询。
+	return s.scheduleValidation(ctx, *created)
 }
 
 // UpdateExecutionHostRequest 是更新执行节点配置的输入。
@@ -152,6 +174,11 @@ func (s *ExecutionHostService) Update(
 	updated := *current
 	applyHostChanges(&updated, request)
 	updated.UpdatedAt = time.Now()
+	// 影响连接目标、认证或工作空间的变更必须让旧校验结果失效。
+	invalidated := validationAffectingFields(*current, updated)
+	if invalidated {
+		updated.InvalidateValidation(updated.UpdatedAt)
+	}
 	wantDefault := updated.IsDefault
 	// is_default 统一由 SetDefaultExecutionHost 维护，避免与唯一索引冲突。
 	updated.IsDefault = false
@@ -174,7 +201,10 @@ func (s *ExecutionHostService) Update(
 	if err != nil {
 		return domain.ExecutionHost{}, fmt.Errorf("更新执行节点失败: %w", err)
 	}
-	return *reloaded, nil
+	if !invalidated {
+		return *reloaded, nil
+	}
+	return s.scheduleValidation(ctx, *reloaded)
 }
 
 // applyHostChanges 把请求中显式给出的字段写入目标节点。

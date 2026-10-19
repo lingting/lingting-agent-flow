@@ -8,7 +8,6 @@ import (
 
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/domain"
-	"github.com/lingting/agentflow/internal/sshclient"
 	"github.com/spf13/cobra"
 )
 
@@ -77,15 +76,6 @@ func newContainerCreateCommand(a *app.App) *cobra.Command {
 				ctx context.Context,
 				service *app.ContainerService,
 			) error {
-				provider, providerErr := credentialProviderForArgs(
-					ctx,
-					service.SSHService(),
-					machine,
-					flags,
-				)
-				if providerErr != nil {
-					return providerErr
-				}
 				detail, createErr := service.CreateContainer(ctx, app.CreateContainerRequest{
 					MachineID:            machine,
 					Ref:                  ref,
@@ -94,7 +84,6 @@ func newContainerCreateCommand(a *app.App) *cobra.Command {
 					Caches:               caches,
 					WorkDir:              workDir,
 					SkipRunContractCheck: skipRunContract,
-					Credentials:          provider,
 				})
 				if printErr := printContainerDetail(a, detail); printErr != nil {
 					return printErr
@@ -202,22 +191,11 @@ func newContainerShowCommand(a *app.App) *cobra.Command {
 				ctx context.Context,
 				service *app.ContainerService,
 			) error {
-				container, err := service.GetContainerRecord(ctx, args[0])
-				if err != nil {
+				if _, err := service.GetContainerRecord(ctx, args[0]); err != nil {
 					return err
-				}
-				provider, providerErr := credentialProviderForArgs(
-					ctx,
-					service.SSHService(),
-					container.HostID.String(),
-					flags,
-				)
-				if providerErr != nil {
-					return providerErr
 				}
 				detail, inspectErr := service.InspectContainer(ctx, app.InspectContainerRequest{
 					ContainerID: args[0],
-					Credentials: provider,
 					Sync:        sync,
 				})
 				if printErr := printContainerDetail(a, detail); printErr != nil {
@@ -245,28 +223,17 @@ func newContainerLogsCommand(a *app.App) *cobra.Command {
 				ctx context.Context,
 				service *app.ContainerService,
 			) error {
-				container, err := service.GetContainerRecord(ctx, args[0])
-				if err != nil {
+				if _, err := service.GetContainerRecord(ctx, args[0]); err != nil {
 					return err
-				}
-				provider, providerErr := credentialProviderForArgs(
-					ctx,
-					service.SSHService(),
-					container.HostID.String(),
-					flags,
-				)
-				if providerErr != nil {
-					return providerErr
 				}
 				logs, logErr := service.ContainerLogs(ctx, app.ContainerLogsRequest{
 					ContainerID: args[0],
 					TailLines:   tail,
-					Credentials: provider,
 				})
 				if logErr != nil {
 					return logErr
 				}
-				_, err = fmt.Fprint(a.Stdout(), ensureTrailingNewline(logs))
+				_, err := fmt.Fprint(a.Stdout(), ensureTrailingNewline(logs))
 				return err
 			})
 		},
@@ -291,24 +258,13 @@ func newContainerExecCommand(a *app.App) *cobra.Command {
 				ctx context.Context,
 				service *app.ContainerService,
 			) error {
-				container, err := service.GetContainerRecord(ctx, args[0])
-				if err != nil {
+				if _, err := service.GetContainerRecord(ctx, args[0]); err != nil {
 					return err
-				}
-				provider, providerErr := credentialProviderForArgs(
-					ctx,
-					service.SSHService(),
-					container.HostID.String(),
-					flags,
-				)
-				if providerErr != nil {
-					return providerErr
 				}
 				result, execErr := service.Exec(ctx, app.ExecRequest{
 					ContainerID: args[0],
 					Command:     args[1:],
 					Timeout:     timeout,
-					Credentials: provider,
 				})
 				if printErr := printExecResult(a, result); printErr != nil {
 					return printErr
@@ -340,11 +296,9 @@ func newContainerStartCommand(a *app.App) *cobra.Command {
 			return runContainerAction(cmd.Context(), a, hostConfigPath(cmd), args[0], flags, func(
 				ctx context.Context,
 				service *app.ContainerService,
-				provider sshclient.CredentialProvider,
 			) (app.ContainerDetail, error) {
 				return service.StartContainer(ctx, app.StartContainerRequest{
 					ContainerID: args[0],
-					Credentials: provider,
 				})
 			})
 		},
@@ -365,12 +319,10 @@ func newContainerStopCommand(a *app.App) *cobra.Command {
 			return runContainerAction(cmd.Context(), a, hostConfigPath(cmd), args[0], flags, func(
 				ctx context.Context,
 				service *app.ContainerService,
-				provider sshclient.CredentialProvider,
 			) (app.ContainerDetail, error) {
 				return service.StopContainer(ctx, app.StopContainerRequest{
 					ContainerID:    args[0],
 					TimeoutSeconds: timeoutSeconds,
-					Credentials:    provider,
 				})
 			})
 		},
@@ -409,12 +361,10 @@ func newContainerDeleteCommand(a *app.App) *cobra.Command {
 			return runContainerAction(cmd.Context(), a, hostConfigPath(cmd), args[0], flags, func(
 				ctx context.Context,
 				service *app.ContainerService,
-				provider sshclient.CredentialProvider,
 			) (app.ContainerDetail, error) {
 				return service.DeleteContainer(ctx, app.DeleteContainerRequest{
 					ContainerID: args[0],
 					Reason:      endReason,
-					Credentials: provider,
 				})
 			})
 		},
@@ -450,11 +400,9 @@ func newContainerDetachCommand(a *app.App) *cobra.Command {
 			return runContainerAction(cmd.Context(), a, hostConfigPath(cmd), args[0], flags, func(
 				ctx context.Context,
 				service *app.ContainerService,
-				provider sshclient.CredentialProvider,
 			) (app.ContainerDetail, error) {
 				return service.DetachContainer(ctx, app.DetachContainerRequest{
 					ContainerID: args[0],
-					Credentials: provider,
 				})
 			})
 		},

@@ -71,6 +71,22 @@ type ExecutionHostStore interface {
 	SetDefaultExecutionHost(ctx context.Context, id domain.ID) error
 	// GetDefaultExecutionHost 返回当前默认节点，没有默认节点时返回 storage.ErrNotFound。
 	GetDefaultExecutionHost(ctx context.Context) (*domain.ExecutionHost, error)
+	// UpdateExecutionHostValidation 以校验代次为条件写入校验状态与结果。
+	//
+	// 只有数据库中的代次仍等于 generation 时才写入，返回 false 表示本次结果已过期
+	// 且没有任何字段被修改。该校验代次条件更新是"旧结果不得覆盖新配置"的落点。
+	UpdateExecutionHostValidation(
+		ctx context.Context,
+		host domain.ExecutionHost,
+		generation int64,
+	) (bool, error)
+	// ListExecutionHostsByValidationStatus 返回指定校验状态的全部未删除节点。
+	//
+	// 服务启动时用它恢复停留在 checking 的记录。
+	ListExecutionHostsByValidationStatus(
+		ctx context.Context,
+		status domain.ValidationStatus,
+	) ([]domain.ExecutionHost, error)
 }
 
 // RequirementFilter 约束需求查询条件，零值表示不限制。

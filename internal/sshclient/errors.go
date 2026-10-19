@@ -29,12 +29,8 @@ const (
 	CodeHostKeyRevoked ErrorCode = "host_key_revoked"
 	// CodeAuthFailed 表示身份认证失败。
 	CodeAuthFailed ErrorCode = "auth_failed"
-	// CodeNoCredential 表示没有可用的凭据。
-	CodeNoCredential ErrorCode = "no_credential"
 	// CodePrivateKey 表示私钥文件不可读、格式不支持或口令错误。
 	CodePrivateKey ErrorCode = "private_key_error"
-	// CodeAgentUnavailable 表示 SSH Agent 不可用或没有可用身份。
-	CodeAgentUnavailable ErrorCode = "agent_unavailable"
 	// CodeTimeout 表示连接或认证超时。
 	CodeTimeout ErrorCode = "timeout"
 	// CodeCancelled 表示调用方取消。
@@ -100,12 +96,8 @@ func defaultDetail(code ErrorCode) string {
 		return "主机密钥已被标记为吊销"
 	case CodeAuthFailed:
 		return "身份认证失败"
-	case CodeNoCredential:
-		return "没有可用的凭据"
 	case CodePrivateKey:
 		return "私钥不可用"
-	case CodeAgentUnavailable:
-		return "SSH Agent 不可用"
 	case CodeTimeout:
 		return "连接超时"
 	case CodeCancelled:

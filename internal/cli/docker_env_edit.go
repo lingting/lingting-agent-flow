@@ -51,20 +51,10 @@ func newDockerEnvEditCommand(a *app.App) *cobra.Command {
 				ctx context.Context,
 				service *app.EnvironmentService,
 			) error {
-				provider, providerErr := credentialProviderForArgs(
-					ctx,
-					service.SSHService(),
-					flags.Machine,
-					flagsCredentials,
-				)
-				if providerErr != nil {
-					return providerErr
-				}
 				current, readErr := service.ReadDockerfile(ctx, app.ReadDockerfileRequest{
 					MachineID:     flags.Machine,
 					Ref:           ref,
 					VersionNumber: flags.Version,
-					Credentials:   provider,
 				})
 				if readErr != nil {
 					return readErr
@@ -94,7 +84,6 @@ func newDockerEnvEditCommand(a *app.App) *cobra.Command {
 					Ref:           ref,
 					Dockerfile:    edited,
 					ParentVersion: parent,
-					Credentials:   provider,
 				})
 				if createErr != nil {
 					return createErr
@@ -236,7 +225,7 @@ func resolveEditor(configured string) (string, []string) {
 
 // readAllStdin 从标准输入读取全部内容。
 func readAllStdin() ([]byte, error) {
-	data, err := io.ReadAll(osStdin())
+	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return nil, fmt.Errorf("读取标准输入失败: %w", err)
 	}

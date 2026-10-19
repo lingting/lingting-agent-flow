@@ -23,6 +23,8 @@ type Deps struct {
 	SystemInfo func() app.SystemInfo
 	// Tasks 是任务管理服务，为空时任务接口返回服务不可用。
 	Tasks *app.TaskService
+	// Hosts 是执行节点服务，为空时执行节点接口返回服务不可用。
+	Hosts *app.ExecutionHostService
 	// Logger 是日志器，为空时使用 slog.Default。
 	Logger *slog.Logger
 }
@@ -40,6 +42,7 @@ func NewHandler(deps Deps) http.Handler {
 		health:     deps.Health,
 		systemInfo: deps.SystemInfo,
 		tasks:      newTaskHandler(deps.Tasks, logger),
+		hosts:      newHostHandler(deps.Hosts, logger),
 		logger:     logger,
 	}
 	mux := http.NewServeMux()
@@ -48,6 +51,9 @@ func NewHandler(deps Deps) http.Handler {
 	// 任务集合路径与单任务路径分别注册：ServeMux 会按更具体的模式优先匹配。
 	mux.HandleFunc(PathTasks, router.tasksHandler)
 	mux.HandleFunc(taskPathPrefix, router.tasksHandler)
+	// 执行节点集合路径与单节点路径分别注册，与任务接口保持一致。
+	mux.HandleFunc(PathHosts, router.hostsHandler)
+	mux.HandleFunc(hostPathPrefix, router.hostsHandler)
 	mux.HandleFunc("/", router.notFoundHandler)
 	return withRequestID(mux)
 }
@@ -57,6 +63,7 @@ type router struct {
 	health     *app.HealthService
 	systemInfo func() app.SystemInfo
 	tasks      *taskHandler
+	hosts      *hostHandler
 	logger     *slog.Logger
 }
 
@@ -95,6 +102,24 @@ func (rt *router) tasksHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rt.tasks.serve(w, r)
+}
+
+// hostsHandler 分发执行节点集合路径与单节点路径的请求。
+//
+// 执行节点服务未初始化时返回 503，而不是让请求落到 404 或前端页面上。
+func (rt *router) hostsHandler(w http.ResponseWriter, r *http.Request) {
+	if rt.hosts == nil || rt.hosts.hosts == nil {
+		writeError(
+			w,
+			r,
+			rt.logger,
+			http.StatusServiceUnavailable,
+			CodeInternal,
+			"执行节点服务未初始化",
+		)
+		return
+	}
+	rt.hosts.serve(w, r)
 }
 
 // healthHandler 处理健康检查请求。

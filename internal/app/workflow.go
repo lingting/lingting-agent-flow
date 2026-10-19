@@ -13,7 +13,6 @@ import (
 	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/source"
-	"github.com/lingting/agentflow/internal/sshclient"
 	"github.com/lingting/agentflow/internal/storage"
 	"github.com/lingting/agentflow/internal/workflow"
 )
@@ -28,7 +27,6 @@ type WorkflowService struct {
 	store      storage.Store
 	logger     *slog.Logger
 	// credentials 提供本次运行所需的 SSH 凭据，只存在于内存中。
-	credentials sshclient.CredentialProvider
 	// commandTimeout 是单条容器内命令的默认超时。
 	commandTimeout time.Duration
 }
@@ -43,8 +41,6 @@ type WorkflowOptions struct {
 	Store storage.Store
 	// Logger 是日志器，为空时使用默认日志器。
 	Logger *slog.Logger
-	// Credentials 提供 SSH 凭据，可为空（Agent 认证方式不需要）。
-	Credentials sshclient.CredentialProvider
 	// CommandTimeout 覆盖容器内命令默认超时。
 	CommandTimeout time.Duration
 }
@@ -73,7 +69,6 @@ func NewWorkflowService(options WorkflowOptions) (*WorkflowService, error) {
 		sessions:       options.Sessions,
 		store:          options.Store,
 		logger:         logger,
-		credentials:    options.Credentials,
 		commandTimeout: timeout,
 	}, nil
 }
@@ -120,7 +115,6 @@ func (c *workflowContainers) Create(
 		TaskID:        &spec.TaskID,
 		AttemptID:     attemptID,
 		WorkDir:       spec.WorkDir,
-		Credentials:   c.service.credentials,
 	})
 	if err != nil {
 		return workflow.ContainerInfo{}, err
@@ -135,7 +129,6 @@ func (c *workflowContainers) Inspect(
 ) (workflow.ContainerInfo, error) {
 	detail, err := c.service.containers.InspectContainer(ctx, InspectContainerRequest{
 		ContainerID: containerID,
-		Credentials: c.service.credentials,
 		Sync:        true,
 	})
 	if err != nil {
@@ -163,13 +156,11 @@ func (c *workflowContainers) Dispose(
 		_, err := c.service.containers.DeleteContainer(ctx, DeleteContainerRequest{
 			ContainerID: containerID,
 			Reason:      domain.ContainerEndReasonTaskSucceeded,
-			Credentials: c.service.credentials,
 		})
 		return err
 	default:
 		_, err := c.service.containers.DetachContainer(ctx, DetachContainerRequest{
 			ContainerID: containerID,
-			Credentials: c.service.credentials,
 		})
 		return err
 	}
@@ -206,7 +197,6 @@ func (s *workflowSource) Fetch(
 		RepositoryURL: spec.RepositoryURL,
 		BaseBranch:    spec.BaseBranch,
 		WorkDir:       spec.WorkDir,
-		Credentials:   s.service.credentials,
 	})
 	if err != nil {
 		return workflow.SourceInfo{}, classifySourceError(err)
@@ -250,7 +240,6 @@ func (a *workflowAgents) Run(
 	}
 	result, err := a.service.containers.RunAgent(ctx, ContainerAgentRequest{
 		ContainerID:  invocation.ContainerID,
-		Credentials:  a.service.credentials,
 		TaskID:       invocation.Scope.TaskID.String(),
 		StepID:       invocation.Scope.StepID.String(),
 		AttemptID:    invocation.Scope.AttemptID.String(),
@@ -303,7 +292,6 @@ func (c *workflowCommands) Exec(
 		ContainerID: containerID,
 		Command:     command,
 		Timeout:     timeout,
-		Credentials: c.service.credentials,
 	})
 	converted := domain.CommandResult{
 		Name:             run.Command.Name,
@@ -341,7 +329,6 @@ func (s *workflowCodeSaver) Save(
 		WorkDir:        spec.WorkDir,
 		BaseBranch:     spec.BaseBranch,
 		MergeAfterPush: spec.MergeAfterPush,
-		Credentials:    s.service.credentials,
 	})
 	return workflow.CodeSaveOutcome{Record: result.Result.Record}, err
 }

@@ -103,7 +103,10 @@ func mustCreateHost(
 	now time.Time,
 ) domain.ExecutionHost {
 	t.Helper()
-	host, err := domain.NewExecutionHost("", "测试节点", "127.0.0.1", 0, "deploy", "", now)
+	host, err := domain.NewExecutionHost(
+		"", "测试节点", "127.0.0.1", 0, "deploy", "", now,
+		domain.WithPrivateKey(PrivateKeyPath(t)),
+	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
 	}
