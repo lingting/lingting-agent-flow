@@ -2,7 +2,11 @@
 
 本文件描述 AgentFlow 的架构边界与依赖方向，用于判断“新代码应该放在哪里”以及“哪些依赖不允许出现”。
 
-> 下文的架构图为**目标架构**，仅说明分层意图。当前代码实现了 CLI 骨架、配置加载与校验、日志封装、SQLite 数据层、执行节点管理与环境预检、SSH 服务探测与 SSH 连接层（主机密钥校验、私钥认证、远程命令执行、SFTP 传输与远端 Unix 套接字通道），图中调度、Agent 执行与 UI 部分尚未实现。
+> 下文的架构图为**目标架构**，仅说明分层意图。当前代码实现了 CLI 骨架、配置加载与校验、
+> 日志封装、SQLite 数据层、执行节点管理与环境预检、SSH 服务探测与 SSH 连接层（主机密钥校验、
+> 私钥认证、远程命令执行、SFTP 传输与远端 Unix 套接字通道）、统一 Pi Runner（本机与容器内）、
+> 以及**单步骤执行协调器**与任务管理 HTTP 接口。图中调度、多步骤工作流编排与 UI 的完整形态
+> 尚未实现。
 
 ## 目标架构
 
@@ -22,38 +26,42 @@ SQLite
 
 - **CLI / Web UI**：只负责发起操作与展示结果。
 - **Application Services**：CLI 与 HTTP 的共同入口，编排各领域能力。
-- **Scheduler / Workflow Engine**：任务领取、并发控制与 Plan / Develop / Verify / Retry 状态迁移。
+- **Scheduler / Workflow Engine**：任务领取、并发控制与 Plan / Develop / Verify / Retry 状态迁移；
+  当前只有单步骤执行协调器接入，多步骤编排未接入 HTTP。
 - **Agent Runner / Process Manager**：以独立子进程方式驱动 Pi，并管理进程生命周期。
-- **Pi RPC / Git Worktree**：JSONL RPC 协议与任务工作区隔离。
+- **Pi CLI / 任务容器**：非交互 `pi --print --session` 调用与任务工作区隔离。
 - **SQLite**：唯一真相来源。
 
 ## 目录地图
 
 ```text
 cmd/agentflow/            CLI 入口，只做构建信息注入与启动
-internal/app/             应用服务，CLI 与 HTTP 的共同调用入口
+internal/app/             应用服务，CLI 与 HTTP 的共同调用入口；
+                          含单步骤执行协调器 step_executor*.go（校验、占用、调用与终态写入）
 internal/cli/             Cobra 命令实现
 internal/config/          配置结构与 YAML 加载、校验
 internal/logging/         结构化日志封装
-internal/domain/          核心实体、状态与业务规则
+internal/domain/          核心实体、状态与业务规则（含单步骤执行准入规则）
 internal/scheduler/       任务领取、并发控制、Worker 与恢复（未实现）
-internal/workflow/        Plan / Develop / Verify / Retry 状态迁移（未实现）
-internal/agent/           统一 Agent 接口（未实现）
-internal/agent/pi/        Pi RPC 适配器（未实现）
-internal/process/         外部进程生命周期管理（未实现）
+internal/workflow/        Plan / Develop / Verify / Retry 状态迁移（引擎已实现，未接入 HTTP）
+internal/agent/           统一 Agent 接口：Runner、RunRequest、RunResult、Event
+internal/agent/pi/        Pi CLI 适配器：本机 Runner、容器 Runner、Session 路径与日志落盘
+internal/process/         外部进程生命周期管理：启动、输出读取、超时、取消与回收
 internal/gitworktree/     任务工作区创建、检查与清理（未实现）
-internal/storage/         存储接口与统一存储错误
+internal/storage/         存储接口与统一存储错误（含步骤占用的原子事务接口）
 internal/storage/sqlite/  数据库连接、迁移与仓储实现
 internal/sshprobe/        SSH 端点探测：TCP 可达性与协议标识校验
 internal/sshclient/        SSH 连接层：主机密钥校验与算法协商、身份认证、远程执行与 SFTP 传输
 internal/events/          内部事件定义与事件总线（未实现）
-internal/httpapi/         HTTP 路由、处理器与 SSE（未实现）
-web/ui/                   React + TypeScript 前端（未实现）
+internal/lifecycle/       后台服务注册、启动、故障传播与逆序停止
+internal/httpapi/         HTTP 路由与处理器（SSE 未实现）
+lingting-agent-flow-ui/   React + TypeScript 前端（独立 pnpm 工程）
 configs/                  示例配置
 migrations/               迁移说明（实际迁移脚本在 internal/storage/sqlite/migrations/）
 docs/                     架构与开发文档
 tests/unit/               快速单元测试（不依赖真实 Pi、SSH 或网络）
 tests/unit/ssh/           SSH 连接层单元测试（主机密钥与类型记录、认证配置、路径与结果状态）
+tests/unit/app/           应用服务单元测试（会话、Runner 生命周期、单步骤执行编排）
 tests/integration/local/  本机集成测试（数据库全链路、进程内 SSH/SFTP 服务端、TCP 探测）
 tests/integration/pi/     需要本机真实 Pi CLI 的集成测试
 tests/integration/ssh/    需要真实远程机器的集成测试
@@ -87,18 +95,24 @@ cmd
 约束：
 
 - `domain` 处于最底层，只依赖 Go 标准库，禁止 import 本项目其他内部包。
+- 单步骤执行准入规则（任务/步骤状态、角色类型、占用检查）只在 `domain` 中定义一次，
+  `app` 只调用它，`httpapi` 与前端不得复制第二份判断。
 - `domain` 不得感知数据库、HTTP、JSONL RPC、子进程与文件系统。
 - `config` 可以把角色类型映射到 `domain.RoleType` 以复用取值校验，但配置结构自身保持独立，不把 YAML 细节泄漏进 `domain`。
 - `app` 之上的层不得直接访问 SQLite；所有持久化经由仓储接口。
 - `scheduler` 与 `workflow` 不得直接创建 Pi 进程，只能通过 `agent` 接口。
 - `httpapi` 与 `cli` 不得包含状态迁移逻辑，只调用 `app`。
-- `web/ui` 不得复制工作流规则，只消费 HTTP API 与 SSE。
+- `httpapi` 不得自行拼接 Pi 命令、创建 Attempt 或直接赋值执行状态；单步骤执行只能调用
+  `app.StepExecutor`。
+- `app.StepExecutor` 只通过容器执行端口发起 Pi 调用，不直接构造命令行，也不创建或接管容器。
+- 前端不得复制工作流规则，只消费 HTTP API。
 
 ## 当前实现的分层
 
 ```text
-cmd/agentflow → cli → app → config / logging / storage / sshprobe / sshclient
-                          ↘ domain
+cmd/agentflow → cli / httpapi / server → app → config / logging / storage / sshclient / docker
+                                              ↘ workflow / lifecycle
+                                                   ↘ domain
 ```
 
 - `main.go` 只注入构建信息、处理信号并返回退出码。
@@ -121,6 +135,14 @@ cmd/agentflow → cli → app → config / logging / storage / sshprobe / sshcli
   查询，并集中定义校验超时。
 - `app` 中的 `HostValidator` 编排三项必需检查，`HostValidationService` 作为后台服务接入
   `internal/lifecycle`，两者都不在 HTTP Handler 内创建长期 goroutine。
+- `app.StepExecutor` 是单步骤执行协调器（`internal/app/step_executor*.go`），按职责拆分为
+  校验与占用、提示词构造、执行与终态写入、生命周期四部分。它是所有执行入口里唯一负责
+  "创建 Attempt → 调用 Pi → 写终态"的组件，同时实现 `lifecycle.Service`，因此 Server 停止时
+  能取消在途执行并等待收敛。
+- `httpapi` 只做协议转换：解析执行参数、把错误类别映射为状态码、序列化结果。它不判断任务
+  是否可执行，也不读数据库。
+- `workflow` 引擎（多步骤编排）已经存在并可在 CLI 下使用，但 `agentflow server` 构造的任务
+  服务不含工作流引擎，因此 HTTP 侧不会自动推进任务。
 
 ## 领域模型边界
 
@@ -162,12 +184,43 @@ cmd/agentflow → cli → app → config / logging / storage / sshprobe / sshcli
 - 跨实体的关键状态更新必须在 `storage.Tx` 内完成，不能在应用层分多次调用独立方法后假定原子性。
 - 外键统一为 `ON DELETE RESTRICT`：角色、需求、任务、步骤等被历史记录引用时不可删除，避免历史丢失。
 - 完整 Agent 会话历史不能作为唯一业务记录，业务结论必须写入结构化字段。
+- 单步骤执行的步骤占用必须在单个事务内完成：以状态为前置条件创建 Attempt，再条件更新
+  Step 与 Task。禁止"先查询、后无条件更新"，也不得只依赖进程内互斥锁保证一致性。
+- `ON DELETE RESTRICT` 是早期设计；当前 Schema 不声明外键，引用完整性由应用层承担（见
+  `AGENTS.md` 的数据库约束规范）。
 
 ## 外部进程边界
 
-- Pi 通过独立子进程与 JSONL RPC 交互，协议以官方文档与当前安装版本为准。
-- 必须处理启动失败、非零退出码、消息解析失败、超时、取消、意外退出、输出流关闭与子进程未退出。
+- Pi 只使用非交互调用方式 `pi --print --session <path> --model <id>`，Prompt 通过标准输入写入
+  并立即关闭；不使用 RPC 模式、不使用 `--no-session`、不依赖伪终端。
+- 必须处理启动失败、非零退出码、超时、取消、意外退出、输出流关闭与子进程未退出。
 - 子进程的终止与回收统一由 `process` 负责，其他包不直接管理进程。
+- 取消与服务关闭必须传播到实际 Pi 进程；两者必须能区分：调用方取消记为 `cancelled`，
+  服务关闭导致的记为 `interrupted`。
+
+## 单步骤执行边界
+
+单步骤执行是 Task Service 与 Pi Runner 之间的中间层，边界如下：
+
+```text
+HTTP Handler
+  └── app.StepExecutor.Execute
+        ├── domain.CheckStepExecutionStart（准入规则）
+        ├── 执行节点准入 + 容器核验（只读，不创建/不启动）
+        ├── storage.StepExecutionStore.BeginStepExecution（单事务占用 + 创建 Attempt）
+        ├── ContainerService.RunAgent（统一 Pi Runner，独立 Session）
+        └── 终态写入：Attempt → Step → Task（各自条件更新）
+```
+
+- 一次请求只执行一个已存在的 Step；不生成计划、不串联步骤、不自动重试。
+- 执行是同步的：Attempt 进入终态后才返回响应，不存在"已受理但仍在后台"的语义。
+- 同一 Step 同一时刻只有一个有效占用，重复与并发请求返回 409。
+- 每次执行创建新的 Attempt 与独立的 Session 文件，不复用旧记录。
+- `completed` 只代表本次 Agent 调用正常结束，不代表任务验收通过；任务保持 `developing`。
+- 失败与超时把任务收敛为 `recovery_required` 而不是终态 `failed`：是否重试需要完整工作流判断。
+- 终态写入失败必须如实报告（`Finalized=false` / `execution_not_persisted`），不得因响应
+  写入失败而跳过 Session 保存与状态更新。
+- 本层不创建、启动、停止或接管容器，也不执行 Git 操作。
 
 ## SSH 边界
 
@@ -195,7 +248,10 @@ cmd/agentflow → cli → app → config / logging / storage / sshprobe / sshcli
 
 ## 工作区边界
 
-- 每个 Task 拥有独立 Git Worktree，同任务多步骤共享该工作区。
+- 目标形态下每个 Task 拥有独立 Git Worktree，同任务多步骤共享该工作区；当前实现的远程任务
+  使用受管理容器内的工作目录（`/workspace/project`），本机 Worktree 尚未接入。
+- 单步骤执行不会克隆代码、不会初始化仓库，也不会修改工作区路径：它只在已就绪的容器内
+  执行 Agent 调用。
 - 未经明确配置，不得自动删除包含未提交代码的工作区。
 - 执行节点的远程工作空间默认 `~/.lingting/agentflow`，`~` 指远程 SSH 登录用户的 Home；
   路径遵循 POSIX 语义。SFTP 不会展开 `~`，因此必须先通过已认证连接取得远程 Home，再把

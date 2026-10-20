@@ -22,6 +22,13 @@ const (
 	CodeInvalidRequest = "invalid_request"
 	// CodeConflict 表示资源当前状态不允许该操作。
 	CodeConflict = "state_conflict"
+	// CodePreconditionFailed 表示执行所需的前置条件尚未满足，
+	// 例如任务缺少受管理的运行中容器，或执行节点未通过环境预检。
+	CodePreconditionFailed = "precondition_failed"
+	// CodeExecutionFailed 表示执行已经发生但未成功：失败、超时、取消或中断。
+	CodeExecutionFailed = "execution_failed"
+	// CodeExecutionNotPersisted 表示执行已结束但最终状态未能完整写入。
+	CodeExecutionNotPersisted = "execution_not_persisted"
 )
 
 // ErrorBody 是统一的错误描述。

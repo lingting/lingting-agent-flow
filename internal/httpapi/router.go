@@ -28,6 +28,8 @@ type Deps struct {
 	Hosts *app.ExecutionHostService
 	// ExecutionRecords 是执行记录查询服务，为空时执行记录接口返回服务不可用。
 	ExecutionRecords *app.ExecutionRecordService
+	// StepExecutor 是单步骤执行协调器，为空时步骤执行接口返回服务不可用。
+	StepExecutor *app.StepExecutor
 	// Logger 是日志器，为空时使用 slog.Default。
 	Logger *slog.Logger
 }
@@ -47,6 +49,7 @@ func NewHandler(deps Deps) http.Handler {
 		tasks:      newTaskHandler(deps.Tasks, logger),
 		hosts:      newHostHandler(deps.Hosts, logger),
 		executions: newExecutionHandler(deps.ExecutionRecords, logger),
+		stepExec:   newStepExecutionHandler(deps.StepExecutor, logger),
 		logger:     logger,
 	}
 	mux := http.NewServeMux()
@@ -69,6 +72,7 @@ type router struct {
 	tasks      *taskHandler
 	hosts      *hostHandler
 	executions *executionHandler
+	stepExec   *stepExecutionHandler
 	logger     *slog.Logger
 }
 
@@ -104,6 +108,12 @@ func (rt *router) tasksHandler(w http.ResponseWriter, r *http.Request) {
 				"该接口只支持 GET 与 POST 请求",
 			)
 		}
+		return
+	}
+	// 步骤执行动作与执行记录共享 {taskID}/steps 前缀，因此必须先判定具体形状：
+	// 执行是写操作，交给步骤执行处理器；其余 steps 路径仍按只读查询处理。
+	if taskID, stepID, ok := parseStepExecutePath(r.URL.Path); ok {
+		rt.stepExec.serve(w, r, taskID, stepID)
 		return
 	}
 	// 执行记录路径（steps / attempts / sessions）与单任务路径共享前缀，

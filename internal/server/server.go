@@ -68,6 +68,12 @@ type Options struct {
 	// SSH 服务需要数据库与配置（known_hosts 路径、超时），因此不能在构造 Server
 	// 时创建。工厂返回错误时启动失败，已启动组件按逆序清理。
 	SSHFactory func(store storage.Store, cfg *config.Config) (*app.SSHService, error)
+	// StepExecutorFactory 在数据库打开后构造单步骤执行协调器。
+	//
+	// 协调器需要容器能力与容器内 Agent 执行能力（SSH、Docker），因此不能在构造
+	// Server 时创建。工厂返回错误时启动失败；返回 nil 表示本次运行不提供执行接口，
+	// 此时接口返回 503 而不是伪造执行。
+	StepExecutorFactory func(store storage.Store, cfg *config.Config) (*app.StepExecutor, error)
 	// AgentRunnerFactory 在数据库打开后构造统一 Pi Runner 服务。
 	//
 	// Pi Runner 依赖已打开的数据库（写 Session 记录）与 Session 持久化目录，因此
@@ -92,22 +98,26 @@ type Server struct {
 	sshFactory func(store storage.Store, cfg *config.Config) (*app.SSHService, error)
 	// agentRunnerFactory 在数据库打开后构造统一 Pi Runner 服务。
 	agentRunnerFactory func(store storage.Store, cfg *config.Config) (*app.AgentRunnerService, error)
-	systemInfo         func() app.SystemInfo
-	tasks              *app.TaskService
-	services           []Service
-	hosts              *app.ExecutionHostService
-	ssh                *app.SSHService
-	validation         *app.HostValidationService
+	// stepExecutorFactory 在数据库打开后构造单步骤执行协调器。
+	stepExecutorFactory func(store storage.Store, cfg *config.Config) (*app.StepExecutor, error)
+	systemInfo          func() app.SystemInfo
+	tasks               *app.TaskService
+	services            []Service
+	hosts               *app.ExecutionHostService
+	ssh                 *app.SSHService
+	validation          *app.HostValidationService
 	// sessions 是所有 Agent 调用共享的会话服务。
 	sessions *app.SessionService
 	// agentRunner 是统一 Pi Runner 后台服务，Server 停止时取消在途调用。
 	agentRunner *app.AgentRunnerService
 	// executionRecords 是执行记录只读查询服务，由已打开的数据库构造。
 	executionRecords *app.ExecutionRecordService
-	requireWeb       bool
-	logger           *slog.Logger
-	report           func(message string)
-	manager          *lifecycle.Manager
+	// stepExecutor 是单步骤执行协调器，为空时不提供执行接口。
+	stepExecutor *app.StepExecutor
+	requireWeb   bool
+	logger       *slog.Logger
+	report       func(message string)
+	manager      *lifecycle.Manager
 
 	boundAddr       string
 	cfg             *config.Config
@@ -146,19 +156,20 @@ func New(options Options) (*Server, error) {
 		}
 	}
 	return &Server{
-		address:            options.Address,
-		openStore:          options.OpenStore,
-		sshFactory:         options.SSHFactory,
-		agentRunnerFactory: options.AgentRunnerFactory,
-		systemInfo:         options.SystemInfo,
-		tasks:              options.Tasks,
-		services:           options.Services,
-		hosts:              options.Hosts,
-		ssh:                options.SSH,
-		requireWeb:         options.RequireWebUI,
-		logger:             options.Logger,
-		report:             report,
-		manager:            lifecycle.New(lifecycle.Options{Logger: options.Logger}),
+		address:             options.Address,
+		openStore:           options.OpenStore,
+		sshFactory:          options.SSHFactory,
+		agentRunnerFactory:  options.AgentRunnerFactory,
+		stepExecutorFactory: options.StepExecutorFactory,
+		systemInfo:          options.SystemInfo,
+		tasks:               options.Tasks,
+		services:            options.Services,
+		hosts:               options.Hosts,
+		ssh:                 options.SSH,
+		requireWeb:          options.RequireWebUI,
+		logger:              options.Logger,
+		report:              report,
+		manager:             lifecycle.New(lifecycle.Options{Logger: options.Logger}),
 	}, nil
 }
 
@@ -222,6 +233,13 @@ func (s *Server) openDatabase(ctx context.Context) error {
 		}
 		s.ssh = sshService
 	}
+	if s.stepExecutorFactory != nil && s.sessions != nil {
+		executor, err := s.stepExecutorFactory(store, s.cfg)
+		if err != nil {
+			return fmt.Errorf("初始化步骤执行协调器失败: %w", err)
+		}
+		s.stepExecutor = executor
+	}
 	if s.agentRunner == nil && s.agentRunnerFactory != nil {
 		runner, err := s.agentRunnerFactory(store, s.cfg)
 		if err != nil {
@@ -261,6 +279,11 @@ func (s *Server) startServices(ctx context.Context) error {
 		// Agent Runner 注册在后台服务里：Server 停止时会取消在途调用并等待收敛，
 		// 不会在退出后残留不受管理的本地子进程。
 		services = append(services, s.agentRunner)
+	}
+	if s.stepExecutor != nil {
+		// 步骤执行协调器同样注册进统一生命周期：Server 停止时取消在途执行并等待
+		// 收敛，使中断状态能被写入数据库，而不是留下 running 残留。
+		services = append(services, s.stepExecutor)
 	}
 	if len(services) == 0 {
 		return nil
@@ -377,6 +400,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		Tasks:            tasks,
 		Hosts:            s.hosts,
 		ExecutionRecords: s.executionRecords,
+		StepExecutor:     s.stepExecutor,
 		RequireWebUI:     s.requireWeb,
 		ShutdownTimeout:  s.shutdownTimeout,
 		Report:           s.report,

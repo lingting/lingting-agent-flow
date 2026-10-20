@@ -285,6 +285,44 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
 - Commit、Push 与 Merge 状态必须分别持久化；`merge_after_push` 默认关闭，Push 结果未知时
   必须先核验远程分支再决定状态。
 
+### 单步骤执行协调器约束
+
+- 单步骤执行入口固定为 `app.StepExecutor`（`internal/app/step_executor*.go`）：HTTP Handler、
+  CLI 与工作流都不得自行拼接 Pi 命令、自行创建 Attempt 或直接写执行状态。
+- 执行是同步的：只有 Attempt 进入终态后才返回结果；不得返回"已受理但仍在后台"的语义，
+  也不得在 Handler 内启动不受生命周期管理的 goroutine 或子进程。
+- 执行前必须校验任务、步骤、角色的归属与状态，并核验任务容器受管理、未 detached 且处于
+  运行中；容器缺失或节点未通过预检时返回明确的前置条件错误，不得静默回退到本机执行，
+  也不得在执行路径上创建、启动或接管容器。
+- 任务的准入状态固定为可合法迁移到 `developing` 的集合（`preparing`、`planned`、
+  `developing`、`retrying`、`paused`、`recovery_required`）；`queued` 必须先完成环境准备与
+  计划，`cancelling` 与已结束状态一律拒绝。该规则只在 `domain` 中定义，不得在别处复制。
+- 步骤占用必须通过 `storage.StepExecutionStore.BeginStepExecution` 在单个事务内完成：先以
+  状态为条件写入 Attempt，再条件更新 Step 与 Task。禁止"先查询、后无条件更新"，也不得只
+  依赖进程内互斥锁保证一致性；冲突一律返回 `storage.ErrConflict` 并映射为 409。
+- 同一步骤同一时刻只允许一个有效执行占用：并发请求、重复请求与客户端超时后的重试都必须
+  返回状态冲突，不得启动第二个 Pi 进程。
+- 每次执行必须创建新的 Attempt 与独立的 Session；重试不得复用旧记录。Session 文件路径由
+  服务端生成，调用方不得指定。
+- 执行结论只由真实结果决定：`completed` 要求进程真实运行并正常退出，缺少可核验运行痕迹时
+  按失败处理；超时、取消与中断分别映射为 `timed_out`、`cancelled`、`interrupted`，不得把
+  任何一种当作成功。
+- 取消与超时必须传播到实际 Pi 进程；用户取消按状态机把 Step 收敛为 `cancelled`，并把任务
+  经 `cancelling` 收敛为 `cancelled`；服务关闭导致的中断映射为 `interrupted`，与用户取消
+  区分记录。
+- 单个步骤成功不得推进任务到 `completed`：任务保持 `developing`，终态由后续确定性验证与
+  代码保存阶段决定。单个步骤失败不得覆盖其他步骤的历史结果。
+- 最终状态写入必须使用未取消的上下文并分别执行：Attempt、Step、Task 三条写入互不阻断，
+  任一失败都要记录到结果的 `FinalizationErrors`，接口不得把"写入失败"报告为成功。
+- 迟到结果不得覆盖已确认的终态：所有终态写入都必须带状态前置条件，冲突时读取数据库真实值。
+- 执行事件（开始、完成、失败、中断）写入任务时间线；事件写入失败只记录日志，不回滚执行
+  状态，也不删除已持久化的执行记录。
+- 步骤执行接口固定为 `POST /api/v1/tasks/{taskID}/steps/{stepID}/execute`，只接受执行参数
+  （可选补充提示词与超时），不接受任意 Session 路径、工作目录、命令行参数或角色覆盖。
+  错误映射：参数错误 400、目标不存在或归属不符 404、状态冲突 409、前置条件缺失 412、
+  执行发生但未成功 500。
+- 本阶段不实现多步骤自动编排、自动重试、远程容器创建、Git 操作与执行队列；相关能力缺失
+  时必须返回明确错误，不得伪装成已可用。
 
 ### 任务管理 API 约束
 

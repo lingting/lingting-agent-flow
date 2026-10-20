@@ -457,6 +457,8 @@ type Tx interface {
 	EnvironmentVersionStore
 	ContainerStore
 	CodeSaveStore
+	// StepExecutionStore 提供单步骤执行的原子占用，与其余实体共享同一事务边界。
+	StepExecutionStore
 }
 
 // Store 是持久化的统一入口。

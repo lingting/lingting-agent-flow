@@ -278,6 +278,77 @@ func TestGracefulShutdownStopsEverything(t *testing.T) {
 	}
 }
 
+// TestStepExecutorStopsWithServer 校验步骤执行协调器被纳入统一生命周期。
+//
+// 关闭时必须先收到停止信号再关闭数据库，否则在途执行会在已关闭的数据库上写状态。
+func TestStepExecutorStopsWithServer(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig(t)
+	instance := newServer(t, server.Options{
+		Address:    "127.0.0.1:0",
+		OpenStore:  realStoreOpener(t),
+		SystemInfo: func() app.SystemInfo { return app.SystemInfo{Version: "test"} },
+		StepExecutorFactory: func(
+			store storage.Store,
+			cfg *config.Config,
+		) (*app.StepExecutor, error) {
+			sessions, err := app.NewSessionService(
+				store,
+				app.SessionRoot(cfg),
+				slog.New(slog.NewTextHandler(testWriter{t}, &slog.HandlerOptions{Level: slog.LevelError})),
+			)
+			if err != nil {
+				return nil, err
+			}
+			return app.NewStepExecutor(app.StepExecutorOptions{
+				Store:      store,
+				Containers: &unusableContainers{},
+				Sessions:   sessions,
+				Logger:     slog.New(slog.NewTextHandler(testWriter{t}, &slog.HandlerOptions{Level: slog.LevelError})),
+			})
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- instance.Run(ctx, loader(cfg))
+	}()
+	waitHealthy(t, instance)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("正常关闭不应返回错误: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("等待服务关闭超时")
+	}
+	if instance.OpenedStore() != nil {
+		t.Fatal("关闭后数据库应已关闭")
+	}
+}
+
+// unusableContainers 是只用于构造协调器的容器替身。
+//
+// 该用例不发起执行，因此两个方法都直接失败：任何意外调用都会让测试立刻暴露。
+type unusableContainers struct{}
+
+// InspectContainer 实现容器核验接口。
+func (u *unusableContainers) InspectContainer(
+	ctx context.Context,
+	request app.InspectContainerRequest,
+) (app.ContainerDetail, error) {
+	return app.ContainerDetail{}, errors.New("测试未配置容器")
+}
+
+// RunAgent 实现容器内 Agent 调用接口。
+func (u *unusableContainers) RunAgent(
+	ctx context.Context,
+	request app.ContainerAgentRequest,
+) (app.ContainerAgentResult, error) {
+	return app.ContainerAgentResult{}, errors.New("测试未配置容器")
+}
+
 // TestFaultTriggersShutdown 校验后台服务运行期故障会触发统一关闭并返回错误。
 func TestFaultTriggersShutdown(t *testing.T) {
 	t.Parallel()

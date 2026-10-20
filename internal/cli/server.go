@@ -74,6 +74,37 @@ func runServer(cmd *cobra.Command, a *app.App, configPath, address string, requi
 				Logger:   a.Logger().Slog(),
 			})
 		},
+		StepExecutorFactory: func(
+			store storage.Store,
+			cfg *config.Config,
+		) (*app.StepExecutor, error) {
+			sessions, sessionsErr := app.NewSessionService(
+				store,
+				app.SessionRoot(cfg),
+				a.Logger().Slog(),
+			)
+			if sessionsErr != nil {
+				return nil, sessionsErr
+			}
+			sshService, sshErr := app.NewSSHService(store, a.Logger(), sshOptionsFrom(cfg))
+			if sshErr != nil {
+				return nil, sshErr
+			}
+			containers, containersErr := app.NewContainerService(app.DockerServiceOptions{
+				SSH:    sshService,
+				Store:  store,
+				Logger: a.Logger(),
+			})
+			if containersErr != nil {
+				return nil, containersErr
+			}
+			return app.NewStepExecutor(app.StepExecutorOptions{
+				Store:      store,
+				Containers: containers,
+				Sessions:   sessions,
+				Logger:     a.Logger().Slog(),
+			})
+		},
 		SystemInfo:   a.SystemInfo,
 		RequireWebUI: requireWebUI,
 		Logger:       a.Logger().Slog(),

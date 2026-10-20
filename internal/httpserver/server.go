@@ -40,6 +40,8 @@ type Options struct {
 	Hosts *app.ExecutionHostService
 	// ExecutionRecords 是执行记录查询服务，为空时执行记录接口报告服务不可用。
 	ExecutionRecords *app.ExecutionRecordService
+	// StepExecutor 是单步骤执行协调器，为空时步骤执行接口报告服务不可用。
+	StepExecutor *app.StepExecutor
 	// Files 是前端静态资源文件系统，为空时使用嵌入资源。
 	Files fs.FS
 	// RequireWebUI 为 true 时，缺少前端构建产物将导致构造失败。
@@ -83,6 +85,7 @@ func New(options Options) (*Server, error) {
 		Tasks:            options.Tasks,
 		Hosts:            options.Hosts,
 		ExecutionRecords: options.ExecutionRecords,
+		StepExecutor:     options.StepExecutor,
 		Logger:           logger,
 	})
 	web, err := buildWebHandler(options.Files, options.RequireWebUI, logger)

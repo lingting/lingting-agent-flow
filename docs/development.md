@@ -135,6 +135,22 @@ make build VERSION=0.1.0
 4. 涉及持久化时，在 `internal/storage/sqlite/migrations/` 追加新迁移脚本，并在对应实体文件中补充仓储实现；不要修改已发布的迁移。
 5. 改动完成后执行 `gofmt` 与 `go vet`，并自查 `git diff`。
 
+### 修改单步骤执行链路时
+
+单步骤执行涉及多份一致的约束，改动时按下列清单自查：
+
+1. 准入规则只在 `internal/domain/step_execution.go` 修改：任务/步骤状态集合、角色类型、
+   占用检查都集中在 `CheckStepExecutionStart`；不得在 `app` 或 `httpapi` 复制第二份判断。
+2. 步骤占用必须仍走 `storage.StepExecutionStore.BeginStepExecution` 的单事务路径；不要在
+   `app` 里改成"先查再写"，否则并发请求会各自创建 running Attempt。
+3. 新增执行结论时同步更新 `StepExecutionOutcome` 的 `AttemptStatus`、步骤终态映射与 HTTP
+   错误码，避免同一结论在不同层表达不一致。
+4. 终态写入必须保持"三条互不阻断 + 未取消上下文 + 状态前置条件"的形式；新增写入路径同样
+   不得因执行错误而跳过其余写入。
+5. 取消与服务关闭必须继续区分：调用方取消记为 `cancelled`，服务停止记为 `interrupted`。
+6. Timer/协程不得脱离 `lifecycle` 管理：执行协调器实现了 `Name/Start/Stop`，Server 关闭时
+   会取消在途执行并等待收敛。
+
 ## 新增角色类型或状态
 
 - 新增角色类型：在 `internal/domain/role.go` 增加 `RoleType` 常量与 `Validate` 分支，并在 `internal/config/config.go` 补充对应的工具策略模式映射与示例配置。
@@ -180,6 +196,13 @@ make build VERSION=0.1.0
 - Pi 作为外部进程运行，任何交互都必须假设对方可能异常退出。
 - 协议字段以官方文档与当前安装版本为准，不凭记忆猜测。
 - 新增交互路径时同时实现成功路径、失败路径与取消路径。
+- 业务代码不得自行拼接 Pi 命令：本机走 `app.AgentRunnerService`，容器内走
+  `app.ContainerService.RunAgent`，两者都通过 `agent.Runner` 接口。
+- 单步骤执行的执行结论必须由真实结果决定：`completed` 要求可核验的运行痕迹（完整 Session
+  或进程标识），没有运行痕迹的"成功"要按失败处理。
+- 用户取消与服务关闭都会终止进程，但必须区分记录：前者 `cancelled`，后者 `interrupted`。
+- 修改执行链路后至少覆盖：成功、非零退出、进程启动失败、超时、取消、服务停止中断、
+  状态写入失败与并发重复请求。
 
 ## 与 SSH 交互的注意事项
 

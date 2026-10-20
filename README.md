@@ -6,12 +6,16 @@ AgentFlow 是一个使用 Go 编写的本地优先 AI 编码工作流编排器�
 
 ## 当前开发阶段
 
-AgentFlow 处于**执行节点接入阶段**。当前仓库包含工程骨架、可运行的 CLI、配置加载与校验、结构化日志封装、SQLite 数据模型与版本化迁移，以及执行节点管理与完整的 SSH 连接层。
+AgentFlow 处于**单步骤执行阶段**。当前仓库包含工程骨架、可运行的 CLI、配置加载与校验、结构化日志封装、SQLite 数据模型与版本化迁移、执行节点管理与完整的 SSH 连接层、统一 Pi Runner，以及**单步骤执行协调器**。
 
 执行节点已支持本机私钥认证、严格的主机密钥校验、带超时与取消的远程命令执行、SFTP
 文件传输、远程 Home 与工作空间解析，以及**执行节点环境预检**（SSH 连接、Docker 版本与
-API 兼容性、Docker CLI 帮助信息、基础 Dockerfile 的外部 `FROM` 镜像元数据）。**远程代码仓库
-操作与工作流引擎尚未实现**。文档只会在对应能力落地后才声明其可用。
+API 兼容性、Docker CLI 帮助信息、基础 Dockerfile 的外部 `FROM` 镜像元数据）。
+
+单步骤执行已打通 `HTTP API → Task Service → Step Execution Service → Pi Runner` 的闭环：
+可以通过接口对**明确指定的 Step** 发起一次真实 Pi 调用，并把 Attempt、Session 与状态变化
+持久化。**多步骤自动编排、自动重试、远程容器创建与 Git 操作仍未实现**。文档只会在对应
+能力落地后才声明其可用。
 
 ## 第一版功能范围
 
@@ -46,14 +50,21 @@ API 兼容性、Docker CLI 帮助信息、基础 Dockerfile 的外部 `FROM` 镜
   返回构建信息，`/api/v1/tasks` 提供任务管理，`/api/v1/hosts` 提供执行节点管理与环境预检
   状态；错误响应统一为 `{"error": {...}}`。
 - 单文件交付：前端生产构建产物通过 `//go:embed` 嵌入 Go 可执行文件，`make release` 是唯一推荐的生产构建入口。
+- 单步骤执行协调器：`POST /api/v1/tasks/{taskID}/steps/{stepID}/execute` 对指定 Step 发起一次
+  真实 Pi 调用。校验任务、步骤、角色的归属与状态，核验执行节点与任务容器，以数据库事务
+  原子占用步骤并创建新的 Attempt 与独立 Session，随后按真实结果写入 Attempt / Step / Task
+  终态。同一 Step 同一时刻只允许一个执行占用。
 
 第一版目标（尚未实现）：
 
 - 持久化任务队列，并限制同时执行的任务数量。
-- 结构化、分步骤的开发计划。
-- 每次执行尝试使用独立的 Agent 会话。
-- 以验证结果驱动的修复循环。
+- 结构化、分步骤的开发计划的自动生成。
+- 多步骤自动编排与 Planner → Developer → Validator 串联。
+- 自动重试与退避策略。
+- 以验证结果驱动的修复循环（确定性验证与 Validator 阶段）。
 - 相互隔离的 Git Worktree。
+- 远程 Docker 容器创建、启动与销毁。
+- Git Clone、Commit、Push 与 Merge。
 - 可恢复的任务状态。
 - 业务 Web 页面（当前只有 Web 外壳与连接状态）。
 
@@ -392,12 +403,12 @@ GET /api/v1/tasks/{taskID}/sessions/{sessionID}
 
 #### 当前能力边界
 
-本阶段的任务 API **只负责管理数据**，不代表任务已经执行：
+任务管理接口**只负责管理数据**，执行只能通过下一节的单步骤执行接口发起：
 
-- 任务 API 不会调用 Pi CLI、不会创建 Docker 容器、不会连接 SSH、不会克隆 Git 仓库。
-- 没有任务执行协调器，因此没有任务会被自动推进到 `running` 或 `succeeded` 等执行状态。
-- 执行记录接口**只提供查询**：没有"开始执行""重试""运行 Agent"等写入口。统一 Pi Runner
-  已经可用（见下一节），但把它接入单个 Step 的实际执行属于后续阶段。
+- 任务管理接口不会调用 Pi CLI、不会创建 Docker 容器、不会连接 SSH、不会克隆 Git 仓库。
+- 没有任务级工作流协调器：任务不会被自动推进到执行阶段，也不会自动生成 Step。
+- 执行记录接口**只提供查询**；唯一写入口是
+  `POST /api/v1/tasks/{taskID}/steps/{stepID}/execute`，它执行一个已经存在的 Step。
 - 未经真实执行器创建时不会存在 Step / Attempt / Session 记录；查询返回空列表是正确结果，
   不会用虚构数据填充。
 - 角色没有查询接口，创建任务时需要手工填写其标识；执行节点已提供 `/api/v1/hosts` 接口。
@@ -409,16 +420,147 @@ GET /api/v1/tasks/{taskID}/sessions/{sessionID}
 关闭超时通过 `server.shutdown_timeout_seconds` 设置（0 表示默认 10 秒）。默认只监听回环
 地址，未实现远程访问认证前不会默认监听所有网卡。
 
+### 单步骤执行
+
+对**已经在数据库中存在的 Step** 发起一次真实 Pi 调用。这是当前唯一的执行写入口，也是
+`HTTP API → Task Service → Step Execution Service → Pi Runner` 闭环的入口。
+
+```http
+POST /api/v1/tasks/{taskID}/steps/{stepID}/execute
+Content-Type: application/json
+
+{
+  "prompt": "可选补充说明",
+  "timeout_seconds": 600
+}
+```
+
+两个字段都是可选的，请求体可以为空。关联标识全部来自路径与数据库记录：
+
+- 不接受 Session 文件路径、工作目录、命令行参数或任意本地路径。
+- 不接受角色覆盖：执行角色由步骤在计划生成时锁定，角色类型必须与步骤类型匹配。
+- `prompt` 只作为补充说明追加在编排器生成的提示词之后，不能替换任务目标与步骤上下文。
+
+#### 执行前校验
+
+按固定顺序校验，任一不满足时不会创建任何执行记录：
+
+1. 任务存在、未被逻辑删除，步骤存在且属于该任务（归属不符与不存在都返回 404）。
+2. 任务状态允许执行：`preparing`、`planned`、`developing`、`retrying`、`paused`、
+   `recovery_required`。`queued` 需要先完成环境准备与计划；`cancelling` 与已结束状态拒绝。
+3. 步骤状态允许执行：`pending`、`retry_wait`、`failed`、`recovery_required`，且当前没有被
+   任何 Attempt 占用。
+4. 步骤类型对应 Agent 角色（`plan` / `develop` / `review`），角色存在、类型匹配、已启用并
+   配置了模型。确定性阶段（`prepare`、`source`、`verify`、`save`、`cleanup`）不能通过该
+   接口执行。
+5. 任务绑定的执行节点 `validation_status` 为 `normal`。
+6. 任务容器存在、未被 detached、未被删除，且核验为正在运行。
+
+第 5、6 步缺失时返回 412 `precondition_failed`：本接口**不会**创建容器、启动容器或回退到
+本机执行。
+
+#### 执行过程
+
+1. 在单个数据库事务内占用步骤：以状态为前置条件创建新的 Attempt（`running`，序号由存储层
+   分配），把 Step 推进到 `running` 并记录 `current_attempt_id`，把 Task 推进到 `developing`
+   并记录当前步骤与尝试。
+2. 通过容器内执行入口调用 Pi：每次执行使用独立的 Attempt 与独立 Session 文件。
+3. 按真实结果写入 Attempt、Step、Task 终态。三条写入各自独立并使用未取消的上下文，任一
+   失败都不阻止其余写入。
+
+占用失败（并发请求、重复请求、状态已变更）返回 409 `state_conflict`，不会启动第二个 Pi
+进程。进程内也有一层登记作为快速拒绝，但一致性由数据库条件更新保证。
+
+#### 终态映射
+
+| 情形 | Attempt | Step | Task |
+|---|---|---|---|
+| Pi 正常退出（有可核验运行痕迹） | `completed` | `completed` | `developing` |
+| Pi 非零退出或启动失败 | `failed` | `failed` | `recovery_required` |
+| 调用超时 | `timed_out` | `failed` | `recovery_required` |
+| 用户取消 | `cancelled` | `cancelled` | `cancelled`（经 `cancelling`） |
+| 服务关闭导致中断 | `interrupted` | `failed` | `recovery_required` |
+
+关键语义：
+
+- **单个步骤成功不等于任务成功**：任务停留在 `developing`，最终结论留给后续确定性验证与
+  代码保存阶段，不会被本接口标记为 `completed`。
+- 单个步骤失败不会覆盖其他步骤的历史结果，也不会把任务直接判为终态 `failed`。
+- 服务关闭与用户取消必须区分：前者记录 `interrupted` 并需要人工核验现场，后者才写入
+  "已取消"的结论。
+- 超时不会被当作成功，也不会触发自动重试。
+
+#### 响应
+
+成功返回 200：
+
+```json
+{
+  "task_id": "<任务标识>",
+  "step_id": "<步骤标识>",
+  "attempt_id": "<尝试标识>",
+  "attempt_number": 1,
+  "session_id": "<会话标识>",
+  "outcome": "completed",
+  "success": true,
+  "summary": "Agent 调用已完成: ...",
+  "exit_code": 0,
+  "attempt_status": "completed",
+  "step_status": "completed",
+  "task_status": "developing",
+  "session_status": "completed",
+  "session_run_status": "completed",
+  "archive_status": "succeeded",
+  "export_status": "not_attempted",
+  "finalized": true,
+  "started_at": "2025-01-01T00:00:00Z",
+  "finished_at": "2025-01-01T00:02:00Z"
+}
+```
+
+`outcome`、`attempt_status`、`step_status`、`task_status` 分别表达"本次调用如何结束""尝试
+终态""步骤终态""任务当前状态"，不能互相替代。`success` 是"调用正常结束且状态已写完"的
+便捷值，不代表任务验收通过。
+
+`archive_status` 与 `export_status` 分别记录原始 JSONL 归档与 HTML 导出结果：归档失败不会
+把成功的调用改写为失败，也不会删除 Attempt 或 Session 记录。
+
+#### 错误语义
+
+错误响应沿用统一结构 `{"error": {"code", "message", "request_id"}}`：
+
+| 状态码 | code | 含义 |
+|---|---|---|
+| 400 | `invalid_request` | 参数非法，例如超时秒数越界 |
+| 404 | `not_found` | 任务或步骤不存在，或步骤不属于该任务 |
+| 409 | `state_conflict` | 状态不允许执行，或步骤已被其他执行占用 |
+| 412 | `precondition_failed` | 缺少受管理的运行中容器，或执行节点未通过环境预检 |
+| 500 | `execution_failed` | 执行已发生但未成功（失败、超时、取消、中断） |
+| 500 | `execution_not_persisted` | 执行已结束，但最终状态未能完整写入数据库 |
+| 503 | `internal_error` | 执行协调器未初始化 |
+
+`execution_not_persisted` 是刻意与成功区分的结果：执行事实仍然在响应体之外成立，但数据库
+记录可能不完整，因此不能返回 200。执行本身出错时同样不会删除已有的 Attempt 与 Session。
+
+#### 本阶段不提供的执行能力
+
+- 不自动生成或选择 Step，不串联多个 Step。
+- 不自动重试，也不按退避策略重新执行。
+- 不创建、启动、停止或接管容器；容器缺失时返回 412。
+- 不执行 Git Clone、Commit、Push 或 Merge。
+- 不实现确定性验证与 Validator 阶段：`completed` 只代表本次 Agent 调用正常结束。
+- 不提供执行队列与跨步骤并行调度。
+
 ### 尚未实现的接口
 
 项目、环境、容器、代码保存与 Agent 调度均**没有** HTTP 接口。Web 页面中的对应入口仍为
 占位说明，连接指示器只表示 HTTP API 的可用性，不代表 SSH、Docker 或 Pi Agent 已就绪。
-任务页面已接入真实接口，但只能创建、查看、取消与删除任务记录，不能启动执行。机器页面
-已接入执行节点接口与环境预检结果展示。
+任务页面已接入真实接口，但只能创建、查看、取消与删除任务记录，尚未接入步骤执行入口。
+机器页面已接入执行节点接口与环境预检结果展示。
 
-后台服务目前注册了执行节点环境预检与统一 Pi Runner：任务调度器、任务执行协调器与 Docker
-运维均尚未接入，`agentflow server` 启动后提供 API、页面、环境预检与可被业务层调用的 Pi
-执行能力。
+后台服务目前注册了执行节点环境预检、统一 Pi Runner 与单步骤执行协调器：任务调度器、
+多步骤工作流引擎与 Docker 运维尚未接入，`agentflow server` 启动后提供 API、页面、环境预检
+与单步骤执行能力。
 
 ## 统一 Pi Runner 与 Session 生命周期
 
@@ -476,9 +618,12 @@ Runner 不会自动追加 `--no-extensions`、`--no-skills` 等参数。
 ### 当前实施边界
 
 - 统一 Runner 只负责单次 Agent 调用，不实现任务调度、步骤排序、自动重试、Docker 生命周期
-  或 Git 工作流。
-- 已存在单次调用入口 `agent test`（本机）与 `agent run <container>`（容器），但尚未接入
-  任务下的 Step 执行流程，因此新建任务不会被自动执行。
+  或 Git 工作流。是否执行、执行哪个 Step、是否重试由 Go 业务层决定。
+- 调用入口有三个：`agent test`（本机连通性检查）、`agent run <container>`（容器内单次调用）、
+  以及任务下的 `POST /api/v1/tasks/{taskID}/steps/{stepID}/execute`（单步骤执行，见上文）。
+  三者的共同点是每次调用都走同一条 Runner 与独立的 Session 文件路径。
+- 单步骤执行要求任务已经拥有受管理的运行中容器；本阶段没有"准备容器 + 获取代码 + 生成
+  Step"的入口，因此仅通过 HTTP 无法把 `queued` 任务推进到可执行状态。
 - 没有提供 HTML 会话查看器，也没有自动上传会话内容到外部存储。
 
 ## 前端工程
@@ -978,17 +1123,18 @@ SSH 连接层按三层覆盖：`tests/unit/ssh/`（主机密钥、认证配置�
 
 以下能力均在计划中，当前版本**不提供**：
 
-- 需求队列、Worker 与并发调度。
-- Pi RPC 客户端、子进程管理与 Agent 执行。
-- Git Worktree 创建与清理。
-- Planner / Developer / Validator 的实际执行。
-- 验证失败回退与任务恢复。
-- 任务、项目、机器、环境等业务 HTTP 接口与对应页面。
-- 多 Agent Provider 与分布式执行。
+- 需求队列、Worker 与并发调度（`internal/scheduler`）。
+- 持久化任务队列与任务自动领取。
+- 任务级工作流在 HTTP 服务中的接入：`agentflow server` 构造的任务服务不含工作流引擎，
+  Web 侧不会自动推进任务。
+- 多步骤自动编排与 Planner → Developer → Validator 自动串联。
+- 自动重试、退避策略与验证失败回退。
+- 确定性验证命令的编排与 Validator 判定接入（当前只有单步骤 Agent 调用）。
+- Git Worktree 创建与清理（每个任务目前使用远程容器内的工作区）。
+- 项目、环境的 HTTP 接口与对应页面（任务、执行节点、执行记录已提供接口）。
+- 多 Agent Provider 与分布式执行（当前只支持 Pi）。
 - 角色管理 CLI 与 Web 页面（当前只有存储层的角色初始化与增删改查接口）。
-- 远程 Docker 检测、Dockerfile 版本化、镜像构建与容器生命周期管理。
-- 远程代码仓库操作与项目代码同步。
-- 在远程容器内执行 Pi Agent。
+- 前端步骤执行入口与实时日志页面。
 
 ## 安全与风险提示
 
