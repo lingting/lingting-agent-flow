@@ -172,7 +172,14 @@ func validateContainerPath(entity, field, value string) error {
 // ProjectConfig 是一个项目的环境配置。
 //
 // 这里只保存非机密元数据：项目源代码与 Git 工作区不在本配置中，也不保存在
-// 远程项目配置目录。访问仓库所需的 Token、SSH 私钥等凭据一律不写入本配置。
+// 远程项目配置目录。访问仓库所需的 Token、SSH 私钥、账号密码等凭据一律不写入
+// 本配置，也不写入数据库、日志或仓库 URL。
+//
+// 需要在容器内执行 Git 操作（Clone、Push、Merge）时，凭据必须由项目所使用的
+// 环境镜像自行注入：在环境 Dockerfile 或项目容器配置中通过 BuildKit secret、
+// 构建期挂载的只读凭据文件等方式准备，并在容器内配置对应的 Git 认证（例如
+// credential helper 或 core.sshCommand）。修改本配置或环境版本不会自动带上
+// 凭据，凭据的注入范围由对应容器配置决定。
 type ProjectConfig struct {
 	// ID 是项目标识，同时作为远程目录名，因此只允许安全字符。
 	ID string `json:"id"`

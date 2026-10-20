@@ -3,10 +3,42 @@
 # 该文件提供需要 Git 仓库的测试（tests/integration/remote/agent）所使用的配置。
 #
 # 取值支持 ${NAME} 占位符：解析配置时会查找同名环境变量，存在则替换为它的值，
-# 不存在则保留原样 ${NAME}。
+# 不存在则保留原样 ${NAME}。例如 password: ${AGENTFLOW_TEST_GIT_PASSWORD}。
 #
 # 真实配置文件不入库，只提交本示例文件。
 
 git:
   # 远程机器可访问的 Git 仓库地址，留空时相关用例输出 WARN 并跳过。
+  # 支持 https:// 与 ssh:// 以及 git@host:path 形式。
   repository: ""
+
+  # 以下是可选的 Git 凭证，只用于容器内部执行 Git 操作时的鉴权。
+  #
+  # 三项按 私钥 → token → 账号密码 的顺序使用，取第一个填写完整的：
+  #   1. ssh_key_path 填写时使用 SSH 私钥鉴权；
+  #   2. 否则 token 填写时使用 HTTPS 访问令牌鉴权（用户名默认 x-access-token，
+  #      可用 username 覆盖）；
+  #   3. 否则 username 与 password 同时填写时使用 HTTPS 账号密码鉴权。
+  # 全部留空表示仓库无需认证。
+  #
+  # 凭证的落地位置与限制：
+  #   - 凭证只会写入本次测试容器的内部临时目录，容器删除后随之消失；
+  #   - 不会写入项目代码目录、远程项目配置目录，也不会挂载宿主机目录；
+  #   - 不会写进仓库 URL、命令行参数、日志或数据库；
+  #   - 私钥只被读取，不会被复制进工作空间，也不会修改本机文件内容与权限。
+  #
+  # 这些凭证是测试侧注入的。AgentFlow 产品本身不保存 Git 凭据，实际运行时要在
+  # 项目环境镜像（Dockerfile）或容器配置中注入凭据，详见 internal/domain.ProjectConfig。
+
+  # SSH 私钥文件路径，支持 ~ 前缀；必须是无口令私钥。
+  # 建议通过 ${NAME} 引用环境变量，避免把私钥路径写死在本机配置里。
+  ssh_key_path: ""
+
+  # HTTPS 访问令牌，与 username 配合时优先于 password。
+  token: ""
+
+  # HTTPS 账号密码方式的用户名；只填写 token 时可留空。
+  username: ""
+
+  # HTTPS 账号密码方式的口令。
+  password: ""

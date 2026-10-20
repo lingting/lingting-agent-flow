@@ -161,9 +161,24 @@ func (c ContainerPiConfig) ResolvedAPI() string {
 }
 
 // GitConfig 是 tests/config/git.yml 的内容。
+//
+// 字段全部可选。Repository 留空表示相关用例跳过；凭证三项按
+// 私钥 → token → 账号密码 的顺序取第一个填写完整的，全部留空表示仓库
+// 无需认证。凭证只用于容器内的一次性 Git 鉴权，不写入日志与仓库 URL。
 type GitConfig struct {
 	// Repository 是远程机器可访问的 Git 仓库地址。
 	Repository string `yaml:"repository"`
+	// SSHKeyPath 是 SSH 方式鉴权使用的私钥文件路径，支持 ~ 前缀。
+	//
+	// 私钥只被读取并上传到容器内本次测试的临时目录，不复制进项目代码目录、
+	// 不写入数据库或日志，也不修改其权限与内容。
+	SSHKeyPath string `yaml:"ssh_key_path"`
+	// Token 是 HTTPS 方式鉴权使用的访问令牌。
+	Token string `yaml:"token"`
+	// Username 是 HTTPS 账号密码方式鉴权的用户名。
+	Username string `yaml:"username"`
+	// Password 是 HTTPS 账号密码方式鉴权的口令。
+	Password string `yaml:"password"`
 }
 
 // sshDocument 对应 ssh.yml 的顶层结构。
@@ -329,6 +344,88 @@ func LoadGitConfig(t *testing.T) (GitConfig, bool) {
 		return GitConfig{}, false
 	}
 	return document.Git, true
+}
+
+// GitCredentialKind 是 Git 鉴权方式。
+type GitCredentialKind string
+
+// 支持的 Git 鉴权方式，取值顺序即使用顺序。
+const (
+	// GitCredentialNone 表示未配置凭证，仓库必须允许匿名访问。
+	GitCredentialNone GitCredentialKind = "none"
+	// GitCredentialPrivateKey 表示使用 SSH 私钥鉴权。
+	GitCredentialPrivateKey GitCredentialKind = "private_key"
+	// GitCredentialToken 表示使用 HTTPS 访问令牌鉴权。
+	GitCredentialToken GitCredentialKind = "token"
+	// GitCredentialPassword 表示使用 HTTPS 账号密码鉴权。
+	GitCredentialPassword GitCredentialKind = "password"
+)
+
+// ResolvedRepository 返回去除空白后的仓库地址。
+func (c GitConfig) ResolvedRepository() string {
+	return strings.TrimSpace(c.Repository)
+}
+
+// ResolvedSSHKeyPath 返回展开 ~ 与去空白后的私钥路径。
+//
+// 该路径只在本次测试中被读取，不会被复制进项目代码目录。
+func (c GitConfig) ResolvedSSHKeyPath() string {
+	path := strings.TrimSpace(c.SSHKeyPath)
+	if path == "" {
+		return ""
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		switch {
+		case path == "~":
+			return home
+		case strings.HasPrefix(path, "~/"):
+			return filepath.Join(home, path[2:])
+		case strings.HasPrefix(path, "~\\"):
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
+}
+
+// CredentialKind 返回按 私钥 → token → 账号密码 顺序选中的鉴权方式。
+//
+// 三者都未填写完整时返回 GitCredentialNone，表示仓库必须允许匿名访问。
+// 顺序固定在此处，各远程测试不得各自实现选择逻辑。
+func (c GitConfig) CredentialKind() GitCredentialKind {
+	switch {
+	case c.ResolvedSSHKeyPath() != "":
+		return GitCredentialPrivateKey
+	case strings.TrimSpace(c.Token) != "":
+		return GitCredentialToken
+	case strings.TrimSpace(c.Username) != "" && strings.TrimSpace(c.Password) != "":
+		return GitCredentialPassword
+	default:
+		return GitCredentialNone
+	}
+}
+
+// CredentialMissing 返回被填写但不完整的凭证项，供失败信息使用。
+//
+// 账号密码方式要求两项同时填写；只填一项时视为配置错误，而不是"没有凭据"，
+// 避免把写错配置的仓库当成匿名仓库去尝试。私钥或 token 已经填写时，账号密码
+// 不参与选择，此时缺少其中一项不算错误。
+func (c GitConfig) CredentialMissing() []string {
+	if c.ResolvedSSHKeyPath() != "" || strings.TrimSpace(c.Token) != "" {
+		return nil
+	}
+	username := strings.TrimSpace(c.Username)
+	password := strings.TrimSpace(c.Password)
+	if username == "" && password == "" {
+		return nil
+	}
+	missing := make([]string, 0, 1)
+	if username == "" {
+		missing = append(missing, "git.username")
+	}
+	if password == "" {
+		missing = append(missing, "git.password")
+	}
+	return missing
 }
 
 // loadDocument 读取并解析一个配置文件，返回文件是否存在。

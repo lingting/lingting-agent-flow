@@ -360,20 +360,52 @@ func ensureRemoteDir(ctx context.Context, client sshclient.Client, dir string) e
 	return nil
 }
 
-// resolveRepository 返回测试使用的仓库地址。
+// resolveGitConfig 返回测试使用的 Git 仓库与凭证配置。
 //
-// 取值来自 tests/config/git.yml 的 git.repository；未配置时输出警告并跳过，
-// 因为远端通常无法访问任意外部仓库。
-func resolveRepository(t *testing.T) string {
+// 取值来自 tests/config/git.yml；仓库地址留空时输出警告并跳过，因为远端通常无法
+// 访问任意外部仓库。账号密码只填写一半属于配置错误，直接让测试失败，而不是当成
+// "没有凭据"静默降级为匿名访问。
+func resolveGitConfig(t *testing.T) testkit.GitConfig {
 	t.Helper()
 	config, _ := testkit.LoadGitConfig(t)
-	repository := strings.TrimSpace(config.Repository)
-	if repository == "" {
+	if config.ResolvedRepository() == "" {
 		reason := testkit.SkipReason(t, testkit.GitConfigFile, []string{"git.repository"})
 		fmt.Fprintln(os.Stdout, reason)
 		t.Skip(reason)
 	}
-	return repository
+	if missing := config.CredentialMissing(); len(missing) > 0 {
+		t.Fatalf(
+			"%s 中的 Git 凭证不完整，缺少 %s",
+			testkit.ConfigPath(t, testkit.GitConfigFile),
+			strings.Join(missing, ", "),
+		)
+	}
+	return config
+}
+
+// applyGitCredentials 把 git.yml 中的可选凭证注入容器内临时目录。
+//
+// 凭证只存在于容器内部文件系统：不写入项目代码目录、不写入远程项目配置目录、
+// 不挂载宿主机目录，容器删除后随之消失；私钥只被读取后写入容器内临时文件。
+func applyGitCredentials(
+	t *testing.T,
+	ctx context.Context,
+	exec *remoteExecutor,
+	dockerID string,
+	config testkit.GitConfig,
+) {
+	t.Helper()
+	auth, err := testkit.ApplyGitCredentials(
+		ctx,
+		exec,
+		dockerID,
+		config,
+		"/tmp/agentflow-credentials-"+randomSuffix(t),
+	)
+	if err != nil {
+		t.Fatalf("注入容器内 Git 凭证失败: %v", err)
+	}
+	t.Logf("CONTAINER_GIT_CREDENTIAL=%s", auth.Kind)
 }
 
 // dial 建立经过主机密钥校验与身份认证的连接。
@@ -494,6 +526,38 @@ func (e *remoteExecutor) Exec(
 		Cancelled:       run.Cancelled(),
 		Certain:         run.Certain,
 	}, err
+}
+
+// ExecContainer 在容器内执行命令并写入标准输入，供 testkit 注入 Git 凭证使用。
+func (e *remoteExecutor) ExecContainer(
+	ctx context.Context,
+	dockerID string,
+	command []string,
+	stdin string,
+) (testkit.GitCredentialResult, error) {
+	var (
+		run docker.CommandResult
+		err error
+	)
+	if stdin == "" {
+		run, err = e.runner.ExecCommand(ctx, dockerID, command, remoteOpTimeout)
+	} else {
+		run, err = e.runner.ExecCommandWithInput(
+			ctx,
+			dockerID,
+			command,
+			strings.NewReader(stdin),
+			remoteOpTimeout,
+		)
+	}
+	if err != nil {
+		return testkit.GitCredentialResult{}, err
+	}
+	return testkit.GitCredentialResult{
+		ExitCode: run.ExitCode,
+		Stdout:   run.Stdout,
+		Stderr:   run.Stderr,
+	}, nil
 }
 
 // CopyFromContainer 用 docker cp 把容器内文件复制到远程临时目录。
@@ -736,7 +800,8 @@ func probeContainerTools(t *testing.T, ctx context.Context, exec *remoteExecutor
 func TestRemoteSourceFetch(t *testing.T) {
 	t.Parallel()
 	tg := requireEnabled(t)
-	repository := resolveRepository(t)
+	gitConfig := resolveGitConfig(t)
+	repository := gitConfig.ResolvedRepository()
 	ws := testkit.New(t)
 	ws.Report()
 	client := dial(t, ws, tg)
@@ -748,6 +813,7 @@ func TestRemoteSourceFetch(t *testing.T) {
 	record := createContainer(t, ctx, exec, suffix)
 	probeContainerTools(t, ctx, exec, record.DockerID)
 
+	applyGitCredentials(t, ctx, exec, record.DockerID, gitConfig)
 	taskID := "task-" + suffix
 	provider, err := source.NewProvider(source.Options{
 		Executor: exec,
