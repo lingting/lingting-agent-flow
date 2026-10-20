@@ -875,3 +875,64 @@ func TestConcurrentRunsDoNotShareSession(t *testing.T) {
 		}
 	}
 }
+
+// TestContainerOutputLogsAreLocal 验证容器内的两个输出流分别落到本机日志文件。
+//
+// 容器删除后容器内文件随之消失，因此原始输出必须在本机留档，否则执行结束后
+// 只剩一份摘要，无法排查真实输出。
+func TestContainerOutputLogsAreLocal(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, func(
+		executor *fakeExecutor,
+		request agent.ContainerExecRequest,
+	) (agent.ContainerExecResult, error) {
+		if isVersionProbe(request.Command) {
+			return succeeded("9.9.9\n"), nil
+		}
+		if isExportCall(request.Command) {
+			executor.writeContainerFile(exportTargetOf(request.Command), "<html>session</html>")
+			return succeeded("Exported\n"), nil
+		}
+		executor.writeContainerFile(sessionPathOf(request.Command), testSessionJSONL)
+		return agent.ContainerExecResult{
+			ExitCode: 0,
+			Stdout:   "READY\n",
+			Stderr:   "容器内诊断信息\n",
+			Certain:  true,
+		}, nil
+	})
+	result, err := h.runner.Run(context.Background(), h.request, nil)
+	if err != nil {
+		t.Fatalf("执行失败: %v", err)
+	}
+	if result.StdoutPath == "" || result.StderrPath == "" {
+		t.Fatalf("输出日志路径不能为空: %q / %q", result.StdoutPath, result.StderrPath)
+	}
+	if result.StdoutPath == result.StderrPath {
+		t.Fatalf("两个流不能共用一个日志文件: %s", result.StdoutPath)
+	}
+	stdout := readLocalFile(t, result.StdoutPath)
+	stderr := readLocalFile(t, result.StderrPath)
+	if !strings.Contains(stdout, "READY") {
+		t.Fatalf("标准输出日志缺少内容: %q", stdout)
+	}
+	if strings.Contains(stdout, "诊断信息") {
+		t.Fatalf("标准输出日志混入了诊断信息: %q", stdout)
+	}
+	if !strings.Contains(stderr, "诊断信息") {
+		t.Fatalf("标准错误日志缺少内容: %q", stderr)
+	}
+	if strings.Contains(stderr, "READY") {
+		t.Fatalf("标准错误日志混入了标准输出: %q", stderr)
+	}
+}
+
+// readLocalFile 读取本机文件，失败时让测试终止。
+func readLocalFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读取文件失败: %s: %v", path, err)
+	}
+	return string(data)
+}

@@ -81,6 +81,9 @@ func resolveRunnerOptions(options Options) Options {
 	if options.StderrLimit <= 0 {
 		options.StderrLimit = DefaultStderrLimit
 	}
+	if options.LogLimit <= 0 {
+		options.LogLimit = DefaultLogLimit
+	}
 	return options
 }
 
@@ -173,6 +176,11 @@ func (r *ContainerRunner) Run(
 		SessionDir: remote.Dir,
 	})
 	executed, execErr := r.execute(runCtx, request, remote)
+	// 容器内的两个输出流在本机分别落盘：容器删除后原始输出仍然可读，
+	// 且不会因为容器内临时目录消失而丢失诊断信息。
+	logs := writeContainerLogs(paths.Dir, r.options.LogLimit, executed)
+	result.StdoutPath = logs.stdoutPath()
+	result.StderrPath = logs.stderrPath()
 	result.ExitCode = executed.ExitCode
 	result.Stdout = agent.TruncateText(strings.TrimSpace(executed.Stdout), agent.MaxFinalTextLength)
 	result.StderrSummary = agent.TruncateText(
@@ -180,8 +188,9 @@ func (r *ContainerRunner) Run(
 		agent.MaxFinalTextLength,
 	)
 	result.FinalText = result.Stdout
-	result.StdoutTruncated = executed.StdoutTruncated
-	result.StderrTruncated = executed.StderrTruncated
+	// 截断标记以日志文件为准：容器返回的输出本身可能已被上限裁剪。
+	result.StdoutTruncated = executed.StdoutTruncated || logs.stdoutTruncated()
+	result.StderrTruncated = executed.StderrTruncated || logs.stderrTruncated()
 	result.Status, result.Failure = classifyContainerOutcome(executed, execErr, request)
 	// Session 处理在进程结束之后：Pi 在退出前写完 Session 文件。
 	result.Session = r.persistSession(ctx, request, remote, paths, executed, result.Status, emit)
@@ -619,4 +628,20 @@ func joinError(existing, addition string) string {
 	default:
 		return existing + "；" + addition
 	}
+}
+
+// writeContainerLogs 把容器内执行的两个输出流写入本机日志文件。
+//
+// 容器执行层返回的是已经按上限裁剪后的输出，无法再流式追加；这里把它分别
+// 落盘，使容器删除后仍有可读的诊断记录。日志写入失败只降级诊断，不影响执行结果。
+func writeContainerLogs(dir string, limit int64, executed agent.ContainerExecResult) *outputLogs {
+	logs := newOutputLogs(dir, limit)
+	if logs.stdout != nil {
+		logs.stdout.Write(strings.TrimRight(executed.Stdout, "\r\n"))
+	}
+	if logs.stderr != nil {
+		logs.stderr.Write(strings.TrimRight(executed.Stderr, "\r\n"))
+	}
+	_ = logs.close()
+	return logs
 }

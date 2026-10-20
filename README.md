@@ -80,8 +80,10 @@ Pi RPC、Git Worktree、React 与 TypeScript 属于后续阶段的技术选型�
 - Make（可选，也可直接使用 `go` 命令）
 
 只有 `agent check` 与 `agent test` 需要 Pi：前者检查 PATH 中的 `pi` 及其非交互式参数，
-后者还会用角色配置的模型发起一次真实调用，因此需要对应 Provider 的凭据。其余命令
-（`config`、`version`、`host`、`server`）不依赖 Pi，也不需要模型凭据。
+后者还会用角色配置的模型发起一次真实调用，因此需要对应 Provider 的凭据。
+`agent run <container>` 在任务容器内部调用 Pi，要求该容器内已安装可用版本的 `pi`。
+`agentflow server` 启动时不会调用 Pi，但会把统一 Pi Runner 注册为后台服务。
+其余命令（`config`、`version`、`host`）不依赖 Pi，也不需要模型凭据。
 
 ## 安装与运行
 
@@ -392,10 +394,10 @@ GET /api/v1/tasks/{taskID}/sessions/{sessionID}
 
 本阶段的任务 API **只负责管理数据**，不代表任务已经执行：
 
-- 不会调用 Pi CLI、不会创建 Docker 容器、不会连接 SSH、不会克隆 Git 仓库。
-- 没有执行器，因此没有任务会被自动推进到 `running` 或 `succeeded` 等执行状态。
-- 执行记录接口**只提供查询**：没有"开始执行""重试""运行 Agent"等写入口。本阶段建立的是
-  可持久化、可追溯的执行数据模型，真实执行能力要等统一 Pi Runner 与执行协调器实现。
+- 任务 API 不会调用 Pi CLI、不会创建 Docker 容器、不会连接 SSH、不会克隆 Git 仓库。
+- 没有任务执行协调器，因此没有任务会被自动推进到 `running` 或 `succeeded` 等执行状态。
+- 执行记录接口**只提供查询**：没有"开始执行""重试""运行 Agent"等写入口。统一 Pi Runner
+  已经可用（见下一节），但把它接入单个 Step 的实际执行属于后续阶段。
 - 未经真实执行器创建时不会存在 Step / Attempt / Session 记录；查询返回空列表是正确结果，
   不会用虚构数据填充。
 - 角色没有查询接口，创建任务时需要手工填写其标识；执行节点已提供 `/api/v1/hosts` 接口。
@@ -414,8 +416,70 @@ GET /api/v1/tasks/{taskID}/sessions/{sessionID}
 任务页面已接入真实接口，但只能创建、查看、取消与删除任务记录，不能启动执行。机器页面
 已接入执行节点接口与环境预检结果展示。
 
-后台服务目前只注册了执行节点环境预检：任务调度器、任务执行器与 Docker 运维均尚未接入，
-`agentflow server` 启动后提供 API、页面与环境预检。
+后台服务目前注册了执行节点环境预检与统一 Pi Runner：任务调度器、任务执行协调器与 Docker
+运维均尚未接入，`agentflow server` 启动后提供 API、页面、环境预检与可被业务层调用的 Pi
+执行能力。
+
+## 统一 Pi Runner 与 Session 生命周期
+
+Planner、Developer 与 Validator 的每一次调用都经由同一个执行入口，由 Go 侧管理完整进程
+生命周期，而不是在业务代码里各自拼接 Pi 命令。
+
+### Pi CLI 依赖与版本检查
+
+非交互调用固定使用以下形式（Prompt 通过标准输入写入并立即关闭）：
+
+```text
+pi --print --session <session.jsonl> --model <provider/model-id> [--append-system-prompt <text>]
+```
+
+当前实测版本为 `1.3.0`，已确认 `--print`、`--session`、`--export` 与 `--list-models` 可用。
+运行前可用下面两条命令自行核对：
+
+```bash
+pi --version
+./bin/agentflow agent check --model group/free
+```
+
+`agent check` 会确认可执行程序、版本、`--print` 与 `--session` 是否出现在帮助中，并在给出
+`--model` 时确认模型被识别以及凭据状态。该命令不发送提示词，因此不消耗模型额度。
+
+Pi 调用不使用 RPC 模式，不使用 `--no-session`，也不依赖伪终端。用户配置的扩展保持正常加载：
+Runner 不会自动追加 `--no-extensions`、`--no-skills` 等参数。
+
+### 会话保存位置
+
+每次调用使用独立 Session 文件，目录按任务、步骤、尝试、会话与调用标识分层：
+
+```text
+<数据库目录>/sessions/<task-id>/<step-id>/<attempt-id>/<session-id>/<invocation-id>/
+    session.jsonl     原始 JSONL，Pi 直接写入
+    session.html      Pi 官方导出的 HTML（可失败）
+    stdout.log        标准输出日志（有字节上限）
+    stderr.log        标准错误日志（有字节上限）
+```
+
+- 目录由服务端生成并校验落在 Session 根目录之内，调用方不能指定任意本地路径。
+- 会话记录在进程启动之前写入数据库并置为 `running`；启动失败会收敛为 `failed`，不会残留
+  `running`。
+- 原始 JSONL 归档状态、HTML 导出状态与执行状态分别在数据库中记录，导出失败不会删除原始
+  文件，也不会把成功的执行改写为失败。
+- 日志超过上限后停止写入并在文件末尾留下明确标记，不会把截断的文件伪装成完整日志。
+
+### 超时、取消与关闭
+
+- 单次调用必须有超时边界，默认 30 分钟；超时后结束实际进程再读取退出状态。
+- 取消与超时都会尽力保存已经写入的 Session 文件，并分别记录为 `cancelled` 与 `timed_out`。
+- `agentflow server` 关闭时取消在途调用并等待其收敛，不会在退出后残留子进程。
+- 容器内执行时，Session 与两个输出流都会回传到本机持久化目录，容器删除后仍可读取。
+
+### 当前实施边界
+
+- 统一 Runner 只负责单次 Agent 调用，不实现任务调度、步骤排序、自动重试、Docker 生命周期
+  或 Git 工作流。
+- 已存在单次调用入口 `agent test`（本机）与 `agent run <container>`（容器），但尚未接入
+  任务下的 Step 执行流程，因此新建任务不会被自动执行。
+- 没有提供 HTML 会话查看器，也没有自动上传会话内容到外部存储。
 
 ## 前端工程
 

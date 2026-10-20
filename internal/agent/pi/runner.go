@@ -108,6 +108,9 @@ func (r *Runner) Run(
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	logs := newOutputLogs(paths.Dir, options.LogLimit)
+	result.StdoutPath = logs.stdoutPath()
+	result.StderrPath = logs.stderrPath()
 	stderrLines := make(chan process.Line, 64)
 	supervisor, err := process.Start(
 		processCommand(processOptions{
@@ -144,7 +147,7 @@ func (r *Runner) Run(
 		PID:        supervisor.PID(),
 	})
 
-	capture := newOutputCapture(options.OutputLimit, request.SessionID, emit)
+	capture := newOutputCapture(options.OutputLimit, request.SessionID, logs, emit)
 	var readers sync.WaitGroup
 	readers.Add(2)
 	go func() {
@@ -166,6 +169,11 @@ func (r *Runner) Run(
 	// 保证极端情况下也不会让调用永久阻塞。
 	exit := awaitExit(supervisor, drainTimeout(options.GraceTimeout))
 	result.ExitCode = exit.Code
+	// 日志在输出读取结束后关闭：先落盘再判定截断标记，避免把未写完的文件
+	// 当作完整日志。
+	logErr := logs.close()
+	result.StdoutTruncated = logs.stdoutTruncated()
+	result.StderrTruncated = logs.stderrTruncated()
 	result.FinalText = agent.TruncateText(capture.stdoutTail(), agent.MaxFinalTextLength)
 	result.StderrSummary = agent.TruncateText(capture.stderrTail(), agent.MaxFinalTextLength)
 	result.Status = ended.status()
@@ -173,6 +181,15 @@ func (r *Runner) Run(
 	if result.Status == agent.RunCompleted && result.Failure != "" {
 		// 进程已退出但退出码非零或提示词写入失败：执行未正常完成。
 		result.Status = agent.RunFailed
+	}
+	if logErr != nil {
+		// 日志写入失败只影响诊断便利性：执行结果与 Session 归档仍然有效，
+		// 因此只把原因附加到失败说明，不改变运行状态。
+		result.Failure = joinFailure(result.Failure, logErr.Error())
+	}
+	if logs.err != nil {
+		// 日志创建失败同样只降级诊断：执行结果与 Session 归档不受影响。
+		result.Failure = joinFailure(result.Failure, logs.err.Error())
 	}
 
 	// Session 处理放在进程回收之后：Pi 在退出前写完 Session 文件，

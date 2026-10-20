@@ -160,3 +160,37 @@ func TestSessionCompletenessHasJSONL(t *testing.T) {
 		}
 	}
 }
+
+// TestApplyArtifactsRecordsOutputPaths 验证两个输出流的位置被分别记录。
+//
+// stdout 与 stderr 必须保留各自的路径：合成一个字段会让"哪段输出来自哪条流"
+// 永久丢失，出错时无法区分真实回答与诊断信息。
+func TestApplyArtifactsRecordsOutputPaths(t *testing.T) {
+	t.Parallel()
+	session := mustSessionWithRole(t)
+	if err := session.MarkRunning(""); err != nil {
+		t.Fatalf("标记运行失败: %v", err)
+	}
+	artifacts := domain.SessionArtifacts{
+		JSONLPath:    "/data/sessions/session.jsonl",
+		RunStatus:    domain.SessionRunCompleted,
+		Completeness: domain.SessionCompletenessComplete,
+		ExportStatus: domain.SessionExportNotAttempted,
+		ExitCode:     0,
+		StdoutPath:   "/data/sessions/stdout.log",
+		StderrPath:   "/data/sessions/stderr.log",
+	}
+	if err := session.ApplyArtifacts(artifacts, time.Now().UTC()); err != nil {
+		t.Fatalf("记录产出元数据失败: %v", err)
+	}
+	if session.StdoutPath != artifacts.StdoutPath {
+		t.Fatalf("标准输出路径未记录: %q", session.StdoutPath)
+	}
+	if session.StderrPath != artifacts.StderrPath {
+		t.Fatalf("标准错误路径未记录: %q", session.StderrPath)
+	}
+	// 两个路径不能指向同一个文件。
+	if session.StdoutPath == session.StderrPath {
+		t.Fatalf("两个输出流不应共用路径: %s", session.StdoutPath)
+	}
+}

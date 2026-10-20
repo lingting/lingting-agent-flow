@@ -234,6 +234,37 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
 - SourceProvider 只负责获取代码与初始化任务分支，不负责 Push、Merge 或删除容器。
 - Runner 不负责工作流重试决策，也不决定整个任务的成功清理策略。
 
+### 统一 Pi Runner 与 Session 生命周期约束
+
+- 所有 Planner、Developer、Validator 调用都必须经由 `app.AgentRunnerService`（本机）或
+  `ContainerService.RunAgent`（容器）发起，并各自对应一条独立的 Session 记录；禁止在
+  CLI、HTTP Handler 或工作流代码里自行拼接 Pi 命令行。
+- Pi CLI 只使用经过本机实测支持的非交互调用方式：`pi --print --session <path> --model <id>`，
+  Prompt 通过标准输入写入并在写入后立即关闭。不得启用 RPC 模式，也不得依赖伪终端。
+- 每次调用使用明确且唯一的 Session 文件路径；路径由服务端按任务 / 步骤 / 尝试 / 会话 /
+  调用标识分层生成，并校验落在 Session 根目录之内。调用方不得指定任意本地路径。
+- 不得使用 `--no-session` 关闭会话保存；每个角色、每次 Attempt 都使用新的 Session 文件。
+- Session 记录必须在 Pi 进程启动之前写入数据库并推进到 `running`；进程启动失败、工作目录
+  不可用等路径必须把该记录收敛为 `failed`，不得残留 `running`。
+- stdout、stderr 与进程退出状态必须分别处理：两个流分别写入 `stdout.log` 与 `stderr.log`，
+  日志有字节上限，截断时必须在文件末尾留下明确标记；数据库只保存路径、状态与摘要。
+- 超时与取消必须传播到实际执行进程，并在宽限期后强制终止仍不退出者；两者与"Server 关闭
+  导致的中断"必须能区分。Server 停止时取消在途调用并等待收敛，不留不受管理的子进程。
+- 原始 JSONL 归档状态（`archive_status` / `archive_path`）、HTML 导出状态（`export_status` /
+  `session_html_path`）与执行状态（`status` / `run_status`）必须分别持久化，不得合并。
+- 归档只有在本机确实拿到可读原始文件时才记为成功；不得把不存在的文件标记为已归档。
+  HTML 导出只能使用 Pi 官方 `--export`，导出失败不得删除原始 JSONL，也不得把成功的执行
+  改写为失败。
+- Session 文件必须保存在 AgentFlow 本机持久化数据目录（默认 `<数据库目录>/sessions`），
+  或在清理远程执行环境之前完成可靠回传；容器删除后归档仍必须可读。
+- 不默认禁用用户扩展：不得为了规避非交互兼容问题而自动追加 `--no-extensions`、
+  `--no-skills` 等参数。扩展阻塞在交互输入时，由超时或取消结束并给出明确诊断。
+- 会话内容默认只在本机持久化，不上传到任何外部存储服务。
+- 真实模型测试必须显式传入模型：默认 `group/free`，只有显式配置后才允许使用其他模型；
+  不得回退到 Pi CLI 配置中的默认（可能付费的）模型。
+- 测试产物（数据库、Session、日志、模拟可执行文件）必须留在随机 OS 临时目录的工作空间中，
+  不得写入真实项目目录与其他用例的工作空间，也不在测试结束时删除。
+
 ### 工作流引擎约束
 
 - Task、Step、Attempt 的状态迁移只能通过 `domain` 的状态机方法完成；禁止在业务层直接
@@ -434,6 +465,9 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
   数据库与后台服务，再启动 HTTP 服务，并由同一处生命周期代码负责启动失败清理与优雅关闭。
 - 后台服务通过 `internal/lifecycle` 的 `Service` 契约（`Name`/`Start`/`Stop`）注册，启动顺序
   与注册顺序一致，停止顺序相反；禁止在 HTTP Handler 内创建长期运行的后台服务。
+- 统一 Pi Runner（`app.AgentRunnerService`）作为后台服务注册进同一生命周期：Server 停止时
+  取消在途调用并等待其收敛。它依赖已打开的数据库与 Session 目录，因此由工厂在打开数据库后
+  构造，不能在构造 Server 时创建。
 - 数据库是必需组件：初始化失败时服务必须返回错误并停止启动，不得带着未初始化的存储在
   后台服务或 HTTP 层继续运行。
 - 启动顺序固定为：配置 → 日志与公共依赖 → 数据库 → 后台服务 → HTTP 服务；关闭顺序相反。

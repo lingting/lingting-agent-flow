@@ -85,11 +85,32 @@ func (l SessionLayout) Paths(root string) (SessionPaths, error) {
 		return SessionPaths{}, err
 	}
 	dir := filepath.Join(absolute, directory)
+	// 清洗后的路径片段仍然必须落在 Session 根目录之内：这是"文件归档到不属于
+	// 当前任务的目录"的最后一道防线，不能只依赖调用方传入的标识。
+	if !pathWithin(absolute, dir) {
+		return SessionPaths{}, fmt.Errorf(
+			"pi: Session 目录 %s 不在根目录 %s 之内",
+			dir,
+			absolute,
+		)
+	}
 	return SessionPaths{
 		Dir:   dir,
 		JSONL: filepath.Join(dir, sessionFileName),
 		HTML:  filepath.Join(dir, htmlFileName),
 	}, nil
+}
+
+// pathWithin 判断 child 是否位于 parent 目录之内（含 parent 本身）。
+func pathWithin(parent, child string) bool {
+	relative, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	if relative == "." {
+		return true
+	}
+	return !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && relative != ".."
 }
 
 // SessionPaths 是一次调用的 Session 文件路径。

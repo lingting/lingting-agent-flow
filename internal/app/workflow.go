@@ -238,6 +238,18 @@ func (a *workflowAgents) Run(
 			"Agent 调用失败: 必须给出步骤与尝试归属",
 		)
 	}
+	invocationID := agent.NewInvocationID()
+	// 会话记录必须在进程启动之前写入：启动本身失败时也要有可诊断的记录，
+	// 不能出现"真实执行过但数据库里没有痕迹"。
+	session, startErr := a.service.sessions.Start(ctx, StartRequest{
+		Scope:        invocation.Scope,
+		Role:         invocation.Role,
+		InvocationID: invocationID,
+		ContainerID:  invocation.ContainerID,
+	})
+	if startErr != nil {
+		return workflow.AgentOutcome{}, fmt.Errorf("Agent 调用失败: %w", startErr)
+	}
 	result, err := a.service.containers.RunAgent(ctx, ContainerAgentRequest{
 		ContainerID:  invocation.ContainerID,
 		TaskID:       invocation.Scope.TaskID.String(),
@@ -248,21 +260,21 @@ func (a *workflowAgents) Run(
 		SystemPrompt: invocation.Role.SystemPrompt,
 		Prompt:       invocation.Prompt,
 		SessionRoot:  a.service.sessions.LocalRoot(),
-		InvocationID: agent.NewInvocationID(),
+		SessionID:    session.ID.String(),
+		InvocationID: invocationID,
 		Timeout:      invocation.Timeout,
 	})
 	outcome := workflow.AgentOutcome{Result: result.Result}
-	session, recordErr := a.service.sessions.Record(ctx, RecordRequest{
-		Scope:     invocation.Scope,
-		Role:      invocation.Role,
-		SessionID: result.Result.SessionID,
+	finished, finishErr := a.service.sessions.Finish(ctx, FinishRequest{
+		SessionID: session.ID,
 		Result:    result.Result,
+		Archive:   archiveOf(result.Result),
 	})
-	if recordErr != nil {
+	if finishErr != nil {
 		// 会话元数据写入失败不能被忽略：它是恢复与诊断的唯一入口。
-		return outcome, errors.Join(err, recordErr)
+		return outcome, errors.Join(err, finishErr)
 	}
-	outcome.Session = session
+	outcome.Session = finished
 	if err != nil {
 		return outcome, err
 	}
@@ -272,6 +284,23 @@ func (a *workflowAgents) Run(
 // workflowCommands 把容器内命令执行能力适配为 workflow.CommandPort。
 type workflowCommands struct {
 	service *WorkflowService
+}
+
+// 归档结论完全来自真实文件状态：只有 Runner 拿到可用原始文件时才记为成功，
+// 其余情况按"尝试过但失败"或"没有可用文件"如实记录。
+func archiveOf(result agent.RunResult) ArchiveOutcome {
+	path := strings.TrimSpace(result.Session.JSONLPath)
+	if path == "" {
+		// 没有可用的原始文件时，归档是失败而非成功：不得把不存在的文件标记为已归档。
+		return ArchiveOutcome{
+			Status: domain.SessionArchiveFailed,
+			Error:  "没有可归档的原始 Session 文件",
+		}
+	}
+	return ArchiveOutcome{
+		Status: domain.SessionArchiveSucceeded,
+		Path:   path,
+	}
 }
 
 // Exec 在任务容器内执行一条验证命令。

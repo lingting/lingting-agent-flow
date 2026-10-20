@@ -15,6 +15,9 @@ import (
 //   - stdout 只保留末尾若干字节用于最终文本摘要；
 //   - stderr 只保留末尾若干字节用于诊断；
 //   - 完整内容通过事件流交给调用方写日志。
+//
+// 完整内容同时写入各自的日志文件（stdout.log / stderr.log）：两个流分别落盘，
+// 不混流，且日志文件本身有大小上限。
 type outputCapture struct {
 	sessionID string
 	emit      func(agent.Event)
@@ -22,16 +25,24 @@ type outputCapture struct {
 	mu     sync.Mutex
 	stdout *tailBuffer
 	stderr *tailBuffer
+	// logs 是两个流各自的日志文件，为 nil 时不落盘。
+	logs *outputLogs
 }
 
 // newOutputCapture 构造输出采集器。
-func newOutputCapture(limit int, sessionID string, emit func(agent.Event)) *outputCapture {
+func newOutputCapture(
+	limit int,
+	sessionID string,
+	logs *outputLogs,
+	emit func(agent.Event),
+) *outputCapture {
 	if limit <= 0 {
 		limit = DefaultOutputLimit
 	}
 	return &outputCapture{
 		sessionID: sessionID,
 		emit:      emit,
+		logs:      logs,
 		stdout:    newTailBuffer(limit),
 		stderr:    newTailBuffer(DefaultStderrLimit),
 	}
@@ -47,6 +58,7 @@ func (c *outputCapture) consumeStdout(lines <-chan process.Line) {
 		c.mu.Lock()
 		c.stdout.WriteString(line.Text + "\n")
 		c.mu.Unlock()
+		c.logs.writeStdout(line.Text)
 		c.emitOutput(agent.StreamStdout, line.Text)
 	}
 }
@@ -60,6 +72,7 @@ func (c *outputCapture) consumeStderr(lines <-chan process.Line) {
 		c.mu.Lock()
 		c.stderr.WriteString(line.Text + "\n")
 		c.mu.Unlock()
+		c.logs.writeStderr(line.Text)
 		c.emitOutput(agent.StreamStderr, line.Text)
 	}
 }

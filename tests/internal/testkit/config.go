@@ -45,6 +45,17 @@ const DefaultSSHPort = 22
 // 不得改为任何常见的付费模型标识。
 const DefaultPiModel = "group/free"
 
+// 真实 Pi 测试的环境变量覆盖入口。
+//
+// 配置文件是主要来源；这两个变量只提供临时覆盖，便于在没有 pi.yml 的环境里显式
+// 指定模型与可执行文件。模型覆盖同样受"必须显式传入"的约束，不会回退到默认付费模型。
+const (
+	// PiModelEnv 覆盖真实 Pi 测试使用的模型标识。
+	PiModelEnv = "AGENTFLOW_TEST_PI_MODEL"
+	// PiExecutableEnv 覆盖真实 Pi 测试使用的可执行文件路径。
+	PiExecutableEnv = "AGENTFLOW_TEST_PI_EXECUTABLE"
+)
+
 // 容器内 Pi 覆盖配置的默认值。
 const (
 	// DefaultContainerPiProvider 是写入容器内 models.json 的默认 provider 名称。
@@ -320,6 +331,13 @@ func LoadPiConfig(t *testing.T) (PiConfig, bool) {
 		return PiConfig{}, false
 	}
 	config := document.Pi
+	// 环境变量优先于配置文件：它们只用于临时覆盖，不改变"必须显式给出模型"的约束。
+	if model := strings.TrimSpace(os.Getenv(PiModelEnv)); model != "" {
+		config.Model = model
+	}
+	if executable := strings.TrimSpace(os.Getenv(PiExecutableEnv)); executable != "" {
+		config.Executable = executable
+	}
 	if strings.TrimSpace(config.Model) == "" {
 		config.Model = DefaultPiModel
 	}

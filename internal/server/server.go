@@ -68,6 +68,12 @@ type Options struct {
 	// SSH 服务需要数据库与配置（known_hosts 路径、超时），因此不能在构造 Server
 	// 时创建。工厂返回错误时启动失败，已启动组件按逆序清理。
 	SSHFactory func(store storage.Store, cfg *config.Config) (*app.SSHService, error)
+	// AgentRunnerFactory 在数据库打开后构造统一 Pi Runner 服务。
+	//
+	// Pi Runner 依赖已打开的数据库（写 Session 记录）与 Session 持久化目录，因此
+	// 不能在构造 Server 时创建。工厂返回错误时启动失败；返回的服务由 Server 注册
+	// 进统一生命周期，Server 停止时取消在途调用。
+	AgentRunnerFactory func(store storage.Store, cfg *config.Config) (*app.AgentRunnerService, error)
 	// RequireWebUI 为 true 时缺少前端构建产物将导致启动失败。
 	//
 	// 正式发布构建应当置为 true；开发时先启动后端再构建前端属于正常流程，
@@ -84,12 +90,18 @@ type Server struct {
 	address    string
 	openStore  StoreOpener
 	sshFactory func(store storage.Store, cfg *config.Config) (*app.SSHService, error)
-	systemInfo func() app.SystemInfo
-	tasks      *app.TaskService
-	services   []Service
-	hosts      *app.ExecutionHostService
-	ssh        *app.SSHService
-	validation *app.HostValidationService
+	// agentRunnerFactory 在数据库打开后构造统一 Pi Runner 服务。
+	agentRunnerFactory func(store storage.Store, cfg *config.Config) (*app.AgentRunnerService, error)
+	systemInfo         func() app.SystemInfo
+	tasks              *app.TaskService
+	services           []Service
+	hosts              *app.ExecutionHostService
+	ssh                *app.SSHService
+	validation         *app.HostValidationService
+	// sessions 是所有 Agent 调用共享的会话服务。
+	sessions *app.SessionService
+	// agentRunner 是统一 Pi Runner 后台服务，Server 停止时取消在途调用。
+	agentRunner *app.AgentRunnerService
 	// executionRecords 是执行记录只读查询服务，由已打开的数据库构造。
 	executionRecords *app.ExecutionRecordService
 	requireWeb       bool
@@ -134,18 +146,19 @@ func New(options Options) (*Server, error) {
 		}
 	}
 	return &Server{
-		address:    options.Address,
-		openStore:  options.OpenStore,
-		sshFactory: options.SSHFactory,
-		systemInfo: options.SystemInfo,
-		tasks:      options.Tasks,
-		services:   options.Services,
-		hosts:      options.Hosts,
-		ssh:        options.SSH,
-		requireWeb: options.RequireWebUI,
-		logger:     options.Logger,
-		report:     report,
-		manager:    lifecycle.New(lifecycle.Options{Logger: options.Logger}),
+		address:            options.Address,
+		openStore:          options.OpenStore,
+		sshFactory:         options.SSHFactory,
+		agentRunnerFactory: options.AgentRunnerFactory,
+		systemInfo:         options.SystemInfo,
+		tasks:              options.Tasks,
+		services:           options.Services,
+		hosts:              options.Hosts,
+		ssh:                options.SSH,
+		requireWeb:         options.RequireWebUI,
+		logger:             options.Logger,
+		report:             report,
+		manager:            lifecycle.New(lifecycle.Options{Logger: options.Logger}),
 	}, nil
 }
 
@@ -193,12 +206,28 @@ func (s *Server) openDatabase(ctx context.Context) error {
 		return fmt.Errorf("初始化数据库失败: %w", err)
 	}
 	s.store = store
+	// 会话服务是所有 Agent 调用的公共依赖：Session 记录先于进程启动写入。
+	root := app.SessionRoot(s.cfg)
+	if root == "" {
+		return fmt.Errorf("初始化 Session 目录失败: 无法从配置确定 Session 根目录")
+	}
+	s.sessions, err = app.NewSessionService(store, root, s.logger)
+	if err != nil {
+		return fmt.Errorf("初始化会话服务失败: %w", err)
+	}
 	if s.ssh == nil && s.sshFactory != nil {
 		sshService, err := s.sshFactory(store, s.cfg)
 		if err != nil {
 			return fmt.Errorf("初始化 SSH 服务失败: %w", err)
 		}
 		s.ssh = sshService
+	}
+	if s.agentRunner == nil && s.agentRunnerFactory != nil {
+		runner, err := s.agentRunnerFactory(store, s.cfg)
+		if err != nil {
+			return fmt.Errorf("初始化 Agent Runner 失败: %w", err)
+		}
+		s.agentRunner = runner
 	}
 	s.logger.DebugContext(ctx, "数据库已就绪", slog.String("path", s.cfg.Storage.DatabasePath))
 	return nil
@@ -227,6 +256,11 @@ func (s *Server) startServices(ctx context.Context) error {
 		if validation != nil {
 			services = append(services, validation)
 		}
+	}
+	if s.agentRunner != nil {
+		// Agent Runner 注册在后台服务里：Server 停止时会取消在途调用并等待收敛，
+		// 不会在退出后残留不受管理的本地子进程。
+		services = append(services, s.agentRunner)
 	}
 	if len(services) == 0 {
 		return nil

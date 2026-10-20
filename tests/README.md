@@ -190,7 +190,9 @@ Unix 套接字时该用例输出 `WARN [SKIP]` 并跳过，其余用例仍会执
 | `AGENTFLOW_TEST_PI_EXECUTABLE` | 指定 Pi 可执行文件路径 | PATH 中的 `pi` |
 
 本机 PATH 中没有 `pi` 时，真实 Pi 用例输出 `WARN [SKIP]` 并跳过；Pi Runner 的单元
-测试位于 `tests/unit/agent/pi/`，使用替身，始终执行。
+测试位于 `tests/unit/agent/pi/`，使用替身，始终执行；统一 Runner 的生命周期用例位于
+`tests/unit/app/`，验证「启动失败不残留 running」「停止服务取消在途调用并收敛」等约束，
+同样不依赖本机 Pi。
 
 默认模型 `group/free` 是特意选定的非标准标识，避免测试意外消耗付费额度。每次真实
 调用都显式传入模型，不会回退到 Pi CLI 配置中的默认模型。

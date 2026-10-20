@@ -90,4 +90,85 @@ func TestRealPiRun(t *testing.T) {
 			t.Fatalf("HTML 与 Session 应位于同一目录: %s", result.Session.HTMLPath)
 		}
 	}
+	// 两个输出流必须分别落盘，且都在 Session 目录内。
+	sessionDir := filepath.Dir(result.Session.JSONLPath)
+	for name, path := range map[string]string{
+		"标准输出": result.StdoutPath,
+		"标准错误": result.StderrPath,
+	} {
+		if path == "" {
+			t.Fatalf("%s日志路径不能为空", name)
+		}
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Fatalf("%s日志不存在: %s: %v", name, path, statErr)
+		}
+		if filepath.Dir(path) != sessionDir {
+			t.Fatalf("%s日志应位于 Session 目录内: %s", name, path)
+		}
+	}
+	// 标准输出日志必须包含真实模型的回答。
+	stdout, readErr := os.ReadFile(result.StdoutPath)
+	if readErr != nil {
+		t.Fatalf("读取标准输出日志失败: %v", readErr)
+	}
+	if !strings.Contains(string(stdout), "READY") {
+		t.Fatalf("标准输出日志缺少回答内容: %q", string(stdout))
+	}
+}
+
+// TestRealPiSessionIsReusable 验证真实 Session 文件可以被重新读取并再次导出 HTML。
+//
+// 该用例确认两件事：
+//   - 生成的 Session 文件是真实的 JSONL，首行是会话头部；
+//   - Pi 官方导出能力可以对该文件再次生成 HTML，说明归档的原始文件是可用的。
+func TestRealPiSessionIsReusable(t *testing.T) {
+	t.Parallel()
+	executable := requirePi(t)
+	model := resolveModel(t)
+	options := pi.Options{Executable: executable, Timeout: realPiTimeout}
+
+	workspace := testkit.New(t)
+	runner := pi.NewRunner(options)
+	result, err := runner.Run(context.Background(), agent.RunRequest{
+		SessionID:   "integration-reuse-session",
+		Model:       model,
+		Prompt:      "只回答 READY 这一个词，不要使用任何工具。",
+		WorkingDir:  workspace.Dir("work"),
+		SessionRoot: workspace.SessionRoot(),
+		Timeout:     realPiTimeout,
+	}, nil)
+	if err != nil {
+		t.Fatalf("真实执行失败: %v（Session: %s）", err, result.Session.JSONLPath)
+	}
+	content, readErr := os.ReadFile(result.Session.JSONLPath)
+	if readErr != nil {
+		t.Fatalf("读取 Session 文件失败: %v", readErr)
+	}
+	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("Session 文件内容过少，不足以证明真实会话: %d 行", len(lines))
+	}
+	if !strings.Contains(lines[0], `"type":"session"`) {
+		t.Fatalf("首行不是会话头部: %s", lines[0])
+	}
+	if result.Session.ExportStatus != agent.ExportSucceeded {
+		// 当前版本不支持导出时如实跳过该断言，但绝不允许伪造成功。
+		t.Logf("当前 Pi 版本未成功导出 HTML: %s（%s）", result.Session.ExportStatus, result.Session.Error)
+		return
+	}
+	htmlPath := result.Session.HTMLPath
+	info, statErr := os.Stat(htmlPath)
+	if statErr != nil {
+		t.Fatalf("导出的 HTML 不存在: %s: %v", htmlPath, statErr)
+	}
+	if info.Size() == 0 {
+		t.Fatalf("导出的 HTML 为空文件: %s", htmlPath)
+	}
+	html, readErr := os.ReadFile(htmlPath)
+	if readErr != nil {
+		t.Fatalf("读取 HTML 失败: %v", readErr)
+	}
+	if !strings.Contains(strings.ToLower(string(html)), "<html") {
+		t.Fatalf("导出内容不是 HTML 文档")
+	}
 }

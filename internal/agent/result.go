@@ -143,6 +143,10 @@ type RunResult struct {
 	StdoutTruncated bool
 	// StderrTruncated 表示标准错误是否因超过上限被截断。
 	StderrTruncated bool
+	// StdoutPath 是标准输出日志在本机的位置，为空表示未落盘。
+	StdoutPath string
+	// StderrPath 是标准错误日志在本机的位置，为空表示未落盘。
+	StderrPath string
 	// StartedAt 是执行开始时间。
 	StartedAt time.Time
 	// FinishedAt 是执行结束时间。

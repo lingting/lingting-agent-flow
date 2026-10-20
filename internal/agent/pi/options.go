@@ -17,6 +17,10 @@ const (
 	DefaultOutputLimit = 256 << 10
 	// DefaultStderrLimit 是保留的 stderr 诊断输出字节上限。
 	DefaultStderrLimit = 64 << 10
+	// DefaultLogLimit 是单个输出日志文件（stdout 或 stderr）的默认字节上限。
+	//
+	// 超过上限后停止写入并在文件末尾留下明确标记，避免长任务把日志写满磁盘。
+	DefaultLogLimit int64 = 8 << 20
 	// MaxOutputEventLength 是单条流式输出事件的文本上限。
 	MaxOutputEventLength = 4 << 10
 	// maxFailureDetail 是失败原因中保留的 stderr 字节上限。
@@ -50,6 +54,8 @@ type Options struct {
 	OutputLimit int
 	// StderrLimit 是保留的 stderr 诊断输出字节上限，零值使用 DefaultStderrLimit。
 	StderrLimit int
+	// LogLimit 是 stdout 与 stderr 日志文件各自的字节上限，零值使用 DefaultLogLimit。
+	LogLimit int64
 	// DisableExport 为 true 时不再尝试导出 HTML。
 	DisableExport bool
 }
@@ -82,6 +88,9 @@ func (r *Runner) resolveOptions() Options {
 	}
 	if options.StderrLimit <= 0 {
 		options.StderrLimit = DefaultStderrLimit
+	}
+	if options.LogLimit <= 0 {
+		options.LogLimit = DefaultLogLimit
 	}
 	return options
 }

@@ -125,6 +125,10 @@ type Session struct {
 	ArchiveStatus SessionArchiveStatus `json:"archive_status,omitempty"`
 	// ArchivePath 是归档后的原始 Session 文件位置，未归档时为空。
 	ArchivePath string `json:"archive_path,omitempty"`
+	// StdoutPath 是标准输出日志在本机的位置，为空表示未落盘。
+	StdoutPath string `json:"stdout_path,omitempty"`
+	// StderrPath 是标准错误日志在本机的位置，为空表示未落盘。
+	StderrPath string `json:"stderr_path,omitempty"`
 	// ExitCode 是 Agent 进程退出码，未能取得时为空。
 	ExitCode       *int   `json:"exit_code,omitempty"`
 	FailureSummary string `json:"failure_summary,omitempty"`

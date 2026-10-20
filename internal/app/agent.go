@@ -130,6 +130,8 @@ func (a *App) AgentTest(ctx context.Context, request AgentTestRequest) (AgentTes
 		counts[event.Type]++
 		a.logEvent(ctx, event)
 	}
+	// 始终通过统一 Runner 接口执行：命令层不直接拼接 Pi 进程，也不再各自实现
+	// 一套"启动子进程 + 收尾"的逻辑。
 	runner := pi.NewRunner(pi.Options{})
 	result, runErr := runner.Run(ctx, agent.RunRequest{
 		SessionID:    sessionID.String(),

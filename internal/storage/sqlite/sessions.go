@@ -15,7 +15,7 @@ import (
 const sessionColumns = `id, task_id, step_id, attempt_id, role_id, role_snapshot_json,
 	provider, model, external_session_id, process_id, status,
 	session_jsonl_path, session_html_path, run_status, completeness, export_status,
-	archive_status, archive_path,
+	archive_status, archive_path, stdout_path, stderr_path,
 	exit_code, failure_summary, invocation_id, container_id, docker_id,
 	started_at, finished_at, created_at`
 
@@ -42,7 +42,7 @@ func (s sessionStore) CreateSession(ctx context.Context, session domain.Session)
 		return err
 	}
 	const statement = `INSERT INTO sessions (` + sessionColumns + `)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	_, err = s.q.ExecContext(
 		ctx,
 		statement,
@@ -64,6 +64,8 @@ func (s sessionStore) CreateSession(ctx context.Context, session domain.Session)
 		sqlNullString(string(session.ExportStatus)),
 		sqlNullString(string(session.ArchiveStatus)),
 		sqlNullString(session.ArchivePath),
+		sqlNullString(session.StdoutPath),
+		sqlNullString(session.StderrPath),
 		toIntPtrParam(session.ExitCode),
 		sqlNullString(session.FailureSummary),
 		sqlNullString(session.InvocationID),
@@ -91,7 +93,7 @@ UPDATE sessions SET
 	provider = ?, model = ?, external_session_id = ?, process_id = ?,
 	status = ?, session_jsonl_path = ?, session_html_path = ?,
 	run_status = ?, completeness = ?, export_status = ?,
-	archive_status = ?, archive_path = ?,
+	archive_status = ?, archive_path = ?, stdout_path = ?, stderr_path = ?,
 	exit_code = ?, failure_summary = ?,
 	invocation_id = ?, container_id = ?, docker_id = ?, finished_at = ?
 WHERE id = ?`
@@ -110,6 +112,8 @@ WHERE id = ?`
 		sqlNullString(string(session.ExportStatus)),
 		sqlNullString(string(session.ArchiveStatus)),
 		sqlNullString(session.ArchivePath),
+		sqlNullString(session.StdoutPath),
+		sqlNullString(session.StderrPath),
 		toIntPtrParam(session.ExitCode),
 		sqlNullString(session.FailureSummary),
 		sqlNullString(session.InvocationID),
@@ -363,6 +367,8 @@ func scanSession(row scanner) (*domain.Session, error) {
 		exportStatus  sql.NullString
 		archiveStatus sql.NullString
 		archivePath   sql.NullString
+		stdoutPath    sql.NullString
+		stderrPath    sql.NullString
 		exitCode      sql.NullInt64
 		failure       sql.NullString
 		invocationID  sql.NullString
@@ -391,6 +397,8 @@ func scanSession(row scanner) (*domain.Session, error) {
 		&exportStatus,
 		&archiveStatus,
 		&archivePath,
+		&stdoutPath,
+		&stderrPath,
 		&exitCode,
 		&failure,
 		&invocationID,
@@ -418,6 +426,8 @@ func scanSession(row scanner) (*domain.Session, error) {
 	session.ExportStatus = domain.SessionExportStatus(exportStatus.String)
 	session.ArchiveStatus = domain.SessionArchiveStatus(archiveStatus.String)
 	session.ArchivePath = archivePath.String
+	session.StdoutPath = stdoutPath.String
+	session.StderrPath = stderrPath.String
 	session.ExitCode = fromIntPtr(exitCode)
 	session.FailureSummary = failure.String
 	session.InvocationID = invocationID.String

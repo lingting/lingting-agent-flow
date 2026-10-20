@@ -44,6 +44,11 @@ type ContainerAgentRequest struct {
 	Prompt string
 	// SessionRoot 是本机 Session 持久化根目录，为空时使用配置数据目录。
 	SessionRoot string
+	// SessionID 是调用方已经创建的会话标识，为空时由本方法生成。
+	//
+	// 显式传入是为了让 Runner 使用的会话标识与数据库记录一致：一旦 Runner 自行
+	// 生成标识，Session 文件目录与数据库记录就会指向两次不同的"会话"。
+	SessionID string
 	// InvocationID 是本次调用的唯一标识，为空时自动生成。
 	InvocationID string
 	// Timeout 是本次调用的超时时间，零值使用执行器默认值。
@@ -117,8 +122,12 @@ func (s *ContainerService) RunAgent(
 			if invocationID == "" {
 				invocationID = agent.NewInvocationID()
 			}
+			sessionID := strings.TrimSpace(request.SessionID)
+			if sessionID == "" {
+				sessionID = domain.NewID().String()
+			}
 			runRequest := agent.RunRequest{
-				SessionID:    domain.NewID().String(),
+				SessionID:    sessionID,
 				TaskID:       strings.TrimSpace(request.TaskID),
 				StepID:       strings.TrimSpace(request.StepID),
 				AttemptID:    strings.TrimSpace(request.AttemptID),

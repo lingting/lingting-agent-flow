@@ -117,6 +117,10 @@ type SessionArtifacts struct {
 	ExitCode int
 	// FailureSummary 是失败或异常的可诊断摘要。
 	FailureSummary string
+	// StdoutPath 是标准输出日志路径，为空表示未落盘。
+	StdoutPath string
+	// StderrPath 是标准错误日志路径，为空表示未落盘。
+	StderrPath string
 }
 
 // Validate 校验会话产出元数据是否完整。
@@ -198,6 +202,8 @@ func (s *Session) ApplyArtifacts(artifacts SessionArtifacts, at time.Time) error
 	exitCode := artifacts.ExitCode
 	s.ExitCode = &exitCode
 	s.FailureSummary = strings.TrimSpace(artifacts.FailureSummary)
+	s.StdoutPath = strings.TrimSpace(artifacts.StdoutPath)
+	s.StderrPath = strings.TrimSpace(artifacts.StderrPath)
 	return nil
 }
 
