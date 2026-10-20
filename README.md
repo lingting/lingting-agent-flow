@@ -186,6 +186,10 @@ make web-dev            # 等价于 cd lingting-agent-flow-ui && pnpm dev
 | GET    | `/api/v1/tasks/{taskID}`        | 任务详情                                              |
 | POST   | `/api/v1/tasks/{taskID}/cancel` | 请求取消任务                                          |
 | DELETE | `/api/v1/tasks/{taskID}`        | 逻辑删除任务，成功返回 204                            |
+| GET    | `/api/v1/tasks/{taskID}/steps`  | 步骤列表（分页、按序号稳定排序）                      |
+| GET    | `/api/v1/tasks/{taskID}/steps/{stepID}/attempts` | 步骤的尝试列表（分页、按序号）    |
+| GET    | `/api/v1/tasks/{taskID}/steps/{stepID}/attempts/{attemptID}/sessions` | 尝试的会话列表 |
+| GET    | `/api/v1/tasks/{taskID}/sessions/{sessionID}` | 会话详情（归档与导出状态分列）      |
 | GET    | `/api/v1/hosts`                 | 执行节点列表（含校验状态与详情）                       |
 | POST   | `/api/v1/hosts`                 | 新增执行节点，返回 201 与真实初始状态 `checking`       |
 | GET    | `/api/v1/hosts/{hostID}`        | 执行节点详情                                          |
@@ -345,12 +349,55 @@ DELETE /api/v1/tasks/{taskID}
 - 删除是逻辑删除：只写 `tasks.deleted_at`，任务行、需求、步骤、尝试、会话与事件全部保留。
 - 成功返回 204 且无响应体；删除后详情返回 404，重复删除返回 404。
 
+#### 执行记录查询
+
+执行记录按 `Task → Step → Attempt → Session` 四层组织，四个接口都是只读的：
+
+| 层级 | 语义 |
+|---|---|
+| Task | 用户提交的整体任务，生命周期与状态沿用任务管理接口 |
+| Step | 逻辑执行阶段（`prepare`、`source`、`plan`、`develop`、`verify`、`review`、`save`、`cleanup`） |
+| Attempt | 同一步骤的一次执行尝试，`attempt_number` 从 1 开始且在同一步骤内唯一 |
+| Session | 一次独立的 Agent 调用会话；每次 Planner / Developer / Validator 调用各有独立会话 |
+
+列表接口统一返回 `{"records", "total", "current", "size"}`，与任务列表一致：
+
+- `current` 默认 1，`size` 默认 20、上限 100，超限返回 400。
+- `status` 可重复或使用逗号分隔，未知状态返回 400。
+- 步骤按 `sequence` 升序，尝试按 `attempt_number` 升序，会话按创建时间升序；排序键附加
+  主键，分页结果稳定。
+
+```http
+GET /api/v1/tasks/{taskID}/steps?current=1&size=20
+GET /api/v1/tasks/{taskID}/steps/{stepID}/attempts
+GET /api/v1/tasks/{taskID}/steps/{stepID}/attempts/{attemptID}/sessions
+GET /api/v1/tasks/{taskID}/sessions/{sessionID}
+```
+
+会话响应把三种状态分开输出，不能互相替代：
+
+| 字段 | 含义 |
+|---|---|
+| `status` | 会话执行状态：`starting`、`running`、`completed`、`failed`、`cancelled`、`interrupted` |
+| `archive_status` / `archive_path` | 原始 JSONL 的归档结果与位置：`not_attempted`、`succeeded`、`failed` |
+| `export_status` / `html_export_path` | HTML 导出结果与位置：`not_attempted`、`succeeded`、`failed` |
+
+因此"调用成功但归档失败""调用失败但会话已保存""原始 JSONL 已保存但 HTML 导出失败"都能
+如实表达。归档位置保存在 AgentFlow 本机的持久目录，容器删除后原始会话与归档仍可读取。
+
+归属校验完全在应用层完成：对象存在但属于其他任务时返回 404，不会泄露其他任务的执行记录；
+已逻辑删除的任务下不再提供执行记录查询，但历史步骤、尝试、会话记录仍然保留在数据库中。
+
 #### 当前能力边界
 
 本阶段的任务 API **只负责管理数据**，不代表任务已经执行：
 
 - 不会调用 Pi CLI、不会创建 Docker 容器、不会连接 SSH、不会克隆 Git 仓库。
 - 没有执行器，因此没有任务会被自动推进到 `running` 或 `succeeded` 等执行状态。
+- 执行记录接口**只提供查询**：没有"开始执行""重试""运行 Agent"等写入口。本阶段建立的是
+  可持久化、可追溯的执行数据模型，真实执行能力要等统一 Pi Runner 与执行协调器实现。
+- 未经真实执行器创建时不会存在 Step / Attempt / Session 记录；查询返回空列表是正确结果，
+  不会用虚构数据填充。
 - 角色没有查询接口，创建任务时需要手工填写其标识；执行节点已提供 `/api/v1/hosts` 接口。
 
 `/api` 下的未知路径返回 JSON 404，不会回退到前端页面；`/api` 之外的未知页面路径进入 SPA

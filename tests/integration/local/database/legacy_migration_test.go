@@ -267,8 +267,8 @@ func TestLegacyDatabaseLosesNoRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取 schema 版本失败: %v", err)
 	}
-	if version != 11 {
-		t.Fatalf("迁移后版本应为 11，实际 %d", version)
+	if version != 12 {
+		t.Fatalf("迁移后版本应为 12，实际 %d", version)
 	}
 
 	roles, err := db.ListRoles(ctx)
@@ -324,6 +324,10 @@ func TestLegacyDatabaseLosesNoRecords(t *testing.T) {
 		}
 		if attempts[0].ID != domain.ID(fixture.attempts[index]) {
 			t.Fatalf("尝试标识不符: %s", attempts[0].ID)
+		}
+		// 0012 迁移必须把既有尝试的任务归属从步骤回填，旧库不能留下空归属。
+		if attempts[0].TaskID != task.ID {
+			t.Fatalf("尝试任务归属未回填: %s", attempts[0].TaskID)
 		}
 	}
 
@@ -514,7 +518,7 @@ func TestLegacyDatabaseMigrationIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取 schema 版本失败: %v", err)
 	}
-	if version != 11 {
+	if version != 12 {
 		t.Fatalf("重复迁移后版本不符: %d", version)
 	}
 	task, err := second.GetTask(ctx, domain.ID(fixture.task))

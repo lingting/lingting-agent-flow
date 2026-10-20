@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage"
 
 	"modernc.org/sqlite"
@@ -80,4 +81,24 @@ func classifyCode(code int) error {
 // notFoundError 构造带实体信息的记录不存在错误。
 func notFoundError(entity, id string) error {
 	return fmt.Errorf("sqlite: %s %s: %w", entity, id, storage.ErrNotFound)
+}
+
+// ensureStatusAffected 确认带状态前置条件的更新命中记录。
+//
+// 影响行数为 0 只说明条件不成立：记录可能已被删除，也可能状态已被其他操作改变。
+// 两种情况都按 storage.ErrConflict 返回，调用方必须重新读取当前状态，不能假定写入成功。
+func ensureStatusAffected(result sql.Result, entity string, id domain.ID) error {
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("sqlite: 统计 %s 影响行数失败: %w", entity, err)
+	}
+	if affected == 0 {
+		return fmt.Errorf(
+			"sqlite: %s %s 的状态已变更，拒绝过期更新: %w",
+			entity,
+			id.String(),
+			storage.ErrConflict,
+		)
+	}
+	return nil
 }

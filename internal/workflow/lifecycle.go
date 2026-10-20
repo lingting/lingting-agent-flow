@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/lingting/agentflow/internal/domain"
+	"github.com/lingting/agentflow/internal/storage"
 )
 
 // internalStepSequence 是内部阶段步骤使用的序号基值。
@@ -80,18 +81,19 @@ func (e *Engine) runStepLifecycle(
 	run func(ctx context.Context, attempt *domain.Attempt) error,
 ) error {
 	policy := effectiveRetry(task.Config.Retry, step.Retry, step.MaxAttempts)
-	number := 1
 	for {
-		attempt, err := domain.NewAttempt(step.ID, number, e.now())
+		// 序号由存储层在同一事务内分配：先查最大值再插入会让并发执行拿到相同序号。
+		attempt, err := e.store.StartAttempt(ctx, storage.StartAttemptRequest{
+			TaskID: task.ID,
+			StepID: step.ID,
+			At:     e.now(),
+		})
 		if err != nil {
-			return fmt.Errorf("创建执行尝试失败: %w", err)
-		}
-		if err := e.store.CreateAttempt(ctx, attempt); err != nil {
 			return fmt.Errorf("写入执行尝试失败: %w", err)
 		}
 		if err := e.appendEvent(ctx, *task, &step.ID, &attempt.ID, nil,
 			domain.EventTypeAttemptStarted,
-			map[string]any{"attempt": number, "stage": string(step.Type)},
+			map[string]any{"attempt": attempt.AttemptNumber, "stage": string(step.Type)},
 		); err != nil {
 			return err
 		}
@@ -142,7 +144,7 @@ func (e *Engine) runStepLifecycle(
 		); err != nil {
 			return err
 		}
-		if !policy.Allows(class) || number >= policy.Limit() {
+		if !policy.Allows(class) || attempt.AttemptNumber >= policy.Limit() {
 			return e.failTask(
 				ctx,
 				task,
@@ -151,7 +153,6 @@ func (e *Engine) runStepLifecycle(
 				fmt.Sprintf("%s 阶段失败且不再重试: %s", stage, summary),
 			)
 		}
-		number++
 	}
 }
 
@@ -161,17 +162,18 @@ func (e *Engine) startAttempt(
 	task *domain.Task,
 	step *domain.Step,
 ) (domain.Attempt, error) {
-	number, err := e.store.NextAttemptNumber(ctx, step.ID)
+	// 序号由存储层在同一次事务内分配：先查最大值再插入会让并发执行拿到相同序号。
+	attempt, err := e.store.StartAttempt(ctx, storage.StartAttemptRequest{
+		TaskID: task.ID,
+		StepID: step.ID,
+		At:     e.now(),
+	})
 	if err != nil {
-		return domain.Attempt{}, fmt.Errorf("查询尝试序号失败: %w", err)
-	}
-	attempt, err := domain.NewAttempt(step.ID, number, e.now())
-	if err != nil {
-		return domain.Attempt{}, fmt.Errorf("创建执行尝试失败: %w", err)
+		return domain.Attempt{}, fmt.Errorf("写入执行尝试失败: %w", err)
 	}
 	attempt.InputDigest = digestInput(*task, *step)
-	if err := e.store.CreateAttempt(ctx, attempt); err != nil {
-		return domain.Attempt{}, fmt.Errorf("写入执行尝试失败: %w", err)
+	if err := e.store.UpdateAttempt(ctx, attempt); err != nil {
+		return domain.Attempt{}, fmt.Errorf("保存执行尝试失败: %w", err)
 	}
 	if err := step.SetCurrentAttempt(&attempt.ID); err != nil {
 		return domain.Attempt{}, err
@@ -195,7 +197,7 @@ func (e *Engine) startAttempt(
 	}
 	if err := e.appendEvent(ctx, *task, &step.ID, &attempt.ID, nil,
 		domain.EventTypeAttemptStarted,
-		map[string]any{"attempt": number, "step_type": string(step.Type)},
+		map[string]any{"attempt": attempt.AttemptNumber, "step_type": string(step.Type)},
 	); err != nil {
 		return domain.Attempt{}, err
 	}

@@ -199,18 +199,106 @@ type StepStore interface {
 	// CreateSteps 在一个事务边界内写入同一任务的多个步骤。
 	CreateSteps(ctx context.Context, steps []domain.Step) error
 	UpdateStep(ctx context.Context, step domain.Step) error
+	// UpdateStepIfStatus 在数据库中的状态仍属于 expected 时写入步骤。
+	//
+	// 状态不匹配时返回 storage.ErrConflict，调用方不得假定更新成功。旧尝试的迟到
+	// 结果必须经过该条件更新，不能无条件覆盖更新的步骤状态。
+	UpdateStepIfStatus(
+		ctx context.Context,
+		step domain.Step,
+		expected []domain.StepStatus,
+	) error
 	GetStep(ctx context.Context, id domain.ID) (*domain.Step, error)
 	ListStepsByTask(ctx context.Context, taskID domain.ID) ([]domain.Step, error)
+	// ListStepPage 按序号稳定排序分页返回任务的步骤，并给出总数。
+	ListStepPage(ctx context.Context, filter StepFilter) (StepPage, error)
+}
+
+// StepFilter 约束步骤查询条件，零值表示不限制。
+type StepFilter struct {
+	// TaskID 限制步骤所属任务，必填。
+	TaskID domain.ID
+	// Statuses 限制步骤状态，为空表示不限制。
+	Statuses []domain.StepStatus
+	// Limit 限制返回条数，小于等于 0 表示不限制。
+	Limit int
+	// Offset 跳过前面若干条记录，小于等于 0 表示不跳过。
+	Offset int
+}
+
+// StepPage 是一次步骤分页查询的结果。
+type StepPage struct {
+	// Steps 是当前页的步骤，按 sequence 升序排列。
+	Steps []domain.Step
+	// Total 是满足筛选条件的记录总数。
+	Total int
 }
 
 // AttemptStore 保存一个步骤的每次完整执行尝试。
 type AttemptStore interface {
 	CreateAttempt(ctx context.Context, attempt domain.Attempt) error
+	// StartAttempt 在一个事务内分配尝试序号、创建 Attempt 并写入。
+	//
+	// 序号分配与插入必须在同一事务内完成：先查最大序号再插入会让并发执行拿到相同
+	// 序号，唯一约束只能事后报错，无法保证"每次重试都得到新序号"。由于序号只有
+	// 存储层知道，Attempt 实体也由存储层在事务内构造，调用方不能自带序号。
+	StartAttempt(
+		ctx context.Context,
+		request StartAttemptRequest,
+	) (domain.Attempt, error)
+	// UpdateAttempt 按主键更新尝试。
+	//
+	// 只允许从 running 结束一次；已结束的尝试不会被重新打开，迟到的结果必须先用
+	// GetAttempt 读取当前状态再经状态机判定。
 	UpdateAttempt(ctx context.Context, attempt domain.Attempt) error
+	// UpdateAttemptIfStatus 在数据库中的状态仍属于 expected 时写入尝试。
+	//
+	// 状态不匹配时返回 storage.ErrConflict：旧尝试的迟到结果不能覆盖新状态。
+	UpdateAttemptIfStatus(
+		ctx context.Context,
+		attempt domain.Attempt,
+		expected []domain.AttemptStatus,
+	) error
 	GetAttempt(ctx context.Context, id domain.ID) (*domain.Attempt, error)
 	ListAttemptsByStep(ctx context.Context, stepID domain.ID) ([]domain.Attempt, error)
+	// ListAttemptPage 按尝试序号稳定排序分页返回步骤的尝试，并给出总数。
+	ListAttemptPage(ctx context.Context, filter AttemptFilter) (AttemptPage, error)
 	// NextAttemptNumber 返回该步骤下一个可用的尝试序号。
+	//
+	// 只用于展示与预估，不能作为写入依据：写入必须使用 StartAttempt。
 	NextAttemptNumber(ctx context.Context, stepID domain.ID) (int, error)
+}
+
+// StartAttemptRequest 是一次"开始执行尝试"的输入。
+//
+// 只包含调用方确实知道的信息：序号由存储层分配，开始时间由调用方按业务时钟给出。
+type StartAttemptRequest struct {
+	// TaskID 是尝试所属任务，必须与步骤所属任务一致。
+	TaskID domain.ID
+	// StepID 是尝试所属步骤。
+	StepID domain.ID
+	// At 是尝试的开始时间，零值使用当前时间。
+	At time.Time
+}
+
+// AttemptFilter 约束尝试查询条件，零值表示不限制。
+type AttemptFilter struct {
+	// StepID 限制尝试所属步骤，必填。
+	StepID domain.ID
+	// Statuses 限制尝试状态，为空表示不限制。
+	Statuses []domain.AttemptStatus
+	// Limit 限制返回条数，小于等于 0 表示不限制。
+	Limit int
+	// Offset 跳过前面若干条记录，小于等于 0 表示不跳过。
+	Offset int
+}
+
+// AttemptPage 是一次尝试分页查询的结果。
+type AttemptPage struct {
+	// Attempts 是当前页的尝试，按 attempt_number 升序排列。
+	Attempts []domain.Attempt
+	// Total 是满足筛选条件的记录总数。
+	Total int
 }
 
 // SessionStore 保存每次 Agent 执行会话的元数据。
@@ -218,9 +306,42 @@ type SessionStore interface {
 	// CreateSession 在写入前校验会话的任务、步骤与尝试归属是否自洽。
 	CreateSession(ctx context.Context, session domain.Session) error
 	UpdateSession(ctx context.Context, session domain.Session) error
+	// UpdateSessionArchive 只更新会话的归档状态与归档位置。
+	//
+	// 归档与执行结果、HTML 导出相互独立，因此单独提供一个只改归档字段的入口，
+	// 避免为了写归档结果而整体覆盖会话状态。
+	UpdateSessionArchive(ctx context.Context, session domain.Session) error
 	GetSession(ctx context.Context, id domain.ID) (*domain.Session, error)
 	ListSessionsByTask(ctx context.Context, taskID domain.ID) ([]domain.Session, error)
 	ListSessionsByAttempt(ctx context.Context, attemptID domain.ID) ([]domain.Session, error)
+	// ListSessionPage 按创建时间稳定排序分页返回会话，并给出总数。
+	ListSessionPage(ctx context.Context, filter SessionFilter) (SessionPage, error)
+}
+
+// SessionFilter 约束会话查询条件，零值表示不限制。
+type SessionFilter struct {
+	// TaskID 限制会话所属任务，必填。
+	TaskID domain.ID
+	// StepID 限制会话所属步骤。
+	StepID *domain.ID
+	// AttemptID 限制会话所属尝试。
+	AttemptID *domain.ID
+	// RoleID 限制会话的 Agent 角色。
+	RoleID *domain.ID
+	// Statuses 限制会话执行状态，为空表示不限制。
+	Statuses []domain.SessionStatus
+	// Limit 限制返回条数，小于等于 0 表示不限制。
+	Limit int
+	// Offset 跳过前面若干条记录，小于等于 0 表示不跳过。
+	Offset int
+}
+
+// SessionPage 是一次会话分页查询的结果。
+type SessionPage struct {
+	// Sessions 是当前页的会话，按创建时间升序排列。
+	Sessions []domain.Session
+	// Total 是满足筛选条件的记录总数。
+	Total int
 }
 
 // VerificationStore 保存每次验证的结构化结果，历史记录只追加不覆盖。

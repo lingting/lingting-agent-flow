@@ -5,18 +5,20 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/lingting/agentflow/internal/domain"
+	"github.com/lingting/agentflow/internal/storage"
 )
 
 // stepColumns 是步骤表的完整列顺序。
 const stepColumns = `id, task_id, sequence, step_type, title, objective, instructions_json,
 	role_id, role_snapshot_json, verification_spec_json, retry_json, max_attempts,
-	current_attempt_id, status, result, failure_stage, started_at, finished_at,
-	created_at, updated_at`
+	current_attempt_id, status, result, failure_stage, failure_summary, started_at,
+	finished_at, created_at, updated_at`
 
 // stepInsertCount 是写入步骤时的参数个数。
-const stepInsertCount = 20
+const stepInsertCount = 21
 
 // stepStore 实现 storage.StepStore。
 type stepStore struct {
@@ -80,16 +82,42 @@ func (s stepStore) UpdateStep(ctx context.Context, step domain.Step) error {
 	if err != nil {
 		return err
 	}
-	const statement = `
+	return s.updateStep(ctx, record, nil)
+}
+
+// UpdateStepIfStatus 在数据库中的状态仍属于 expected 时写入步骤。
+func (s stepStore) UpdateStepIfStatus(
+	ctx context.Context,
+	step domain.Step,
+	expected []domain.StepStatus,
+) error {
+	if len(expected) == 0 {
+		return wrapError(
+			"条件更新步骤",
+			errors.Join(storage.ErrInvalidData, errors.New("期望状态集合不能为空")),
+		)
+	}
+	record, err := encodeStep(step)
+	if err != nil {
+		return err
+	}
+	return s.updateStep(ctx, record, expected)
+}
+
+// updateStep 执行步骤更新；expected 为空表示无条件更新，否则附加状态前置条件。
+func (s stepStore) updateStep(
+	ctx context.Context,
+	record stepRecord,
+	expected []domain.StepStatus,
+) error {
+	statement := `
 UPDATE steps SET
 	sequence = ?, step_type = ?, title = ?, objective = ?, instructions_json = ?,
 	role_id = ?, role_snapshot_json = ?, verification_spec_json = ?, retry_json = ?,
 	max_attempts = ?, current_attempt_id = ?, status = ?, result = ?, failure_stage = ?,
-	started_at = ?, finished_at = ?, updated_at = ?
+	failure_summary = ?, started_at = ?, finished_at = ?, updated_at = ?
 WHERE id = ?`
-	result, err := s.q.ExecContext(
-		ctx,
-		statement,
+	args := []any{
 		record.step.Sequence,
 		string(record.step.Type),
 		record.step.Title,
@@ -104,15 +132,28 @@ WHERE id = ?`
 		string(record.step.Status),
 		nullIfBlank(record.step.Result),
 		nullIfBlank(record.step.FailureStage),
+		nullIfBlank(record.step.FailureSummary),
 		toMillisPtr(record.step.StartedAt),
 		toMillisPtr(record.step.FinishedAt),
 		toMillis(record.step.UpdatedAt),
 		toIDParam(record.step.ID),
-	)
+	}
+	if len(expected) > 0 {
+		conditions := make([]string, 0, len(expected))
+		for _, status := range expected {
+			conditions = append(conditions, "?")
+			args = append(args, string(status))
+		}
+		statement += ` AND status IN (` + strings.Join(conditions, ", ") + `)`
+	}
+	result, err := s.q.ExecContext(ctx, statement, args...)
 	if err != nil {
 		return wrapError("更新步骤", err)
 	}
-	return ensureAffected(result, "步骤", step.ID)
+	if len(expected) == 0 {
+		return ensureAffected(result, "步骤", record.step.ID)
+	}
+	return ensureStatusAffected(result, "步骤", record.step.ID)
 }
 
 // GetStep 读取单个步骤。
@@ -158,6 +199,68 @@ func (s stepStore) ListStepsByTask(ctx context.Context, taskID domain.ID) ([]dom
 	return steps, nil
 }
 
+// ListStepPage 按序号稳定排序分页返回任务的步骤。
+//
+// 排序键是 (sequence, id)：sequence 在同一任务内唯一，附加 id 只是为了让排序在
+// 数据异常时仍然确定，分页不会因行顺序抖动而漏读或重复。
+func (s stepStore) ListStepPage(
+	ctx context.Context,
+	filter storage.StepFilter,
+) (storage.StepPage, error) {
+	if err := filter.TaskID.Validate(); err != nil {
+		return storage.StepPage{}, err
+	}
+	conditions := []string{"task_id = ?"}
+	args := []any{toIDParam(filter.TaskID)}
+	if len(filter.Statuses) > 0 {
+		placeholdersForStatus := make([]string, 0, len(filter.Statuses))
+		for _, status := range filter.Statuses {
+			placeholdersForStatus = append(placeholdersForStatus, "?")
+			args = append(args, string(status))
+		}
+		conditions = append(
+			conditions,
+			"status IN ("+strings.Join(placeholdersForStatus, ", ")+")",
+		)
+	}
+	var countBuilder strings.Builder
+	countBuilder.WriteString(`SELECT COUNT(*) FROM steps`)
+	appendConditions(&countBuilder, conditions)
+	page := storage.StepPage{Steps: []domain.Step{}}
+	if err := s.q.QueryRowContext(ctx, countBuilder.String(), args...).Scan(&page.Total); err != nil {
+		return storage.StepPage{}, wrapError("统计步骤数量", err)
+	}
+	if page.Total == 0 {
+		return page, nil
+	}
+	var builder strings.Builder
+	builder.WriteString(`SELECT `)
+	builder.WriteString(stepColumns)
+	builder.WriteString(` FROM steps`)
+	appendConditions(&builder, conditions)
+	builder.WriteString(` ORDER BY sequence, id`)
+	queryArgs := append([]any{}, args...)
+	queryArgs = appendPaging(&builder, queryArgs, filter.Limit, filter.Offset)
+	rows, err := s.q.QueryContext(ctx, builder.String(), queryArgs...)
+	if err != nil {
+		return storage.StepPage{}, wrapError("查询步骤", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+	for rows.Next() {
+		step, err := scanStep(rows)
+		if err != nil {
+			return storage.StepPage{}, wrapError("读取步骤", err)
+		}
+		page.Steps = append(page.Steps, *step)
+	}
+	if err := rows.Err(); err != nil {
+		return storage.StepPage{}, wrapError("查询步骤", err)
+	}
+	return page, nil
+}
+
 // insertStep 写入编码后的步骤记录。
 func (s stepStore) insertStep(ctx context.Context, record stepRecord) error {
 	statement := `INSERT INTO steps (` + stepColumns + `)
@@ -181,6 +284,7 @@ func (s stepStore) insertStep(ctx context.Context, record stepRecord) error {
 		string(record.step.Status),
 		nullIfBlank(record.step.Result),
 		nullIfBlank(record.step.FailureStage),
+		nullIfBlank(record.step.FailureSummary),
 		toMillisPtr(record.step.StartedAt),
 		toMillisPtr(record.step.FinishedAt),
 		toMillis(record.step.CreatedAt),
@@ -263,6 +367,7 @@ func scanStep(row scanner) (*domain.Step, error) {
 		status           string
 		result           sql.NullString
 		failureStage     sql.NullString
+		failureSummary   sql.NullString
 		startedAt        sql.NullInt64
 		finishedAt       sql.NullInt64
 		createdAt        int64
@@ -285,6 +390,7 @@ func scanStep(row scanner) (*domain.Step, error) {
 		&status,
 		&result,
 		&failureStage,
+		&failureSummary,
 		&startedAt,
 		&finishedAt,
 		&createdAt,
@@ -300,6 +406,7 @@ func scanStep(row scanner) (*domain.Step, error) {
 	step.Status = domain.StepStatus(status)
 	step.Result = result.String
 	step.FailureStage = failureStage.String
+	step.FailureSummary = failureSummary.String
 	step.CurrentAttemptID = fromIDPtr(currentAttemptID)
 	step.StartedAt = fromMillisPtr(startedAt)
 	step.FinishedAt = fromMillisPtr(finishedAt)

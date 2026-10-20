@@ -132,7 +132,7 @@ func mustStep(t *testing.T, db *sqlite.DB, task domain.Task, role domain.Role, s
 // mustAttempt 创建并写入一次测试执行尝试。
 func mustAttempt(t *testing.T, db *sqlite.DB, step domain.Step, number int) domain.Attempt {
 	t.Helper()
-	attempt, err := domain.NewAttempt(step.ID, number, time.Now().UTC())
+	attempt, err := domain.NewAttempt(step.TaskID, step.ID, number, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("构造执行尝试失败: %v", err)
 	}

@@ -81,7 +81,7 @@ func TestDuplicateAttemptNumberIsRejected(t *testing.T) {
 	db := newTestDB(t)
 	ctx := testContext(t)
 	built := newFixture(t, db)
-	duplicate, err := domain.NewAttempt(built.step.ID, 1, time.Now().UTC())
+	duplicate, err := domain.NewAttempt(built.step.TaskID, built.step.ID, 1, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("构造执行尝试失败: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestAttemptRequiresPositiveNumber(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	built := newFixture(t, db)
-	if _, err := domain.NewAttempt(built.step.ID, 0, time.Now().UTC()); err == nil {
+	if _, err := domain.NewAttempt(built.step.TaskID, built.step.ID, 0, time.Now().UTC()); err == nil {
 		t.Fatal("尝试序号必须大于 0")
 	}
 }
@@ -198,7 +198,7 @@ func TestAttemptAllowsOrphanStepID(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	// 数据库不声明外键，step_id 只是普通文本，允许保存孤立标识。
-	attempt, err := domain.NewAttempt(domain.NewID(), 1, time.Now().UTC())
+	attempt, err := domain.NewAttempt(domain.NewID(), domain.NewID(), 1, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("构造执行尝试失败: %v", err)
 	}

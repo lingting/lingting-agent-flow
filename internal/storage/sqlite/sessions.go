@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage"
@@ -14,6 +15,7 @@ import (
 const sessionColumns = `id, task_id, step_id, attempt_id, role_id, role_snapshot_json,
 	provider, model, external_session_id, process_id, status,
 	session_jsonl_path, session_html_path, run_status, completeness, export_status,
+	archive_status, archive_path,
 	exit_code, failure_summary, invocation_id, container_id, docker_id,
 	started_at, finished_at, created_at`
 
@@ -40,7 +42,7 @@ func (s sessionStore) CreateSession(ctx context.Context, session domain.Session)
 		return err
 	}
 	const statement = `INSERT INTO sessions (` + sessionColumns + `)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	_, err = s.q.ExecContext(
 		ctx,
 		statement,
@@ -60,6 +62,8 @@ func (s sessionStore) CreateSession(ctx context.Context, session domain.Session)
 		sqlNullString(string(session.RunStatus)),
 		sqlNullString(string(session.Completeness)),
 		sqlNullString(string(session.ExportStatus)),
+		sqlNullString(string(session.ArchiveStatus)),
+		sqlNullString(session.ArchivePath),
 		toIntPtrParam(session.ExitCode),
 		sqlNullString(session.FailureSummary),
 		sqlNullString(session.InvocationID),
@@ -87,6 +91,7 @@ UPDATE sessions SET
 	provider = ?, model = ?, external_session_id = ?, process_id = ?,
 	status = ?, session_jsonl_path = ?, session_html_path = ?,
 	run_status = ?, completeness = ?, export_status = ?,
+	archive_status = ?, archive_path = ?,
 	exit_code = ?, failure_summary = ?,
 	invocation_id = ?, container_id = ?, docker_id = ?, finished_at = ?
 WHERE id = ?`
@@ -103,6 +108,8 @@ WHERE id = ?`
 		sqlNullString(string(session.RunStatus)),
 		sqlNullString(string(session.Completeness)),
 		sqlNullString(string(session.ExportStatus)),
+		sqlNullString(string(session.ArchiveStatus)),
+		sqlNullString(session.ArchivePath),
 		toIntPtrParam(session.ExitCode),
 		sqlNullString(session.FailureSummary),
 		sqlNullString(session.InvocationID),
@@ -115,6 +122,43 @@ WHERE id = ?`
 		return wrapError("更新会话", err)
 	}
 	return ensureAffected(result, "会话", session.ID)
+}
+
+// UpdateSessionArchive 只更新会话的归档状态与归档位置。
+//
+// 归档与执行结果、HTML 导出相互独立，因此这里不改写 status、run_status 与
+// export_status：归档失败不会把成功的调用改写为失败，反之亦然。
+//
+// 归档结果一经写入不再改写：WHERE 条件要求当前归档状态为空或未归档，影响行数为 0
+// 时返回 storage.ErrConflict，避免迟到的归档任务覆盖已经确认的事实。
+func (s sessionStore) UpdateSessionArchive(ctx context.Context, session domain.Session) error {
+	if err := session.ArchiveStatus.Validate(); err != nil {
+		return err
+	}
+	if session.ArchiveStatus == domain.SessionArchiveNotAttempted {
+		return wrapError(
+			"更新会话归档",
+			errors.Join(
+				storage.ErrInvalidData,
+				errors.New("归档结果不能写回未归档"),
+			),
+		)
+	}
+	const statement = `
+UPDATE sessions SET archive_status = ?, archive_path = ?
+WHERE id = ? AND (archive_status IS NULL OR archive_status = ?)`
+	result, err := s.q.ExecContext(
+		ctx,
+		statement,
+		string(session.ArchiveStatus),
+		nullIfBlank(session.ArchivePath),
+		toIDParam(session.ID),
+		string(domain.SessionArchiveNotAttempted),
+	)
+	if err != nil {
+		return wrapError("更新会话归档", err)
+	}
+	return ensureStatusAffected(result, "会话归档", session.ID)
 }
 
 // GetSession 读取单个会话。
@@ -157,6 +201,65 @@ func (s sessionStore) ListSessionsByAttempt(
 	const statement = `SELECT ` + sessionColumns + ` FROM sessions
 		WHERE attempt_id = ? ORDER BY created_at, rowid`
 	return s.querySessions(ctx, statement, toIDParam(attemptID))
+}
+
+// ListSessionPage 按创建时间稳定排序分页返回会话。
+//
+// 排序键是 (created_at, rowid)：同一毫秒内创建的多个会话仍有确定顺序，分页不会
+// 因行顺序抖动而漏读或重复。
+func (s sessionStore) ListSessionPage(
+	ctx context.Context,
+	filter storage.SessionFilter,
+) (storage.SessionPage, error) {
+	if err := filter.TaskID.Validate(); err != nil {
+		return storage.SessionPage{}, err
+	}
+	conditions := []string{"task_id = ?"}
+	args := []any{toIDParam(filter.TaskID)}
+	if filter.StepID != nil {
+		conditions = append(conditions, "step_id = ?")
+		args = append(args, toIDParam(*filter.StepID))
+	}
+	if filter.AttemptID != nil {
+		conditions = append(conditions, "attempt_id = ?")
+		args = append(args, toIDParam(*filter.AttemptID))
+	}
+	if filter.RoleID != nil {
+		conditions = append(conditions, "role_id = ?")
+		args = append(args, toIDParam(*filter.RoleID))
+	}
+	if len(filter.Statuses) > 0 {
+		statusPlaceholders := make([]string, 0, len(filter.Statuses))
+		for _, status := range filter.Statuses {
+			statusPlaceholders = append(statusPlaceholders, "?")
+			args = append(args, string(status))
+		}
+		conditions = append(conditions, "status IN ("+strings.Join(statusPlaceholders, ", ")+")")
+	}
+	var countBuilder strings.Builder
+	countBuilder.WriteString(`SELECT COUNT(*) FROM sessions`)
+	appendConditions(&countBuilder, conditions)
+	page := storage.SessionPage{Sessions: []domain.Session{}}
+	if err := s.q.QueryRowContext(ctx, countBuilder.String(), args...).Scan(&page.Total); err != nil {
+		return storage.SessionPage{}, wrapError("统计会话数量", err)
+	}
+	if page.Total == 0 {
+		return page, nil
+	}
+	var builder strings.Builder
+	builder.WriteString(`SELECT `)
+	builder.WriteString(sessionColumns)
+	builder.WriteString(` FROM sessions`)
+	appendConditions(&builder, conditions)
+	builder.WriteString(` ORDER BY created_at, rowid`)
+	queryArgs := append([]any{}, args...)
+	queryArgs = appendPaging(&builder, queryArgs, filter.Limit, filter.Offset)
+	sessions, err := s.querySessions(ctx, builder.String(), queryArgs...)
+	if err != nil {
+		return storage.SessionPage{}, err
+	}
+	page.Sessions = sessions
+	return page, nil
 }
 
 // querySessions 执行会话查询并读取结果。
@@ -258,6 +361,8 @@ func scanSession(row scanner) (*domain.Session, error) {
 		runStatus     sql.NullString
 		completeness  sql.NullString
 		exportStatus  sql.NullString
+		archiveStatus sql.NullString
+		archivePath   sql.NullString
 		exitCode      sql.NullInt64
 		failure       sql.NullString
 		invocationID  sql.NullString
@@ -284,6 +389,8 @@ func scanSession(row scanner) (*domain.Session, error) {
 		&runStatus,
 		&completeness,
 		&exportStatus,
+		&archiveStatus,
+		&archivePath,
 		&exitCode,
 		&failure,
 		&invocationID,
@@ -309,6 +416,8 @@ func scanSession(row scanner) (*domain.Session, error) {
 	session.RunStatus = domain.SessionRunStatus(runStatus.String)
 	session.Completeness = domain.SessionCompleteness(completeness.String)
 	session.ExportStatus = domain.SessionExportStatus(exportStatus.String)
+	session.ArchiveStatus = domain.SessionArchiveStatus(archiveStatus.String)
+	session.ArchivePath = archivePath.String
 	session.ExitCode = fromIntPtr(exitCode)
 	session.FailureSummary = failure.String
 	session.InvocationID = invocationID.String

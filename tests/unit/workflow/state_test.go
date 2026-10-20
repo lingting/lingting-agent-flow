@@ -83,7 +83,7 @@ func TestCancelledTaskCannotRestart(t *testing.T) {
 func TestFinishedAttemptCannotReturnToRunning(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
-	attempt, err := domain.NewAttempt(domain.NewID(), 1, now)
+	attempt, err := domain.NewAttempt(domain.NewID(), domain.NewID(), 1, now)
 	if err != nil {
 		t.Fatalf("构造尝试失败: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestRecoveryMarksUnfinishedAttemptsInterrupted(t *testing.T) {
 	fixture := testkit.NewWorkflowFixture(t, testkit.WorkflowOptions{})
 	ctx := context.Background()
 	step := fixture.CreateStep(t, ctx, 1, domain.VerificationSpec{}, 3)
-	attempt, err := domain.NewAttempt(step.ID, 1, time.Now().UTC())
+	attempt, err := domain.NewAttempt(step.TaskID, step.ID, 1, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("构造尝试失败: %v", err)
 	}

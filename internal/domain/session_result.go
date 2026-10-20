@@ -139,6 +139,41 @@ func (a SessionArtifacts) Validate() error {
 	return nil
 }
 
+// SessionArchiveStatus 描述原始 Session 文件的归档结果。
+//
+// 归档状态与执行状态（SessionStatus）、HTML 导出状态（SessionExportStatus）三者
+// 相互独立，必须分别记录：
+//   - Agent 调用成功，但原始 JSONL 归档失败；
+//   - Agent 调用失败，但原始会话仍成功保存并归档；
+//   - 原始 JSONL 已保存，但 HTML 导出失败。
+//
+// 归档指把容器内的原始会话文件复制到 AgentFlow 本机持久目录并登记路径；它不依赖
+// 远程容器生命周期，容器删除后归档仍必须可读。
+type SessionArchiveStatus string
+
+// 归档状态取值。
+const (
+	// SessionArchiveNotAttempted 表示尚未尝试归档，通常是执行还没结束。
+	SessionArchiveNotAttempted SessionArchiveStatus = "not_attempted"
+	// SessionArchiveSucceeded 表示原始会话已保存到本机持久目录。
+	SessionArchiveSucceeded SessionArchiveStatus = "succeeded"
+	// SessionArchiveFailed 表示归档失败，原始会话可能仍存在于执行环境内部。
+	SessionArchiveFailed SessionArchiveStatus = "failed"
+)
+
+// Validate 校验归档状态是否受支持。
+//
+// 未知取值在读取层原样保留：数据库不设枚举白名单，历史记录里的新取值不能让整行
+// 读取失败，但业务层写入时必须拒绝拼写错误的取值。
+func (s SessionArchiveStatus) Validate() error {
+	switch s {
+	case SessionArchiveNotAttempted, SessionArchiveSucceeded, SessionArchiveFailed:
+		return nil
+	default:
+		return invalidField("Session", "archive_status", "未知归档状态 "+string(s))
+	}
+}
+
 // ApplyArtifacts 记录会话的产出元数据，并按运行结果结束会话。
 //
 // 会话状态与产出元数据一起写入，避免出现"状态已结束但文件信息缺失"的中间态。

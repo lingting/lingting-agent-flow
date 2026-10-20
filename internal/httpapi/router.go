@@ -3,6 +3,7 @@ package httpapi
 import (
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/lingting/agentflow/internal/app"
 )
@@ -25,6 +26,8 @@ type Deps struct {
 	Tasks *app.TaskService
 	// Hosts 是执行节点服务，为空时执行节点接口返回服务不可用。
 	Hosts *app.ExecutionHostService
+	// ExecutionRecords 是执行记录查询服务，为空时执行记录接口返回服务不可用。
+	ExecutionRecords *app.ExecutionRecordService
 	// Logger 是日志器，为空时使用 slog.Default。
 	Logger *slog.Logger
 }
@@ -43,6 +46,7 @@ func NewHandler(deps Deps) http.Handler {
 		systemInfo: deps.SystemInfo,
 		tasks:      newTaskHandler(deps.Tasks, logger),
 		hosts:      newHostHandler(deps.Hosts, logger),
+		executions: newExecutionHandler(deps.ExecutionRecords, logger),
 		logger:     logger,
 	}
 	mux := http.NewServeMux()
@@ -64,6 +68,7 @@ type router struct {
 	systemInfo func() app.SystemInfo
 	tasks      *taskHandler
 	hosts      *hostHandler
+	executions *executionHandler
 	logger     *slog.Logger
 }
 
@@ -101,7 +106,45 @@ func (rt *router) tasksHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// 执行记录路径（steps / attempts / sessions）与单任务路径共享前缀，
+	// 因此先判定是否属于执行记录形状，再交给任务处理器。
+	if isExecutionRecordPath(r.URL.Path) {
+		if rt.executions == nil || rt.executions.records == nil {
+			writeError(
+				w,
+				r,
+				rt.logger,
+				http.StatusServiceUnavailable,
+				CodeInternal,
+				"执行记录服务未初始化",
+			)
+			return
+		}
+		rt.executions.serve(w, r)
+		return
+	}
 	rt.tasks.serve(w, r)
+}
+
+// isExecutionRecordPath 判断路径是否指向任务下的执行记录资源。
+//
+// 判定依据第二段是否是执行记录资源名：单任务动作（例如 cancel）与未知子路径
+// 都留给任务处理器，从而保持它们原有的 405 与 404 语义。
+func isExecutionRecordPath(path string) bool {
+	remainder := strings.TrimPrefix(path, taskPathPrefix)
+	if remainder == path {
+		return false
+	}
+	segments := splitPathSegments(remainder)
+	if len(segments) < 2 {
+		return false
+	}
+	switch segments[1] {
+	case stepsSegment, sessionsSegment:
+		return true
+	default:
+		return false
+	}
 }
 
 // hostsHandler 分发执行节点集合路径与单节点路径的请求。

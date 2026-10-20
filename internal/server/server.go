@@ -90,10 +90,12 @@ type Server struct {
 	hosts      *app.ExecutionHostService
 	ssh        *app.SSHService
 	validation *app.HostValidationService
-	requireWeb bool
-	logger     *slog.Logger
-	report     func(message string)
-	manager    *lifecycle.Manager
+	// executionRecords 是执行记录只读查询服务，由已打开的数据库构造。
+	executionRecords *app.ExecutionRecordService
+	requireWeb       bool
+	logger           *slog.Logger
+	report           func(message string)
+	manager          *lifecycle.Manager
 
 	boundAddr       string
 	cfg             *config.Config
@@ -207,6 +209,11 @@ func (s *Server) openDatabase(ctx context.Context) error {
 // 环境预检作为后台服务注册进统一生命周期：由这里启动与停止，不在 HTTP Handler
 // 内创建不受管理的长期 goroutine。
 func (s *Server) startServices(ctx context.Context) error {
+	records, err := s.executionRecordService()
+	if err != nil {
+		return err
+	}
+	s.executionRecords = records
 	hosts, err := s.hostService()
 	if err != nil {
 		return err
@@ -236,6 +243,20 @@ func (s *Server) startServices(ctx context.Context) error {
 // 包装后两者共用同一个 handler，输出目标与级别一致，不会产生第二套日志格式。
 func (s *Server) loggerWrapper() *logging.Logger {
 	return logging.FromSlog(s.logger)
+}
+
+// executionRecordService 构造执行记录只读查询服务。
+//
+// 未打开数据库时返回 nil：执行记录接口随后返回 503，而不是伪造空结果。
+func (s *Server) executionRecordService() (*app.ExecutionRecordService, error) {
+	if s.store == nil {
+		return nil, nil
+	}
+	records, err := app.NewExecutionRecordService(s.store)
+	if err != nil {
+		return nil, fmt.Errorf("初始化执行记录服务失败: %w", err)
+	}
+	return records, nil
 }
 
 // hostService 返回执行节点服务。
@@ -316,15 +337,16 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		return err
 	}
 	web, err := httpserver.New(httpserver.Options{
-		Address:         s.address,
-		Health:          app.NewHealthService(s.store),
-		SystemInfo:      s.systemInfo,
-		Tasks:           tasks,
-		Hosts:           s.hosts,
-		RequireWebUI:    s.requireWeb,
-		ShutdownTimeout: s.shutdownTimeout,
-		Report:          s.report,
-		Logger:          s.logger,
+		Address:          s.address,
+		Health:           app.NewHealthService(s.store),
+		SystemInfo:       s.systemInfo,
+		Tasks:            tasks,
+		Hosts:            s.hosts,
+		ExecutionRecords: s.executionRecords,
+		RequireWebUI:     s.requireWeb,
+		ShutdownTimeout:  s.shutdownTimeout,
+		Report:           s.report,
+		Logger:           s.logger,
 	})
 	if err != nil {
 		return err

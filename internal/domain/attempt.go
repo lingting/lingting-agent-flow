@@ -112,8 +112,14 @@ func (v VerificationVerdict) Validate() error {
 //
 // 每次重试都会创建新的 Attempt，并保留此前的执行记录：历史记录不会被覆盖，
 // 也不会被复用为新的执行。
+//
+// 任务归属与步骤归属同时保存：数据库不声明外键，因此"尝试所属步骤属于该任务"
+// 这一关系必须由服务层在写入前显式校验，不能只凭两个标识各自存在就认为合法。
 type Attempt struct {
-	ID            ID            `json:"id"`
+	ID ID `json:"id"`
+	// TaskID 是本次尝试所属任务。
+	TaskID ID `json:"task_id"`
+	// StepID 是本次尝试所属步骤。
 	StepID        ID            `json:"step_id"`
 	AttemptNumber int           `json:"attempt_number"`
 	Status        AttemptStatus `json:"status"`
@@ -154,11 +160,16 @@ type Attempt struct {
 
 // NewAttempt 创建并校验执行尝试。
 //
-// attemptNumber 必须从 1 开始，并由调用方保证同一步骤内递增且不重复。
-func NewAttempt(stepID ID, attemptNumber int, at time.Time) (Attempt, error) {
+// attemptNumber 必须从 1 开始，并由调用方保证同一步骤内递增且不重复；
+// 序号的并发安全由存储层的 StartAttempt 保证，不能只靠"先查最大值再插入"。
+//
+// 尝试创建即为 running：Attempt 只在真正开始执行时创建，不存在预先占位的待执行
+// 尝试。未调用真实执行器时不得创建 Attempt。
+func NewAttempt(taskID, stepID ID, attemptNumber int, at time.Time) (Attempt, error) {
 	startedAt := normalizeTime(at)
 	attempt := Attempt{
 		ID:            NewID(),
+		TaskID:        taskID,
 		StepID:        stepID,
 		AttemptNumber: attemptNumber,
 		Status:        AttemptStatusRunning,
@@ -175,6 +186,9 @@ func NewAttempt(stepID ID, attemptNumber int, at time.Time) (Attempt, error) {
 // Validate 校验执行尝试定义是否完整。
 func (a Attempt) Validate() error {
 	if err := a.ID.Validate(); err != nil {
+		return err
+	}
+	if err := a.TaskID.Validate(); err != nil {
 		return err
 	}
 	if err := a.StepID.Validate(); err != nil {

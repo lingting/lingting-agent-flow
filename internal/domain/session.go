@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"fmt"
 	"strings"
 	"time"
 )
@@ -117,9 +118,15 @@ type Session struct {
 	Completeness SessionCompleteness `json:"completeness,omitempty"`
 	// ExportStatus 是 HTML 导出状态。
 	ExportStatus SessionExportStatus `json:"export_status,omitempty"`
+	// ArchiveStatus 是原始 Session 文件的归档状态。
+	//
+	// 归档独立于执行状态与导出状态：原始文件没保存下来不代表 Agent 调用失败，
+	// HTML 导出失败也不影响归档成功的事实。
+	ArchiveStatus SessionArchiveStatus `json:"archive_status,omitempty"`
+	// ArchivePath 是归档后的原始 Session 文件位置，未归档时为空。
+	ArchivePath string `json:"archive_path,omitempty"`
 	// ExitCode 是 Agent 进程退出码，未能取得时为空。
-	ExitCode *int `json:"exit_code,omitempty"`
-	// FailureSummary 是失败或异常的可诊断摘要。
+	ExitCode       *int   `json:"exit_code,omitempty"`
 	FailureSummary string `json:"failure_summary,omitempty"`
 	// InvocationID 是本次 Agent 调用的唯一标识，用于区分同一会话下的多次调用。
 	InvocationID string `json:"invocation_id,omitempty"`
@@ -191,6 +198,16 @@ func (s Session) Validate() error {
 
 // validateArtifacts 校验可选的产出元数据：未记录时跳过，记录时必须自洽。
 func (s Session) validateArtifacts() error {
+	// 未记录归档结果时跳过：空值表示"还没有归档结论"，不是非法取值。
+	if s.ArchiveStatus != "" {
+		if err := s.ArchiveStatus.Validate(); err != nil {
+			return err
+		}
+	}
+	// 归档成功必须给出归档位置，否则无法定位原始会话文件。
+	if s.ArchiveStatus == SessionArchiveSucceeded && strings.TrimSpace(s.ArchivePath) == "" {
+		return invalidField("Session", "archive_path", "归档成功时必须给出归档位置")
+	}
 	if s.RunStatus == "" && s.Completeness == "" && s.ExportStatus == "" {
 		return nil
 	}
@@ -256,6 +273,42 @@ func (s *Session) Cancel(at time.Time) error {
 // Interrupt 标记会话因编排器或宿主进程异常结束。
 func (s *Session) Interrupt(at time.Time) error {
 	return s.finish(SessionStatusInterrupted, at)
+}
+
+// ApplyArchive 记录原始会话文件的归档结果。
+//
+// 归档可以在会话结束之后单独推进（例如先保存原始 JSONL，稍后再完成 HTML 导出），
+// 因此它不参与会话状态迁移：归档失败不会把已成功的调用改写为失败，归档成功也不会
+// 把失败的调用改写为成功。
+//
+// 归档结果只允许从"未归档"推进到成功或失败；已有结论不重复改写，避免迟到的归档
+// 任务覆盖已经确认的事实。
+func (s *Session) ApplyArchive(status SessionArchiveStatus, path string) error {
+	if s == nil {
+		return invalidField("Session", "", "实体为空")
+	}
+	if err := status.Validate(); err != nil {
+		return err
+	}
+	if status == SessionArchiveNotAttempted {
+		return invalidField("Session", "archive_status", "归档结果不能写回未归档")
+	}
+	if s.ArchiveStatus != "" && s.ArchiveStatus != SessionArchiveNotAttempted {
+		return fmt.Errorf(
+			"%w: 会话 %s 的归档结果已确认为 %s，不能改写为 %s",
+			ErrInvalidState,
+			s.ID,
+			s.ArchiveStatus,
+			status,
+		)
+	}
+	trimmed := strings.TrimSpace(path)
+	if status == SessionArchiveSucceeded && trimmed == "" {
+		return invalidField("Session", "archive_path", "归档成功时必须给出归档位置")
+	}
+	s.ArchiveStatus = status
+	s.ArchivePath = trimmed
+	return nil
 }
 
 // finish 执行会话的结束迁移。

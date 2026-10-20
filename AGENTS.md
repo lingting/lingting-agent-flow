@@ -32,6 +32,31 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
 - 逻辑删除使用 `deleted_at` 标记，读取层默认过滤已删除记录，只有显式 `IncludeDeleted`
   时才纳入查询；历史记录一律保留。
 
+### 执行记录四层关系（Task → Step → Attempt → Session）
+
+- 层级固定为 `Task → Step → Attempt → Session`：Task 是用户提交的整体任务，Step 是逻辑执行
+  阶段（`plan` / `develop` / `verify` / `review` 等），Attempt 是同一步骤的一次执行尝试，
+  Session 是一次独立的 Agent 调用会话。
+- 每一次 Planner、Developer、Validator 调用都必须对应一个独立 Session，不得复用同一个会话
+  记录或同一个外部会话标识。
+- 每一次重试都必须创建新的 Attempt 与新 Session：不复用旧 Attempt、不覆盖旧尝试的错误与
+  耗时、不复用旧容器、不复用旧 Agent Session，完整保留历史尝试。
+- 执行状态只能由 Go 业务服务经 `domain` 的状态机方法推进；不得由 HTTP Handler、前端或
+  Agent 直接赋值状态字段。创建 Step / Attempt 不会自动把 Task 推进到运行状态。
+- 尝试序号由存储层在事务内分配（`storage.AttemptStore.StartAttempt`），禁止"先查最大值再
+  无保护插入"。`NextAttemptNumber` 只用于展示与预估。
+- 依赖条件的更新必须检查影响行数并返回 `storage.ErrConflict`：旧 Attempt 的迟到结果不得
+  覆盖新状态，重复完成不得重新打开终态记录。
+- 四层关联由应用层校验：Attempt 的 Task 必须与其 Step 的 Task 一致，Session 的 Task / Step /
+  Attempt 必须属于同一条任务链。数据库不声明外键，孤立关联 ID 允许存在但不得被当作合法关系。
+- Session 的执行状态、原始 JSONL 归档状态（`archive_status` / `archive_path`）与 HTML 导出
+  状态（`export_status` / `session_html_path`）必须分别记录，不得合并为一个字段。
+- Session 归档与远程容器生命周期分离：归档路径由服务端生成并保存到本机持久目录，容器删除
+  后原始会话与归档仍必须可读；容器清理成败都不得删除 Session 归档。
+- 客户端不得传入任意 Session 文件路径；路径一律由服务端生成与管理。
+- 不得伪造执行结果：未调用真实执行器时不得把 Step / Attempt / Session 标记为 `running`、
+  `completed` 或 `succeeded`，也不得把测试夹具数据写入真实开发数据库冒充执行历史。
+
 ## 架构硬性约束
 
 - 数据库是唯一真相来源。关键状态迁移（任务领取、步骤开始、Session 启动、验证失败、重试、任务完成）都必须持久化，内存对象只能作为执行期缓存。
@@ -300,6 +325,11 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
 - 数据库连接显式关闭外键检查（`foreign_keys(0)`），业务 Schema 本身不得依赖该开关。
 - 迁移必须在事务内完成，失败时回滚且不得写入版本记录；并发打开同一数据库只允许执行
   一次迁移。
+- 执行记录表沿用同一套约束：`steps`、`attempts`、`sessions` 不声明外键，`step_type`、
+  `status`、`run_status`、`completeness`、`export_status`、`archive_status` 等枚举式字段
+  不得设置取值白名单，未知取值必须能写入并原样读回。
+- 新增列的迁移必须可重复执行且只读取既有表：`attempts.task_id` 的历史回填通过
+  `steps.task_id` 完成，步骤已不存在的孤立记录保持空值，不得因此失败或删除记录。
 - 数据库相关测试集中在 `tests/`，必须覆盖 Schema 审计、旧库升级、数据保留、未知枚举
   值与并发访问，且不得把未执行、失败或跳过的测试报告为通过。
 

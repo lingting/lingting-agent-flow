@@ -113,7 +113,7 @@ func TestConcurrentAttemptCreationKeepsSingleWinner(t *testing.T) {
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			attempt, err := domain.NewAttempt(built.step.ID, 2, time.Now().UTC())
+			attempt, err := domain.NewAttempt(built.task.ID, built.step.ID, 2, time.Now().UTC())
 			if err != nil {
 				results <- err
 				return

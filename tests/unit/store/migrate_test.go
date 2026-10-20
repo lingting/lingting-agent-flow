@@ -14,7 +14,7 @@ import (
 )
 
 // latestSchemaVersion 是当前程序内置迁移的最新版本号。
-const latestSchemaVersion = 11
+const latestSchemaVersion = 12
 
 // migrationTableName 是记录已应用迁移版本的元数据表名。
 const migrationTableName = "schema_migrations"
@@ -143,6 +143,9 @@ func TestMigrateUpgradesExistingDatabase(t *testing.T) {
 		`ALTER TABLE sessions DROP COLUMN run_status`,
 		`ALTER TABLE sessions DROP COLUMN completeness`,
 		`ALTER TABLE sessions DROP COLUMN export_status`,
+		`ALTER TABLE sessions DROP COLUMN archive_status`,
+		`ALTER TABLE sessions DROP COLUMN archive_path`,
+		`DROP INDEX idx_sessions_task_role`,
 		`ALTER TABLE sessions DROP COLUMN exit_code`,
 		`ALTER TABLE sessions DROP COLUMN failure_summary`,
 		`DROP INDEX idx_sessions_invocation`,
@@ -150,13 +153,17 @@ func TestMigrateUpgradesExistingDatabase(t *testing.T) {
 		`ALTER TABLE sessions DROP COLUMN invocation_id`,
 		`ALTER TABLE sessions DROP COLUMN container_id`,
 		`ALTER TABLE sessions DROP COLUMN docker_id`,
+		// 执行记录模型同样需要回退，才能重新执行 0012。
+		`DROP INDEX idx_attempts_task`,
+		`ALTER TABLE attempts DROP COLUMN task_id`,
+		`ALTER TABLE steps DROP COLUMN failure_summary`,
 	} {
 		testkit.MustExec(t, rawDB(t, db), statement)
 	}
 	testkit.MustExec(
 		t,
 		rawDB(t, db),
-		`DELETE FROM `+migrationTableName+` WHERE version IN (2, 3, 4, 5, 6, 7, 8, 9, 10, 11)`,
+		`DELETE FROM `+migrationTableName+` WHERE version IN (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)`,
 	)
 	if version, err := db.SchemaVersion(ctx); err != nil || version != 1 {
 		t.Fatalf("模拟旧库版本失败: %d, %v", version, err)

@@ -416,14 +416,18 @@ type Step struct {
 	// CurrentAttemptID 是当前正在执行的尝试。
 	CurrentAttemptID *ID        `json:"current_attempt_id,omitempty"`
 	Status           StepStatus `json:"status"`
-	// Result 是该步骤的最终结果说明。
+	// Result 是该步骤的最终结果说明，对应清单中的 output_summary。
 	Result string `json:"result,omitempty"`
 	// FailureStage 是失败发生的阶段名，用于定位。
-	FailureStage string     `json:"failure_stage,omitempty"`
-	StartedAt    *time.Time `json:"started_at,omitempty"`
-	FinishedAt   *time.Time `json:"finished_at,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	FailureStage string `json:"failure_stage,omitempty"`
+	// FailureSummary 是失败原因摘要，对应清单中的 error。
+	//
+	// 与 FailureStage 分开保存：阶段名用于定位"哪一步出错"，摘要用于说明"出了什么错"。
+	FailureSummary string     `json:"failure_summary,omitempty"`
+	StartedAt      *time.Time `json:"started_at,omitempty"`
+	FinishedAt     *time.Time `json:"finished_at,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
 // NewStep 创建并校验步骤。

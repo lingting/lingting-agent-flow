@@ -31,3 +31,27 @@ type transactioner interface {
 	queryer
 	runInTx(ctx context.Context, fn func(tx queryer) error) error
 }
+
+// appendPaging 为查询附加分页子句并返回追加后的参数列表。
+//
+// 分页参数必须与筛选参数分开处理：先追加全部筛选参数，再追加 LIMIT / OFFSET 参数，
+// 顺序必须与占位符在语句中出现的顺序一致。
+func appendPaging(
+	builder *strings.Builder,
+	args []any,
+	limit, offset int,
+) []any {
+	if limit > 0 {
+		builder.WriteString(` LIMIT ?`)
+		args = append(args, limit)
+	}
+	if offset > 0 {
+		// SQLite 要求 LIMIT 与 OFFSET 成对出现，无上限时用 -1 表示不限。
+		if limit <= 0 {
+			builder.WriteString(` LIMIT -1`)
+		}
+		builder.WriteString(` OFFSET ?`)
+		args = append(args, offset)
+	}
+	return args
+}
