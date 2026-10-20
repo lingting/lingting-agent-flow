@@ -2,14 +2,15 @@
 //
 // 运行方式：
 //
-//	AGENTFLOW_TEST_REMOTE_DOCKER=1 \
-//	AGENTFLOW_TEST_SSH_HOST=10.0.0.10 \
-//	AGENTFLOW_TEST_SSH_USER=deploy \
-//	AGENTFLOW_TEST_SSH_KEY_PATH=$HOME/.ssh/id_ed25519 \
+//	cp tests/config/example.ssh.yml tests/config/ssh.yml       # 填写远程目标
+//	cp tests/config/example.docker.yml tests/config/docker.yml # 设置 remote_enabled: true
 //	go test -count=1 -v ./tests/integration/remote/docker/...
 //
+// 配置项来自 tests/config/ssh.yml 与 tests/config/docker.yml，字段说明见对应的
+// 示例文件。
+//
 // 安全约束：
-//   - 只有显式设置 AGENTFLOW_TEST_REMOTE_DOCKER=1 时才会修改真实远程 Docker；
+//   - 只有 tests/config/docker.yml 中 docker.remote_enabled 为 true 时才会修改真实远程 Docker；
 //   - SSH 目标缺失时输出 WARN 并跳过；
 //   - 目标配置完整但连接、认证、主机密钥校验失败或 Docker 不可用时必须让测试失败；
 //   - 所有镜像标签、容器名称与远程目录都带随机后缀，并只操作本次测试创建的资源；
@@ -24,7 +25,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -33,24 +33,6 @@ import (
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/sshclient"
 	"github.com/lingting/agentflow/tests/internal/testkit"
-)
-
-// 真实远程 Docker 测试使用的环境变量。
-const (
-	// EnvRemoteDocker 是显式启用远程 Docker 测试的开关。
-	EnvRemoteDocker = "AGENTFLOW_TEST_REMOTE_DOCKER"
-	// EnvHost 是 SSH 服务器地址，必填。
-	EnvHost = "AGENTFLOW_TEST_SSH_HOST"
-	// EnvUser 是登录用户名，必填。
-	EnvUser = "AGENTFLOW_TEST_SSH_USER"
-	// EnvPort 是 SSH 端口，可选，默认 22。
-	EnvPort = "AGENTFLOW_TEST_SSH_PORT"
-	// EnvKeyPath 是测试使用的私钥路径，可选；为空时使用 SSH Agent。
-	EnvKeyPath = "AGENTFLOW_TEST_SSH_KEY_PATH"
-	// EnvKnownHosts 是只读的 known_hosts 文件，可选。
-	EnvKnownHosts = "AGENTFLOW_TEST_SSH_KNOWN_HOSTS"
-	// defaultPort 是未指定端口时使用的 SSH 端口。
-	defaultPort = 22
 )
 
 // remoteOpTimeout 是单次远程操作的超时上限。
@@ -76,44 +58,36 @@ type target struct {
 // 开关未启用时输出明确警告并跳过，避免普通测试意外修改远程 Docker。
 func requireEnabled(t *testing.T) target {
 	t.Helper()
-	if strings.TrimSpace(os.Getenv(EnvRemoteDocker)) != "1" {
+	enabled, _ := testkit.LoadDockerConfig(t)
+	if !enabled.RemoteEnabled {
 		reason := fmt.Sprintf(
-			"WARN [SKIP] remote docker integration tests: set %s=1 to enable.",
-			EnvRemoteDocker,
+			"WARN [SKIP] remote docker integration tests: 请把 %s 中的 docker.remote_enabled 设为 true。",
+			testkit.ConfigPath(t, testkit.DockerConfigFile),
 		)
 		fmt.Fprintln(os.Stdout, reason)
 		t.Skip(reason)
 	}
-	host := strings.TrimSpace(os.Getenv(EnvHost))
-	user := strings.TrimSpace(os.Getenv(EnvUser))
-	if host == "" || user == "" {
-		missing := make([]string, 0, 2)
-		if host == "" {
-			missing = append(missing, EnvHost)
-		}
-		if user == "" {
-			missing = append(missing, EnvUser)
-		}
-		reason := fmt.Sprintf(
-			"WARN [SKIP] remote docker integration tests: missing %s.",
-			strings.Join(missing, ", "),
-		)
+	sshConfig, _ := testkit.LoadSSHConfig(t)
+	missing := make([]string, 0, 2)
+	if strings.TrimSpace(sshConfig.Host) == "" {
+		missing = append(missing, "ssh.host")
+	}
+	if strings.TrimSpace(sshConfig.User) == "" {
+		missing = append(missing, "ssh.user")
+	}
+	if len(missing) > 0 {
+		reason := testkit.SkipReason(t, testkit.SSHConfigFile, missing)
 		fmt.Fprintln(os.Stdout, reason)
 		t.Skip(reason)
 	}
-	port := defaultPort
-	if raw := strings.TrimSpace(os.Getenv(EnvPort)); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil {
-			t.Fatalf("解析 %s 失败: %v", EnvPort, err)
-		}
-		port = parsed
+	if sshConfig.Port <= 0 || sshConfig.Port > 65535 {
+		t.Fatalf("ssh.port 不是合法端口: %d", sshConfig.Port)
 	}
 	return target{
-		host:            host,
-		user:            user,
-		port:            port,
-		keyPath:         strings.TrimSpace(os.Getenv(EnvKeyPath)),
+		host:            strings.TrimSpace(sshConfig.Host),
+		user:            strings.TrimSpace(sshConfig.User),
+		port:            sshConfig.Port,
+		keyPath:         strings.TrimSpace(sshConfig.PrivateKeyPath),
 		knownHostsPaths: testkit.KnownHostsSources(t),
 	}
 }

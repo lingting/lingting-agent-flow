@@ -1,8 +1,8 @@
 // Package testkit 提供 AgentFlow 测试统一使用的工作空间与环境辅助组件。
 //
 // 该文件集中处理真实 SSH 测试的 known_hosts 来源解析，使各远程测试目录的行为一致：
-// 显式配置优先，未配置时复用本机用户 OpenSSH 的 known_hosts，与产品
-// internal/app.SSHService 的默认行为一致。
+// tests/config/ssh.yml 中显式配置优先，未配置时复用本机用户 OpenSSH 的
+// known_hosts，与产品 internal/app.SSHService 的默认行为一致。
 package testkit
 
 import (
@@ -13,32 +13,38 @@ import (
 	"testing"
 )
 
-// KnownHostsEnv 是真实 SSH 测试指定只读 known_hosts 文件的环境变量。
-const KnownHostsEnv = "AGENTFLOW_TEST_SSH_KNOWN_HOSTS"
-
 // KnownHostsSources 返回参与主机密钥校验的只读 known_hosts 文件列表。
 //
 // 优先级：
 //
-//  1. 环境变量 AGENTFLOW_TEST_SSH_KNOWN_HOSTS 指定的文件；
-//  2. 未设置时复用本机用户 OpenSSH 的 ~/.ssh/known_hosts 与 known_hosts2。
+//  1. tests/config/ssh.yml 中 ssh.known_hosts 指定的文件；
+//  2. 未配置时复用本机用户 OpenSSH 的 ~/.ssh/known_hosts 与 known_hosts2。
 //
 // 返回的文件可能不存在（用户从未连接过任何主机），调用方无需预先检查：
-// 主机密钥库会跳过不存在的路径。显式指定但文件不存在时视为配置错误并让测试失败，
-// 避免"设置了变量却仍然报主机密钥未知"的误判。
+// 主机密钥库会跳过不存在的路径。显式配置但文件不可读时视为配置错误并让测试失败，
+// 避免"配置了文件却仍然报主机密钥未知"的误判。
 func KnownHostsSources(t *testing.T) []string {
 	t.Helper()
-	configured := strings.TrimSpace(os.Getenv(KnownHostsEnv))
-	if configured != "" {
-		if _, err := os.Stat(configured); err != nil {
+	config, _ := LoadSSHConfig(t)
+	configured := make([]string, 0, len(config.KnownHosts))
+	for _, path := range config.KnownHosts {
+		trimmed := strings.TrimSpace(path)
+		if trimmed == "" {
+			continue
+		}
+		if _, err := os.Stat(trimmed); err != nil {
 			t.Fatalf(
-				"%s 指向的 known_hosts 不可读: %s: %v（请检查环境变量，或取消设置以复用本机 ~/.ssh/known_hosts）",
-				KnownHostsEnv,
-				configured,
+				"%s 中 ssh.known_hosts 指向的文件不可读: %s: %v"+
+					"（请修改配置，或删除该字段以复用本机 ~/.ssh/known_hosts）",
+				ConfigPath(t, SSHConfigFile),
+				trimmed,
 				err,
 			)
 		}
-		return []string{configured}
+		configured = append(configured, trimmed)
+	}
+	if len(configured) > 0 {
+		return configured
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -76,10 +82,10 @@ func HostKeyHint(t *testing.T, storePath string) string {
 	t.Helper()
 	return fmt.Sprintf(
 		"已读取的 known_hosts: %s\n"+
-			"若本机 OpenSSH 已信任该主机仍报未知，可用 %s 显式指定文件；\n"+
+			"若本机 OpenSSH 已信任该主机仍报未知，可在 %s 的 ssh.known_hosts 中显式指定文件；\n"+
 			"确认指纹后把记录写入 %s 即可复用（例如 host trust 命令）。",
 		DescribeKnownHosts(t),
-		KnownHostsEnv,
+		ConfigPath(t, SSHConfigFile),
 		storePath,
 	)
 }

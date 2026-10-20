@@ -2,13 +2,12 @@
 //
 // 运行方式：
 //
-//	AGENTFLOW_TEST_SSH_HOST=10.0.0.10 \
-//	AGENTFLOW_TEST_SSH_USER=deploy \
-//	AGENTFLOW_TEST_SSH_KEY_PATH=$HOME/.ssh/id_ed25519 \
+//	cp tests/config/example.ssh.yml tests/config/ssh.yml   # 按需填写后执行
 //	go test -count=1 -v ./tests/integration/ssh/...
 //
-// 必需目标变量缺失时输出 WARN 并跳过；目标配置完整但连接、认证或主机密钥校验
-// 失败时必须让测试失败，不得当作缺少可选依赖跳过。
+// 配置项来自 tests/config/ssh.yml，字段说明见 tests/config/example.ssh.yml。
+// 必需配置缺失时输出 WARN 并跳过；配置完整但连接、认证或主机密钥校验失败时
+// 必须让测试失败，不得当作缺少可选依赖跳过。
 package ssh_integration
 
 import (
@@ -16,31 +15,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/sshclient"
 	"github.com/lingting/agentflow/tests/internal/testkit"
-)
-
-// 真实 SSH 测试使用的环境变量。
-const (
-	// EnvHost 是 SSH 服务器地址，必填。
-	EnvHost = "AGENTFLOW_TEST_SSH_HOST"
-	// EnvUser 是登录用户名，必填。
-	EnvUser = "AGENTFLOW_TEST_SSH_USER"
-	// EnvPort 是 SSH 端口，可选，默认 22。
-	EnvPort = "AGENTFLOW_TEST_SSH_PORT"
-	// EnvKeyPath 是测试使用的私钥路径，可选；为空时使用 SSH Agent。
-	EnvKeyPath = "AGENTFLOW_TEST_SSH_KEY_PATH"
-	// EnvKnownHosts 是只读的 known_hosts 文件，可选。
-	//
-	// 未设置时复用本机用户 OpenSSH 的 known_hosts；取值见 testkit.KnownHostsEnv。
-	EnvKnownHosts = testkit.KnownHostsEnv
-	// defaultPort 是未指定端口时使用的 SSH 端口。
-	defaultPort = 22
 )
 
 // target 是一次真实 SSH 测试的连接目标。
@@ -55,40 +35,34 @@ type target struct {
 
 // loadTarget 读取并校验目标配置。
 //
-// 必需变量缺失时输出警告并跳过；只配置了一部分时说明缺少哪一项再跳过。
+// 必需配置缺失时输出警告并跳过，并说明缺少哪一项；配置完整但取值非法时让测试
+// 直接失败，避免把配置错误当成缺少环境。
 func loadTarget(t *testing.T) target {
 	t.Helper()
-	host := strings.TrimSpace(os.Getenv(EnvHost))
-	user := strings.TrimSpace(os.Getenv(EnvUser))
-	if host == "" || user == "" {
-		missing := make([]string, 0, 2)
-		if host == "" {
-			missing = append(missing, EnvHost)
-		}
-		if user == "" {
-			missing = append(missing, EnvUser)
-		}
-		reason := fmt.Sprintf(
-			"WARN [SKIP] SSH integration tests: set AGENTFLOW_TEST_SSH_HOST and "+
-				"AGENTFLOW_TEST_SSH_USER to enable (missing: %s).",
-			strings.Join(missing, ", "),
-		)
+	config, ok := testkit.LoadSSHConfig(t)
+	missing := make([]string, 0, 2)
+	if strings.TrimSpace(config.Host) == "" {
+		missing = append(missing, "ssh.host")
+	}
+	if strings.TrimSpace(config.User) == "" {
+		missing = append(missing, "ssh.user")
+	}
+	if len(missing) > 0 {
+		reason := testkit.SkipReason(t, testkit.SSHConfigFile, missing)
 		fmt.Fprintln(os.Stdout, reason)
 		t.Skip(reason)
 	}
-	port := defaultPort
-	if raw := strings.TrimSpace(os.Getenv(EnvPort)); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil {
-			t.Fatalf("解析 %s 失败: %v", EnvPort, err)
-		}
-		port = parsed
+	if !ok {
+		t.Fatalf("测试配置读取结果不一致: %s", testkit.ConfigPath(t, testkit.SSHConfigFile))
+	}
+	if config.Port <= 0 || config.Port > 65535 {
+		t.Fatalf("ssh.port 不是合法端口: %d", config.Port)
 	}
 	return target{
-		host:            host,
-		user:            user,
-		port:            port,
-		keyPath:         strings.TrimSpace(os.Getenv(EnvKeyPath)),
+		host:            strings.TrimSpace(config.Host),
+		user:            strings.TrimSpace(config.User),
+		port:            config.Port,
+		keyPath:         strings.TrimSpace(config.PrivateKeyPath),
 		knownHostsPaths: testkit.KnownHostsSources(t),
 	}
 }
@@ -106,10 +80,10 @@ func logTarget(t *testing.T, tg target) {
 	t.Logf("主机密钥来源: %s", testkit.DescribeKnownHosts(t))
 }
 
-// describeKeyPath 描述私钥来源，未指定时说明使用 SSH Agent。
+// describeKeyPath 描述私钥来源，未指定时说明缺少私钥配置。
 func describeKeyPath(path string) string {
 	if path == "" {
-		return "SSH Agent"
+		return "未配置（ssh.private_key_path）"
 	}
 	return path
 }
@@ -138,7 +112,7 @@ func dial(t *testing.T, ws *testkit.Workspace, tg target) sshclient.DialResult {
 
 	// 本版本只支持私钥认证，因此真实远程测试必须提供私钥路径。
 	if tg.keyPath == "" {
-		t.Fatalf("真实 SSH 测试必须设置私钥路径（本版本只支持私钥认证）")
+		t.Fatalf("真实 SSH 测试必须设置私钥路径（ssh.private_key_path，本版本只支持私钥认证）")
 	}
 	auth := sshclient.AuthConfig{
 		Method:         sshclient.AuthMethodPrivateKey,

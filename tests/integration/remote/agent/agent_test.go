@@ -3,26 +3,23 @@
 //
 // 运行方式（Git Bash / Linux / macOS）：
 //
-//	AGENTFLOW_TEST_REMOTE_DOCKER=1 \
-//	AGENTFLOW_TEST_SSH_HOST=10.0.0.10 \
-//	AGENTFLOW_TEST_SSH_USER=deploy \
-//	AGENTFLOW_TEST_SSH_KEY_PATH=$HOME/.ssh/id_ed25519 \
+//	cp tests/config/example.ssh.yml tests/config/ssh.yml          # 填写远程目标
+//	cp tests/config/example.docker.yml tests/config/docker.yml    # 开启 remote_enabled，可选填 docker.pi
+//	cp tests/config/example.pi.yml tests/config/pi.yml            # 按需填写模型
+//	cp tests/config/example.git.yml tests/config/git.yml          # 填写可访问的仓库
 //	go test -count=1 -v ./tests/integration/remote/agent/...
 //
-// PowerShell 示例：
-//
-//	$env:AGENTFLOW_TEST_REMOTE_DOCKER="1"
-//	$env:AGENTFLOW_TEST_SSH_HOST="10.0.0.10"
-//	$env:AGENTFLOW_TEST_SSH_USER="deploy"
-//	go test -count=1 -v ./tests/integration/remote/agent/...
+// 配置项来自 tests/config 下的 ssh.yml、docker.yml、pi.yml 与 git.yml，
+// 字段说明见对应的示例文件。
 //
 // 安全约束：
-//   - 只有显式设置 AGENTFLOW_TEST_REMOTE_DOCKER=1 时才连接远程 Docker；
+//   - 只有 tests/config/docker.yml 中 docker.remote_enabled 为 true 时才连接远程 Docker；
 //   - SSH 目标缺失时输出 WARN 并跳过；目标完整但认证、主机密钥校验失败或
 //     Docker 不可用时必须让测试失败；
 //   - 只操作本次测试创建并已核验所有权的容器与远程目录；
 //   - 不执行全局 prune，不删除共享镜像、共享缓存卷或其他测试的资源；
-//   - 始终使用正式的主机密钥校验，禁止关闭验证或自动接受未知主机。
+//   - 始终使用正式的主机密钥校验，禁止关闭验证或自动接受未知主机；
+//   - 填写 docker.pi 时只覆盖容器内 Pi 自己的配置目录，密钥不写入日志或宿主机。
 package agent_remote
 
 import (
@@ -34,7 +31,6 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -48,36 +44,14 @@ import (
 	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
-// 真实远程测试使用的环境变量。
-const (
-	// EnvRemoteDocker 是显式启用远程 Docker 测试的开关。
-	EnvRemoteDocker = "AGENTFLOW_TEST_REMOTE_DOCKER"
-	// EnvHost 是 SSH 服务器地址，必填。
-	EnvHost = "AGENTFLOW_TEST_SSH_HOST"
-	// EnvUser 是登录用户名，必填。
-	EnvUser = "AGENTFLOW_TEST_SSH_USER"
-	// EnvPort 是 SSH 端口，可选，默认 22。
-	EnvPort = "AGENTFLOW_TEST_SSH_PORT"
-	// EnvKeyPath 是测试使用的私钥路径，可选；为空时使用 SSH Agent。
-	EnvKeyPath = "AGENTFLOW_TEST_SSH_KEY_PATH"
-	// EnvKnownHosts 是只读的 known_hosts 文件，可选。
-	EnvKnownHosts = "AGENTFLOW_TEST_SSH_KNOWN_HOSTS"
-	// EnvModel 覆盖真实模型标识。
-	EnvModel = "AGENTFLOW_TEST_PI_MODEL"
-	// EnvImage 覆盖测试使用的镜像引用。
-	EnvImage = "AGENTFLOW_TEST_REMOTE_AGENT_IMAGE"
-	// EnvRepository 覆盖测试使用的仓库地址。
-	EnvRepository = "AGENTFLOW_TEST_REMOTE_GIT_REPOSITORY"
-	// DefaultModel 是真实调用的默认模型，必须是免费模型。
-	DefaultModel = "group/free"
-	// DefaultImage 是测试使用的默认镜像引用。
-	//
-	// 该镜像由 tests/integration/remote/agent/Dockerfile 构建，包含固定版本的
-	// Git 与 Pi CLI，构建方式见该文件头部说明。
-	DefaultImage = "agentflow-test-agent:1.0.0"
-	// defaultPort 是未指定端口时使用的 SSH 端口。
-	defaultPort = 22
-)
+// DefaultModel 是真实调用的默认模型，必须是免费模型。
+const DefaultModel = testkit.DefaultPiModel
+
+// DefaultImage 是测试使用的默认镜像引用。
+//
+// 该镜像由 tests/integration/remote/agent/Dockerfile 构建，包含固定版本的
+// Git 与 Pi CLI，构建方式见该文件头部说明。
+const DefaultImage = "agentflow-test-agent:1.0.0"
 
 // 远程操作超时。
 const (
@@ -98,54 +72,51 @@ type target struct {
 }
 
 // requireEnabled 检查远程 Docker 测试开关与目标配置。
+//
+// 开关未启用时输出明确警告并跳过，避免普通测试意外修改远程 Docker。
 func requireEnabled(t *testing.T) target {
 	t.Helper()
-	if strings.TrimSpace(os.Getenv(EnvRemoteDocker)) != "1" {
+	enabled, _ := testkit.LoadDockerConfig(t)
+	if !enabled.RemoteEnabled {
 		reason := fmt.Sprintf(
-			"WARN [SKIP] remote agent integration tests: set %s=1 to enable.",
-			EnvRemoteDocker,
+			"WARN [SKIP] remote agent integration tests: 请把 %s 中的 docker.remote_enabled 设为 true。",
+			testkit.ConfigPath(t, testkit.DockerConfigFile),
 		)
 		fmt.Fprintln(os.Stdout, reason)
 		t.Skip(reason)
 	}
-	host := strings.TrimSpace(os.Getenv(EnvHost))
-	user := strings.TrimSpace(os.Getenv(EnvUser))
-	if host == "" || user == "" {
-		missing := make([]string, 0, 2)
-		if host == "" {
-			missing = append(missing, EnvHost)
-		}
-		if user == "" {
-			missing = append(missing, EnvUser)
-		}
-		reason := fmt.Sprintf(
-			"WARN [SKIP] remote agent integration tests: missing %s.",
-			strings.Join(missing, ", "),
-		)
+	sshConfig, _ := testkit.LoadSSHConfig(t)
+	missing := make([]string, 0, 2)
+	if strings.TrimSpace(sshConfig.Host) == "" {
+		missing = append(missing, "ssh.host")
+	}
+	if strings.TrimSpace(sshConfig.User) == "" {
+		missing = append(missing, "ssh.user")
+	}
+	if len(missing) > 0 {
+		reason := testkit.SkipReason(t, testkit.SSHConfigFile, missing)
 		fmt.Fprintln(os.Stdout, reason)
 		t.Skip(reason)
 	}
-	port := defaultPort
-	if raw := strings.TrimSpace(os.Getenv(EnvPort)); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil {
-			t.Fatalf("解析 %s 失败: %v", EnvPort, err)
-		}
-		port = parsed
+	if sshConfig.Port <= 0 || sshConfig.Port > 65535 {
+		t.Fatalf("ssh.port 不是合法端口: %d", sshConfig.Port)
 	}
 	return target{
-		host:            host,
-		user:            user,
-		port:            port,
-		keyPath:         strings.TrimSpace(os.Getenv(EnvKeyPath)),
+		host:            strings.TrimSpace(sshConfig.Host),
+		user:            strings.TrimSpace(sshConfig.User),
+		port:            sshConfig.Port,
+		keyPath:         strings.TrimSpace(sshConfig.PrivateKeyPath),
 		knownHostsPaths: testkit.KnownHostsSources(t),
 	}
 }
 
 // resolveModel 返回本次真实调用使用的模型标识。
+//
+// 取值来自 tests/config/pi.yml 的 pi.model，未填写时使用默认免费模型。
 func resolveModel(t *testing.T) string {
 	t.Helper()
-	model := strings.TrimSpace(os.Getenv(EnvModel))
+	config, _ := testkit.LoadPiConfig(t)
+	model := strings.TrimSpace(config.Model)
 	if model == "" {
 		model = DefaultModel
 	}
@@ -154,12 +125,124 @@ func resolveModel(t *testing.T) string {
 }
 
 // resolveImage 返回测试使用的镜像引用。
-func resolveImage() string {
-	image := strings.TrimSpace(os.Getenv(EnvImage))
+//
+// 取值来自 tests/config/docker.yml 的 docker.agent_image，未配置时使用默认镜像。
+func resolveImage(t *testing.T) string {
+	t.Helper()
+	config, _ := testkit.LoadDockerConfig(t)
+	image := strings.TrimSpace(config.AgentImage)
 	if image == "" {
 		image = DefaultImage
 	}
 	return image
+}
+
+// resolveContainerPi 返回容器内 Pi 的可选覆盖配置。
+//
+// 取值来自 tests/config/docker.yml 的 docker.pi；未填写时返回未启用，容器内 Pi
+// 沿用镜像内已有配置。只填写了一部分时输出 WARN 并跳过，并指明缺少的配置项，
+// 避免把配置错误当成"容器内没有凭据"。
+func resolveContainerPi(t *testing.T) testkit.ContainerPiConfig {
+	t.Helper()
+	config, _ := testkit.LoadDockerConfig(t)
+	if missing := config.Pi.Missing(); len(missing) > 0 {
+		reason := testkit.SkipReason(t, testkit.DockerConfigFile, missing)
+		fmt.Fprintln(os.Stdout, reason)
+		t.Skip(reason)
+	}
+	return config.Pi
+}
+
+// applyContainerPi 把可选的容器内 Pi 配置写入容器，并返回实际使用的模型标识。
+//
+// 覆盖配置未启用时保持容器内 Pi 原样，模型仍取 pi.yml。启用时直接覆盖容器内 Pi
+// 自己的配置目录（容器内 $HOME/.pi/agent）下的 models.json 与 settings.json：
+// 这两个文件只存在于容器内部文件系统，不写入项目代码目录、不写入远程项目配置目录、
+// 不挂载宿主机目录，容器删除后随之消失；密钥不会被写入日志。
+func applyContainerPi(
+	t *testing.T,
+	ctx context.Context,
+	exec *remoteExecutor,
+	dockerID string,
+	config testkit.ContainerPiConfig,
+	fallbackModel string,
+) string {
+	t.Helper()
+	if !config.Enabled() {
+		t.Logf("CONTAINER_PI_CONFIG=none（沿用容器内已有配置）")
+		return fallbackModel
+	}
+	home, err := containerHome(ctx, exec, dockerID)
+	if err != nil {
+		t.Fatalf("解析容器内 Home 失败: %v", err)
+	}
+	dir := home + "/" + testkit.ContainerPiConfigDir
+	if err := execContainerCommand(ctx, exec, dockerID, []string{"mkdir", "-p", dir}); err != nil {
+		t.Fatalf("创建容器内 Pi 配置目录失败: %v", err)
+	}
+	write := func(name string, content []byte) {
+		t.Helper()
+		command := []string{
+			"sh", "-c",
+			fmt.Sprintf("cat > %s && chmod 600 %s", name, name),
+		}
+		run, runErr := exec.runner.ExecCommandWithInput(
+			ctx,
+			dockerID,
+			command,
+			strings.NewReader(string(content)),
+			remoteOpTimeout,
+		)
+		if runErr != nil || !run.Succeeded() {
+			t.Fatalf("写入容器内 Pi 配置 %s 失败: %v（退出码 %d）: %s",
+				name, runErr, run.ExitCode, summarize(run.Stderr))
+		}
+	}
+	write(dir+"/models.json", testkit.ContainerPiModelsFile(config))
+	write(dir+"/settings.json", testkit.ContainerPiSettingsFile(config))
+	t.Logf("CONTAINER_PI_CONFIG=%s（provider %s，model %s，thinking %s）",
+		dir, config.ResolvedProvider(), config.Model, config.ThinkingLevel)
+	return strings.TrimSpace(config.Model)
+}
+
+// containerHome 返回容器内登录用户的 Home 目录。
+//
+// 与产品解析远程 Home 的方式一致：命令完全固定，不拼接任何外部内容。
+func containerHome(ctx context.Context, exec *remoteExecutor, dockerID string) (string, error) {
+	run, err := exec.runner.ExecCommand(
+		ctx,
+		dockerID,
+		[]string{"sh", "-c", `printf %s "$HOME"`},
+		remoteOpTimeout,
+	)
+	if err != nil {
+		return "", err
+	}
+	if !run.Succeeded() {
+		return "", fmt.Errorf("查询容器内 Home 退出码 %d: %s", run.ExitCode, summarize(run.Stderr))
+	}
+	home := strings.TrimSpace(run.Stdout)
+	if !strings.HasPrefix(home, "/") {
+		return "", fmt.Errorf("容器内 Home 不是绝对路径: %q", home)
+	}
+	return home, nil
+}
+
+// execContainerCommand 在容器内执行一条命令，非零退出码视为失败。
+func execContainerCommand(
+	ctx context.Context,
+	exec *remoteExecutor,
+	dockerID string,
+	command []string,
+) error {
+	run, err := exec.runner.ExecCommand(ctx, dockerID, command, remoteOpTimeout)
+	if err != nil {
+		return err
+	}
+	if !run.Succeeded() {
+		return fmt.Errorf("容器内命令退出码 %d: %s", run.ExitCode, summarize(run.Stderr))
+	}
+	return nil
 }
 
 // ensureImage 确认测试镜像在远端存在，缺失时按需在远端构建。
@@ -278,15 +361,15 @@ func ensureRemoteDir(ctx context.Context, client sshclient.Client, dir string) e
 }
 
 // resolveRepository 返回测试使用的仓库地址。
+//
+// 取值来自 tests/config/git.yml 的 git.repository；未配置时输出警告并跳过，
+// 因为远端通常无法访问任意外部仓库。
 func resolveRepository(t *testing.T) string {
 	t.Helper()
-	repository := strings.TrimSpace(os.Getenv(EnvRepository))
+	config, _ := testkit.LoadGitConfig(t)
+	repository := strings.TrimSpace(config.Repository)
 	if repository == "" {
-		reason := fmt.Sprintf(
-			"WARN [SKIP] remote agent integration tests: set %s to a repository "+
-				"reachable from the remote machine (missing).",
-			EnvRepository,
-		)
+		reason := testkit.SkipReason(t, testkit.GitConfigFile, []string{"git.repository"})
 		fmt.Fprintln(os.Stdout, reason)
 		t.Skip(reason)
 	}
@@ -506,7 +589,7 @@ func createContainer(
 	suffix string,
 ) domain.Container {
 	t.Helper()
-	image := resolveImage()
+	image := resolveImage(t)
 	ensureImage(t, ctx, exec.client, exec.runner, image)
 	containerID := domain.NewID()
 	name := "agentflow-test-agent-" + suffix
@@ -719,6 +802,7 @@ func TestRemoteAgentRunSessions(t *testing.T) {
 	t.Parallel()
 	tg := requireEnabled(t)
 	model := resolveModel(t)
+	containerPi := resolveContainerPi(t)
 	ws := testkit.New(t)
 	ws.Report()
 	client := dial(t, ws, tg)
@@ -729,6 +813,7 @@ func TestRemoteAgentRunSessions(t *testing.T) {
 	suffix := randomSuffix(t)
 	record := createContainer(t, ctx, exec, suffix)
 	probeContainerTools(t, ctx, exec, record.DockerID)
+	model = applyContainerPi(t, ctx, exec, record.DockerID, containerPi, model)
 	requireContainerModel(t, ctx, exec, record.DockerID, model)
 
 	sessionRoot := ws.SessionRoot()

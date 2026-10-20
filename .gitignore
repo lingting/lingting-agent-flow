@@ -15,3 +15,13 @@
 .agentflow/
 # 本地配置（示例配置之外的配置文件不入库）
 /configs/agentflow.yaml
+
+# 测试配置：忽略 tests/config 下的真实配置文件，只提交 example.* 示例文件。
+#
+# 按文件名逐个放行而不是按前缀通配：新增示例文件时必须在下方显式追加一行，
+# 避免误把真实配置（可能包含主机地址、私钥路径）提交进版本库。
+/tests/config/*
+!/tests/config/example.ssh.yml
+!/tests/config/example.pi.yml
+!/tests/config/example.docker.yml
+!/tests/config/example.git.yml

@@ -35,7 +35,7 @@ func TestRealPiCheck(t *testing.T) {
 
 // TestRealPiRun 使用真实 Pi 执行一次最小提示词。
 //
-// 模型由 AGENTFLOW_TEST_PI_MODEL 决定，未设置时使用 group/free；
+// 模型由 tests/config/pi.yml 的 pi.model 决定，未填写时使用 group/free；
 // 每次调用都显式传入选定的模型，不回退到 Pi CLI 的默认模型。
 func TestRealPiRun(t *testing.T) {
 	t.Parallel()

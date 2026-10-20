@@ -2,14 +2,15 @@
 //
 // 运行方式：
 //
-//	AGENTFLOW_TEST_REMOTE_DOCKER=1 \
-//	AGENTFLOW_TEST_SSH_HOST=10.0.0.10 \
-//	AGENTFLOW_TEST_SSH_USER=deploy \
-//	AGENTFLOW_TEST_SSH_KEY_PATH=$HOME/.ssh/id_ed25519 \
+//	cp tests/config/example.ssh.yml tests/config/ssh.yml       # 填写远程目标
+//	cp tests/config/example.docker.yml tests/config/docker.yml # 设置 remote_enabled 与 git_image
 //	go test -count=1 -v ./tests/integration/remote/codesaver/...
 //
+// 配置项来自 tests/config/ssh.yml 与 tests/config/docker.yml，字段说明见对应的
+// 示例文件。
+//
 // 安全约束：
-//   - 只有显式设置 AGENTFLOW_TEST_REMOTE_DOCKER=1 时才会修改真实远程资源；
+//   - 只有 tests/config/docker.yml 中 docker.remote_enabled 为 true 时才会修改真实远程资源；
 //   - SSH 目标缺失时输出 WARN 并跳过；
 //   - 目标配置完整但连接、认证、主机密钥校验失败或断言不成立时必须让测试失败；
 //   - 只使用带随机后缀的容器与远程目录，只操作本次测试创建的资源；
@@ -25,7 +26,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -37,24 +37,7 @@ import (
 	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
-// 真实远程测试使用的环境变量。
 const (
-	// EnvRemoteDocker 是显式启用远程容器测试的开关。
-	EnvRemoteDocker = "AGENTFLOW_TEST_REMOTE_DOCKER"
-	// EnvHost 是 SSH 服务器地址，必填。
-	EnvHost = "AGENTFLOW_TEST_SSH_HOST"
-	// EnvUser 是登录用户名，必填。
-	EnvUser = "AGENTFLOW_TEST_SSH_USER"
-	// EnvPort 是 SSH 端口，可选，默认 22。
-	EnvPort = "AGENTFLOW_TEST_SSH_PORT"
-	// EnvKeyPath 是测试使用的私钥路径，可选；为空时使用 SSH Agent。
-	EnvKeyPath = "AGENTFLOW_TEST_SSH_KEY_PATH"
-	// EnvKnownHosts 是只读的 known_hosts 文件，可选。
-	EnvKnownHosts = "AGENTFLOW_TEST_SSH_KNOWN_HOSTS"
-	// EnvImage 是测试使用的任务镜像，必填。
-	EnvImage = "AGENTFLOW_TEST_REMOTE_GIT_IMAGE"
-	// defaultPort 是未指定端口时使用的 SSH 端口。
-	defaultPort = 22
 	// testBaseBranch 是测试仓库的基础分支名。
 	testBaseBranch = "main"
 	// testRemoteName 是测试仓库的远程名称。
@@ -81,49 +64,54 @@ type target struct {
 
 // loadTarget 读取并校验远程测试目标。
 //
-// 开关未设置时跳过；开关已设置但目标不完整时说明缺少的变量并跳过；目标完整时
+// 开关未启用时跳过；开关已启用但目标不完整时说明缺少的配置项并跳过；目标完整时
 // 返回配置，由后续连接与断言决定测试是否失败。
 func loadTarget(t *testing.T) target {
 	t.Helper()
-	if strings.TrimSpace(os.Getenv(EnvRemoteDocker)) != "1" {
-		reason := "WARN [SKIP] codesaver remote tests: " + EnvRemoteDocker + " is not set to 1."
-		t.Log(reason)
+	enabled, _ := testkit.LoadDockerConfig(t)
+	if !enabled.RemoteEnabled {
+		reason := fmt.Sprintf(
+			"WARN [SKIP] codesaver remote tests: 请把 %s 中的 docker.remote_enabled 设为 true。",
+			testkit.ConfigPath(t, testkit.DockerConfigFile),
+		)
+		fmt.Fprintln(os.Stdout, reason)
 		t.Skip(reason)
 	}
-	missing := make([]string, 0, 4)
-	read := func(key string) string {
-		value := strings.TrimSpace(os.Getenv(key))
-		if value == "" {
-			missing = append(missing, key)
-		}
-		return value
+	sshConfig, _ := testkit.LoadSSHConfig(t)
+	sshMissing := make([]string, 0, 2)
+	if strings.TrimSpace(sshConfig.Host) == "" {
+		sshMissing = append(sshMissing, "ssh.host")
 	}
-	loaded := target{
-		host:            read(EnvHost),
-		user:            read(EnvUser),
-		keyPath:         strings.TrimSpace(os.Getenv(EnvKeyPath)),
+	if strings.TrimSpace(sshConfig.User) == "" {
+		sshMissing = append(sshMissing, "ssh.user")
+	}
+	if len(sshMissing) > 0 {
+		reason := testkit.SkipReason(t, testkit.SSHConfigFile, sshMissing)
+		fmt.Fprintln(os.Stdout, reason)
+		t.Skip(reason)
+	}
+	image := strings.TrimSpace(enabled.GitImage)
+	if image == "" {
+		reason := testkit.SkipReason(t, testkit.DockerConfigFile, []string{"docker.git_image"})
+		fmt.Fprintln(os.Stdout, reason)
+		t.Skip(reason)
+	}
+	if sshConfig.Port <= 0 || sshConfig.Port > 65535 {
+		t.Fatalf("ssh.port 不是合法端口: %d", sshConfig.Port)
+	}
+	return target{
+		host:            strings.TrimSpace(sshConfig.Host),
+		user:            strings.TrimSpace(sshConfig.User),
+		port:            sshConfig.Port,
+		keyPath:         strings.TrimSpace(sshConfig.PrivateKeyPath),
 		knownHostsPaths: testkit.KnownHostsSources(t),
-		image:           read(EnvImage),
+		image:           image,
 	}
-	if len(missing) > 0 {
-		reason := "WARN [SKIP] codesaver remote tests: missing " + strings.Join(missing, ", ") + "."
-		t.Log(reason)
-		t.Skip(reason)
-	}
-	loaded.port = defaultPort
-	if raw := strings.TrimSpace(os.Getenv(EnvPort)); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed <= 0 || parsed > 65535 {
-			t.Fatalf("%s 不是合法端口: %q", EnvPort, raw)
-		}
-		loaded.port = parsed
-	}
-	return loaded
 }
 
 // dial 建立经过主机密钥校验的 SSH 连接。
 //
-// 主机密钥校验始终开启：信任记录只来自环境变量指定的只读 known_hosts，以及测试
+// 主机密钥校验始终开启：信任记录只来自 ssh.yml 配置的只读 known_hosts，以及测试
 // 工作空间内的临时信任文件，绝不自动接受未知主机密钥。
 func (t target) dial(t2 *testing.T, workspace *testkit.Workspace) sshclient.Client {
 	t2.Helper()
