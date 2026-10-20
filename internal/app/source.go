@@ -17,7 +17,7 @@ type FetchSourceRequest struct {
 	ContainerID string
 	// TaskID 是本次代码获取所属任务，用于生成任务分支 agent/<task-id>。
 	TaskID string
-	// RepositoryURL 是仓库地址，必须是 ssh:// 或 https:// 形式。
+	// RepositoryURL 是仓库地址，必须是 ssh://、https:// 或 host:path 形式。
 	RepositoryURL string
 	// BaseBranch 是显式指定的基础分支，空值表示自动识别。
 	BaseBranch string

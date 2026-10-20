@@ -72,7 +72,7 @@ func newSourceFetchCommand(a *app.App) *cobra.Command {
 	}
 	addCredentialFlags(&flags, command)
 	command.Flags().StringVar(&taskID, "task", "", "任务标识，用于生成 agent/<task-id> 分支（必填）")
-	command.Flags().StringVar(&repositoryURL, "repo", "", "仓库地址，ssh:// 或 https:// 形式（必填）")
+	command.Flags().StringVar(&repositoryURL, "repo", "", "仓库地址，ssh://、https:// 或 host:path 形式（必填）")
 	command.Flags().StringVar(&baseBranch, "base", "", "基础分支，省略时按 origin/HEAD、main、master 顺序识别")
 	command.Flags().StringVar(
 		&workDir,

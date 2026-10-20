@@ -536,7 +536,7 @@ func (x *Session) recordRepository(ctx context.Context) error {
 		return newError(
 			CodeRemoteInvalid,
 			"remote",
-			"Git 远程地址不符合仓库访问策略（只允许 ssh:// 与 https:// 且不含内嵌凭据）",
+			"Git 远程地址不符合仓库访问策略（只允许 ssh://、https:// 或 host:path 且不含内嵌凭据）",
 			err,
 		)
 	}

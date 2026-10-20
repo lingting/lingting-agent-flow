@@ -205,7 +205,7 @@ func newTaskCreateCommand(a *app.App) *cobra.Command {
 	command.Flags().StringVar(&goal, "goal", "", "任务目标描述，省略时使用需求描述")
 	command.Flags().StringVar(&priority, "priority", "", "需求优先级：low、normal、high")
 	command.Flags().StringVar(&hostID, "host", "", "执行节点标识（必填）")
-	command.Flags().StringVar(&repositoryURL, "repo", "", "仓库地址，ssh:// 或 https://（必填）")
+	command.Flags().StringVar(&repositoryURL, "repo", "", "仓库地址，ssh://、https:// 或 host:path（必填）")
 	command.Flags().StringVar(&baseBranch, "base", "", "基础分支（必填）")
 	command.Flags().StringVar(&environment, "environment", "", "语言环境名称（必填）")
 	command.Flags().StringVar(&environmentVer, "environment-version", "", "锁定的环境版本标签，例如 v0001")

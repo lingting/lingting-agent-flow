@@ -67,6 +67,7 @@ func TestHostLifecycle(t *testing.T) {
 		"--name", "构建节点",
 		"--host", "10.0.0.11",
 		"--user", "deploy",
+		"--key", writeTestPrivateKey(t),
 	)
 	if code != 0 {
 		t.Fatalf("新增节点应成功，实际退出码 %d，错误: %s", code, stderr)
@@ -127,10 +128,11 @@ func TestHostLifecycle(t *testing.T) {
 func TestHostAddRejectsInvalidInput(t *testing.T) {
 	t.Parallel()
 	configPath := hostConfig(t)
+	key := writeTestPrivateKey(t)
 	cases := map[string][]string{
-		"端口超出范围":   {"--host", "10.0.0.11", "--user", "deploy", "--port", "70000"},
-		"工作空间相对路径": {"--host", "10.0.0.11", "--user", "deploy", "--workspace", "agentflow"},
-		"主机地址非法":   {"--host", "10.0.0.11:22", "--user", "deploy"},
+		"端口超出范围":   {"--host", "10.0.0.11", "--user", "deploy", "--port", "70000", "--key", key},
+		"工作空间相对路径": {"--host", "10.0.0.11", "--user", "deploy", "--workspace", "agentflow", "--key", key},
+		"主机地址非法":   {"--host", "10.0.0.11:22", "--user", "deploy", "--key", key},
 	}
 	for name, extra := range cases {
 		args := append([]string{"host", "add", "--config", configPath}, extra...)
@@ -206,6 +208,7 @@ func TestHostProbeDetectsSSH(t *testing.T) {
 		"--host", host,
 		"--port", fmt.Sprint(port),
 		"--user", "deploy",
+		"--key", writeTestPrivateKey(t),
 	}
 	if code, _, stderr := run(t, addArgs...); code != 0 {
 		t.Fatalf("新增节点应成功，错误: %s", stderr)
@@ -236,6 +239,7 @@ func TestHostProbeNotSSH(t *testing.T) {
 		"--host", host,
 		"--port", fmt.Sprint(port),
 		"--user", "deploy",
+		"--key", writeTestPrivateKey(t),
 	}
 	if code, _, stderr := run(t, addArgs...); code != 0 {
 		t.Fatalf("新增节点应成功，错误: %s", stderr)
@@ -275,6 +279,7 @@ func TestHostProbeUnreachable(t *testing.T) {
 		"--host", address.IP.String(),
 		"--port", fmt.Sprint(port),
 		"--user", "deploy",
+		"--key", writeTestPrivateKey(t),
 	}
 	if code, _, stderr := run(t, addArgs...); code != 0 {
 		t.Fatalf("新增节点应成功，错误: %s", stderr)
@@ -359,7 +364,7 @@ func TestHostAddRejectsUnknownAuthMethod(t *testing.T) {
 	}
 }
 
-// TestHostUpdateChangesAuthMethod 校验更新命令可以切换认证方式。
+// TestHostUpdateChangesAuthMethod 校验更新命令可以修改连接参数与私钥路径。
 func TestHostUpdateChangesAuthMethod(t *testing.T) {
 	t.Parallel()
 	configPath := hostConfig(t)
@@ -370,6 +375,7 @@ func TestHostUpdateChangesAuthMethod(t *testing.T) {
 		"--id", "node-update",
 		"--host", "10.0.0.24",
 		"--user", "deploy",
+		"--key", writeTestPrivateKey(t),
 	); code != 0 {
 		t.Fatalf("新增节点应成功，错误: %s", stderr)
 	}
@@ -377,20 +383,21 @@ func TestHostUpdateChangesAuthMethod(t *testing.T) {
 		t,
 		"host", "update", "node-update",
 		"--config", configPath,
-		"--auth", "password",
+		"--key", "/home/deploy/.ssh/id_ed25519",
 		"--workspace", "/srv/agentflow",
 	)
 	if code != 0 {
 		t.Fatalf("更新节点应成功，实际退出码 %d，错误: %s", code, stderr)
 	}
-	if !strings.Contains(stdout, "认证方式: password") {
+	if !strings.Contains(stdout, "认证方式: private_key") {
 		t.Fatalf("更新输出不符: %s", stdout)
 	}
 	code, stdout, stderr = run(t, "host", "show", "node-update", "--config", configPath)
 	if code != 0 {
 		t.Fatalf("查看节点应成功，错误: %s", stderr)
 	}
-	if !strings.Contains(stdout, "认证方式: password") || !strings.Contains(stdout, "/srv/agentflow") {
+	if !strings.Contains(stdout, "私钥文件: /home/deploy/.ssh/id_ed25519") ||
+		!strings.Contains(stdout, "/srv/agentflow") {
 		t.Fatalf("更新未生效: %s", stdout)
 	}
 	if !strings.Contains(stdout, "10.0.0.24") {
@@ -398,10 +405,11 @@ func TestHostUpdateChangesAuthMethod(t *testing.T) {
 	}
 }
 
-// TestHostTestFailsWithoutCredentialInNonInteractive 校验非交互环境缺少凭据时立即失败。
-func TestHostTestFailsWithoutCredentialInNonInteractive(t *testing.T) {
+// TestHostTestFailsWithoutPrivateKeyInNonInteractive 校验私钥不可用时立即失败。
+func TestHostTestFailsWithoutPrivateKeyInNonInteractive(t *testing.T) {
 	t.Parallel()
 	configPath := hostConfig(t)
+	missingKey := filepath.Join(testkit.Dir(t), "missing_id_ed25519")
 	if code, _, stderr := run(
 		t,
 		"host", "add",
@@ -410,18 +418,18 @@ func TestHostTestFailsWithoutCredentialInNonInteractive(t *testing.T) {
 		"--host", "127.0.0.1",
 		"--port", "1",
 		"--user", "deploy",
-		"--auth", "password",
+		"--key", missingKey,
 	); code != 0 {
 		t.Fatalf("新增节点应成功，错误: %s", stderr)
 	}
 	code, _, stderr := run(t, "host", "test", "node-pwd", "--config", configPath)
 	if code == 0 {
-		t.Fatal("缺少凭据时应返回非零退出码")
+		t.Fatal("私钥不可用时应返回非零退出码")
 	}
-	if !strings.Contains(stderr, "没有可用的凭据") {
-		t.Fatalf("错误信息应说明缺少凭据，实际: %s", stderr)
+	if !strings.Contains(stderr, "私钥") {
+		t.Fatalf("错误信息应说明私钥不可用，实际: %s", stderr)
 	}
-	if strings.Contains(stderr, "密码") && strings.Contains(stderr, "请输入") {
+	if strings.Contains(stderr, "请输入") || strings.Contains(stderr, "口令") {
 		t.Fatalf("非交互环境不应挂起等待输入: %s", stderr)
 	}
 }
@@ -479,6 +487,7 @@ func TestHostTransferRequiresRemoteAbsolutePath(t *testing.T) {
 		"--host", "127.0.0.1",
 		"--port", "1",
 		"--user", "deploy",
+		"--key", writeTestPrivateKey(t),
 	); code != 0 {
 		t.Fatalf("新增节点应成功，错误: %s", stderr)
 	}
@@ -528,6 +537,7 @@ func TestHostTrustRequiresVerifiedFingerprint(t *testing.T) {
 		"--host", host,
 		"--port", fmt.Sprint(port),
 		"--user", "deploy",
+		"--key", writeTestPrivateKey(t),
 	); code != 0 {
 		t.Fatalf("新增节点应成功，错误: %s", stderr)
 	}
@@ -555,10 +565,11 @@ func TestHostTrustRequiresVerifiedFingerprint(t *testing.T) {
 	}
 }
 
-// TestHostWorkspaceRequiresCredentials 校验非交互环境缺少凭据时立即失败。
-func TestHostWorkspaceRequiresCredentials(t *testing.T) {
+// TestHostWorkspaceRequiresPrivateKey 校验私钥不可用时工作空间解析立即失败。
+func TestHostWorkspaceRequiresPrivateKey(t *testing.T) {
 	t.Parallel()
 	configPath := hostConfig(t)
+	missingKey := filepath.Join(testkit.Dir(t), "missing_id_ed25519")
 	if code, _, stderr := run(
 		t,
 		"host", "add",
@@ -567,16 +578,16 @@ func TestHostWorkspaceRequiresCredentials(t *testing.T) {
 		"--host", "127.0.0.1",
 		"--port", "1",
 		"--user", "deploy",
-		"--auth", "password",
+		"--key", missingKey,
 	); code != 0 {
 		t.Fatalf("新增节点应成功，错误: %s", stderr)
 	}
 	code, _, stderr := run(t, "host", "workspace", "node-workspace", "--config", configPath)
 	if code == 0 {
-		t.Fatal("缺少凭据时应返回非零退出码")
+		t.Fatal("私钥不可用时应返回非零退出码")
 	}
-	if !strings.Contains(stderr, "没有可用的凭据") {
-		t.Fatalf("错误信息应说明缺少凭据，实际: %s", stderr)
+	if !strings.Contains(stderr, "私钥") {
+		t.Fatalf("错误信息应说明私钥不可用，实际: %s", stderr)
 	}
 }
 
@@ -658,6 +669,7 @@ func TestHostTrustRecordsVerifiedFingerprint(t *testing.T) {
 		"--host", host,
 		"--port", fmt.Sprint(port),
 		"--user", "deploy",
+		"--key", writeTestPrivateKey(t),
 	); code != 0 {
 		t.Fatalf("新增节点应成功，错误: %s", stderr)
 	}

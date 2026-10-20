@@ -41,6 +41,18 @@ RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.3.0 \
     && npm cache clean --force \
     && pi --version
 
+# GitHub 走 443 端口：部分网络环境无法直连 22，改用官方支持的 ssh.github.com:443。
+# 该配置在能直连 22 的环境同样可用，因此作为镜像默认值而不是测试期覆盖。
+RUN mkdir -p /root/.ssh \
+    && chmod 700 /root/.ssh \
+    && printf '%s\n' \
+        'Host github.com' \
+        '    Hostname ssh.github.com' \
+        '    Port 443' \
+        '    User git' \
+        > /root/.ssh/config \
+    && chmod 600 /root/.ssh/config
+
 WORKDIR /workspace/project
 
 CMD ["sh", "-c", "sleep infinity"]

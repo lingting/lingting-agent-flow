@@ -153,9 +153,10 @@ func (u GitRepositoryURL) IsZero() bool {
 
 // ParseGitRepositoryURL 校验并解析仓库地址。
 //
-// 第一版只接受两种无需内嵌凭据的地址形式：
+// 接受三种无需内嵌凭据的地址形式：
 //   - ssh://[user@]host[:port]/path
 //   - https://host/path
+//   - [user@]host:path（scp 形式，与 ssh:// 等价）
 //
 // 明确拒绝把用户名口令写进 URL 的形式（user:token@host），因为该内容会进入
 // 命令行、进程参数与错误信息，无法安全脱敏。
@@ -178,11 +179,8 @@ func ParseGitRepositoryURL(raw string) (GitRepositoryURL, error) {
 	}
 	scheme, rest, ok := strings.Cut(trimmed, "://")
 	if !ok {
-		return GitRepositoryURL{}, invalidField(
-			"GitRepository",
-			"url",
-			"仓库地址必须以 ssh:// 或 https:// 开头",
-		)
+		// 没有协议前缀时只接受 scp 形式，其余形式一律拒绝。
+		return parseScpRepositoryURL(trimmed)
 	}
 	switch strings.ToLower(scheme) {
 	case "ssh":
@@ -196,6 +194,55 @@ func ParseGitRepositoryURL(raw string) (GitRepositoryURL, error) {
 			"不支持的仓库地址协议 "+scheme+"，只允许 ssh 与 https",
 		)
 	}
+}
+
+// parseScpRepositoryURL 解析 [user@]host:path 形式的仓库地址。
+//
+// 该形式与 ssh:// 等价，是 Git 的经典写法。它同样不允许内嵌口令，并且拒绝
+// 单字母主机名，避免把 Windows 盘符路径误判为远程仓库地址。
+func parseScpRepositoryURL(raw string) (GitRepositoryURL, error) {
+	authority, pathPart, ok := strings.Cut(raw, ":")
+	if !ok {
+		return GitRepositoryURL{}, invalidField(
+			"GitRepository",
+			"url",
+			"仓库地址必须以 ssh://、https:// 或 host:path 形式给出",
+		)
+	}
+	if strings.TrimSpace(pathPart) == "" {
+		return GitRepositoryURL{}, invalidField("GitRepository", "url", "scp 地址缺少仓库路径")
+	}
+	if strings.Contains(authority, "/") {
+		return GitRepositoryURL{}, invalidField(
+			"GitRepository",
+			"url",
+			"仓库地址必须以 ssh://、https:// 或 host:path 形式给出",
+		)
+	}
+	userPart, hostPart := splitAuthorityUser(authority)
+	if strings.Contains(userPart, ":") {
+		return GitRepositoryURL{}, invalidField(
+			"GitRepository",
+			"url",
+			"仓库地址不能包含内嵌口令，请使用独立的凭据机制",
+		)
+	}
+	if err := validateRepositoryHost(hostPart); err != nil {
+		return GitRepositoryURL{}, err
+	}
+	if len(hostPart) == 1 {
+		// 单字母主机名几乎只会来自 Windows 盘符路径，不可能是真实仓库主机。
+		return GitRepositoryURL{}, invalidField(
+			"GitRepository",
+			"url",
+			"scp 地址的主机名不能是单个字符",
+		)
+	}
+	return GitRepositoryURL{
+		raw:       raw,
+		display:   "ssh://" + hostPart + "/" + strings.TrimPrefix(pathPart, "/"),
+		anonymous: false,
+	}, nil
 }
 
 // parseSSHRepositoryURL 解析 ssh:// 形式的仓库地址。

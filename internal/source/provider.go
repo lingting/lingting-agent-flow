@@ -27,7 +27,7 @@ type Request struct {
 	TaskID string
 	// ContainerID 是容器登记记录 ID，用于核验归属与管理状态。
 	ContainerID string
-	// RepositoryURL 是仓库地址，必须是 ssh:// 或 https:// 形式且不含内嵌凭据。
+	// RepositoryURL 是仓库地址，必须是 ssh://、https:// 或 host:path 形式且不含内嵌凭据。
 	RepositoryURL string
 	// WorkDir 是容器内目标工作目录，空值使用 domain.DefaultContainerWorkDir。
 	WorkDir string

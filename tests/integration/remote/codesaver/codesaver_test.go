@@ -46,6 +46,16 @@ const (
 	//
 	// 代码保存要求工作目录位于 /workspace 之下，因此测试容器直接使用该目录。
 	testWorkDir = domain.DefaultContainerWorkDir
+	// testRepositoryURL 是容器内工作仓库登记的远程地址。
+	//
+	// 代码保存只接受 ssh://、https:// 或 host:path 形式且不含内嵌凭据的地址，
+	// 因此这里登记一个真实的 https 形式地址，再由容器内的 insteadOf 映射到本次
+	// 测试创建的 bare 仓库；仓库访问策略本身保持不变。
+	testRepositoryURL = "https://git.example.com/agentflow/remote-test.git"
+	// testBareDir 是容器内 bare 仓库所在目录。
+	testBareDir = "/tmp"
+	// testBareName 是容器内 bare 仓库目录名。
+	testBareName = "agentflow-remote.git"
 )
 
 // remoteOpTimeout 是单次远程操作的超时上限。
@@ -402,17 +412,22 @@ func prepareTestRepository(
 	dockerID, workDir, taskBranch string,
 ) string {
 	t.Helper()
-	barePath := path.Join("/tmp", "agentflow-remote.git")
+	barePath := path.Join(testBareDir, testBareName)
 	script := strings.Join([]string{
 		"set -e",
+		// 容器的初始工作目录就是 workDir，先切到根目录，否则删除后 cwd 失效。
+		"cd /",
 		"git config --global user.name 'AgentFlow Tester'",
 		"git config --global user.email 'agentflow@example.com'",
 		"git config --global init.defaultBranch " + testBaseBranch,
 		"rm -rf " + barePath + " " + workDir,
 		"git init --bare --initial-branch=" + testBaseBranch + " " + barePath,
 		"git init --initial-branch=" + testBaseBranch + " " + workDir,
+		// 远程地址保持 https 形式以符合仓库访问策略，实际访问由 insteadOf 映射到
+		// 本次测试创建的 bare 仓库，不会产生任何网络请求。
+		"git config --global url." + barePath + ".insteadOf " + testRepositoryURL,
 		"cd " + workDir,
-		"git remote add " + testRemoteName + " " + barePath,
+		"git remote add " + testRemoteName + " " + testRepositoryURL,
 		"printf '初始内容\\n' > README.md",
 		"git add --all",
 		"git commit -m '初始提交'",
