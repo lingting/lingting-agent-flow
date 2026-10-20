@@ -2,12 +2,12 @@
 //
 // 运行方式：
 //
-//	cp tests/config/example.pi.yml tests/config/pi.yml   # 按需填写后执行
+//	cp tests/config/example.pi.yml tests/config/pi.yml   # 填写内容并把 pi.enable 设为 true
 //	go test -count=1 -v ./tests/integration/pi/...
 //
 // 配置项来自 tests/config/pi.yml，字段说明见 tests/config/example.pi.yml。
-// 本机不存在 pi 时，依赖真实 CLI 的用例输出 WARN 并跳过；Pi Runner 的单元测试
-// 位于 tests/unit/agent/pi，不依赖本机是否安装 Pi。
+// 未把 pi.enable 设为 true，或本机不存在 pi 时，依赖真实 CLI 的用例输出 WARN 并跳过；
+// Pi Runner 的单元测试位于 tests/unit/agent/pi，不依赖本机是否安装 Pi。
 package pi_integration
 
 import (
@@ -22,18 +22,25 @@ import (
 
 // requirePi 返回可用于真实调用的 Pi 可执行文件路径。
 //
-// 本机不存在 Pi 时输出警告并跳过当前用例；Pi 存在但后续调用失败时必须由用例
-// 如实报告失败，不得在这里当作缺少可选依赖跳过。
+// 未在 tests/config/pi.yml 中把 pi.enable 设为 true 时输出警告并跳过；该开关是
+// 该目录下所有真实调用用例的唯一启用入口，缺少配置文件同样视为未启用。
+// 已启用但本机不存在 Pi 时同样输出警告并跳过；Pi 存在但后续调用失败时必须由
+// 用例如实报告失败，不得在这里当作缺少可选依赖跳过。
 func requirePi(t *testing.T) string {
 	t.Helper()
-	config, _ := testkit.LoadPiConfig(t)
+	config, ok := testkit.LoadPiConfig(t)
+	if !ok || !config.Enabled {
+		reason := testkit.EnableReason(t, testkit.PiConfigFile, "pi.enable")
+		fmt.Fprintln(os.Stdout, reason)
+		t.Skip(reason)
+	}
 	executable := strings.TrimSpace(config.Executable)
 	if executable == "" {
 		found, err := exec.LookPath("pi")
 		if err != nil {
-			fmt.Fprintf(os.Stdout,
-				"WARN [SKIP] Pi integration tests: executable \"pi\" not found in PATH.\n")
-			t.Skip("WARN [SKIP] Pi integration tests: executable \"pi\" not found in PATH")
+			reason := "WARN [SKIP] Pi integration tests: executable \"pi\" not found in PATH."
+			fmt.Fprintln(os.Stdout, reason)
+			t.Skip(reason)
 		}
 		executable = found
 	}

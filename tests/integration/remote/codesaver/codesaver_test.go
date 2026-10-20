@@ -2,7 +2,7 @@
 //
 // 运行方式：
 //
-//	cp tests/config/example.ssh.yml tests/config/ssh.yml       # 填写远程目标
+//	cp tests/config/example.ssh.yml tests/config/ssh.yml       # 开启 ssh.enable 并填写远程目标
 //	cp tests/config/example.docker.yml tests/config/docker.yml # 设置 remote_enabled 与 git_image
 //	go test -count=1 -v ./tests/integration/remote/codesaver/...
 //
@@ -87,7 +87,12 @@ func loadTarget(t *testing.T) target {
 		fmt.Fprintln(os.Stdout, reason)
 		t.Skip(reason)
 	}
-	sshConfig, _ := testkit.LoadSSHConfig(t)
+	sshConfig, sshOK := testkit.LoadSSHConfig(t)
+	if !sshOK || !sshConfig.Enabled {
+		reason := testkit.EnableReason(t, testkit.SSHConfigFile, "ssh.enable")
+		fmt.Fprintln(os.Stdout, reason)
+		t.Skip(reason)
+	}
 	sshMissing := make([]string, 0, 2)
 	if strings.TrimSpace(sshConfig.Host) == "" {
 		sshMissing = append(sshMissing, "ssh.host")

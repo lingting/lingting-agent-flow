@@ -157,12 +157,14 @@ make build VERSION=0.1.0
 - 无共享状态的用例使用 `t.Parallel()`，不得依赖固定执行顺序或其他测试预先创建的数据；
   并发度通过 `-p` 与 `-parallel` 控制。
 - 测试不得读写用户真实配置、仓库或 `.agentflow/` 下的真实数据。
-- 真实 Pi 测试默认使用模型 `group/free`，可用 `AGENTFLOW_TEST_PI_MODEL` 覆盖；本机没有
-  `pi` 时输出 `WARN [SKIP]` 并跳过。真实 SSH 测试通过 `AGENTFLOW_TEST_SSH_*` 获取目标，
-  缺少必需目标时跳过，配置完整但连接、认证或主机密钥校验失败时必须失败。
-- 真实 SSH 测试的 known_hosts 来源统一由 `testkit.KnownHostsSources` 解析：显式设置
-  `AGENTFLOW_TEST_SSH_KNOWN_HOSTS` 时读取该文件（不可读直接失败），未设置时复用本机
-  `~/.ssh/known_hosts` 与 `known_hosts2`。写入的信任记录只落在测试工作空间。
+- 真实外部依赖测试统一由 `tests/config/` 下的 YAML 配置驱动：真实 Pi 测试由 `pi.yml` 的
+  `pi.enable` 开启（默认模型 `group/free`），真实 SSH 测试由 `ssh.yml` 的 `ssh.enable` 开启，
+  真实远程 Docker 测试由 `docker.yml` 的 `docker.remote_enabled` 开启且同时要求 `ssh.enable`。
+  未开启或必需项缺失时输出 `WARN [SKIP]` 并跳过，配置完整但连接、认证或主机密钥校验失败时
+  必须失败。
+- 真实 SSH 测试的 known_hosts 来源统一由 `testkit.KnownHostsSources` 解析：`ssh.known_hosts`
+  显式配置时读取该文件（不可读直接失败），未配置时复用本机 `~/.ssh/known_hosts` 与
+  `known_hosts2`。写入的信任记录只落在测试工作空间。
 - SSH 连接层按三层覆盖：`tests/unit/ssh/` 放纯逻辑单元测试，`tests/integration/local/ssh/`
   在进程内启动真实 SSH/SFTP 服务端，`tests/integration/ssh/` 面向真实远程机器。本机集成测试
   不得要求用户预先启动服务，也不得用"配置解析正确"代替真实握手、认证与传输验证。

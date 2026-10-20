@@ -967,10 +967,10 @@ go test -race -count=1 ./tests/integration/local/ssh/...            # 竞态检�
 SSH 连接层按三层覆盖：`tests/unit/ssh/`（主机密钥、认证配置、路径与结果状态，不启动
 服务端）、`tests/integration/local/ssh/`（进程内启动真实 SSH/SFTP 服务端，覆盖认证、
 命令执行、取消与超时、SFTP 传输、并发与资源释放）、`tests/integration/ssh/`（真实远程
-机器，需要 `AGENTFLOW_TEST_SSH_HOST` 与 `AGENTFLOW_TEST_SSH_USER`，缺失时警告并跳过；
-未设置 `AGENTFLOW_TEST_SSH_KNOWN_HOSTS` 时复用本机 `~/.ssh/known_hosts`）。
+机器，需要在 `tests/config/ssh.yml` 中把 `ssh.enable` 设为 true 并填好目标，未启用或目标
+缺失时警告并跳过；`ssh.known_hosts` 留空时复用本机 `~/.ssh/known_hosts`）。
 
-测试分类、环境变量与编写约定见 [tests/README.md](tests/README.md)。
+测试分类、配置文件与编写约定见 [tests/README.md](tests/README.md)。
 
 开发环境、代码风格与提交约定见 [docs/development.md](docs/development.md)，分层与依赖方向见 [docs/architecture.md](docs/architecture.md)。
 

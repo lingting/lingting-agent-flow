@@ -9,6 +9,9 @@
 # 真实配置文件不入库，只提交本示例文件。
 
 ssh:
+  # 是否执行需要真实远程机器的测试（tests/integration/ssh、tests/integration/remote/*），
+  # 默认 false。远程 Docker 用例还要求 docker.yml 中的 docker.remote_enabled 为 true。
+  enable: false
   # SSH 服务器地址，必填。缺失时相关测试输出 WARN 并跳过。
   host: 10.0.0.10
   # 登录用户名，必填。

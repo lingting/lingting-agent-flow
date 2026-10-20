@@ -9,6 +9,9 @@
 # 真实配置文件不入库，只提交本示例文件。
 
 pi:
+  # 是否执行需要真实 Pi CLI 的测试（tests/integration/pi），默认 false。
+  # 设为 true 前请确认本机已安装 Pi，并已填好下文的模型与可执行文件路径。
+  enable: false
   # 真实调用使用的模型标识，留空时使用默认免费模型 group/free。
   # 每次调用都会显式传入模型，不回退到 Pi CLI 配置中的默认模型。
   model: group/free

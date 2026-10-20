@@ -125,19 +125,19 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
 
 - 本机没有 `pi` 时，只有依赖真实 Pi CLI 的用例输出 `WARN [SKIP]` 并跳过；Pi Runner
   的单元测试使用替身，必须继续执行。
-- 真实 Pi 测试默认模型为 `group/free`，可用 `AGENTFLOW_TEST_PI_MODEL` 覆盖；每次真实
-  调用都必须显式传入模型，不得回退到 Pi CLI 配置中的默认付费模型。
-- 真实 SSH 测试必须通过 `AGENTFLOW_TEST_SSH_HOST`、`AGENTFLOW_TEST_SSH_USER`、
-  `AGENTFLOW_TEST_SSH_PORT`、`AGENTFLOW_TEST_SSH_KEY_PATH`、
-  `AGENTFLOW_TEST_SSH_KNOWN_HOSTS` 获取目标；必需目标缺失时输出警告并跳过，目标配置
-  完整但连接、认证或主机密钥校验失败时必须让测试失败。
-- `AGENTFLOW_TEST_SSH_KNOWN_HOSTS` 未设置时，真实 SSH 测试必须复用本机用户 OpenSSH 的
-  `~/.ssh/known_hosts` 与 `known_hosts2`，与产品默认行为一致；显式设置但文件不可读时
-  直接让测试失败，不得静默回落到空信任库。来源解析统一由 `tests/internal/testkit` 的
-  `KnownHostsSources` 提供，各远程测试目录不得各自实现。
+- 真实 Pi 测试由 `tests/config/pi.yml` 的 `pi.enable` 显式开启，默认模型为 `group/free`；
+  每次真实调用都必须显式传入模型，不得回退到 Pi CLI 配置中的默认付费模型。
+- 真实 SSH 测试的目标统一来自 `tests/config/ssh.yml`（`ssh.host`、`ssh.user`、`ssh.port`、
+  `ssh.private_key_path`、`ssh.known_hosts`），并由 `ssh.enable` 显式开启；未启用时输出
+  警告并跳过，启用但必需目标缺失时输出警告并跳过，目标配置完整但连接、认证或主机密钥校验
+  失败时必须让测试失败。测试配置禁止再通过 `AGENTFLOW_TEST_SSH_*` 等环境变量逐项读取。
+- `ssh.known_hosts` 留空时，真实 SSH 测试必须复用本机用户 OpenSSH 的 `~/.ssh/known_hosts`
+  与 `known_hosts2`，与产品默认行为一致；显式填写但文件不可读时直接让测试失败，不得静默
+  回落到空信任库。来源解析统一由 `tests/internal/testkit` 的 `KnownHostsSources` 提供，
+  各远程测试目录不得各自实现。
 - 真实 SSH 测试写入的信任记录只允许落在测试工作空间，不得修改用户真实 known_hosts。
-- 主机密钥未知的失败信息必须列出实际读取的 known_hosts 路径、可用的环境变量与目标信任
-  记录路径，使"环境变量配错"与"连接层缺陷"可以区分。
+- 主机密钥未知的失败信息必须列出实际读取的 known_hosts 路径、可用的配置项与目标信任
+  记录路径，使"配置写错"与"连接层缺陷"可以区分。
 - 禁止关闭 SSH 主机密钥验证来规避测试失败，禁止自动接受未知主机密钥。
 - 真实外部测试的远程操作只允许在随机生成的远程临时目录内进行。
 - SSH 连接层的单元测试放在 `tests/unit/ssh/`，本机协议集成测试放在
@@ -145,19 +145,21 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
 - 本机集成测试的 SSH/SFTP 服务端只能由测试代码在进程内启动，不得要求用户预先启动服务，
   也不得用"配置解析正确"代替真实握手、认证与传输验证。
 - 远程命令的取消与超时测试必须验证会话确实被关闭，不能只验证本地停止等待。
-- 真实远程 Docker 集成测试必须显式设置 `AGENTFLOW_TEST_REMOTE_DOCKER=1`；未设置时输出
-  `WARN [SKIP]`，普通测试不得修改真实远程 Docker。
-- 真实远程 Docker 测试放在 `tests/integration/remote/docker/`，目标机器通过
-  `AGENTFLOW_TEST_SSH_*` 获取；开关已启用但目标缺失时说明缺少的变量并跳过，目标完整
-  但认证失败、Docker 不可用或断言不成立时必须让测试失败。
+- 真实远程 Docker 集成测试必须把 `tests/config/docker.yml` 的 `docker.remote_enabled` 设为
+  `true` 并同时启用 `ssh.enable`；未启用时输出 `WARN [SKIP]`，普通测试不得修改真实远程
+  Docker。
+- 真实远程 Docker 测试放在 `tests/integration/remote/docker/`，目标机器由
+  `tests/config/ssh.yml` 提供；开关已启用但目标缺失时说明缺少的配置项并跳过，目标完整但
+  认证失败、Docker 不可用或断言不成立时必须让测试失败。
 - 真实远程 Docker 测试只允许操作带随机后缀、属于本次测试的镜像标签、容器与远程目录；
   禁止执行全局 `docker system prune`、`docker image prune`、`docker volume prune`。
-- 真实远程 Agent 测试放在 `tests/integration/remote/agent/`，同样必须显式设置
-  `AGENTFLOW_TEST_REMOTE_DOCKER=1`；容器内 Pi CLI 是否可用必须通过容器内实际检查确认，
-  不能依据本机是否安装 Pi 判断。测试镜像由该目录下的 `Dockerfile` 构建，基础镜像与
-  Pi CLI 版本都固定到具体版本。
-- 真实远程工作流测试放在 `tests/integration/remote/workflow/`，同样必须显式设置
-  `AGENTFLOW_TEST_REMOTE_DOCKER=1`；只操作带随机后缀、属于本次测试的容器与远程目录。
+- 真实远程 Agent 测试放在 `tests/integration/remote/agent/`，同样要求 `docker.remote_enabled`
+  与 `ssh.enable` 都已启用；容器内 Pi CLI 是否可用必须通过容器内实际检查确认，不能依据本机
+  是否安装 Pi 判断。测试镜像由该目录下的 `Dockerfile` 构建，基础镜像与 Pi CLI 版本都固定到
+  具体版本。
+- 真实远程工作流测试放在 `tests/integration/remote/workflow/`，同样要求
+  `docker.remote_enabled` 与 `ssh.enable` 都已启用；只操作带随机后缀、属于本次测试的容器与
+  远程目录。
 
 ### SSH 连接层约束
 

@@ -69,20 +69,17 @@ go test -count=1 -v -p 8 -parallel 8 ./tests/integration/local/...
 # 本机 Git 代码保存集成测试
 go test -count=1 -v ./tests/integration/local/codesaver/...
 
-# 真实 Pi 集成测试
+# 真实 Pi 集成测试（在 tests/config/pi.yml 中把 pi.enable 设为 true 后才会执行）
 go test -count=1 -v ./tests/integration/pi/...
 
-# 真实 SSH 集成测试
+# 真实 SSH 集成测试（在 tests/config/ssh.yml 中把 ssh.enable 设为 true 后才会执行）
 go test -count=1 -v ./tests/integration/ssh/...
 
-# 真实远程 Docker 集成测试（必须显式启用）
-AGENTFLOW_TEST_REMOTE_DOCKER=1 go test -count=1 -v ./tests/integration/remote/docker/...
-
-# 真实远程 Agent 集成测试（必须显式启用）
-AGENTFLOW_TEST_REMOTE_DOCKER=1 go test -count=1 -v ./tests/integration/remote/agent/...
-
-# 真实远程工作流集成测试（必须显式启用）
-AGENTFLOW_TEST_REMOTE_DOCKER=1 go test -count=1 -v ./tests/integration/remote/workflow/...
+# 真实远程 Docker / Agent / 工作流集成测试
+# （docker.yml 的 docker.remote_enabled 与 ssh.yml 的 ssh.enable 都必须为 true）
+go test -count=1 -v ./tests/integration/remote/docker/...
+go test -count=1 -v ./tests/integration/remote/agent/...
+go test -count=1 -v ./tests/integration/remote/workflow/...
 
 # CLI 端到端测试
 go test -count=1 -v ./tests/e2e/...
@@ -131,7 +128,7 @@ TEST_ARTIFACT_DIR=<绝对路径>
 |---|---|---|
 | `tests/unit/ssh/` | 主机密钥指纹与结论、已记录主机密钥类型、认证配置、私钥路径、参数转义、远程路径、结果状态 | 无 |
 | `tests/integration/local/ssh/` | 本机真实 SSH 握手与认证、多主机密钥类型协商、远程命令执行、取消与超时、SFTP 传输、工作空间解析、并发与资源释放 | 无（测试内启动服务端） |
-| `tests/integration/ssh/` | 真实远程 Linux 机器上的认证、命令状态、超时、SFTP 与工作空间 | 环境变量指定的 SSH 目标 |
+| `tests/integration/ssh/` | 真实远程 Linux 机器上的认证、命令状态、超时、SFTP 与工作空间 | tests/config/ssh.yml 指定的 SSH 目标 |
 
 本机集成测试使用 `golang.org/x/crypto/ssh` 启动真实的服务端进程内实例，并配合
 `github.com/pkg/sftp` 的服务端实现，因此主机密钥校验、密码/私钥/Agent 认证、
@@ -170,7 +167,7 @@ Unix 套接字时该用例输出 `WARN [SKIP]` 并跳过，其余用例仍会执
 | `tests/unit/container/` | 容器状态迁移、detached 语义、生命周期策略、缓存卷命名、创建参数安全边界、JSON 解析 | 无 |
 | `tests/integration/local/docker/` | 预检错误分类、命令构造与转义、幂等删除、状态不确定分类、清单读写 | 无（使用 SSH 执行替身） |
 | `tests/integration/local/environment/` | 版本文件不可覆盖、清单落盘一致性、构建上下文上传与清理 | 无（远程路径映射到本机目录） |
-| `tests/integration/remote/docker/` | 真实远程预检、镜像构建、容器创建/启动/执行/停止/删除 | 环境变量指定的 SSH 目标与真实 Docker |
+| `tests/integration/remote/docker/` | 真实远程预检、镜像构建、容器创建/启动/执行/停止/删除 | tests/config/ssh.yml 指定的 SSH 目标与真实 Docker |
 
 本机 Docker 测试使用可控的 SSH 执行替身：替身记录收到的远程命令并返回预设输出，
 因此命令构造、参数转义、结果解析与错误分类都经过真实代码路径，但不需要 Docker Engine。
@@ -180,75 +177,83 @@ Unix 套接字时该用例输出 `WARN [SKIP]` 并跳过，其余用例仍会执
 真实远程 Docker 测试只使用带随机后缀的测试镜像标签、容器名称与远程目录，并只清理
 自己创建并已核验所有权的测试容器；不会执行全局 prune，也不会删除共享镜像或缓存卷。
 
-## 环境变量
+## 测试配置
+
+需要真实外部依赖的测试统一由 `tests/config/` 下的 YAML 配置驱动，示例文件随仓库提交，
+真实配置文件不入库。环境变量只用于在配置值中写 `${NAME}` 占位符，不再有逐项覆盖配置的
+测试专用环境变量（`AGENTFLOW_TEST_CONFIG_DIR` 仍然存在，仅用于把测试指向另一份配置目录）。
 
 ### 真实 Pi
 
-| 变量 | 用途 | 默认值 |
-|---|---|---|
-| `AGENTFLOW_TEST_PI_MODEL` | 覆盖真实 Pi 测试使用的模型 | `group/free` |
-| `AGENTFLOW_TEST_PI_EXECUTABLE` | 指定 Pi 可执行文件路径 | PATH 中的 `pi` |
+真实 Pi 测试的全部配置来自 `tests/config/pi.yml`（示例文件为 `example.pi.yml`）：
 
-本机 PATH 中没有 `pi` 时，真实 Pi 用例输出 `WARN [SKIP]` 并跳过；Pi Runner 的单元
-测试位于 `tests/unit/agent/pi/`，使用替身，始终执行；统一 Runner 的生命周期用例位于
-`tests/unit/app/`，验证「启动失败不残留 running」「停止服务取消在途调用并收敛」等约束，
-同样不依赖本机 Pi。
+| 配置项 | 用途 | 默认值 |
+|---|---|---|
+| `pi.enable` | 是否执行需要真实 Pi CLI 的测试 | `false` |
+| `pi.model` | 真实 Pi 测试使用的模型 | `group/free` |
+| `pi.executable` | Pi 可执行文件路径 | PATH 中的 `pi` |
+
+`pi.enable` 未设为 `true` 或本机 PATH 中没有 `pi` 时，真实 Pi 用例输出 `WARN [SKIP]` 并
+跳过；Pi Runner 的单元测试位于 `tests/unit/agent/pi/`，使用替身，始终执行；统一 Runner 的
+生命周期用例位于 `tests/unit/app/`，验证「启动失败不残留 running」「停止服务取消在途调用
+并收敛」等约束，同样不依赖本机 Pi。
 
 默认模型 `group/free` 是特意选定的非标准标识，避免测试意外消耗付费额度。每次真实
 调用都显式传入模型，不会回退到 Pi CLI 配置中的默认模型。
 
 ### 真实 SSH
 
-| 变量 | 用途 | 必填 |
+真实 SSH 测试的全部配置来自 `tests/config/ssh.yml`（示例文件为 `example.ssh.yml`）：
+
+| 配置项 | 用途 | 必填 |
 |---|---|---|
-| `AGENTFLOW_TEST_SSH_HOST` | SSH 服务器地址 | 是 |
-| `AGENTFLOW_TEST_SSH_USER` | 登录用户名 | 是 |
-| `AGENTFLOW_TEST_SSH_PORT` | SSH 端口 | 否，默认 `22` |
-| `AGENTFLOW_TEST_SSH_KEY_PATH` | 私钥路径 | 否，为空时使用 SSH Agent |
-| `AGENTFLOW_TEST_SSH_KNOWN_HOSTS` | 只读 known_hosts 文件 | 否，未设置时复用本机 `~/.ssh/known_hosts` 与 `known_hosts2` |
+| `ssh.enable` | 是否执行需要真实远程机器的测试 | 是，默认 `false` |
+| `ssh.host` | SSH 服务器地址 | 是 |
+| `ssh.user` | 登录用户名 | 是 |
+| `ssh.port` | SSH 端口 | 否，默认 `22` |
+| `ssh.private_key_path` | 私钥路径，本版本只支持私钥认证 | 是（连接类用例） |
+| `ssh.known_hosts` | 只读 known_hosts 文件列表 | 否，留空时复用本机 `~/.ssh/known_hosts` 与 `known_hosts2` |
 
 示例：
 
 ```bash
-AGENTFLOW_TEST_SSH_HOST=10.0.0.10 \
-AGENTFLOW_TEST_SSH_USER=deploy \
-AGENTFLOW_TEST_SSH_KEY_PATH=$HOME/.ssh/id_ed25519 \
+cp tests/config/example.ssh.yml tests/config/ssh.yml   # 填写内容并把 ssh.enable 设为 true
 go test -count=1 -v ./tests/integration/ssh/...
 ```
 
-必需目标变量缺失时输出 `WARN [SKIP]` 并说明缺少哪一项；目标配置完整但连接、认证或
-主机密钥校验失败时必须让测试失败。真实 SSH 测试始终执行主机密钥校验，不会自动接受
-未知主机密钥。远程文件操作只发生在随机生成的远程临时目录内。
+`ssh.enable` 未设为 `true` 时输出 `WARN [SKIP]`；已启用但必需目标缺失时说明缺少哪一项；
+目标配置完整但连接、认证或主机密钥校验失败时必须让测试失败。真实 SSH 测试始终执行主机
+密钥校验，不会自动接受未知主机密钥。远程文件操作只发生在随机生成的远程临时目录内。
 
-known_hosts 来源由 `tests/internal/testkit` 的 `KnownHostsSources` 统一解析：显式设置的
-`AGENTFLOW_TEST_SSH_KNOWN_HOSTS` 优先，文件不可读时直接让测试失败；未设置时复用本机
-用户 OpenSSH 的 known_hosts，与产品 `internal/app.SSHService` 的默认行为一致。新写入的
-信任记录只落在测试工作空间，不修改用户真实配置。
+known_hosts 来源由 `tests/internal/testkit` 的 `KnownHostsSources` 统一解析：`ssh.known_hosts`
+显式配置时优先，文件不可读时直接让测试失败；未配置时复用本机用户 OpenSSH 的 known_hosts，
+与产品 `internal/app.SSHService` 的默认行为一致。新写入的信任记录只落在测试工作空间，
+不修改用户真实配置。配置中的取值支持 `${NAME}` 占位符，需要引用环境变量时写在 yml 里。
 
-每个真实 SSH 用例都会在日志中输出目标与 known_hosts 来源，便于区分"环境变量配错"与
-"连接层缺陷"。主机密钥未知时，失败信息会列出实际读取的 known_hosts 路径、可用的环境
-变量以及需要写入信任记录的路径。
+每个真实 SSH 用例都会在日志中输出目标与 known_hosts 来源，便于区分"配置写错"与
+"连接层缺陷"。主机密钥未知时，失败信息会列出实际读取的 known_hosts 路径、可用的配置项
+以及需要写入信任记录的路径。
 
 ### 真实远程 Docker
 
-| 变量 | 用途 | 必填 |
+真实远程 Docker 测试同样由配置文件驱动：
+
+| 配置项 | 用途 | 必填 |
 |---|---|---|
-| `AGENTFLOW_TEST_REMOTE_DOCKER` | 显式启用真实远程 Docker 测试，必须为 `1` | 是 |
-| `AGENTFLOW_TEST_SSH_HOST` | SSH 服务器地址 | 是 |
-| `AGENTFLOW_TEST_SSH_USER` | 登录用户名 | 是 |
-| `AGENTFLOW_TEST_SSH_PORT` | SSH 端口 | 否，默认 `22` |
-| `AGENTFLOW_TEST_SSH_KEY_PATH` | 私钥路径 | 否，为空时使用 SSH Agent |
-| `AGENTFLOW_TEST_SSH_KNOWN_HOSTS` | 只读 known_hosts 文件 | 否，未设置时复用本机 `~/.ssh/known_hosts` 与 `known_hosts2` |
+| `docker.remote_enabled` | 显式启用真实远程 Docker 测试 | 是，默认 `false` |
+| `ssh.enable` 及 `ssh.*` | SSH 目标，见「真实 SSH」 | 是 |
 
 示例：
 
 ```bash
-AGENTFLOW_TEST_REMOTE_DOCKER=1 AGENTFLOW_TEST_SSH_HOST=10.0.0.10 AGENTFLOW_TEST_SSH_USER=deploy AGENTFLOW_TEST_SSH_KEY_PATH=$HOME/.ssh/id_ed25519 go test -count=1 -v ./tests/integration/remote/docker/...
+# 先在 tests/config/docker.yml 把 docker.remote_enabled 设为 true，
+# 并在 tests/config/ssh.yml 把 ssh.enable 设为 true 且填好目标
+go test -count=1 -v ./tests/integration/remote/docker/...
 ```
 
-开关未设置时输出 `WARN [SKIP]`，普通测试不会修改真实远程 Docker；开关已启用但 SSH
-目标缺失时说明缺少的变量并跳过；目标完整但认证失败、Docker 不可用或断言不成立时
-必须让测试失败。
+`docker.remote_enabled` 未启用时输出 `WARN [SKIP]`，普通测试不会修改真实远程 Docker；
+该开关已启用但 `ssh.enable` 未开启或 SSH 目标缺失时说明缺少的配置项并跳过；目标完整但
+认证失败、Docker 不可用或断言不成立时必须让测试失败。
 
 ## 编写测试的约定
 
@@ -259,8 +264,9 @@ AGENTFLOW_TEST_REMOTE_DOCKER=1 AGENTFLOW_TEST_SSH_HOST=10.0.0.10 AGENTFLOW_TEST_
 - 需要真实外部依赖时，由测试自身检查依赖并在缺失时输出警告后跳过。
 - 成功判定必须基于具体业务结果（退出码、数据库记录、文件内容、状态字段），不能只
   依赖日志文本。
-- Docker 相关测试必须显式启用 `AGENTFLOW_TEST_REMOTE_DOCKER=1` 才允许修改真实远程
-  Docker；本机测试一律使用执行替身或路径映射，不依赖本机是否安装 Docker。
+- Docker 相关测试必须在 `tests/config/docker.yml` 中显式启用 `docker.remote_enabled`
+  才允许修改真实远程 Docker；本机测试一律使用执行替身或路径映射，不依赖本机是否安装
+  Docker。
 - 测试结束不得删除测试工作空间与产物；真实远程测试的远程测试目录同样保留。
 
 ## 远程执行测试分层
@@ -271,7 +277,7 @@ AGENTFLOW_TEST_REMOTE_DOCKER=1 AGENTFLOW_TEST_SSH_HOST=10.0.0.10 AGENTFLOW_TEST_
 | `tests/unit/agent/` | 容器内 Pi 参数构造、调用标识唯一性、标准输入、退出状态分类、Session 缺失/残缺、导出失败保留 JSONL、容器所有权核验 | 无（使用容器执行替身） |
 | `tests/integration/local/source/` | 真实 Git 克隆、基础分支识别、`agent/<task-id>` 分支、远程任务分支检出、目标目录不被删除、并发目录隔离 | 本机 `git` |
 | `tests/integration/local/session/` | 容器内 → 宿主机 → 本机三段式传输、字节校验、传输中断保留部分文件、导出失败保留 JSONL、并发 Session 隔离、容器删除后本机 Session 可读 | 无（路径映射到测试工作空间） |
-| `tests/integration/remote/agent/` | 真实远程容器内 Git Clone、容器内 Pi 调用、独立 Session、本机持久化、容器删除后 Session 仍可读 | 环境变量指定的 SSH 目标、真实 Docker 与容器内真实 Pi CLI |
+| `tests/integration/remote/agent/` | 真实远程容器内 Git Clone、容器内 Pi 调用、独立 Session、本机持久化、容器删除后 Session 仍可读 | tests/config/ssh.yml 指定的 SSH 目标、真实 Docker 与容器内真实 Pi CLI |
 
 本机 Git 缺失时，`tests/integration/local/source/` 的用例输出 `WARN [SKIP]` 并跳过，
 其余用例仍会执行。
@@ -283,33 +289,32 @@ AGENTFLOW_TEST_REMOTE_DOCKER=1 AGENTFLOW_TEST_SSH_HOST=10.0.0.10 AGENTFLOW_TEST_
 | `tests/unit/source/codesaver/` | 容器登记与实际 ID 不一致、detached 容器、任务分支不匹配、非 Git 工作区、无变更、既有冲突、提交身份缺失、提交信息与作者参数传递、提交成功与 SHA 读取、提交异常但 HEAD 已变化、既有暂存内容不被重置、只推送任务分支、禁止强制推送、远程缺失、内嵌凭据拒绝、认证失败、非快进冲突、推送超时但远程已收到、远程与本地不一致、无法核验远程、合并默认关闭、推送失败禁止合并、基础分支识别失败、合并冲突、主分支推送失败、合并结果不确定、记录先于远程操作落盘、并发隔离、取消不影响其他任务 | 无（使用容器执行替身） |
 | `tests/unit/store/` | `code_saves` 写入与更新、状态字段约束（成功必须带 SHA）、未请求合并不能记录合并结果、按任务查询、并发写入独立 | 无 |
 | `tests/integration/local/codesaver/` | 真实 Git 提交、任务分支真实 Push 到 bare 仓库、远程引用核验、默认不合并、显式合并后基础分支包含任务提交、推送失败不误报成功、合并冲突保留现场、无变更不制造空提交、并发仓库隔离 | 本机 `git` |
-| `tests/integration/remote/codesaver/` | 真实远程容器内提交、推送与合并，远程任务分支与基础分支 commit 核验 | 环境变量指定的 SSH 目标、真实 Docker 与容器内 Git |
+| `tests/integration/remote/codesaver/` | 真实远程容器内提交、推送与合并，远程任务分支与基础分支 commit 核验 | tests/config/ssh.yml 指定的 SSH 目标、真实 Docker 与容器内 Git |
 
 本机 Git 缺失时，`tests/integration/local/codesaver/` 的用例输出 `WARN [SKIP]` 并跳过，
 `tests/unit/source/codesaver/` 与 `tests/unit/store/` 的用例仍然执行。
 
-### 代码保存测试的环境变量
+### 代码保存测试的配置
 
-| 变量 | 用途 | 必填 |
+远程代码保存测试使用 `tests/config/docker.yml` 与 `tests/config/ssh.yml`：
+
+| 配置项 | 用途 | 必填 |
 |---|---|---|
-| `AGENTFLOW_TEST_REMOTE_DOCKER` | 显式启用真实远程容器测试，必须为 `1` | 是 |
-| `AGENTFLOW_TEST_SSH_HOST` | SSH 服务器地址 | 是 |
-| `AGENTFLOW_TEST_SSH_USER` | 登录用户名 | 是 |
-| `AGENTFLOW_TEST_SSH_PORT` | SSH 端口 | 否，默认 `22` |
-| `AGENTFLOW_TEST_SSH_KEY_PATH` | 私钥路径 | 否，为空时使用 SSH Agent |
-| `AGENTFLOW_TEST_SSH_KNOWN_HOSTS` | 只读 known_hosts 文件 | 否，未设置时复用本机 `~/.ssh/known_hosts` 与 `known_hosts2` |
-| `AGENTFLOW_TEST_REMOTE_GIT_IMAGE` | 远程代码保存测试使用的容器镜像（需包含 `git`） | 是 |
+| `docker.remote_enabled` | 显式启用真实远程容器测试 | 是 |
+| `docker.git_image` | 远程代码保存测试使用的容器镜像（需包含 `git`） | 是 |
+| `ssh.enable` 及 `ssh.*` | SSH 目标，见「真实 SSH」 | 是 |
 
 ```bash
 # 本机 Git 集成测试（不依赖公网）
 go test -count=1 -v ./tests/integration/local/codesaver/...
 
-# 真实远程容器代码保存测试（必须显式启用）
-AGENTFLOW_TEST_REMOTE_DOCKER=1 AGENTFLOW_TEST_SSH_HOST=10.0.0.10 AGENTFLOW_TEST_SSH_USER=deploy AGENTFLOW_TEST_SSH_KEY_PATH=$HOME/.ssh/id_ed25519 AGENTFLOW_TEST_REMOTE_GIT_IMAGE=alpine/git:2.45.2 go test -count=1 -v ./tests/integration/remote/codesaver/...
+# 真实远程容器代码保存测试（先在 docker.yml 与 ssh.yml 中启用并填写配置）
+go test -count=1 -v ./tests/integration/remote/codesaver/...
 ```
 
-开关未设置时输出 `WARN [SKIP]`；开关已启用但 SSH 目标或镜像变量缺失时说明缺少的变量
-并跳过；目标完整但连接、认证、主机密钥校验失败或断言不成立时必须让测试失败。
+`docker.remote_enabled` 未启用时输出 `WARN [SKIP]`；已启用但 `ssh.enable` 未开启、SSH 目标
+或 `docker.git_image` 缺失时说明缺少的配置项并跳过；目标完整但连接、认证、主机密钥校验
+失败或断言不成立时必须让测试失败。
 
 远程代码保存测试只在本次测试创建并已核验所有权的容器内操作，只使用带随机后缀的容器
 名称与容器内临时目录，不执行全局 prune，也不在用户的真实主分支上执行合并。
@@ -323,33 +328,22 @@ AGENTFLOW_TEST_REMOTE_DOCKER=1 AGENTFLOW_TEST_SSH_HOST=10.0.0.10 AGENTFLOW_TEST_
 docker build -t agentflow-test-agent:1.0.0 -f tests/integration/remote/agent/Dockerfile .
 ```
 
-### 远程 Agent 测试的环境变量
+### 远程 Agent 测试的配置
 
-| 变量 | 用途 | 必填 |
+远程 Agent 测试同样使用 `tests/config/docker.yml` 与 `tests/config/ssh.yml`：
+
+| 配置项 | 用途 | 必填 |
 |---|---|---|
-| `AGENTFLOW_TEST_REMOTE_DOCKER` | 显式启用远程 Docker 测试，必须为 `1` | 是 |
-| `AGENTFLOW_TEST_SSH_HOST` | SSH 服务器地址 | 是 |
-| `AGENTFLOW_TEST_SSH_USER` | 登录用户名 | 是 |
-| `AGENTFLOW_TEST_SSH_PORT` | SSH 端口 | 否，默认 `22` |
-| `AGENTFLOW_TEST_SSH_KEY_PATH` | 私钥路径 | 否，为空时使用 SSH Agent |
-| `AGENTFLOW_TEST_SSH_KNOWN_HOSTS` | 只读 known_hosts 文件 | 否，未设置时复用本机 `~/.ssh/known_hosts` 与 `known_hosts2` |
-| `AGENTFLOW_TEST_PI_MODEL` | 覆盖真实模型标识 | 否，默认 `group/free` |
-| `AGENTFLOW_TEST_REMOTE_AGENT_IMAGE` | 覆盖测试镜像引用 | 否，默认 `agentflow-test-agent:1.0.0` |
-| `AGENTFLOW_TEST_REMOTE_GIT_REPOSITORY` | 测试使用的仓库地址（必须能从远程机器访问） | 是 |
+| `docker.remote_enabled` | 显式启用远程 Docker 测试 | 是 |
+| `docker.agent_image` | 测试使用的镜像引用 | 否，默认 `agentflow-test-agent:1.0.0` |
+| `ssh.enable` 及 `ssh.*` | SSH 目标，见「真实 SSH」 | 是 |
+| `docker.pi.*` | 可选的容器内 Pi 模型接入覆盖 | 否 |
 
-示例（Git Bash / Linux / macOS）：
+真实模型标识来自 `tests/config/pi.yml` 的 `pi.model`，默认 `group/free`；该配置在本目录
+只提供模型标识，是否执行本机真实 Pi 测试由同一文件的 `pi.enable` 控制。
 
 ```bash
-AGENTFLOW_TEST_REMOTE_DOCKER=1 AGENTFLOW_TEST_SSH_HOST=10.0.0.10 AGENTFLOW_TEST_SSH_USER=deploy AGENTFLOW_TEST_SSH_KEY_PATH=$HOME/.ssh/id_ed25519 AGENTFLOW_TEST_REMOTE_GIT_REPOSITORY=https://github.com/example/repo.git go test -count=1 -v ./tests/integration/remote/agent/...
-```
-
-示例（PowerShell）：
-
-```powershell
-$env:AGENTFLOW_TEST_REMOTE_DOCKER="1"
-$env:AGENTFLOW_TEST_SSH_HOST="10.0.0.10"
-$env:AGENTFLOW_TEST_SSH_USER="deploy"
-$env:AGENTFLOW_TEST_REMOTE_GIT_REPOSITORY="https://github.com/example/repo.git"
+# 先在 docker.yml 与 ssh.yml 中启用，并准备好测试镜像
 go test -count=1 -v ./tests/integration/remote/agent/...
 ```
 

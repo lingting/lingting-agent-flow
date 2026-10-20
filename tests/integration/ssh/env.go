@@ -2,12 +2,12 @@
 //
 // 运行方式：
 //
-//	cp tests/config/example.ssh.yml tests/config/ssh.yml   # 按需填写后执行
+//	cp tests/config/example.ssh.yml tests/config/ssh.yml   # 填写内容并把 ssh.enable 设为 true
 //	go test -count=1 -v ./tests/integration/ssh/...
 //
 // 配置项来自 tests/config/ssh.yml，字段说明见 tests/config/example.ssh.yml。
-// 必需配置缺失时输出 WARN 并跳过；配置完整但连接、认证或主机密钥校验失败时
-// 必须让测试失败，不得当作缺少可选依赖跳过。
+// 未把 ssh.enable 设为 true 时输出 WARN 并跳过；已启用但必需配置缺失时同样跳过；
+// 配置完整但连接、认证或主机密钥校验失败时必须让测试失败，不得当作缺少可选依赖跳过。
 package ssh_integration
 
 import (
@@ -35,11 +35,18 @@ type target struct {
 
 // loadTarget 读取并校验目标配置。
 //
-// 必需配置缺失时输出警告并跳过，并说明缺少哪一项；配置完整但取值非法时让测试
-// 直接失败，避免把配置错误当成缺少环境。
+// 未在 tests/config/ssh.yml 中把 ssh.enable 设为 true 时输出警告并跳过；该开关是
+// 该目录下所有真实连接用例的唯一启用入口，缺少配置文件同样视为未启用。
+// 启用后必需配置缺失时同样输出警告并跳过，并说明缺少哪一项；配置完整但取值非法时
+// 让测试直接失败，避免把配置错误当成缺少环境。
 func loadTarget(t *testing.T) target {
 	t.Helper()
 	config, ok := testkit.LoadSSHConfig(t)
+	if !ok || !config.Enabled {
+		reason := testkit.EnableReason(t, testkit.SSHConfigFile, "ssh.enable")
+		fmt.Fprintln(os.Stdout, reason)
+		t.Skip(reason)
+	}
 	missing := make([]string, 0, 2)
 	if strings.TrimSpace(config.Host) == "" {
 		missing = append(missing, "ssh.host")
@@ -51,9 +58,6 @@ func loadTarget(t *testing.T) target {
 		reason := testkit.SkipReason(t, testkit.SSHConfigFile, missing)
 		fmt.Fprintln(os.Stdout, reason)
 		t.Skip(reason)
-	}
-	if !ok {
-		t.Fatalf("测试配置读取结果不一致: %s", testkit.ConfigPath(t, testkit.SSHConfigFile))
 	}
 	if config.Port <= 0 || config.Port > 65535 {
 		t.Fatalf("ssh.port 不是合法端口: %d", config.Port)

@@ -45,17 +45,6 @@ const DefaultSSHPort = 22
 // 不得改为任何常见的付费模型标识。
 const DefaultPiModel = "group/free"
 
-// 真实 Pi 测试的环境变量覆盖入口。
-//
-// 配置文件是主要来源；这两个变量只提供临时覆盖，便于在没有 pi.yml 的环境里显式
-// 指定模型与可执行文件。模型覆盖同样受"必须显式传入"的约束，不会回退到默认付费模型。
-const (
-	// PiModelEnv 覆盖真实 Pi 测试使用的模型标识。
-	PiModelEnv = "AGENTFLOW_TEST_PI_MODEL"
-	// PiExecutableEnv 覆盖真实 Pi 测试使用的可执行文件路径。
-	PiExecutableEnv = "AGENTFLOW_TEST_PI_EXECUTABLE"
-)
-
 // 容器内 Pi 覆盖配置的默认值。
 const (
 	// DefaultContainerPiProvider 是写入容器内 models.json 的默认 provider 名称。
@@ -71,6 +60,8 @@ const (
 
 // SSHConfig 是 tests/config/ssh.yml 的内容。
 type SSHConfig struct {
+	// Enabled 决定是否执行需要真实 SSH 目标的测试，未填写时视为不执行。
+	Enabled bool `yaml:"enable"`
 	// Host 是 SSH 服务器地址。
 	Host string `yaml:"host"`
 	// User 是登录用户名。
@@ -87,6 +78,8 @@ type SSHConfig struct {
 
 // PiConfig 是 tests/config/pi.yml 的内容。
 type PiConfig struct {
+	// Enabled 决定是否执行需要真实 Pi CLI 的测试，未填写时视为不执行。
+	Enabled bool `yaml:"enable"`
 	// Model 是真实调用使用的模型标识，未填写时为 DefaultPiModel。
 	Model string `yaml:"model"`
 	// Executable 是 Pi 可执行文件路径，为空时使用 PATH 中的 pi。
@@ -306,6 +299,20 @@ func SkipReason(t *testing.T, name string, missing []string) string {
 	)
 }
 
+// EnableReason 生成测试未启用时的跳过原因。
+//
+// 真实外部依赖的测试统一由配置文件中的 enable 开关显式开启，缺失配置文件同样
+// 视为未启用；提示中同时给出配置文件与示例文件的绝对路径。
+func EnableReason(t *testing.T, name, field string) string {
+	t.Helper()
+	return fmt.Sprintf(
+		"WARN [SKIP] 测试未启用：%s 不存在或未把 %s 设为 true；%s",
+		ConfigPath(t, name),
+		field,
+		ConfigHint(t, name),
+	)
+}
+
 // LoadSSHConfig 读取 tests/config/ssh.yml。
 //
 // 文件不存在时返回零值配置与 false；文件存在但内容非法时让测试失败，
@@ -331,13 +338,6 @@ func LoadPiConfig(t *testing.T) (PiConfig, bool) {
 		return PiConfig{}, false
 	}
 	config := document.Pi
-	// 环境变量优先于配置文件：它们只用于临时覆盖，不改变"必须显式给出模型"的约束。
-	if model := strings.TrimSpace(os.Getenv(PiModelEnv)); model != "" {
-		config.Model = model
-	}
-	if executable := strings.TrimSpace(os.Getenv(PiExecutableEnv)); executable != "" {
-		config.Executable = executable
-	}
 	if strings.TrimSpace(config.Model) == "" {
 		config.Model = DefaultPiModel
 	}

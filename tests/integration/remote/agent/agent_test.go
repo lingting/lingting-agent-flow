@@ -3,9 +3,9 @@
 //
 // 运行方式（Git Bash / Linux / macOS）：
 //
-//	cp tests/config/example.ssh.yml tests/config/ssh.yml          # 填写远程目标
+//	cp tests/config/example.ssh.yml tests/config/ssh.yml          # 开启 ssh.enable 并填写远程目标
 //	cp tests/config/example.docker.yml tests/config/docker.yml    # 开启 remote_enabled，可选填 docker.pi
-//	cp tests/config/example.pi.yml tests/config/pi.yml            # 按需填写模型
+//	cp tests/config/example.pi.yml tests/config/pi.yml            # 按需填写模型（enable 只控制本机真实 Pi 测试）
 //	cp tests/config/example.git.yml tests/config/git.yml          # 填写可访问的仓库
 //	go test -count=1 -v ./tests/integration/remote/agent/...
 //
@@ -85,7 +85,12 @@ func requireEnabled(t *testing.T) target {
 		fmt.Fprintln(os.Stdout, reason)
 		t.Skip(reason)
 	}
-	sshConfig, _ := testkit.LoadSSHConfig(t)
+	sshConfig, sshOK := testkit.LoadSSHConfig(t)
+	if !sshOK || !sshConfig.Enabled {
+		reason := testkit.EnableReason(t, testkit.SSHConfigFile, "ssh.enable")
+		fmt.Fprintln(os.Stdout, reason)
+		t.Skip(reason)
+	}
 	missing := make([]string, 0, 2)
 	if strings.TrimSpace(sshConfig.Host) == "" {
 		missing = append(missing, "ssh.host")

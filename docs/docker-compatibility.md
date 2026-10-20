@@ -150,7 +150,8 @@ Docker 支持用 `DOCKER_API_VERSION` 让 CLI 使用指定 API 版本，但设�
 - **本机集成测试**（进程内假 SSH 服务端与假 Engine）：`tests/integration/local/docker/`
   与 `tests/integration/local/validation/`。
 - **真实远程测试**（需真实 Docker）：`tests/integration/remote/docker/` 等目录，通过
-  `AGENTFLOW_TEST_REMOTE_DOCKER=1` 显式启用。目标环境版本低于基线时预检必然失败，这属于
+  `tests/config/docker.yml` 的 `docker.remote_enabled`（同时需 `tests/config/ssh.yml` 的
+  `ssh.enable`）显式启用。目标环境版本低于基线时预检必然失败，这属于
   环境不满足基线，不是代码缺陷；必须如实报告，不得把未运行的测试记为通过。
 
 真实环境缺少 Docker CLI `29.0.0` 时，帮助信息的最低基线验证只能跳过，且必须在报告中说明
