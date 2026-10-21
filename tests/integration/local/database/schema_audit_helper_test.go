@@ -187,6 +187,16 @@ var enumProbes = []enumProbe{
 			 'agent/probe-task', 'awaiting_review', 'mirror', 1, 1, 1)`,
 	},
 	{
+		table:  "validation_feedbacks",
+		column: "verdict",
+		value:  "needs_rework",
+		statement: `INSERT INTO validation_feedbacks
+			(id, task_id, step_id, developer_attempt_id, validation_run_id, verdict,
+			 summary, infrastructure_error, checks_json, created_at)
+			VALUES ('probe-feedback', 'probe-task', 'probe-step', 'probe-attempt',
+			 'probe-run', 'needs_rework', '需要返工', 0, '[]', 1)`,
+	},
+	{
 		table:  "roles",
 		column: "type",
 		value:  "auditor",
@@ -228,6 +238,7 @@ var requiredConstraints = []requiredConstraint{
 	{"validation_runs", "passed_checks + failed_checks + skipped_checks <= total_checks"},
 	{"validation_check_results", "json_valid(definition_json)"},
 	{"validation_check_results", "sequence > 0"},
+	{"validation_feedbacks", "json_valid(checks_json)"},
 	{"code_fetches", "base_branch IS NULL OR base_branch <> task_branch"},
 	{"code_fetches", "length(commit_sha) IN (40, 64)"},
 	{"code_fetches", "status NOT IN ('succeeded', 'skipped') OR commit_sha IS NOT NULL"},
@@ -281,6 +292,9 @@ var expectedIndexes = []string{
 	"idx_code_fetches_attempt",
 	"idx_code_fetches_container",
 	"idx_code_fetches_status",
+	"idx_validation_feedbacks_step",
+	"idx_validation_feedbacks_attempt",
+	"idx_validation_feedbacks_task",
 }
 
 // quoteIdentifier 校验表名并返回可直接拼接的标识符。

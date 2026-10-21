@@ -272,29 +272,7 @@ func (c ValidateCheckRequest) toDomain() domain.ValidationCheckDefinition {
 func validateAttemptResponse(result app.ValidationExecuteResult) ValidateAttemptResponse {
 	checks := make([]ValidateCheckResultResponse, 0, len(result.Checks))
 	for _, check := range result.Checks {
-		checks = append(checks, ValidateCheckResultResponse{
-			CheckID:       check.CheckID,
-			CheckName:     check.CheckName,
-			Required:      check.Required,
-			Sequence:      check.Sequence,
-			Status:        string(check.Status),
-			ExitCode:      check.ExitCode,
-			TimedOut:      check.TimedOut,
-			Cancelled:     check.Cancelled,
-			Certain:       check.Certain,
-			RequiredPass:  check.Status.Passed(),
-			DurationMS:    check.Duration.Milliseconds(),
-			StdoutPath:    check.StdoutPath,
-			StderrPath:    check.StderrPath,
-			StdoutSummary: check.StdoutSummary,
-			StderrSummary: check.StderrSummary,
-			OutputTrunc:   check.OutputTruncated,
-			ArchiveError:  check.OutputArchiveError,
-			FailureReason: check.FailureReason,
-			ErrorDetail:   check.ErrorDetail,
-			StartedAt:     check.StartedAt,
-			FinishedAt:    check.FinishedAt,
-		})
+		checks = append(checks, validateCheckResultResponse(check))
 	}
 	return ValidateAttemptResponse{
 		ValidationRunID:   result.ValidationRunID.String(),
@@ -317,6 +295,36 @@ func validateAttemptResponse(result app.ValidationExecuteResult) ValidateAttempt
 		Checks:            checks,
 		StartedAt:         result.StartedAt,
 		FinishedAt:        result.FinishedAt,
+	}
+}
+
+// validateCheckResultResponse 把单条检查结果转换为对外表示。
+//
+// 验证接口与开发—验证闭环接口共用同一套转换：两者输出的检查结果必须完全一致，
+// 否则调用方需要为同一份数据维护两种解析逻辑。
+func validateCheckResultResponse(check domain.ValidationCheckResult) ValidateCheckResultResponse {
+	return ValidateCheckResultResponse{
+		CheckID:       check.CheckID,
+		CheckName:     check.CheckName,
+		Required:      check.Required,
+		Sequence:      check.Sequence,
+		Status:        string(check.Status),
+		ExitCode:      check.ExitCode,
+		TimedOut:      check.TimedOut,
+		Cancelled:     check.Cancelled,
+		Certain:       check.Certain,
+		RequiredPass:  check.Status.Passed(),
+		DurationMS:    check.Duration.Milliseconds(),
+		StdoutPath:    check.StdoutPath,
+		StderrPath:    check.StderrPath,
+		StdoutSummary: check.StdoutSummary,
+		StderrSummary: check.StderrSummary,
+		OutputTrunc:   check.OutputTruncated,
+		ArchiveError:  check.OutputArchiveError,
+		FailureReason: check.FailureReason,
+		ErrorDetail:   check.ErrorDetail,
+		StartedAt:     check.StartedAt,
+		FinishedAt:    check.FinishedAt,
 	}
 }
 

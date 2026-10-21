@@ -146,6 +146,63 @@ func (s *ExecutionRecordService) ListAttempts(
 	return page, nil
 }
 
+// ValidationHistoryEntry 是一次验证记录及其检查结果。
+type ValidationHistoryEntry struct {
+	// Run 是验证记录。
+	Run domain.ValidationRun
+	// Checks 是该次验证的逐项检查结果。
+	Checks []domain.ValidationCheckResult
+}
+
+// ValidationHistory 是某个步骤的验证历史。
+//
+// 历史记录只追加不覆盖：调用方取最后一条即为最新验证结果，取全部即为验证历史。
+// State 是从最新记录派生出的步骤验证状态，使"是否有验证""验证是否通过"不需要调用方
+// 自己从原始记录推断。
+type ValidationHistory struct {
+	// StepID 是步骤标识。
+	StepID domain.ID
+	// State 是派生出的步骤验证状态，没有记录时为 unverified。
+	State domain.StepVerificationState
+	// Entries 按创建时间升序排列，最后一条是最新验证。
+	Entries []ValidationHistoryEntry
+}
+
+// ListValidations 返回某步骤的验证历史。
+func (s *ExecutionRecordService) ListValidations(
+	ctx context.Context,
+	taskID, stepID string,
+) (ValidationHistory, error) {
+	step, err := s.requireStep(ctx, taskID, stepID)
+	if err != nil {
+		return ValidationHistory{}, err
+	}
+	runs, err := s.store.ListValidationRunsByStep(ctx, step.ID)
+	if err != nil {
+		return ValidationHistory{}, fmt.Errorf("查询验证记录失败: %w", err)
+	}
+	history := ValidationHistory{
+		StepID:  step.ID,
+		State:   domain.StepVerificationUnverified,
+		Entries: make([]ValidationHistoryEntry, 0, len(runs)),
+	}
+	for _, run := range runs {
+		checks, checkErr := s.store.ListValidationCheckResults(ctx, run.ID)
+		if checkErr != nil {
+			return ValidationHistory{}, fmt.Errorf("查询检查结果失败: %w", checkErr)
+		}
+		history.Entries = append(history.Entries, ValidationHistoryEntry{
+			Run:    run,
+			Checks: checks,
+		})
+	}
+	if len(history.Entries) > 0 {
+		latest := history.Entries[len(history.Entries)-1]
+		history.State = domain.DeriveStepVerificationState(&latest.Run, latest.Checks)
+	}
+	return history, nil
+}
+
 // ListSessions 返回某次尝试下的会话分页。
 //
 // 每一次 Planner、Developer、Validator 调用都对应一个独立会话，因此同一次尝试下

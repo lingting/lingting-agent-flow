@@ -54,6 +54,10 @@ API 兼容性、Docker CLI 帮助信息、基础 Dockerfile 的外部 `FROM` 镜
   真实 Pi 调用。校验任务、步骤、角色的归属与状态，核验执行节点与任务容器，以数据库事务
   原子占用步骤并创建新的 Attempt 与独立 Session，随后按真实结果写入 Attempt / Step / Task
   终态。同一 Step 同一时刻只允许一个执行占用。
+- 单步骤开发—验证闭环：`POST /api/v1/tasks/{taskID}/steps/{stepID}/execute-and-validate`
+  在同一个任务容器工作区内先执行 Developer，再执行确定性验证，并依据真实检查结果收口步骤
+  状态。Developer 完成不等于验证通过：开发成功时步骤进入 `verifying`，只有必要检查全部通过
+  才进入 `completed`。验证失败时保存结构化失败反馈供下次显式重试引用，并停止等待用户决定。
 - 代码获取与任务分支管理：`POST /api/v1/tasks/{taskID}/steps/{stepID}/attempts/{attemptID}/initialize-code`
   与 `agentflow code init` 在对应 Attempt 的任务容器内执行 Git Clone，识别基础分支
   （`origin/HEAD` → `main` → `master`，或显式指定），创建并核验任务分支 `agent/<task-id>`，
@@ -556,7 +560,8 @@ Content-Type: application/json
 - 不自动重试，也不按退避策略重新执行。
 - 不创建、启动、停止或接管容器；容器缺失时返回 412。
 - 不执行 Git Clone、Commit、Push 或 Merge。
-- 不实现确定性验证与 Validator 阶段：`completed` 只代表本次 Agent 调用正常结束。
+- 不实现确定性验证与 Validator 阶段：`completed` 只代表本次 Agent 调用正常结束；需要
+  "开发 + 验证"闭环时使用下一节的 `execute-and-validate` 入口。
 - 不提供执行队列与跨步骤并行调度。
 
 #### 执行前的前置步骤校验
@@ -635,6 +640,137 @@ Content-Type: application/json
 错误语义与单步骤执行一致：参数错误 400、任务不存在 404、状态冲突 409、前置条件缺失 412。
 协调器返回错误（例如缺少容器）时整个请求返回该错误，不会被伪装成"执行后正常停止"。
 
+### 单步骤开发—验证闭环
+
+对一个已经在数据库中存在的开发 Step 依次执行"开发 → 验证"，并依据真实验证结果收口步骤状态。
+这是当前唯一把 Developer 与 Validator 串起来的入口。
+
+```http
+POST /api/v1/tasks/{taskID}/steps/{stepID}/execute-and-validate
+Content-Type: application/json
+
+{
+  "prompt": "可选补充说明",
+  "timeout_seconds": 600,
+  "validation_timeout_seconds": 900
+}
+```
+
+三个字段都是可选的，请求体可以为空。`timeout_seconds` 约束开发阶段单次 Agent 调用，
+`validation_timeout_seconds` 约束验证阶段全部检查的总时长，两者是不同概念。
+
+#### 执行流程
+
+```text
+归属 / 前置步骤 / 验证配置校验
+  → StepExecutor.Execute（DeferCompletion=true，新建 Attempt 与独立 Session）
+      → 开发成功时步骤进入 verifying 并保持被当前尝试占用
+  → ValidationService.Validate（同一容器、同一工作区）
+  → domain.DeriveStepVerificationState（由 Run 状态 / 结论 / 检查结果推导验证状态）
+  → domain.DecideStepCloseout（开发结论 + 验证状态 → 步骤收口状态）
+  → 收口写入：步骤（条件更新）→ 任务（条件更新）→ 事件
+```
+
+- 开发与验证使用**同一份**任务容器工作区：中间不重新 Clone、不重置代码、不清理改动。
+- 每次执行创建新的 Attempt 与独立 Session；重新执行不会复用旧记录。
+- 只有开发结论为 `completed`、开发记录已完整写入、验证配置有效且容器仍可用时才启动验证。
+- 验证配置缺少启用的必需检查时在开发之前返回 400，不会跑完开发再把配置问题伪装成
+  "验证未通过"。
+
+#### 收口规则
+
+| 开发结论 | 验证情况 | 步骤状态 |
+|---|---|---|
+| 失败 / 超时 | 未执行 | `failed` |
+| 取消 | 未执行 | `cancelled` |
+| 中断 | 未执行 | `recovery_required` |
+| 成功 | 未发起验证 | `recovery_required` |
+| 成功 | 验证通过 | `completed` |
+| 成功 | 必要检查失败 | `failed` |
+| 成功 | 验证被取消 | `cancelled` |
+| 成功 | 验证基础设施异常 | `recovery_required` |
+
+- **Developer 完成不等于验证通过**：开发成功时步骤进入 `verifying`，只有真实验证通过才会
+  进入 `completed`。
+- **单个步骤通过验证不等于任务完成**：任务保持 `developing`，终态由后续代码保存与任务级
+  编排决定。
+- 必要检查失败时不会标记为已验证完成；基础设施异常（容器不可用、命令无法启动、结果无法
+  确认、验证流程整体失败或超时）既不会伪装成代码失败，也不会判为通过。
+- 验证失败后停止并等待用户显式决定：不自动重试、不自动修复代码、不删除容器。
+
+#### 响应
+
+成功（已验证通过）返回 200：
+
+```json
+{
+  "task_id": "<任务标识>",
+  "step_id": "<步骤标识>",
+  "attempt_id": "<尝试标识>",
+  "attempt_number": 1,
+  "session_id": "<会话标识>",
+  "outcome": "completed",
+  "validation_ran": true,
+  "validation_run_id": "<验证记录标识>",
+  "validation_status": "completed",
+  "validation_verdict": "passed",
+  "validation_passed": true,
+  "checks": [{"check_id": "build", "status": "passed", "exit_code": 0}],
+  "validation_persisted": true,
+  "infrastructure_error": false,
+  "verification_state": "passed",
+  "step_status": "completed",
+  "task_status": "developing",
+  "verified": true,
+  "finalized": true
+}
+```
+
+`outcome`、`validation_ran`、`validation_verdict`、`step_status`、`verified` 分别表达"开发
+如何结束""验证是否发起""验证结论""步骤状态""是否已验证完成"，不能互相替代。
+
+#### 错误语义
+
+| 状态码 | code | 含义 |
+|---|---|---|
+| 400 | `invalid_request` | 参数非法，或步骤验证配置缺少启用的必需检查 |
+| 404 | `not_found` | 任务或步骤不存在，或步骤不属于该任务 |
+| 409 | `state_conflict` | 状态不允许执行，或步骤已被另一条闭环占用 |
+| 412 | `precondition_failed` | 缺少受管理的运行中容器，或执行节点未通过环境预检 |
+| 500 | `execution_failed` | 开发未成功，或验证未通过 |
+| 500 | `execution_not_persisted` | 闭环已结束，但结果未能完整写入数据库 |
+| 503 | `internal_error` | 闭环协调器未初始化 |
+
+未通过验证不会返回 200：调用方必须看到真实的失败原因与状态。
+
+#### 验证失败反馈
+
+验证未通过时写入结构化的失败反馈（`validation_feedbacks`），包含失败检查标识与名称、实际
+退出码、失败原因、有长度限制的输出摘要、检查起止时间、超时/取消/基础设施标记，以及开发
+Attempt 与 Validation Run 引用。
+
+- 摘要会过滤令牌、口令、私钥与 URL 内嵌凭据，并按上限裁剪。
+- 反馈与原始 Validation Run 一起保留，不替代它；同一轮验证至多一条反馈，历史不被覆盖。
+- 用户显式重新执行时，提示词会引用上一轮失败反馈（"上一次验证未通过的问题"），但反馈不是
+  当前验证结论，新的执行仍然必须通过新的验证。
+
+#### 查询验证历史
+
+```http
+GET /api/v1/tasks/{taskID}/steps/{stepID}/validations
+```
+
+响应包含派生出的 `state`（`unverified` / `verifying` / `passed` / `failed` / `cancelled` /
+`infrastructure_error`）、`latest`（最新一次验证）与 `records`（全部历史，按创建时间升序）。
+历史记录只追加不覆盖，因此重新执行不会抹掉上一轮失败证据。
+
+#### 本阶段不提供的闭环能力
+
+- 不自动生成计划，不串联多个 Step，不按计划自动推进。
+- 不自动重试，也不在验证失败后自动调用 Developer 修复。
+- 不创建、启动、删除或接管容器；容器缺失时返回 412。
+- 不执行 Commit / Push / Merge，也不提供任务级调度队列。
+
 ### 尚未实现的接口
 
 项目、环境、容器、代码保存与 Agent 调度均**没有** HTTP 接口。Web 页面中的对应入口仍为
@@ -642,9 +778,10 @@ Content-Type: application/json
 任务页面已接入真实接口，但只能创建、查看、取消与删除任务记录，尚未接入步骤执行入口。
 机器页面已接入执行节点接口与环境预检结果展示。
 
-后台服务目前注册了执行节点环境预检、统一 Pi Runner 与单步骤执行协调器：任务调度器、
-自动 Plan / Verify / Retry 编排与 Docker 运维尚未接入，`agentflow server` 启动后提供 API、
-页面、环境预检、单步骤执行与显式顺序执行能力。
+后台服务目前注册了执行节点环境预检、统一 Pi Runner、单步骤执行协调器、确定性验证引擎与
+开发—验证闭环协调器：任务调度器、自动 Plan / Retry 编排与 Docker 运维尚未接入，
+`agentflow server` 启动后提供 API、页面、环境预检、单步骤执行、显式顺序执行与单步骤
+开发—验证闭环能力。
 
 ## 统一 Pi Runner 与 Session 生命周期
 

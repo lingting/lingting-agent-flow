@@ -271,6 +271,40 @@ func (s validationStore) ListValidationRunsByAttempt(
 	return runs, nil
 }
 
+// ListValidationRunsByStep 按创建时间返回某个步骤的全部验证记录。
+//
+// 步骤级查询用于"最新验证结果"：同一尝试下验证只追加，重试会创建新的尝试与新的
+// 验证记录，历史记录仍然保留，调用方按创建时间取最后一条即为最新结果。
+func (s validationStore) ListValidationRunsByStep(
+	ctx context.Context,
+	stepID domain.ID,
+) ([]domain.ValidationRun, error) {
+	if err := stepID.Validate(); err != nil {
+		return nil, err
+	}
+	const statement = `SELECT ` + validationRunColumns + ` FROM validation_runs
+		WHERE step_id = ? ORDER BY created_at, rowid`
+	rows, err := s.q.QueryContext(ctx, statement, toIDParam(stepID))
+	if err != nil {
+		return nil, wrapError("查询验证记录", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+	runs := make([]domain.ValidationRun, 0, 4)
+	for rows.Next() {
+		run, err := scanValidationRun(rows)
+		if err != nil {
+			return nil, wrapError("读取验证记录", err)
+		}
+		runs = append(runs, *run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, wrapError("查询验证记录", err)
+	}
+	return runs, nil
+}
+
 // FinishValidationRun 以"仍在运行"为条件写入结论与终态。
 //
 // 条件更新保证迟到的结论不会覆盖已确认的终态：影响行数为 0 时返回 ErrConflict，

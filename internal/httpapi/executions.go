@@ -23,6 +23,8 @@ const (
 	attemptsSegment = "attempts"
 	// sessionsSegment 是尝试下会话集合、以及任务下会话详情的路径段。
 	sessionsSegment = "sessions"
+	// validationsSegment 是步骤下验证历史的路径段。
+	validationsSegment = "validations"
 )
 
 // StepResponse 是步骤的对外表示。
@@ -157,6 +159,54 @@ type SessionListResponse struct {
 	Size    int               `json:"size"`
 }
 
+// ValidationHistoryResponse 是某个步骤的验证历史。
+//
+// 历史记录只追加不覆盖：`records` 按创建时间升序排列，最后一条是最新验证结果。
+// `state` 是从最新记录派生出的验证状态，调用方不需要自己从原始记录推断。
+type ValidationHistoryResponse struct {
+	StepID string `json:"step_id"`
+	// State 是派生出的验证状态：unverified / verifying / passed / failed /
+	// cancelled / infrastructure_error。
+	State string `json:"state"`
+	// Latest 是最新一次验证的对外表示，没有记录时为空。
+	Latest *ValidationRunResponse `json:"latest,omitempty"`
+	// Records 是全部验证历史，按创建时间升序排列。
+	Records []ValidationRunResponse `json:"records"`
+	Total   int                     `json:"total"`
+}
+
+// ValidationRunResponse 是一次验证记录的对外表示。
+//
+// 流程状态、结论与检查结果分别输出：调用方必须能区分"流程跑完了"、"结论是通过"与
+// "哪些检查真实执行过"。
+type ValidationRunResponse struct {
+	ID        string `json:"id"`
+	TaskID    string `json:"task_id"`
+	StepID    string `json:"step_id"`
+	AttemptID string `json:"attempt_id"`
+	// Status 是验证流程状态，Verdict 是最终结论，两者不得互相推导。
+	Status  string `json:"status"`
+	Verdict string `json:"verdict"`
+	Summary string `json:"summary,omitempty"`
+	// FailureSummary 是未通过结论的原因。
+	FailureSummary string `json:"failure_summary,omitempty"`
+	// ErrorDetail 是验证流程自身的错误。
+	ErrorDetail string `json:"error_detail,omitempty"`
+	// PassedChecks / FailedChecks / SkippedChecks 是检查统计。
+	PassedChecks  int `json:"passed_checks"`
+	FailedChecks  int `json:"failed_checks"`
+	SkippedChecks int `json:"skipped_checks"`
+	TotalChecks   int `json:"total_checks"`
+	// ExecutionEnv / Workspace / ContainerID 说明检查到底在哪里执行。
+	ExecutionEnv string `json:"execution_env,omitempty"`
+	Workspace    string `json:"workspace,omitempty"`
+	ContainerID  string `json:"container_id,omitempty"`
+	// Checks 是逐项检查结果摘要，不含完整 stdout / stderr。
+	Checks     []ValidateCheckResultResponse `json:"checks,omitempty"`
+	StartedAt  time.Time                     `json:"started_at"`
+	FinishedAt *time.Time                    `json:"finished_at,omitempty"`
+}
+
 // executionHandler 处理执行记录只读查询。
 type executionHandler struct {
 	records *app.ExecutionRecordService
@@ -165,10 +215,11 @@ type executionHandler struct {
 
 // serve 按路径分发任务下的执行记录查询请求。
 //
-// 支持的四类路径：
+// 支持的只读查询路径：
 //   - {taskID}/steps
 //   - {taskID}/steps/{stepID}/attempts
 //   - {taskID}/steps/{stepID}/attempts/{attemptID}/sessions
+//   - {taskID}/steps/{stepID}/validations
 //   - {taskID}/sessions/{sessionID}
 //
 // 其他形状一律按接口不存在处理：执行记录接口不提供任何写操作，因此不注册
@@ -185,6 +236,8 @@ func (h *executionHandler) serve(w http.ResponseWriter, r *http.Request) {
 		segments[3] == attemptsSegment &&
 		segments[5] == sessionsSegment:
 		h.listSessions(w, r, segments[0], segments[2], segments[4])
+	case len(segments) == 4 && segments[1] == stepsSegment && segments[3] == validationsSegment:
+		h.listValidations(w, r, segments[0], segments[2])
 	case len(segments) == 3 && segments[1] == sessionsSegment:
 		h.getSession(w, r, segments[0], segments[2])
 	default:
@@ -279,6 +332,65 @@ func (h *executionHandler) listSessions(
 		Current: normalizedCurrent(request.Current),
 		Size:    normalizedSize(request.Size),
 	})
+}
+
+// listValidations 处理 GET /api/v1/tasks/{taskID}/steps/{stepID}/validations。
+func (h *executionHandler) listValidations(
+	w http.ResponseWriter,
+	r *http.Request,
+	taskID, stepID string,
+) {
+	if !h.allowGet(w, r) {
+		return
+	}
+	history, err := h.records.ListValidations(r.Context(), taskID, stepID)
+	if err != nil {
+		h.writeServiceError(w, r, err)
+		return
+	}
+	response := ValidationHistoryResponse{
+		StepID:  history.StepID.String(),
+		State:   string(history.State),
+		Records: make([]ValidationRunResponse, 0, len(history.Entries)),
+		Total:   len(history.Entries),
+	}
+	for _, entry := range history.Entries {
+		response.Records = append(response.Records, validationRunResponse(entry))
+	}
+	if len(response.Records) > 0 {
+		latest := response.Records[len(response.Records)-1]
+		response.Latest = &latest
+	}
+	writeJSON(w, r, h.logger, http.StatusOK, response)
+}
+
+// validationRunResponse 把验证记录与检查结果转换为对外表示。
+func validationRunResponse(entry app.ValidationHistoryEntry) ValidationRunResponse {
+	checks := make([]ValidateCheckResultResponse, 0, len(entry.Checks))
+	for _, check := range entry.Checks {
+		checks = append(checks, validateCheckResultResponse(check))
+	}
+	return ValidationRunResponse{
+		ID:             entry.Run.ID.String(),
+		TaskID:         entry.Run.TaskID.String(),
+		StepID:         entry.Run.StepID.String(),
+		AttemptID:      entry.Run.AttemptID.String(),
+		Status:         string(entry.Run.Status),
+		Verdict:        string(entry.Run.Verdict),
+		Summary:        entry.Run.Summary,
+		FailureSummary: entry.Run.FailureSummary,
+		ErrorDetail:    entry.Run.ErrorDetail,
+		PassedChecks:   entry.Run.PassedChecks,
+		FailedChecks:   entry.Run.FailedChecks,
+		SkippedChecks:  entry.Run.SkippedChecks,
+		TotalChecks:    entry.Run.TotalChecks,
+		ExecutionEnv:   entry.Run.ExecutionEnv,
+		Workspace:      entry.Run.Workspace,
+		ContainerID:    entry.Run.ContainerID,
+		Checks:         checks,
+		StartedAt:      entry.Run.StartedAt,
+		FinishedAt:     entry.Run.FinishedAt,
+	}
 }
 
 // getSession 处理 GET /api/v1/tasks/{taskID}/sessions/{sessionID}。

@@ -41,7 +41,7 @@ func (e *StepExecutor) runAttempt(
 		ArchiveStatus:      run.session.ArchiveStatus,
 		ExportStatus:       run.session.ExportStatus,
 		AttemptStatus:      outcome.AttemptStatus(),
-		StepStatus:         stepStatusOfOutcome(outcome, outcome.AttemptStatus()),
+		StepStatus:         finalizeStepStatus(request.deferCompletion, outcome, outcome.AttemptStatus()),
 		TaskStatus:         domain.TaskStatusDeveloping,
 		StartedAt:          run.result.StartedAt,
 		FinishedAt:         run.result.FinishedAt,
@@ -63,6 +63,8 @@ func (e *StepExecutor) runAttempt(
 		failure:   failure,
 		gitBefore: request.gitBefore,
 		gitAfter:  after,
+		// 闭环模式只完成开发阶段：步骤进入 verifying 并保持占用，由协调器收口。
+		deferCompletion: request.deferCompletion,
 	})
 	result.AttemptStatus = finalization.attemptStatus
 	result.StepStatus = finalization.stepStatus
@@ -133,6 +135,8 @@ type finalizeRequest struct {
 	outcome domain.StepExecutionOutcome
 	summary string
 	failure string
+	// deferCompletion 表示只完成开发阶段，由闭环协调器收口步骤状态。
+	deferCompletion bool
 	// gitBefore 与 gitAfter 是执行前后的 Git 工作区状态，为空表示本次没有采集。
 	gitBefore *domain.GitWorktreeState
 	gitAfter  *domain.GitWorktreeState
@@ -157,7 +161,7 @@ func (e *StepExecutor) finalizeExecution(
 	writeCtx := context.WithoutCancel(ctx)
 	outcome := finalizeOutcome{
 		attemptStatus: request.outcome.AttemptStatus(),
-		stepStatus:    stepStatusOfOutcome(request.outcome, request.outcome.AttemptStatus()),
+		stepStatus:    finalizeStepStatus(request.deferCompletion, request.outcome, request.outcome.AttemptStatus()),
 		taskStatus:    request.task.Status,
 	}
 	attempt, attemptErr := e.finishAttempt(writeCtx, request)
@@ -303,7 +307,7 @@ func (e *StepExecutor) finishStep(
 		step.FailureStage = ""
 		step.FailureSummary = ""
 	}
-	next := stepStatusOfOutcome(request.outcome, attemptStatus)
+	next := finalizeStepStatus(request.deferCompletion, request.outcome, attemptStatus)
 	if err := step.Transition(next, at); err != nil {
 		return step, fmt.Errorf("标记步骤终态失败: %w", err)
 	}
@@ -691,6 +695,33 @@ func stepStatusOfOutcome(
 		}
 		return domain.StepStatusFailed
 	}
+}
+
+// finalizeStepStatus 依据是否延后收口选择步骤状态映射。
+func finalizeStepStatus(
+	deferCompletion bool,
+	outcome domain.StepExecutionOutcome,
+	attemptStatus domain.AttemptStatus,
+) domain.StepStatus {
+	if deferCompletion {
+		return deferredStepStatusOfOutcome(outcome, attemptStatus)
+	}
+	return stepStatusOfOutcome(outcome, attemptStatus)
+}
+
+// deferredStepStatusOfOutcome 把执行结论映射为闭环模式下的步骤状态。
+//
+// 与 stepStatusOfOutcome 的唯一区别是成功分支：闭环模式下开发成功并不代表验证通过，
+// 步骤进入 verifying 并保持被当前尝试占用，由闭环协调器依据真实验证结果收口。其余
+// 结论与普通模式一致：失败、超时与中断都不允许停留在"仍在执行"的中间状态。
+func deferredStepStatusOfOutcome(
+	outcome domain.StepExecutionOutcome,
+	attemptStatus domain.AttemptStatus,
+) domain.StepStatus {
+	if outcome == domain.StepExecutionCompleted {
+		return domain.StepStatusVerifying
+	}
+	return stepStatusOfOutcome(outcome, attemptStatus)
 }
 
 // errorClassOf 把执行结论映射为可复用的错误类别。

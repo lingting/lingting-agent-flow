@@ -428,6 +428,13 @@ type ValidationStore interface {
 		ctx context.Context,
 		attemptID domain.ID,
 	) ([]domain.ValidationRun, error)
+	// ListValidationRunsByStep 按创建时间返回某个步骤的全部验证记录。
+	//
+	// 步骤级查询用于"最新验证结果"：重试会创建新的尝试，历史验证记录仍然保留。
+	ListValidationRunsByStep(
+		ctx context.Context,
+		stepID domain.ID,
+	) ([]domain.ValidationRun, error)
 	// FinishValidationRun 以"仍在运行"为条件写入结论与终态。
 	//
 	// 已确认终态不会被迟到结果覆盖：状态不匹配返回 ErrConflict。
@@ -452,6 +459,32 @@ type ValidationStore interface {
 		ctx context.Context,
 		runID domain.ID,
 	) ([]domain.ValidationCheckResult, error)
+}
+
+// ValidationFeedbackStore 保存验证失败的结构化反馈。
+//
+// 反馈与原始 Validation Run 一起保留，不替代它：Validation Run 保存流程状态与最终
+// 结论，反馈保存"下一次 Developer 执行可以引用的失败问题清单"。
+type ValidationFeedbackStore interface {
+	// CreateValidationFailureFeedback 追加一条失败反馈。
+	//
+	// 同一轮验证至多一条反馈，重复写入返回 ErrConflict；历史反馈不会被覆盖。
+	CreateValidationFailureFeedback(
+		ctx context.Context,
+		feedback domain.ValidationFailureFeedback,
+	) error
+	// GetValidationFailureFeedback 读取某轮验证的失败反馈，不存在时返回 ErrNotFound。
+	GetValidationFailureFeedback(
+		ctx context.Context,
+		runID domain.ID,
+	) (*domain.ValidationFailureFeedback, error)
+	// LatestValidationFailureFeedbackByStep 返回步骤最近一次的失败反馈。
+	//
+	// 用于显式重试时引用上一轮问题；没有反馈时返回 ErrNotFound。
+	LatestValidationFailureFeedbackByStep(
+		ctx context.Context,
+		stepID domain.ID,
+	) (*domain.ValidationFailureFeedback, error)
 }
 
 // EventFilter 约束事件查询条件，零值表示不限制。
@@ -573,7 +606,10 @@ type Tx interface {
 	SessionStore
 	VerificationStore
 	// ValidationStore 提供确定性验证的运行记录与检查结果持久化。
+	// ValidationStore 提供确定性验证的运行记录与检查结果持久化。
 	ValidationStore
+	// ValidationFeedbackStore 提供验证失败反馈的追加与查询。
+	ValidationFeedbackStore
 	EventStore
 	EnvironmentVersionStore
 	ContainerStore

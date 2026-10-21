@@ -84,6 +84,8 @@ type ExecuteStepResponse struct {
 // stepExecutionHandler 处理步骤执行请求。
 type stepExecutionHandler struct {
 	executor *app.StepExecutor
+	// workflow 是开发—验证闭环协调器，为空时闭环接口返回 503。
+	workflow *app.StepWorkflowService
 	logger   *slog.Logger
 }
 
@@ -92,12 +94,13 @@ type stepExecutionHandler struct {
 // 服务为空时仍然返回处理器：请求会得到 503，而不是 404 或前端页面。
 func newStepExecutionHandler(
 	executor *app.StepExecutor,
+	workflow *app.StepWorkflowService,
 	logger *slog.Logger,
 ) *stepExecutionHandler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &stepExecutionHandler{executor: executor, logger: logger}
+	return &stepExecutionHandler{executor: executor, workflow: workflow, logger: logger}
 }
 
 // serve 处理 POST /api/v1/tasks/{taskID}/steps/{stepID}/execute。

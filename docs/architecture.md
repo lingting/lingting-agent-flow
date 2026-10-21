@@ -319,8 +319,86 @@ HTTP Handler（POST .../attempts/{attemptID}/validate）
 - 只支持命令型检查（`command`）：可执行文件 + 参数数组，不经过 shell。
 - 不发起 Validator Agent 辅助评估：结论函数已支持 `AgentAssessment` 输入并按"只能收紧、
   不能放宽"实现，但本阶段不创建 Validator Session。
-- 不实现完整 Planner → Developer → Validator 编排、自动重试与任务级调度队列。
 - 检查输出落在数据库目录下的 `validations/` 子目录，属于本机持久化数据，不写入项目目录。
+- 单步骤的开发—验证衔接见"单步骤开发—验证闭环边界"：验证引擎本身仍只负责执行检查与计算
+  结论，收口决策由 `domain.DecideStepCloseout` 承担。
+
+## 单步骤开发—验证闭环边界
+
+闭环是"单步骤执行"与"确定性验证"之上的一层薄协调，而不是新的调度器：
+
+```text
+HTTP Handler（POST /api/v1/tasks/{taskID}/steps/{stepID}/execute-and-validate）
+  └── app.StepWorkflowService.ExecuteAndValidate
+        ├── 归属 / 前置步骤 / 验证配置校验（domain.CheckStepPrerequisites、必需检查存在）
+        ├── app.StepExecutor.Execute（DeferCompletion=true，新建 Attempt 与独立 Session）
+        │     └── 开发成功时步骤进入 verifying 并保持被当前尝试占用
+        ├── app.ValidationService.Validate（同一容器、同一工作区）
+        ├── domain.DeriveStepVerificationState（由 Run 状态 / 结论 / 检查结果推导验证状态）
+        ├── domain.DecideStepCloseout（开发结论 + 验证状态 → 步骤收口状态）
+        └── 收口写入：步骤（条件更新）→ 任务（条件更新）→ 事件
+```
+
+### 状态分层
+
+| 层次 | 取值来源 | 说明 |
+|---|---|---|
+| 开发执行状态 | `attempts.status` / `StepExecutionOutcome` | `completed` 只表示 Agent 调用正常结束 |
+| 验证流程状态 | `validation_runs.status` | 流程是否跑完、是否被取消或超时 |
+| 验证结论 | `validation_runs.verdict` | 现有证据能否支持通过 |
+| 步骤验证状态 | `domain.StepVerificationState`（派生，不落库） | 供收口决策与展示使用 |
+| 最终步骤状态 | `steps.status` | 由 `domain.DecideStepCloseout` 计算后写入 |
+
+`StepVerificationState` 是从 Validation Run 派生出来的**决策视图**，不写入任何表：数据库仍只
+保存 `validation_runs.status` 与 `validation_runs.verdict`，两者严格分离的约束不会因为多了一个
+聚合视图而被抹平。
+
+### 收口规则
+
+| 开发结论 | 验证情况 | 步骤状态 |
+|---|---|---|
+| 失败 / 超时 | 未执行 | `failed` |
+| 取消 | 未执行 | `cancelled` |
+| 中断 | 未执行 | `recovery_required` |
+| 成功 | 未发起验证 | `recovery_required` |
+| 成功 | 验证通过 | `completed`（已验证完成） |
+| 成功 | 必要检查失败 | `failed` |
+| 成功 | 验证被取消 | `cancelled` |
+| 成功 | 验证基础设施异常 | `recovery_required` |
+
+- 规则只在 `domain.DecideStepCloseout` 中定义一次，不得在 Handler 或前端复制。
+- 单个步骤通过验证**不会**把任务推进到 `completed`：任务保持 `developing`，终态由后续代码
+  保存与任务级编排决定。只有"需要人工核验"的结论才把任务推进到 `recovery_required`。
+
+### 执行失败、验证失败与基础设施异常的区别
+
+三者必须可区分，任何一项都不能替代其他项：
+
+- **执行失败**：开发阶段结论为 `failed` / `timed_out` / `cancelled` / `interrupted`。此时没有
+  待验证的完成品，不启动验证。
+- **验证失败**：验证流程跑完，但至少一项启用的必需检查未通过（退出码不在允许范围内、输出
+  未匹配预期、检查超时或取消）。这是代码问题，步骤收敛为 `failed`。
+- **基础设施异常**：验证流程本身失败或整体超时，或任一启用的必需检查状态为 `error`
+  （命令无法启动、结果无法确认）。这**不是**代码问题：既不伪装成验证失败，也不判为通过，
+  步骤收敛为 `recovery_required`。
+
+### 失败反馈
+
+- 验证未通过时写入 `validation_feedbacks`：Task / Step / Developer Attempt / Validation Run
+  引用、失败检查标识与名称、实际退出码、失败原因、有长度限制的输出摘要、检查起止时间、
+  超时/取消/基础设施标记，以及开发会话引用。
+- 反馈与原始 Validation Run 一起保留，不替代它；同一轮验证至多一条反馈，历史反馈不被覆盖。
+- 输出摘要与原因在 `domain.RedactSensitiveText` / `domain.ClipFeedbackText` 中统一脱敏与
+  裁剪：令牌、口令、私钥与 URL 内嵌凭据一律过滤，长度受 `domain.MaxFeedback*` 限制。
+- 用户显式重新执行时，提示词会引用上一轮失败反馈（"上一次验证未通过的问题"），但反馈**不是**
+  当前验证结论，新的执行仍然必须创建新的 Attempt 与独立 Session 并通过新的验证。
+
+### 当前能力边界
+
+- 闭环只覆盖单个 Step：不生成计划、不串联多个步骤、不自动重试、不自动修复代码。
+- 同一 Step 同一时刻只允许一条闭环：进程内以步骤为键拒绝重复请求，跨进程由步骤占用的事务
+  条件更新拒绝。
+- 不实现任务级调度队列与多任务并发编排；下一步才是按计划推进多个 Step 并在验证失败时停下。
 
 ## SSH 边界
 

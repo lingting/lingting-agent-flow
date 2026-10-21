@@ -447,6 +447,54 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
 - 检查覆盖配置不得放宽门槛：覆盖后仍要求存在启用的必需检查，并执行同一套结论规则。
 - 本阶段不实现完整 Planner → Developer → Validator 编排、自动重试、任务级调度队列与
   Docker 镜像构建；相关能力缺失时必须返回明确错误，不得伪装成已可用。
+### 单步骤开发—验证闭环约束
+
+- 闭环入口固定为 `app.StepWorkflowService.ExecuteAndValidate`
+  （`internal/app/step_workflow*.go`）：HTTP Handler、CLI 与工作流都不得自行串联开发与验证，
+  也不得自行判断"开发成功了就该验证"。
+- 开发阶段必须复用 `app.StepExecutor`，验证阶段必须复用 `app.ValidationService`：
+  禁止新建第二套 Validator，也禁止把验证逻辑塞进 Handler。
+- Developer 完成不等于验证通过：开发成功时步骤进入 `verifying` 并保持被当前尝试占用
+  （`StepExecuteRequest.DeferCompletion`），只有真实验证通过才允许推进到 `completed`。
+- 验证结论只能由 `domain.DecideValidation` 依据真实检查结果计算；步骤收口状态只能由
+  `domain.DecideStepCloseout` 依据开发结论与验证状态计算。两处规则都不得在别处复制。
+- 只有以下条件全部成立时才启动验证：开发结论为 `completed`、开发阶段执行记录已完整写入、
+  验证配置存在启用的必需检查、任务容器仍受管理且运行中、上下文未被取消。
+- 验证配置缺失或无效时必须在开发之前返回明确错误（`ErrStepWorkflowInvalidConfig`），
+  不得跑完开发后把配置问题伪装成"验证未通过"。
+- Developer 失败、超时、取消或中断一律不启动验证；这些结论都不得被改写为通过。
+- 必要检查失败时不得将步骤标记为已验证完成；基础设施异常（容器不可用、命令无法启动、
+  结果无法确认、验证流程整体失败或超时）既不得伪装成代码验证失败，也不得判为通过。
+- 验证失败后默认停止并等待用户显式决定：不自动重试、不自动调用 Developer 修复代码、
+  不自动删除容器、不自动启动下一步骤。
+- 每次重新执行都必须创建新的 Attempt 与独立 Session，不复用旧记录、不覆盖历史尝试。
+- Developer 与 Validator 必须针对同一份任务容器工作区：中间不得重新 Clone、不得重置或
+  清理已有代码改动，也不得在验证结束前删除容器与必要临时资源。
+- 代码检查不得静默退回宿主机执行：容器缺失、未运行、已 detached 或节点未通过预检时
+  一律返回前置条件错误。
+- 验证失败的反馈以结构化记录保存（`validation_feedbacks`），至少包含 Task / Step /
+  Developer Attempt / Validation Run 引用、失败检查标识与名称、实际退出码、失败原因、
+  有长度限制的输出摘要、检查起止时间、超时/取消/基础设施标记。不得只覆盖步骤上的一个
+  字符串字段，也不得把完整 Session 内容写进反馈。
+- 反馈摘要必须过滤凭据（令牌、口令、私钥、URL 内嵌凭据）并限制长度；过滤在
+  `domain.RedactSensitiveText` / `domain.ClipFeedbackText` 中统一实现。
+- 反馈可以被下一次显式执行的提示词引用（"上一次验证未通过的问题"），但不得被当作当前
+  验证结论，也不得让新的执行跳过验证。
+- 收口写入必须使用状态前置条件：步骤只在仍处于 `verifying` 时被改写，迟到的结果不得覆盖
+  已确认的终态；收口为可再次执行或终态时必须释放 `current_attempt_id`。
+- 单个步骤通过验证不得把任务推进到 `completed`：任务保持 `developing`，终态由后续代码
+  保存与任务级编排决定；只有"需要人工核验"的结论才把任务推进到 `recovery_required`。
+- 闭环协调器作为 `agentflow server` 的后台服务注册进 `internal/lifecycle`，注册顺序在
+  步骤执行与验证引擎之后，停止顺序因此反过来：先停止新请求入口，再让下层服务收敛。
+- 同一 Step 同一时刻只允许一条闭环：进程内以步骤为键拒绝重复请求，跨进程仍由步骤占用的
+  事务条件更新拒绝。重复与并发请求返回 409，不得启动第二个 Pi 进程。
+- 闭环接口固定为 `POST /api/v1/tasks/{taskID}/steps/{stepID}/execute-and-validate`，
+  只接受执行参数（可选补充提示词、开发超时、验证超时），不接受任意 Session 路径、
+  工作目录、命令行参数或角色覆盖。错误映射：参数错误 400、目标不存在或归属不符 404、
+  状态冲突 409、前置条件缺失 412、执行发生但未成功 500。
+- 未验证通过不得返回 200：响应必须如实区分开发结论、验证是否发起、验证结论与最终状态。
+- 本阶段不实现 Planner 自动生成计划、自动修复重试循环与多任务并发调度；相关能力缺失时
+  必须返回明确错误，不得伪装成已可用。
 
 ### 任务管理 API 约束
 

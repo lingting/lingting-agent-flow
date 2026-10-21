@@ -56,6 +56,14 @@ type StepExecuteRequest struct {
 	Prompt string
 	// Timeout 是本次调用的超时时间，零值使用任务配置或默认值。
 	Timeout time.Duration
+	// DeferCompletion 表示本次调用只完成开发阶段，由闭环协调器收口步骤状态。
+	//
+	// 为 true 时，开发成功后步骤进入 verifying 并保持被当前尝试占用：此时既没有通过
+	// 验证，也没有失败，把步骤提前标记为 completed 会伪造"已验证完成"。闭环协调器
+	// 随后依据真实验证结果把步骤推进到最终状态。
+	//
+	// 该字段只由应用层内部使用，不通过 HTTP 请求体暴露。
+	DeferCompletion bool
 }
 
 // StepExecutionResult 是一次单步骤执行的结果。
@@ -347,16 +355,17 @@ func (e *StepExecutor) Execute(
 		slog.String("role_id", role.ID.String()),
 	)
 	result := e.runAttempt(runCtx, runAttemptRequest{
-		task:        started.Task,
-		step:        started.Step,
-		attempt:     started.Attempt,
-		role:        role,
-		container:   container,
-		containerID: started.Attempt.ContainerID,
-		dockerID:    started.Attempt.DockerID,
-		prompt:      prompt,
-		timeout:     timeout,
-		gitBefore:   before,
+		task:            started.Task,
+		step:            started.Step,
+		attempt:         started.Attempt,
+		role:            role,
+		container:       container,
+		containerID:     started.Attempt.ContainerID,
+		dockerID:        started.Attempt.DockerID,
+		prompt:          prompt,
+		timeout:         timeout,
+		gitBefore:       before,
+		deferCompletion: request.DeferCompletion,
 	})
 	result.AttemptNumber = started.Attempt.AttemptNumber
 	return result, nil
@@ -375,6 +384,8 @@ type runAttemptRequest struct {
 	timeout     time.Duration
 	// gitBefore 是执行前采集到的 Git 工作区状态，为空表示本次没有采集。
 	gitBefore *domain.GitWorktreeState
+	// deferCompletion 表示只完成开发阶段，由闭环协调器收口步骤状态。
+	deferCompletion bool
 }
 
 // checkPrerequisites 校验指定步骤的全部前序步骤是否已完成。

@@ -27,6 +27,8 @@ type dbStore struct {
 	codeSaveStore
 	codeFetchStore
 	stepExecutionStore
+	// validationFeedbackStore 提供验证失败反馈的追加与查询。
+	validationFeedbackStore
 }
 
 // txStore 把事务上的各实体仓储组合成 storage.Tx。
@@ -46,6 +48,8 @@ type txStore struct {
 	codeSaveStore
 	codeFetchStore
 	stepExecutionStore
+	// validationFeedbackStore 提供验证失败反馈的追加与查询。
+	validationFeedbackStore
 }
 
 // newDBStore 构造连接池仓储。
@@ -67,6 +71,7 @@ func newDBStore(db *sql.DB) *dbStore {
 		codeSaveStore:           codeSaveStore{q: pool},
 		codeFetchStore:          codeFetchStore{q: pool},
 		stepExecutionStore:      stepExecutionStore{q: pool},
+		validationFeedbackStore: validationFeedbackStore{q: pool},
 	}
 }
 
@@ -88,6 +93,7 @@ func newTxStore(tx *sql.Tx) *txStore {
 		codeSaveStore:           codeSaveStore{q: tx},
 		codeFetchStore:          codeFetchStore{q: tx},
 		stepExecutionStore:      stepExecutionStore{q: tx},
+		validationFeedbackStore: validationFeedbackStore{q: tx},
 	}
 }
 

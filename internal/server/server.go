@@ -137,6 +137,8 @@ type Server struct {
 	stepExecutor *app.StepExecutor
 	// validationEngine 是确定性验证引擎，为空时不提供验证接口。
 	validationEngine *app.ValidationService
+	// stepWorkflow 是单步骤开发—验证闭环协调器，为空时不提供闭环接口。
+	stepWorkflow *app.StepWorkflowService
 	// codeInitialize 是代码初始化协调器，为空时不提供初始化接口。
 	codeInitialize *app.CodeInitializeService
 	requireWeb     bool
@@ -274,6 +276,20 @@ func (s *Server) openDatabase(ctx context.Context) error {
 		}
 		s.validationEngine = engine
 	}
+	if s.stepExecutor != nil && s.validationEngine != nil {
+		// 闭环协调器只是把两个已有服务串起来：开发使用 StepExecutor，验证使用
+		// ValidationService，两者共享同一任务容器工作区。
+		workflow, workflowErr := app.NewStepWorkflowService(app.StepWorkflowOptions{
+			Steps:      s.stepExecutor,
+			Validation: s.validationEngine,
+			Store:      s.store,
+			Logger:     s.logger,
+		})
+		if workflowErr != nil {
+			return fmt.Errorf("初始化步骤闭环协调器失败: %w", workflowErr)
+		}
+		s.stepWorkflow = workflow
+	}
 	if s.codeInitializeFactory != nil {
 		initializer, initErr := s.codeInitializeFactory(store, s.cfg)
 		if initErr != nil {
@@ -330,6 +346,11 @@ func (s *Server) startServices(ctx context.Context) error {
 		// 验证引擎也注册进统一生命周期：停止时取消在途验证并等待远程命令中断，
 		// 使验证记录收敛为失败终态，而不是留下 running 残留。
 		services = append(services, s.validationEngine)
+	}
+	if s.stepWorkflow != nil {
+		// 闭环协调器注册在最后：它依赖步骤执行与验证引擎，停止顺序因此自动反过来，
+		// 先停止新请求入口，再让下层服务收敛在途工作。
+		services = append(services, s.stepWorkflow)
 	}
 	if len(services) == 0 {
 		return nil
@@ -448,6 +469,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		ExecutionRecords: s.executionRecords,
 		StepExecutor:     s.stepExecutor,
 		Validation:       s.validationEngine,
+		StepWorkflow:     s.stepWorkflow,
 		CodeInitialize:   s.codeInitialize,
 		RequireWebUI:     s.requireWeb,
 		ShutdownTimeout:  s.shutdownTimeout,

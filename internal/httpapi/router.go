@@ -31,8 +31,9 @@ type Deps struct {
 	// StepExecutor 是单步骤执行协调器，为空时步骤执行接口返回服务不可用。
 	StepExecutor *app.StepExecutor
 	// Validation 是确定性验证引擎，为空时验证接口返回服务不可用。
-	// Validation 是确定性验证引擎，为空时验证接口返回服务不可用。
 	Validation *app.ValidationService
+	// StepWorkflow 是单步骤开发—验证闭环协调器，为空时闭环接口返回服务不可用。
+	StepWorkflow *app.StepWorkflowService
 	// CodeInitialize 是代码初始化协调器，为空时初始化接口返回服务不可用。
 	CodeInitialize *app.CodeInitializeService
 	// Logger 是日志器，为空时使用 slog.Default。
@@ -54,7 +55,7 @@ func NewHandler(deps Deps) http.Handler {
 		tasks:      newTaskHandler(deps.Tasks, logger),
 		hosts:      newHostHandler(deps.Hosts, logger),
 		executions: newExecutionHandler(deps.ExecutionRecords, logger),
-		stepExec:   newStepExecutionHandler(deps.StepExecutor, logger),
+		stepExec:   newStepExecutionHandler(deps.StepExecutor, deps.StepWorkflow, logger),
 		validation: newValidationHandler(deps.Validation, logger),
 		codeInit:   newCodeInitializeHandler(deps.CodeInitialize, logger),
 		logger:     logger,
@@ -117,6 +118,12 @@ func (rt *router) tasksHandler(w http.ResponseWriter, r *http.Request) {
 				"该接口只支持 GET 与 POST 请求",
 			)
 		}
+		return
+	}
+	// 开发—验证闭环与单步骤执行共享 {taskID}/steps/{stepID} 前缀，且都是写操作，
+	// 因此必须先判定闭环形状，再判定单步骤执行形状。
+	if taskID, stepID, ok := parseExecuteAndValidatePath(r.URL.Path); ok {
+		rt.stepExec.serveExecuteAndValidate(w, r, taskID, stepID)
 		return
 	}
 	// 步骤执行动作与执行记录共享 {taskID}/steps 前缀，因此必须先判定具体形状：
