@@ -324,6 +324,49 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
 - 本阶段不实现多步骤自动编排、自动重试、远程容器创建、Git 操作与执行队列；相关能力缺失
   时必须返回明确错误，不得伪装成已可用。
 
+### 确定性验证引擎（Validator）约束
+
+- 验证入口固定为 `app.ValidationService`（`internal/app/validation*.go`）：HTTP Handler、CLI 与
+  工作流都不得自行执行检查命令、自行创建 Validation Run 或直接写验证结论。
+- 验证流程状态（`validation_runs.status`：`pending` / `running` / `completed` / `failed` /
+  `cancelled` / `timed_out`）与最终结论（`validation_runs.verdict`：`passed` / `failed` /
+  `inconclusive`）必须分别持久化，不得合并为一个字段，也不得由状态推导结论。
+- 最终结论只能由 `domain.DecideValidation` 这一纯函数依据结构化检查结果计算：禁止由 Pi Agent、
+  HTTP Handler 或前端决定结论。规则至少包含：
+  - 验证流程必须处于 `completed`，取消、超时与流程失败一律不判通过；
+  - 至少存在一项启用的必需检查；
+  - 每一项启用的必需检查都必须有结果且状态为 `passed`；
+  - 必需检查非零退出码、超时、取消、跳过、启动失败与结果缺失都判 `failed`；
+  - 可选检查失败不影响结论，但必须保留结果；
+  - 全部检查被跳过或没有启用的必需检查时不得判定通过。
+- Agent 辅助评估只能收紧结论：Agent 声称通过不得覆盖必需检查的失败，也不得替代缺失的必需
+  检查。本阶段不发起 Validator Session 调用，结论计算函数已按该约束实现并可被单独测试。
+- 命令检查必须以可执行文件 + 参数数组表达，禁止拼接 shell 字符串，也不得把所有命令交给
+  `sh -c` / `bash -c`。检查命令只在受管理的任务容器内、容器内工作区（`/workspace` 之下）执行；
+  容器缺失、未运行、已 detached 或节点未通过预检时返回明确的前置条件错误，不得回退到服务进程
+  的当前目录执行。
+- 检查执行必须设置超时、响应 context 取消、限制输出字节数，并分别捕获标准输出与标准错误。
+  执行结果必须区分"命令以非零码正常结束"与"启动失败、超时、取消、结果无法确认"，不得压缩成
+  单个布尔值。
+- 检查结果逐项写入（`storage.ValidationStore.AppendValidationCheckResult`）：部分检查完成后
+  发生错误时，已产生的证据必须仍可追溯，不得因最后一项失败而整体丢失。
+- 同一 Attempt 同一时刻只允许一个有效验证：占用必须通过
+  `storage.ValidationStore.BeginValidationRun` 在单个事务内以状态为条件完成，冲突返回
+  `storage.ErrConflict` 并映射为 409；禁止只依赖进程内互斥锁。
+- 验证结论写回 Attempt 必须使用带状态前置条件的更新；迟到结果不得覆盖已确认的终态。
+- 结论或检查结果写入失败时，接口不得报告验证成功：结果必须携带 `Persisted=false` 与
+  `PersistenceErrors`，HTTP 映射为 `execution_not_persisted`（500）。
+- 检查输出落盘失败（`output_archive_error`）与检查判定相互独立：归档失败不得改写退出码或
+  检查状态，必须单独记录。
+- 验证服务作为 `agentflow server` 的后台服务注册进 `internal/lifecycle`：Server 停止时取消
+  在途验证并等待收敛，把记录推进到失败终态，不留 `running` 残留。
+- 验证接口固定为 `POST /api/v1/tasks/{taskID}/steps/{stepID}/attempts/{attemptID}/validate`，
+  只接受验证参数（可选超时与检查覆盖配置），不接受工作目录、任意命令行或 Session 路径。
+  错误映射：参数错误 400、目标不存在或归属不符 404、状态冲突 409、前置条件缺失 412。
+- 检查覆盖配置不得放宽门槛：覆盖后仍要求存在启用的必需检查，并执行同一套结论规则。
+- 本阶段不实现完整 Planner → Developer → Validator 编排、自动重试、任务级调度队列与
+  Docker 镜像构建；相关能力缺失时必须返回明确错误，不得伪装成已可用。
+
 ### 任务管理 API 约束
 
 - 任务状态只能由业务层状态机修改：`internal/domain` 的 `Transition`、`RequestCancel`、

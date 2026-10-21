@@ -32,6 +32,7 @@ var enumColumns = []string{
 	"commit_status",
 	"push_status",
 	"merge_status",
+	"execution_env",
 }
 
 // enumProbe 是一次"写入未知枚举值"的探测。
@@ -150,6 +151,28 @@ var enumProbes = []enumProbe{
 			 'agent/probe-task', 'deferred', 'deferred', 'deferred', 1, 1)`,
 	},
 	{
+		table:  "validation_runs",
+		column: "status",
+		value:  "awaiting_rerun",
+		statement: `INSERT INTO validation_runs
+			(id, task_id, step_id, attempt_id, status, verdict, spec_json,
+			 total_checks, passed_checks, failed_checks, skipped_checks,
+			 started_at, created_at, updated_at)
+			VALUES ('probe-validation-run', 'orphan-task', 'orphan-step',
+			 'orphan-attempt', 'awaiting_rerun', 'pending_review', '{}',
+			 0, 0, 0, 0, 1, 1, 1)`,
+	},
+	{
+		table:  "validation_check_results",
+		column: "status",
+		value:  "quarantined",
+		statement: `INSERT INTO validation_check_results
+			(id, validation_run_id, check_id, check_name, definition_json, status,
+			 exit_code, started_at, finished_at, created_at)
+			VALUES ('probe-check-result', 'orphan-run', 'probe-check', '探针检查',
+			 '{}', 'quarantined', -1, 1, 1, 1)`,
+	},
+	{
 		table:  "roles",
 		column: "type",
 		value:  "auditor",
@@ -187,6 +210,10 @@ var requiredConstraints = []requiredConstraint{
 	{"code_saves", "base_branch IS NULL OR base_branch <> task_branch"},
 	{"code_saves", "length(commit_sha) IN (40, 64)"},
 	{"verification_results", "json_valid(checks_json)"},
+	{"validation_runs", "json_valid(spec_json)"},
+	{"validation_runs", "passed_checks + failed_checks + skipped_checks <= total_checks"},
+	{"validation_check_results", "json_valid(definition_json)"},
+	{"validation_check_results", "sequence > 0"},
 }
 
 // expectedIndexes 是必须保留的索引名。
@@ -225,6 +252,12 @@ var expectedIndexes = []string{
 	"idx_code_saves_task",
 	"idx_code_saves_container",
 	"idx_code_saves_push_status",
+	"idx_validation_runs_attempt",
+	"idx_validation_runs_step",
+	"idx_validation_runs_task",
+	"idx_validation_runs_status",
+	"idx_validation_check_results_run",
+	"idx_validation_check_results_status",
 }
 
 // quoteIdentifier 校验表名并返回可直接拼接的标识符。

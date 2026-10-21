@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
+	"github.com/lingting/agentflow/internal/sshclient"
 )
 
 // 容器运行的默认约束。
@@ -418,12 +419,39 @@ func VerifyOwnership(inspect ContainerInspect, expected domain.Container) error 
 // ExecCommand 在运行中的容器内执行一条非交互命令。
 //
 // 命令通过 docker exec 执行，输出受 sshclient 的有界缓冲限制；
-// 返回的退出码是容器内命令的退出码。
+// 返回的退出码是容器内命令的退出码。工作目录固定为任务项目目录。
 func (r *Runner) ExecCommand(
 	ctx context.Context,
 	dockerID string,
 	command []string,
 	timeout time.Duration,
+) (CommandResult, error) {
+	return r.ExecCommandIn(ctx, dockerID, command, ExecOptions{Timeout: timeout})
+}
+
+// ExecOptions 约束一次容器内命令执行。
+type ExecOptions struct {
+	// WorkDir 是容器内执行目录，空值使用任务项目目录。
+	//
+	// 它必须是 /workspace 之下的安全绝对路径：调用方不能指定任意宿主机目录，
+	// 也不能借此读取容器内的敏感路径。
+	WorkDir string
+	// Timeout 是执行超时，零值使用 DefaultMutateTimeout。
+	Timeout time.Duration
+	// MaxOutputBytes 是标准输出与标准错误各自保留的字节上限，
+	// 零值使用 sshclient.DefaultMaxOutputBytes。
+	MaxOutputBytes int
+}
+
+// ExecCommandIn 在运行中的容器内按给定选项执行一条非交互命令。
+//
+// 工作目录与输出上限都必须显式经过校验：验证引擎需要在任务工作区内执行检查命令，
+// 同时避免异常输出耗尽内存或磁盘。
+func (r *Runner) ExecCommandIn(
+	ctx context.Context,
+	dockerID string,
+	command []string,
+	options ExecOptions,
 ) (CommandResult, error) {
 	if strings.TrimSpace(dockerID) == "" {
 		return CommandResult{}, newError(CodeInvalidArgument, "docker exec", "容器 ID 不能为空", nil)
@@ -431,14 +459,56 @@ func (r *Runner) ExecCommand(
 	if len(command) == 0 {
 		return CommandResult{}, newError(CodeInvalidArgument, "docker exec", "容器内命令不能为空", nil)
 	}
-	remote, err := execCommandString(dockerID, command)
+	workDir := strings.TrimSpace(options.WorkDir)
+	if workDir == "" {
+		workDir = domain.DefaultContainerWorkDir
+	}
+	if err := domain.ValidateContainerWorkDir(workDir); err != nil {
+		return CommandResult{}, newError(
+			CodeInvalidArgument,
+			"docker exec",
+			"容器内工作目录非法: "+err.Error(),
+			nil,
+		)
+	}
+	remote, err := execCommandStringIn(workDir, dockerID, command)
 	if err != nil {
 		return CommandResult{}, err
 	}
+	timeout := options.Timeout
 	if timeout <= 0 {
 		timeout = DefaultMutateTimeout
 	}
-	return r.Run(ctx, "docker exec", remote, timeout)
+	if options.MaxOutputBytes <= 0 {
+		return r.Run(ctx, "docker exec", remote, timeout)
+	}
+	// 只有显式给出上限时才覆盖默认值：其余调用路径保持原有行为。
+	var result sshclient.CommandResult
+	var runErr error
+	result, runErr = r.runWithOutputLimit(ctx, remote, timeout, options.MaxOutputBytes)
+	converted := CommandResult{
+		Command:   remote,
+		ExitCode:  result.ExitCode,
+		Stdout:    result.Stdout,
+		Stderr:    result.Stderr,
+		Truncated: result.StdoutTruncated || result.StderrTruncated,
+		Duration:  result.Duration,
+		Status:    result.Status,
+		Stdin:     result.Stdin,
+		Certain:   result.TerminationConfirmed,
+		Started:   result.Started,
+	}
+	if runErr != nil {
+		code := CodeSSHUnavailable
+		if result.TimedOut() || result.Cancelled() {
+			code = CodeStateUncertain
+		}
+		return converted, newError(code, "docker exec", "远程命令未能确认结束", runErr)
+	}
+	if converted.Succeeded() {
+		return converted, nil
+	}
+	return converted, converted.commandError("docker exec")
 }
 
 // ExecCommandWithInput 在运行中的容器内执行命令并把 input 写入其标准输入。
@@ -480,7 +550,19 @@ func execCommandString(
 	command []string,
 	extra ...string,
 ) (string, error) {
-	args := []string{"--workdir", domain.DefaultContainerWorkDir}
+	return execCommandStringIn(domain.DefaultContainerWorkDir, dockerID, command, extra...)
+}
+
+// execCommandStringIn 构造带显式工作目录的 docker exec 远程命令字符串。
+//
+// workDir 必须已通过 domain.ValidateContainerWorkDir 校验；命令的每个参数都会被
+// 单独转义，用户输入不会进入 shell。
+func execCommandStringIn(
+	workDir, dockerID string,
+	command []string,
+	extra ...string,
+) (string, error) {
+	args := []string{"--workdir", workDir}
 	args = append(args, extra...)
 	args = append(args, dockerID)
 	args = append(args, command...)

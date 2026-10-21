@@ -20,6 +20,7 @@ const (
 	EventTypeAttemptStarted       EventType = "attempt.started"
 	EventTypeSessionStarted       EventType = "session.started"
 	EventTypeSessionCompleted     EventType = "session.completed"
+	EventTypeVerificationStarted  EventType = "verification.started"
 	EventTypeVerificationPassed   EventType = "verification.passed"
 	EventTypeVerificationFailed   EventType = "verification.failed"
 	EventTypeAttemptFailed        EventType = "attempt.failed"
@@ -49,6 +50,7 @@ var knownEventTypes = []EventType{
 	EventTypeAttemptStarted,
 	EventTypeSessionStarted,
 	EventTypeSessionCompleted,
+	EventTypeVerificationStarted,
 	EventTypeVerificationPassed,
 	EventTypeVerificationFailed,
 	EventTypeAttemptFailed,

@@ -177,6 +177,8 @@ func (c *client) runWithInput(
 		result.Duration = time.Since(started)
 		return result, err
 	}
+	// 会话已建立且命令已提交：从这一刻起退出码与输出才有意义。
+	result.Started = true
 	finished := make(chan error, 1)
 	go func() {
 		finished <- session.Run(command)

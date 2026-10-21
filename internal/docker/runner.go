@@ -79,6 +79,11 @@ type CommandResult struct {
 	// 超时、取消或连接中断时为 false：此时远程命令可能已经执行完成，
 	// 调用方必须先核验远程状态，不得直接重试可能产生副作用的命令。
 	Certain bool
+	// Started 表示远程命令确实被提交执行过。
+	//
+	// 会话创建失败或上下文已取消时保持 false：此时退出码与输出都没有意义，
+	// 调用方必须区分"命令执行失败"与"命令根本没跑起来"。
+	Started bool
 }
 
 // Succeeded 判断命令是否以退出码 0 正常结束。
@@ -166,6 +171,7 @@ func (r *Runner) runWithInput(
 		Status:    result.Status,
 		Stdin:     result.Stdin,
 		Certain:   result.TerminationConfirmed,
+		Started:   result.Started,
 	}
 	if err != nil {
 		// 传输层错误：超时、取消、连接中断。此时远程是否已经执行无法确认。
@@ -193,6 +199,33 @@ func (r CommandResult) commandError(op string) error {
 		detail += ": " + summary
 	}
 	return newError(code, op, detail, nil)
+}
+
+// runWithOutputLimit 以显式输出上限执行一条远程命令。
+//
+// 它只被需要限制输出的调用路径使用（例如确定性验证检查）：其余路径保持
+// sshclient 的默认上限，避免无意中改变既有行为。
+func (r *Runner) runWithOutputLimit(
+	ctx context.Context,
+	command string,
+	timeout time.Duration,
+	maxOutputBytes int,
+) (sshclient.CommandResult, error) {
+	if strings.TrimSpace(command) == "" {
+		return sshclient.CommandResult{}, newError(
+			CodeInvalidArgument,
+			"docker",
+			"远程命令不能为空",
+			nil,
+		)
+	}
+	if timeout <= 0 {
+		timeout = r.queryTimeout
+	}
+	return r.client.Run(ctx, command, sshclient.RunOptions{
+		Timeout:        timeout,
+		MaxOutputBytes: maxOutputBytes,
+	})
 }
 
 // RunQuery 执行查询类命令，使用查询超时。

@@ -113,6 +113,11 @@ type CommandResult struct {
 	// 正常结束时为 true；超时或取消时本端已关闭会话通道，但 SSH 协议不保证
 	// 远程进程一定被终止，因此该字段为 false，调用方不得据此认为远程进程已退出。
 	TerminationConfirmed bool
+	// Started 表示远程会话已建立并提交了命令。
+	//
+	// 会话创建失败、上下文已取消或写入标准输入失败时保持 false：此时退出码与
+	// 输出都没有意义，调用方不得据此判定"命令执行失败"，只能判定"没有拿到证据"。
+	Started bool
 }
 
 // Succeeded 判断命令是否以退出码 0 正常结束。

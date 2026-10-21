@@ -154,10 +154,15 @@ cmd/agentflow → cli / httpapi / server → app → config / logging / storage 
 | Step | 计划中的业务步骤 | domain |
 | Attempt | 某个 Step 的一次执行尝试 | domain |
 | Session | 一次具体的 Pi 会话 | domain |
-| VerificationResult | 某次验证的结构化结果 | domain |
+| VerificationResult | 工作流引擎一次验证的结构化结果（含 Agent 辅助评估） | domain |
+| ValidationRun | 确定性验证引擎的一次运行记录（状态与结论分离） | domain |
+| ValidationCheckResult | 一项确定性检查的真实执行结果 | domain |
 | ExecutionHost | 通过 SSH 管理的远程执行节点（连接目标与工作空间） | domain |
 
 - Step / Attempt / Session 是三个不同层次，不得合并为一个对象。
+- `ValidationRun` 与 `VerificationResult` 是两个不同模型：前者是确定性验证引擎的运行记录
+  （状态、结论、逐项检查结果分别持久化），后者是工作流引擎的验证快照（含 Agent 辅助评估，
+  结果整体以 JSON 保存）。两者不得合并，也不得互相替代。
 - 重试必须产生新的 Attempt 与新的 Session，历史记录只追加不覆盖。
 - 状态只能通过 `Transition`（或实体自身的结束方法）变更，不允许直接赋值绕过校验。
 - 角色名称由用户自由命名，工作流只依据角色类型识别职责。
@@ -221,6 +226,56 @@ HTTP Handler
 - 终态写入失败必须如实报告（`Finalized=false` / `execution_not_persisted`），不得因响应
   写入失败而跳过 Session 保存与状态更新。
 - 本层不创建、启动、停止或接管容器，也不执行 Git 操作。
+
+## 确定性验证引擎边界
+
+验证引擎是"执行结果"与"验收结论"之间的独立一层，边界如下：
+
+```text
+HTTP Handler（POST .../attempts/{attemptID}/validate）
+  └── app.ValidationService.Validate
+        ├── 归属与状态校验（Task → Step → Attempt）
+        ├── 执行节点准入 + 容器核验（只读，不创建/不启动）
+        ├── storage.ValidationStore.BeginValidationRun（单事务占用 + 创建 Validation Run）
+        ├── CheckExecutor.Exec（按配置顺序执行，逐项 AppendValidationCheckResult）
+        ├── domain.DecideValidation（纯函数计算结论）
+        └── 终态写入：Validation Run 结论 + Attempt 判定（各自条件更新）
+```
+
+### Validation Run 与 Check Result
+
+| 概念 | 含义 | 存储 |
+|---|---|---|
+| Validation Run | 一次验证的完整记录 | `validation_runs` |
+| Check Definition | 一项确定性检查的配置（随 Run 保存快照） | `validation_runs.spec_json` / `validation_check_results.definition_json` |
+| Check Result | 一项检查的真实执行结果 | `validation_check_results` |
+
+- 每次验证创建独立的 Validation Run，历史记录只追加不覆盖。
+- Check Result 独立成表而不是塞进单个 JSON 字段：需要按检查标识、状态与验证记录查询与审计。
+- 完整输出只保存落盘位置与摘要（`stdout_path` / `stderr_path` + `stdout_summary` /
+  `stderr_summary`），大输出由文件承载，避免撑爆 SQLite 普通字段。
+
+### 状态与结论的区别
+
+- `validation_runs.status`（`pending` / `running` / `completed` / `failed` / `cancelled` /
+  `timed_out`）描述**验证流程本身发生了什么**：是否跑完、是否被取消、是否整体超时。
+- `validation_runs.verdict`（`passed` / `failed` / `inconclusive`）描述**现有证据能否支持
+  通过**。两者严格分离：`completed` 不代表 `passed`，`failed` 状态也不必然对应
+  `failed` 结论，不得互相推导。
+- 单项检查状态（`validation_check_results.status`：`pending` / `running` / `passed` /
+  `failed` / `skipped` / `timed_out` / `cancelled` / `error`）必须区分"命令以非零码正常结束"
+  与"命令没能正常执行"，否则失败证据会被压平成一个布尔值。
+- 结论规则由 `domain.DecideValidation` 计算，不可被 Agent 结论覆盖（见 `AGENTS.md`）。
+
+### 当前能力边界
+
+- 检查执行环境固定为受管理的任务容器，通过 `docker exec` 在容器内工作区执行；容器缺失、
+  未运行或节点未通过预检时返回前置条件错误，不回退到本机执行。
+- 只支持命令型检查（`command`）：可执行文件 + 参数数组，不经过 shell。
+- 不发起 Validator Agent 辅助评估：结论函数已支持 `AgentAssessment` 输入并按"只能收紧、
+  不能放宽"实现，但本阶段不创建 Validator Session。
+- 不实现完整 Planner → Developer → Validator 编排、自动重试与任务级调度队列。
+- 检查输出落在数据库目录下的 `validations/` 子目录，属于本机持久化数据，不写入项目目录。
 
 ## SSH 边界
 

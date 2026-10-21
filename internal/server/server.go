@@ -68,6 +68,11 @@ type Options struct {
 	// SSH 服务需要数据库与配置（known_hosts 路径、超时），因此不能在构造 Server
 	// 时创建。工厂返回错误时启动失败，已启动组件按逆序清理。
 	SSHFactory func(store storage.Store, cfg *config.Config) (*app.SSHService, error)
+	// ValidationFactory 在数据库打开后构造确定性验证引擎。
+	//
+	// 验证引擎需要容器能力与检查输出目录，因此不能在构造 Server 时创建。工厂返回
+	// 错误时启动失败；返回 nil 表示本次运行不提供验证接口，此时接口返回 503。
+	ValidationFactory func(store storage.Store, cfg *config.Config) (*app.ValidationService, error)
 	// StepExecutorFactory 在数据库打开后构造单步骤执行协调器。
 	//
 	// 协调器需要容器能力与容器内 Agent 执行能力（SSH、Docker），因此不能在构造
@@ -100,12 +105,14 @@ type Server struct {
 	agentRunnerFactory func(store storage.Store, cfg *config.Config) (*app.AgentRunnerService, error)
 	// stepExecutorFactory 在数据库打开后构造单步骤执行协调器。
 	stepExecutorFactory func(store storage.Store, cfg *config.Config) (*app.StepExecutor, error)
-	systemInfo          func() app.SystemInfo
-	tasks               *app.TaskService
-	services            []Service
-	hosts               *app.ExecutionHostService
-	ssh                 *app.SSHService
-	validation          *app.HostValidationService
+	// validationFactory 在数据库打开后构造确定性验证引擎。
+	validationFactory func(store storage.Store, cfg *config.Config) (*app.ValidationService, error)
+	systemInfo        func() app.SystemInfo
+	tasks             *app.TaskService
+	services          []Service
+	hosts             *app.ExecutionHostService
+	ssh               *app.SSHService
+	validation        *app.HostValidationService
 	// sessions 是所有 Agent 调用共享的会话服务。
 	sessions *app.SessionService
 	// agentRunner 是统一 Pi Runner 后台服务，Server 停止时取消在途调用。
@@ -114,10 +121,12 @@ type Server struct {
 	executionRecords *app.ExecutionRecordService
 	// stepExecutor 是单步骤执行协调器，为空时不提供执行接口。
 	stepExecutor *app.StepExecutor
-	requireWeb   bool
-	logger       *slog.Logger
-	report       func(message string)
-	manager      *lifecycle.Manager
+	// validationEngine 是确定性验证引擎，为空时不提供验证接口。
+	validationEngine *app.ValidationService
+	requireWeb       bool
+	logger           *slog.Logger
+	report           func(message string)
+	manager          *lifecycle.Manager
 
 	boundAddr       string
 	cfg             *config.Config
@@ -161,6 +170,7 @@ func New(options Options) (*Server, error) {
 		sshFactory:          options.SSHFactory,
 		agentRunnerFactory:  options.AgentRunnerFactory,
 		stepExecutorFactory: options.StepExecutorFactory,
+		validationFactory:   options.ValidationFactory,
 		systemInfo:          options.SystemInfo,
 		tasks:               options.Tasks,
 		services:            options.Services,
@@ -240,6 +250,13 @@ func (s *Server) openDatabase(ctx context.Context) error {
 		}
 		s.stepExecutor = executor
 	}
+	if s.validationFactory != nil {
+		engine, engineErr := s.validationFactory(store, s.cfg)
+		if engineErr != nil {
+			return fmt.Errorf("初始化验证引擎失败: %w", engineErr)
+		}
+		s.validationEngine = engine
+	}
 	if s.agentRunner == nil && s.agentRunnerFactory != nil {
 		runner, err := s.agentRunnerFactory(store, s.cfg)
 		if err != nil {
@@ -284,6 +301,11 @@ func (s *Server) startServices(ctx context.Context) error {
 		// 步骤执行协调器同样注册进统一生命周期：Server 停止时取消在途执行并等待
 		// 收敛，使中断状态能被写入数据库，而不是留下 running 残留。
 		services = append(services, s.stepExecutor)
+	}
+	if s.validationEngine != nil {
+		// 验证引擎也注册进统一生命周期：停止时取消在途验证并等待远程命令中断，
+		// 使验证记录收敛为失败终态，而不是留下 running 残留。
+		services = append(services, s.validationEngine)
 	}
 	if len(services) == 0 {
 		return nil
@@ -401,6 +423,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		Hosts:            s.hosts,
 		ExecutionRecords: s.executionRecords,
 		StepExecutor:     s.stepExecutor,
+		Validation:       s.validationEngine,
 		RequireWebUI:     s.requireWeb,
 		ShutdownTimeout:  s.shutdownTimeout,
 		Report:           s.report,

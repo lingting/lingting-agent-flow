@@ -23,6 +23,8 @@ const (
 	MaxCommandLength = 4096
 	// MaxAcceptanceCriteria 是验收条件数量上限。
 	MaxAcceptanceCriteria = 50
+	// MaxValidationChecks 是单次验证允许的确定性检查数量上限。
+	MaxValidationChecks = 50
 )
 
 // RetryErrorClass 是可重试的错误类别。

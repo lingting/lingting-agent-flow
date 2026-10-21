@@ -355,6 +355,105 @@ type VerificationStore interface {
 	) ([]domain.VerificationResult, error)
 }
 
+// ValidationRunStartRequest 是一次"占用并开始验证"的输入。
+//
+// 只包含调用方已经确认的信息：验证记录本身由存储层在同一事务内创建，
+// 调用方不能指定任意标识或时间。
+type ValidationRunStartRequest struct {
+	// TaskID 是任务标识，必须与步骤所属任务一致。
+	TaskID domain.ID
+	// StepID 是待验证的步骤。
+	StepID domain.ID
+	// AttemptID 是待验证的执行尝试。
+	AttemptID domain.ID
+	// ExpectedTaskStatus 是占用时数据库中任务必须处于的状态。
+	ExpectedTaskStatus domain.TaskStatus
+	// Spec 是本次验证的配置快照。
+	Spec domain.ValidationSpec
+	// SpecSnapshot 是配置的 JSON 快照。
+	SpecSnapshot string
+	// ExecutionEnv 是执行环境类型。
+	ExecutionEnv string
+	// Workspace 是执行命令的工作区标识。
+	Workspace string
+	// ContainerID 是执行本次验证的容器登记记录 ID。
+	ContainerID string
+	// At 是验证开始时间，零值使用当前时间。
+	At time.Time
+}
+
+// ValidationRunFinishRequest 是一次"写入验证结论"的输入。
+type ValidationRunFinishRequest struct {
+	// RunID 是验证记录标识。
+	RunID domain.ID
+	// Status 是验证流程终态。
+	Status domain.ValidationRunStatus
+	// Verdict 是最终结论。
+	Verdict domain.VerificationVerdict
+	// Summary 是结论摘要。
+	Summary string
+	// FailureSummary 是失败或不确定结论的原因。
+	FailureSummary string
+	// ErrorDetail 是验证流程自身的错误。
+	ErrorDetail string
+	// PassedChecks / FailedChecks / SkippedChecks 是统计计数。
+	PassedChecks  int
+	FailedChecks  int
+	SkippedChecks int
+	// Duration 是验证总耗时。
+	Duration time.Duration
+	// At 是结束时间，零值使用当前时间。
+	At time.Time
+}
+
+// ValidationStore 保存确定性验证的运行记录与逐项检查结果。
+//
+// 写入分为两步：先以状态条件占用并创建验证记录，再逐项追加检查结果，最后写入
+// 结论。这样部分检查完成后发生错误时，已经产生的证据仍然可追溯，不会因为最后
+// 一项失败而整体丢失。
+type ValidationStore interface {
+	// BeginValidationRun 在单个事务内校验归属、占用验证并创建验证记录。
+	//
+	// 校验内容包括：任务与步骤归属一致、尝试属于该步骤、任务状态仍为期望值、
+	// 该尝试没有正在运行的验证。任一条件不成立返回 ErrConflict，调用方据此返回
+	// 状态冲突，而不是启动第二组检查。
+	BeginValidationRun(
+		ctx context.Context,
+		request ValidationRunStartRequest,
+	) (domain.ValidationRun, error)
+	// GetValidationRun 读取单条验证记录。
+	GetValidationRun(ctx context.Context, id domain.ID) (*domain.ValidationRun, error)
+	// ListValidationRunsByAttempt 按创建时间返回某次尝试的全部验证记录。
+	ListValidationRunsByAttempt(
+		ctx context.Context,
+		attemptID domain.ID,
+	) ([]domain.ValidationRun, error)
+	// FinishValidationRun 以"仍在运行"为条件写入结论与终态。
+	//
+	// 已确认终态不会被迟到结果覆盖：状态不匹配返回 ErrConflict。
+	FinishValidationRun(ctx context.Context, request ValidationRunFinishRequest) error
+	// FailValidationRun 把验证记录收敛为失败终态并记录原因。
+	FailValidationRun(
+		ctx context.Context,
+		id domain.ID,
+		status domain.ValidationRunStatus,
+		reason string,
+		at time.Time,
+	) error
+	// AppendValidationCheckResult 追加一条检查结果。
+	//
+	// 逐项追加而不是一次性写入：部分检查完成后发生错误时，已有结果仍然可追溯。
+	AppendValidationCheckResult(
+		ctx context.Context,
+		result domain.ValidationCheckResult,
+	) error
+	// ListValidationCheckResults 按执行顺序返回某个验证记录的全部检查结果。
+	ListValidationCheckResults(
+		ctx context.Context,
+		runID domain.ID,
+	) ([]domain.ValidationCheckResult, error)
+}
+
 // EventFilter 约束事件查询条件，零值表示不限制。
 type EventFilter struct {
 	// StepID 限制事件所属步骤。
@@ -453,6 +552,8 @@ type Tx interface {
 	AttemptStore
 	SessionStore
 	VerificationStore
+	// ValidationStore 提供确定性验证的运行记录与检查结果持久化。
+	ValidationStore
 	EventStore
 	EnvironmentVersionStore
 	ContainerStore

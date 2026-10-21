@@ -421,8 +421,12 @@ type ExecRequest struct {
 	ContainerID string
 	// Command 是容器内命令及其参数。
 	Command []string
+	// WorkDir 是容器内执行目录，必须位于 /workspace 之下；空值使用项目目录。
+	WorkDir string
 	// Timeout 是执行超时时间，零值使用默认值。
 	Timeout time.Duration
+	// MaxOutputBytes 是标准输出与标准错误各自保留的字节上限，零值使用默认上限。
+	MaxOutputBytes int
 }
 
 // ExecResult 是容器内命令的执行结果。
@@ -458,11 +462,15 @@ func (s *ContainerService) Exec(
 			if !inspect.Running {
 				return fmt.Errorf("容器 %s 当前未运行，无法执行命令", container.ID)
 			}
-			run, runErr := session.runner.ExecCommand(
+			run, runErr := session.runner.ExecCommandIn(
 				ctx,
 				container.DockerID,
 				request.Command,
-				request.Timeout,
+				docker.ExecOptions{
+					WorkDir:        request.WorkDir,
+					Timeout:        request.Timeout,
+					MaxOutputBytes: request.MaxOutputBytes,
+				},
 			)
 			result = ExecResult{Container: container, Result: run}
 			return runErr

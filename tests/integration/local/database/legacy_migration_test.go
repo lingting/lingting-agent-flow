@@ -267,8 +267,8 @@ func TestLegacyDatabaseLosesNoRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取 schema 版本失败: %v", err)
 	}
-	if version != 13 {
-		t.Fatalf("迁移后版本应为 13，实际 %d", version)
+	if version != 14 {
+		t.Fatalf("迁移后版本应为 14，实际 %d", version)
 	}
 
 	roles, err := db.ListRoles(ctx)
@@ -518,7 +518,7 @@ func TestLegacyDatabaseMigrationIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取 schema 版本失败: %v", err)
 	}
-	if version != 13 {
+	if version != 14 {
 		t.Fatalf("重复迁移后版本不符: %d", version)
 	}
 	task, err := second.GetTask(ctx, domain.ID(fixture.task))

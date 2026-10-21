@@ -105,6 +105,29 @@ func runServer(cmd *cobra.Command, a *app.App, configPath, address string, requi
 				Logger:     a.Logger().Slog(),
 			})
 		},
+		ValidationFactory: func(
+			store storage.Store,
+			cfg *config.Config,
+		) (*app.ValidationService, error) {
+			sshService, sshErr := app.NewSSHService(store, a.Logger(), sshOptionsFrom(cfg))
+			if sshErr != nil {
+				return nil, sshErr
+			}
+			containers, containersErr := app.NewContainerService(app.DockerServiceOptions{
+				SSH:    sshService,
+				Store:  store,
+				Logger: a.Logger(),
+			})
+			if containersErr != nil {
+				return nil, containersErr
+			}
+			return app.NewValidationService(app.ValidationOptions{
+				Store:      store,
+				Containers: containers,
+				OutputRoot: app.ValidationOutputRoot(cfg),
+				Logger:     a.Logger().Slog(),
+			})
+		},
 		SystemInfo:   a.SystemInfo,
 		RequireWebUI: requireWebUI,
 		Logger:       a.Logger().Slog(),

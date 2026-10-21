@@ -642,6 +642,72 @@ func TestExecCommandUsesNonInteractiveForm(t *testing.T) {
 	}
 }
 
+// TestExecCommandInHonoursWorkDirAndOutputLimit 验证显式工作目录与输出上限被应用。
+//
+// 验证引擎需要在任务工作区内执行检查命令，同时限制输出大小；两者都必须经过校验，
+// 不能由调用方随意指定。
+func TestExecCommandInHonoursWorkDirAndOutputLimit(t *testing.T) {
+	t.Parallel()
+	ws := testkit.New(t)
+	ws.Report()
+	client := &fakeClient{responder: func(command string) (sshclient.CommandResult, error) {
+		return succeed("ok\n")
+	}}
+	runner := newRunner(t, client)
+	if _, err := runner.ExecCommandIn(
+		context.Background(),
+		"container-abc",
+		[]string{"go", "test", "./..."},
+		docker.ExecOptions{
+			WorkDir:        "/workspace/project/sub",
+			Timeout:        time.Second,
+			MaxOutputBytes: 4096,
+		},
+	); err != nil {
+		t.Fatalf("执行容器内命令失败: %v", err)
+	}
+	recorded := client.recorded()
+	if len(recorded) != 1 {
+		t.Fatalf("应只执行一条远程命令，实际 %d", len(recorded))
+	}
+	command := recorded[0]
+	if !strings.Contains(command, "--workdir /workspace/project/sub") {
+		t.Fatalf("工作目录未应用: %s", command)
+	}
+	if !strings.Contains(command, "docker exec") {
+		t.Fatalf("容器内命令应使用 docker exec: %s", command)
+	}
+	// 命令以参数数组传递：可执行文件与每个参数分别转义，不存在整条命令字符串。
+	if !strings.Contains(command, "container-abc go test ./...") {
+		t.Fatalf("命令与参数应逐项传递: %s", command)
+	}
+}
+
+// TestExecCommandInRejectsUnsafeWorkDir 验证容器外工作目录被拒绝。
+func TestExecCommandInRejectsUnsafeWorkDir(t *testing.T) {
+	t.Parallel()
+	ws := testkit.New(t)
+	ws.Report()
+	client := &fakeClient{responder: func(command string) (sshclient.CommandResult, error) {
+		return succeed("ok\n")
+	}}
+	runner := newRunner(t, client)
+	for _, workDir := range []string{"/tmp", "/", "/workspace", "/etc/passwd"} {
+		_, err := runner.ExecCommandIn(
+			context.Background(),
+			"container-abc",
+			[]string{"ls"},
+			docker.ExecOptions{WorkDir: workDir, Timeout: time.Second},
+		)
+		if err == nil {
+			t.Fatalf("工作目录 %q 应当被拒绝", workDir)
+		}
+	}
+	if len(client.recorded()) != 0 {
+		t.Fatal("工作目录非法时不得执行任何远程命令")
+	}
+}
+
 // TestListAgentFlowContainersFiltersByOwnership 验证容器列表只匹配 AgentFlow 资源。
 func TestListAgentFlowContainersFiltersByOwnership(t *testing.T) {
 	t.Parallel()

@@ -31,6 +31,8 @@ var businessTables = []string{
 	"sessions",
 	"steps",
 	"tasks",
+	"validation_check_results",
+	"validation_runs",
 	"verification_results",
 }
 
