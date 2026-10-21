@@ -73,6 +73,15 @@ type Options struct {
 	// 验证引擎需要容器能力与检查输出目录，因此不能在构造 Server 时创建。工厂返回
 	// 错误时启动失败；返回 nil 表示本次运行不提供验证接口，此时接口返回 503。
 	ValidationFactory func(store storage.Store, cfg *config.Config) (*app.ValidationService, error)
+	// CodeInitializeFactory 在数据库打开后构造代码初始化协调器。
+	//
+	// 代码初始化需要容器能力（SSH、Docker）与容器内命令执行，因此不能在构造 Server
+	// 时创建。工厂返回错误时启动失败；返回 nil 表示本次运行不提供初始化接口，
+	// 此时接口返回 503 而不是伪造"代码已就绪"。
+	CodeInitializeFactory func(
+		store storage.Store,
+		cfg *config.Config,
+	) (*app.CodeInitializeService, error)
 	// StepExecutorFactory 在数据库打开后构造单步骤执行协调器。
 	//
 	// 协调器需要容器能力与容器内 Agent 执行能力（SSH、Docker），因此不能在构造
@@ -107,12 +116,17 @@ type Server struct {
 	stepExecutorFactory func(store storage.Store, cfg *config.Config) (*app.StepExecutor, error)
 	// validationFactory 在数据库打开后构造确定性验证引擎。
 	validationFactory func(store storage.Store, cfg *config.Config) (*app.ValidationService, error)
-	systemInfo        func() app.SystemInfo
-	tasks             *app.TaskService
-	services          []Service
-	hosts             *app.ExecutionHostService
-	ssh               *app.SSHService
-	validation        *app.HostValidationService
+	// codeInitializeFactory 在数据库打开后构造代码初始化协调器。
+	codeInitializeFactory func(
+		store storage.Store,
+		cfg *config.Config,
+	) (*app.CodeInitializeService, error)
+	systemInfo func() app.SystemInfo
+	tasks      *app.TaskService
+	services   []Service
+	hosts      *app.ExecutionHostService
+	ssh        *app.SSHService
+	validation *app.HostValidationService
 	// sessions 是所有 Agent 调用共享的会话服务。
 	sessions *app.SessionService
 	// agentRunner 是统一 Pi Runner 后台服务，Server 停止时取消在途调用。
@@ -123,10 +137,12 @@ type Server struct {
 	stepExecutor *app.StepExecutor
 	// validationEngine 是确定性验证引擎，为空时不提供验证接口。
 	validationEngine *app.ValidationService
-	requireWeb       bool
-	logger           *slog.Logger
-	report           func(message string)
-	manager          *lifecycle.Manager
+	// codeInitialize 是代码初始化协调器，为空时不提供初始化接口。
+	codeInitialize *app.CodeInitializeService
+	requireWeb     bool
+	logger         *slog.Logger
+	report         func(message string)
+	manager        *lifecycle.Manager
 
 	boundAddr       string
 	cfg             *config.Config
@@ -165,21 +181,22 @@ func New(options Options) (*Server, error) {
 		}
 	}
 	return &Server{
-		address:             options.Address,
-		openStore:           options.OpenStore,
-		sshFactory:          options.SSHFactory,
-		agentRunnerFactory:  options.AgentRunnerFactory,
-		stepExecutorFactory: options.StepExecutorFactory,
-		validationFactory:   options.ValidationFactory,
-		systemInfo:          options.SystemInfo,
-		tasks:               options.Tasks,
-		services:            options.Services,
-		hosts:               options.Hosts,
-		ssh:                 options.SSH,
-		requireWeb:          options.RequireWebUI,
-		logger:              options.Logger,
-		report:              report,
-		manager:             lifecycle.New(lifecycle.Options{Logger: options.Logger}),
+		address:               options.Address,
+		openStore:             options.OpenStore,
+		sshFactory:            options.SSHFactory,
+		agentRunnerFactory:    options.AgentRunnerFactory,
+		stepExecutorFactory:   options.StepExecutorFactory,
+		validationFactory:     options.ValidationFactory,
+		codeInitializeFactory: options.CodeInitializeFactory,
+		systemInfo:            options.SystemInfo,
+		tasks:                 options.Tasks,
+		services:              options.Services,
+		hosts:                 options.Hosts,
+		ssh:                   options.SSH,
+		requireWeb:            options.RequireWebUI,
+		logger:                options.Logger,
+		report:                report,
+		manager:               lifecycle.New(lifecycle.Options{Logger: options.Logger}),
 	}, nil
 }
 
@@ -256,6 +273,13 @@ func (s *Server) openDatabase(ctx context.Context) error {
 			return fmt.Errorf("初始化验证引擎失败: %w", engineErr)
 		}
 		s.validationEngine = engine
+	}
+	if s.codeInitializeFactory != nil {
+		initializer, initErr := s.codeInitializeFactory(store, s.cfg)
+		if initErr != nil {
+			return fmt.Errorf("初始化代码初始化服务失败: %w", initErr)
+		}
+		s.codeInitialize = initializer
 	}
 	if s.agentRunner == nil && s.agentRunnerFactory != nil {
 		runner, err := s.agentRunnerFactory(store, s.cfg)
@@ -424,6 +448,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		ExecutionRecords: s.executionRecords,
 		StepExecutor:     s.stepExecutor,
 		Validation:       s.validationEngine,
+		CodeInitialize:   s.codeInitialize,
 		RequireWebUI:     s.requireWeb,
 		ShutdownTimeout:  s.shutdownTimeout,
 		Report:           s.report,

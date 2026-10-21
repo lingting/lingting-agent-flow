@@ -128,6 +128,28 @@ func runServer(cmd *cobra.Command, a *app.App, configPath, address string, requi
 				Logger:     a.Logger().Slog(),
 			})
 		},
+		CodeInitializeFactory: func(
+			store storage.Store,
+			cfg *config.Config,
+		) (*app.CodeInitializeService, error) {
+			sshService, sshErr := app.NewSSHService(store, a.Logger(), sshOptionsFrom(cfg))
+			if sshErr != nil {
+				return nil, sshErr
+			}
+			containers, containersErr := app.NewContainerService(app.DockerServiceOptions{
+				SSH:    sshService,
+				Store:  store,
+				Logger: a.Logger(),
+			})
+			if containersErr != nil {
+				return nil, containersErr
+			}
+			return app.NewCodeInitializeService(app.CodeInitializeOptions{
+				Store:      store,
+				Containers: containers,
+				Logger:     a.Logger().Slog(),
+			})
+		},
 		SystemInfo:   a.SystemInfo,
 		RequireWebUI: requireWebUI,
 		Logger:       a.Logger().Slog(),

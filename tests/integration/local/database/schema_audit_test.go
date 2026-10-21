@@ -21,6 +21,7 @@ import (
 // businessTables 是 AgentFlow 管理的全部业务表。
 var businessTables = []string{
 	"attempts",
+	"code_fetches",
 	"code_saves",
 	"containers",
 	"environment_versions",

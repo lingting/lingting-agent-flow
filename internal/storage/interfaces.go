@@ -543,6 +543,26 @@ type CodeSaveStore interface {
 	ListCodeSaveRecordsByTask(ctx context.Context, taskID string) ([]domain.CodeSaveRecord, error)
 }
 
+// CodeFetchStore 保存代码初始化（代码获取 + 任务分支准备）的执行记录。
+//
+// 记录只追加不覆盖：一次初始化对应一条记录，失败与成功都必须落库，使"同一
+// Attempt 是否已经初始化成功"可以由记录直接判断，而不是重新探测容器内文件系统。
+type CodeFetchStore interface {
+	CreateCodeFetchRecord(ctx context.Context, record domain.CodeFetchRecord) error
+	// UpdateCodeFetchRecord 按主键更新记录，不存在时返回 storage.ErrNotFound。
+	//
+	// 已进入终态的记录不会被重新打开：调用方必须先读取当前状态再经状态机判定。
+	UpdateCodeFetchRecord(ctx context.Context, record domain.CodeFetchRecord) error
+	GetCodeFetchRecord(ctx context.Context, id domain.ID) (*domain.CodeFetchRecord, error)
+	// ListCodeFetchRecordsByAttempt 按尝试列出记录，最新的在前。
+	ListCodeFetchRecordsByAttempt(
+		ctx context.Context,
+		attemptID string,
+	) ([]domain.CodeFetchRecord, error)
+	// ListCodeFetchRecordsByTask 按任务列出记录，最新的在前。
+	ListCodeFetchRecordsByTask(ctx context.Context, taskID string) ([]domain.CodeFetchRecord, error)
+}
+
 type Tx interface {
 	RoleStore
 	ExecutionHostStore
@@ -558,6 +578,8 @@ type Tx interface {
 	EnvironmentVersionStore
 	ContainerStore
 	CodeSaveStore
+	// CodeFetchStore 提供代码初始化记录的追加与查询。
+	CodeFetchStore
 	// StepExecutionStore 提供单步骤执行的原子占用，与其余实体共享同一事务边界。
 	StepExecutionStore
 }

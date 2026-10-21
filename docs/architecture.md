@@ -5,8 +5,9 @@
 > 下文的架构图为**目标架构**，仅说明分层意图。当前代码实现了 CLI 骨架、配置加载与校验、
 > 日志封装、SQLite 数据层、执行节点管理与环境预检、SSH 服务探测与 SSH 连接层（主机密钥校验、
 > 私钥认证、远程命令执行、SFTP 传输与远端 Unix 套接字通道）、统一 Pi Runner（本机与容器内）、
-> **单步骤执行协调器**、**确定性验证引擎**、**统一执行环境（远程 Linux + Docker）**
-> 与任务管理 HTTP 接口。图中调度、多步骤工作流编排与 UI 的完整形态尚未实现。
+> **单步骤执行协调器**、**确定性验证引擎**、**统一执行环境（远程 Linux + Docker）**、
+> **代码获取（CodeFetcher）与代码初始化协调器**与任务管理 HTTP 接口。
+> 图中调度、多步骤工作流编排与 UI 的完整形态尚未实现。
 
 ## 目标架构
 
@@ -43,6 +44,8 @@ internal/cli/             Cobra 命令实现
 internal/config/          配置结构与 YAML 加载、校验
 internal/logging/         结构化日志封装
 internal/domain/          核心实体、状态与业务规则（含单步骤执行准入规则）
+internal/source/          代码获取抽象（Fetcher）与 Git Clone 实现：容器内 Clone、基础分支识别、
+                          任务分支初始化与错误分类
 internal/execenv/         统一执行环境契约：Kind、Workspace、Environment、ExecSpec/Result、
                           PrepareSpec/Prepared、ReleaseRequest/Result、Provider 与 ExecPort
 internal/scheduler/       任务领取、并发控制、Worker 与恢复（未实现）
@@ -350,8 +353,55 @@ Environment  Container   docker.Runner
 ### 当前能力边界
 
 - 只实现远程 Linux + Docker 容器执行环境；本机 Windows / macOS / Linux 执行环境尚未实现。
-- 项目代码只通过 Git Clone 进入容器（SourceProvider）；wget、curl、SCP 等获取方式未实现。
+- 项目代码只通过 Git Clone 进入容器（`source.GitFetcher`）；wget、curl、SCP 等获取方式未实现。
 - 不实现多步骤自动编排、自动重试与任务级调度队列。
+- 不实现多步骤自动编排、自动重试与任务级调度队列。
+
+## 代码获取边界
+
+代码获取由统一抽象 `source.Fetcher` 表达，第一版只有 Git Clone 实现
+（`source.GitFetcher`），远程执行环境内的服务入口是 `app.CodeInitializeService`。
+
+```text
+HTTP Handler / CLI
+  └── app.CodeInitializeService.Initialize
+        ├── 归属与状态校验（Task → Step → Attempt → Container → Host）
+        ├── 幂等判定（同一 Attempt 已成功 → 写 skipped，不重新 Clone）
+        ├── storage.CodeFetchStore（pending → running → 终态）
+        ├── ContainerService.FetchSourceWith（远程会话内按来源类型构造 Fetcher）
+        │     └── source.GitFetcher.Fetch
+        │           ├── git --version / 目标目录检查 / mkdir -p
+        │           ├── git clone --no-hardlinks -- <url> <workdir>
+        │           ├── 基础分支识别（origin/HEAD → main → master，或显式指定）
+        │           ├── git checkout --no-force -b agent/<task-id>（或检出已存在分支）
+        │           └── git rev-parse HEAD / --abbrev-ref HEAD（工作区核验）
+        └── 事件追加（source.fetched）与结果记录
+```
+
+- 命令一律以可执行文件 + 参数数组表达，通过统一执行环境在受管理容器内执行；
+  文件系统检查类命令使用固定的 `sh -c` 模板，模板本身固定，唯一变量是已经过
+  `domain.ValidateContainerWorkDir` 校验的容器内绝对路径。
+- 目标目录固定为容器内 `/workspace/project`（或任务配置的 `/workspace` 之下路径），
+  不会拉取到 AgentFlow 管理工作区或宿主机目录；容器不可用时直接返回前置条件错误。
+- 任务分支固定为 `agent/<task-id>`，由 `domain.TaskBranchName` 生成与校验；分支已存在时
+  只检出（远程优先、其次本地），从不强制重置或覆盖。
+- 初始化结果持久化到 `code_fetches`：来源类型、脱敏仓库地址、目标目录、容器标识、
+  基础分支与 commit、任务分支与来源、实际 HEAD、状态、失败阶段、错误类别与摘要、
+  起止时间。状态（`status`）、失败阶段（`stage`）与错误类别（`error_code`）分别保存。
+- 幂等边界：同一 Attempt 在同一容器上已有成功记录时写入 `skipped` 记录并复用原 commit；
+  目标目录非空时直接失败，不会为了重试自动清空目录。
+- 认证范围：第一版不支持私有仓库认证。仓库地址必须通过 `domain.ParseGitRepositoryURL`
+  校验，内嵌凭据（`user:token@host`）直接拒绝；Clone 输出显示需要认证时返回
+  `repository_auth_required`，不静默降级为匿名访问。凭据由环境镜像自行注入。
+- 失败与中断：Clone 失败、基础分支缺失、分支冲突与工作区核验失败分别映射到不同错误类别；
+  超时、取消与结果不确定分别记录为 `timed_out`、`cancelled`、`uncertain`，都不得判定为成功。
+- 代码获取不负责 Push、Merge、容器生命周期与重试决策；失败不会删除容器或工作区。
+- 后续接入 HTTP 下载、wget、curl 与 SCP 时只需新增 `source.Fetcher` 实现，并在
+  `app.newContainerFetcher` 注册；服务层、持久化模型与调用方都不必改动。
+- 接口固定为 `POST /api/v1/tasks/{taskID}/steps/{stepID}/attempts/{attemptID}/initialize-code`，
+  只接受执行参数（可选目标目录与超时）。错误映射：参数错误 400、目标不存在或归属不符 404、
+  状态冲突 409、前置条件缺失 412、执行未成功 500。
+- 代码初始化成功不等于 Agent 开发流程已打通：Developer 逐步执行仍由后续阶段实现。
 
 ## 工作区边界
 

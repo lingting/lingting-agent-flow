@@ -54,6 +54,14 @@ API 兼容性、Docker CLI 帮助信息、基础 Dockerfile 的外部 `FROM` 镜
   真实 Pi 调用。校验任务、步骤、角色的归属与状态，核验执行节点与任务容器，以数据库事务
   原子占用步骤并创建新的 Attempt 与独立 Session，随后按真实结果写入 Attempt / Step / Task
   终态。同一 Step 同一时刻只允许一个执行占用。
+- 代码获取与任务分支管理：`POST /api/v1/tasks/{taskID}/steps/{stepID}/attempts/{attemptID}/initialize-code`
+  与 `agentflow code init` 在对应 Attempt 的任务容器内执行 Git Clone，识别基础分支
+  （`origin/HEAD` → `main` → `master`，或显式指定），创建并核验任务分支 `agent/<task-id>`，
+  记录实际 HEAD。代码获取抽象为 `source.Fetcher`，第一版只注册 Git Clone 实现；初始化结果
+  持久化到 `code_fetches`（来源、脱敏仓库地址、目标目录、基础分支与 commit、任务分支与来源、
+  实际 HEAD、状态、失败阶段、错误类别与摘要、起止时间）。目标目录非空时直接失败；同一
+  Attempt 已初始化成功时写入 `skipped` 记录并复用原 commit，不会重新 Clone。私有仓库认证
+  尚未支持，需要认证时返回明确错误，不静默降级为匿名访问。
 
 第一版目标（尚未实现）：
 
@@ -64,7 +72,7 @@ API 兼容性、Docker CLI 帮助信息、基础 Dockerfile 的外部 `FROM` 镜
 - 以验证结果驱动的修复循环（确定性验证与 Validator 阶段）。
 - 相互隔离的 Git Worktree。
 - 远程 Docker 容器创建、启动与销毁。
-- Git Clone、Commit、Push 与 Merge。
+- Commit、Push 与 Merge 的自动编排（代码获取与任务分支管理已提供接口与命令）。
 - 可恢复的任务状态。
 - 业务 Web 页面（当前只有 Web 外壳与连接状态）。
 
@@ -668,7 +676,22 @@ go run ./cmd/agentflow --help
 ./bin/agentflow host test node-a       # 完整 SSH 身份认证
 ./bin/agentflow host workspace node-a  # 解析远程 Home 与工作空间
 ./bin/agentflow host validate node-a   # 环境预检：SSH、Docker CLI 帮助、镜像元数据
+
+# 代码初始化：在任务容器内 Clone 并准备 agent/<task-id> 分支
+./bin/agentflow code init --task <task-id> --step <step-id> --attempt <attempt-id>
+./bin/agentflow code init --task <task-id> --step <step-id> --attempt <attempt-id> --workdir /workspace/project
 ```
+
+`code init` 的边界：
+
+- 代码只克隆到对应 Attempt 的任务容器内工作目录（默认 `/workspace/project`），
+  不经过本机数据目录，也不使用宿主机 bind mount。
+- 任务分支固定为 `agent/<task-id>`；分支已存在时只检出，不强制重置或覆盖。
+- 目标目录非空时直接失败，不会为了重试自动清空目录内容。
+- 同一 Attempt 已初始化成功时不会重新 Clone，只记录 `skipped` 并复用原 commit。
+- 需要认证的私有仓库返回 `repository_auth_required`；第一版不提供凭据存储，凭据需由
+  环境镜像自行注入。
+- 容器必须由环境准备阶段登记本次 Attempt（`attempt_id`），否则返回前置条件错误。
 
 配置路径规则：
 
@@ -1131,6 +1154,9 @@ SSH 连接层按三层覆盖：`tests/unit/ssh/`（主机密钥、认证配置�
 - 自动重试、退避策略与验证失败回退。
 - 确定性验证命令的编排与 Validator 判定接入（当前只有单步骤 Agent 调用）。
 - Git Worktree 创建与清理（每个任务目前使用远程容器内的工作区）。
+- Git 之外的代码获取方式（HTTP 下载、wget、curl、SCP）：`source.Fetcher` 抽象已就位，
+  但只注册了 Git Clone 实现。
+- 私有仓库认证：仓库地址中的内嵌凭据被拒绝，凭据需由环境镜像自行注入。
 - 项目、环境的 HTTP 接口与对应页面（任务、执行节点、执行记录已提供接口）。
 - 多 Agent Provider 与分布式执行（当前只支持 Pi）。
 - 角色管理 CLI 与 Web 页面（当前只有存储层的角色初始化与增删改查接口）。

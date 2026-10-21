@@ -25,6 +25,7 @@ type dbStore struct {
 	environmentVersionStore
 	containerStore
 	codeSaveStore
+	codeFetchStore
 	stepExecutionStore
 }
 
@@ -43,6 +44,7 @@ type txStore struct {
 	environmentVersionStore
 	containerStore
 	codeSaveStore
+	codeFetchStore
 	stepExecutionStore
 }
 
@@ -63,6 +65,7 @@ func newDBStore(db *sql.DB) *dbStore {
 		environmentVersionStore: environmentVersionStore{q: pool},
 		containerStore:          containerStore{q: pool},
 		codeSaveStore:           codeSaveStore{q: pool},
+		codeFetchStore:          codeFetchStore{q: pool},
 		stepExecutionStore:      stepExecutionStore{q: pool},
 	}
 }
@@ -83,6 +86,7 @@ func newTxStore(tx *sql.Tx) *txStore {
 		environmentVersionStore: environmentVersionStore{q: tx},
 		containerStore:          containerStore{q: tx},
 		codeSaveStore:           codeSaveStore{q: tx},
+		codeFetchStore:          codeFetchStore{q: tx},
 		stepExecutionStore:      stepExecutionStore{q: tx},
 	}
 }

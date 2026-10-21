@@ -31,7 +31,10 @@ type Deps struct {
 	// StepExecutor 是单步骤执行协调器，为空时步骤执行接口返回服务不可用。
 	StepExecutor *app.StepExecutor
 	// Validation 是确定性验证引擎，为空时验证接口返回服务不可用。
+	// Validation 是确定性验证引擎，为空时验证接口返回服务不可用。
 	Validation *app.ValidationService
+	// CodeInitialize 是代码初始化协调器，为空时初始化接口返回服务不可用。
+	CodeInitialize *app.CodeInitializeService
 	// Logger 是日志器，为空时使用 slog.Default。
 	Logger *slog.Logger
 }
@@ -53,6 +56,7 @@ func NewHandler(deps Deps) http.Handler {
 		executions: newExecutionHandler(deps.ExecutionRecords, logger),
 		stepExec:   newStepExecutionHandler(deps.StepExecutor, logger),
 		validation: newValidationHandler(deps.Validation, logger),
+		codeInit:   newCodeInitializeHandler(deps.CodeInitialize, logger),
 		logger:     logger,
 	}
 	mux := http.NewServeMux()
@@ -77,6 +81,7 @@ type router struct {
 	executions *executionHandler
 	stepExec   *stepExecutionHandler
 	validation *validationHandler
+	codeInit   *codeInitializeHandler
 	logger     *slog.Logger
 }
 
@@ -124,6 +129,11 @@ func (rt *router) tasksHandler(w http.ResponseWriter, r *http.Request) {
 	// 具体形状：验证是写操作，其余 attempts 路径仍按只读查询处理。
 	if taskID, stepID, attemptID, ok := parseValidatePath(r.URL.Path); ok {
 		rt.validation.serve(w, r, taskID, stepID, attemptID)
+		return
+	}
+	// 代码初始化同样是挂在 attempts 之下的写操作，必须先于只读执行记录判定。
+	if taskID, stepID, attemptID, ok := parseInitializeCodePath(r.URL.Path); ok {
+		rt.codeInit.serve(w, r, taskID, stepID, attemptID)
 		return
 	}
 	// 执行记录路径（steps / attempts / sessions）与单任务路径共享前缀，

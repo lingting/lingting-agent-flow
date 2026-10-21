@@ -44,6 +44,8 @@ type Options struct {
 	StepExecutor *app.StepExecutor
 	// Validation 是确定性验证引擎，为空时验证接口报告服务不可用。
 	Validation *app.ValidationService
+	// CodeInitialize 是代码初始化协调器，为空时初始化接口报告服务不可用。
+	CodeInitialize *app.CodeInitializeService
 	// Files 是前端静态资源文件系统，为空时使用嵌入资源。
 	Files fs.FS
 	// RequireWebUI 为 true 时，缺少前端构建产物将导致构造失败。
@@ -89,6 +91,7 @@ func New(options Options) (*Server, error) {
 		ExecutionRecords: options.ExecutionRecords,
 		StepExecutor:     options.StepExecutor,
 		Validation:       options.Validation,
+		CodeInitialize:   options.CodeInitialize,
 		Logger:           logger,
 	})
 	web, err := buildWebHandler(options.Files, options.RequireWebUI, logger)

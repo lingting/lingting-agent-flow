@@ -15,13 +15,56 @@ func TestCodeCommandHelp(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code --help 应成功退出，实际 %d，错误: %s", code, stderr)
 	}
-	for _, expected := range []string{"save", "push", "merge", "status"} {
+	for _, expected := range []string{"init", "save", "push", "merge", "status"} {
 		if !strings.Contains(stdout, expected) {
 			t.Fatalf("code --help 应列出 %s 子命令: %s", expected, stdout)
 		}
 	}
 	if !strings.Contains(stdout, "agent/<task-id>") {
 		t.Fatalf("code --help 应说明任务分支规则: %s", stdout)
+	}
+}
+
+// TestCodeInitRequiresTask 校验代码初始化缺少 --task 时被拒绝。
+func TestCodeInitRequiresTask(t *testing.T) {
+	t.Parallel()
+	code, _, stderr := run(t, "code", "init")
+	if code == 0 {
+		t.Fatal("缺少 --task 时不应成功")
+	}
+	if !strings.Contains(stderr, "task") {
+		t.Fatalf("错误信息应指出缺少 --task: %s", stderr)
+	}
+}
+
+// TestCodeInitRequiresStepAndAttempt 校验代码初始化必须给出步骤与尝试。
+func TestCodeInitRequiresStepAndAttempt(t *testing.T) {
+	t.Parallel()
+	for _, args := range [][]string{
+		{"code", "init", "--task", "task-1"},
+		{"code", "init", "--task", "task-1", "--step", "step-1"},
+	} {
+		code, _, stderr := run(t, args...)
+		if code == 0 {
+			t.Fatalf("%v 不应成功", args)
+		}
+		if !strings.Contains(stderr, "step") && !strings.Contains(stderr, "attempt") {
+			t.Fatalf("错误信息应指出缺少的参数: %s", stderr)
+		}
+	}
+}
+
+// TestCodeInitHelpExplainsBoundaries 校验帮助文本说明幂等与非覆盖规则。
+func TestCodeInitHelpExplainsBoundaries(t *testing.T) {
+	t.Parallel()
+	code, stdout, stderr := run(t, "code", "init", "--help")
+	if code != 0 {
+		t.Fatalf("code init --help 应成功退出，实际 %d，错误: %s", code, stderr)
+	}
+	for _, expected := range []string{"agent/<task-id>", "skipped", "认证"} {
+		if !strings.Contains(stdout, expected) {
+			t.Fatalf("帮助文本应说明 %q: %s", expected, stdout)
+		}
 	}
 }
 

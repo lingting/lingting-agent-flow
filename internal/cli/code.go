@@ -26,6 +26,7 @@ func newCodeCommand(a *app.App) *cobra.Command {
 			return cmd.Help()
 		},
 	}
+	command.AddCommand(newCodeInitCommand(a))
 	command.AddCommand(newCodeSaveCommand(a))
 	command.AddCommand(newCodePushCommand(a))
 	command.AddCommand(newCodeMergeCommand(a))

@@ -33,6 +33,9 @@ var enumColumns = []string{
 	"push_status",
 	"merge_status",
 	"execution_env",
+	"source_type",
+	"task_branch_source",
+	"stage",
 }
 
 // enumProbe 是一次"写入未知枚举值"的探测。
@@ -173,6 +176,17 @@ var enumProbes = []enumProbe{
 			 '{}', 'quarantined', -1, 1, 1, 1)`,
 	},
 	{
+		table:  "code_fetches",
+		column: "source_type",
+		value:  "http_archive",
+		statement: `INSERT INTO code_fetches
+			(id, task_id, step_id, attempt_id, source_type, work_dir, container_id,
+			 task_branch, status, stage, started_at, created_at, updated_at)
+			VALUES ('probe-code-fetch', 'probe-task', 'probe-step', 'probe-attempt',
+			 'http_archive', '/workspace/project', 'probe-container',
+			 'agent/probe-task', 'awaiting_review', 'mirror', 1, 1, 1)`,
+	},
+	{
 		table:  "roles",
 		column: "type",
 		value:  "auditor",
@@ -214,6 +228,9 @@ var requiredConstraints = []requiredConstraint{
 	{"validation_runs", "passed_checks + failed_checks + skipped_checks <= total_checks"},
 	{"validation_check_results", "json_valid(definition_json)"},
 	{"validation_check_results", "sequence > 0"},
+	{"code_fetches", "base_branch IS NULL OR base_branch <> task_branch"},
+	{"code_fetches", "length(commit_sha) IN (40, 64)"},
+	{"code_fetches", "status NOT IN ('succeeded', 'skipped') OR commit_sha IS NOT NULL"},
 }
 
 // expectedIndexes 是必须保留的索引名。
@@ -258,6 +275,10 @@ var expectedIndexes = []string{
 	"idx_validation_runs_status",
 	"idx_validation_check_results_run",
 	"idx_validation_check_results_status",
+	"idx_code_fetches_task",
+	"idx_code_fetches_attempt",
+	"idx_code_fetches_container",
+	"idx_code_fetches_status",
 }
 
 // quoteIdentifier 校验表名并返回可直接拼接的标识符。

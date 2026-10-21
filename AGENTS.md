@@ -457,6 +457,33 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
   凭据只允许在单次操作期间以内存形式存在。
 - CodeSaver 不负责容器生命周期、任务调度与重试决策，也不包含模型调用。
 
+### 代码获取（CodeFetcher）约束
+
+- 代码获取必须通过统一抽象 `source.Fetcher`（`internal/source/fetcher.go`）：第一版只注册
+  Git Clone 实现（`GitFetcher`）。新增 HTTP 下载、wget、curl、SCP 等方式只能新增实现并在
+  `app.newContainerFetcher` 注册，不得在服务层、Handler 或 CLI 中另行拼接获取命令。
+- 任务代码只允许存放于对应 Attempt 的任务容器工作区（`/workspace/project`，由
+  `domain.DefaultContainerWorkDir` 与任务配置决定）；不得拉取到 AgentFlow 管理工作区、
+  本机数据目录或宿主机目录，也不得在容器不可用时回退到本机执行。
+- 任务分支统一为 `agent/<task-id>`，由 `domain.TaskBranchName` 生成与校验；代码获取与
+  代码保存不得各自拼接分支名。分支已存在时只检出，不强制重置或覆盖。
+- 不允许初始化时覆盖已有代码：目标目录非空即失败，同一 Attempt 已经初始化成功时写入
+  `skipped` 记录并复用原 commit，不得重新 Clone。
+- Clone、基础分支识别与分支切换失败必须记录真实原因：失败阶段（`stage`）、错误类别
+  （`error_code`）与脱敏摘要（`error_summary`）分别持久化到 `code_fetches`，不得只记录
+  "失败"。
+- 初始化记录必须先于容器内命令写入：`pending` → `running` → 终态；成功记录必须带可核验的
+  `commit_sha`，没有 commit 的"成功"不得落库。
+- 代码初始化必须校验任务、步骤、尝试、容器与执行节点归属，并严格要求容器记录的
+  `attempt_id` 与本请求一致；容器未登记尝试归属时返回前置条件错误，由环境准备阶段补写。
+- 凭据不得泄露到 Dockerfile、Git URL、普通日志、数据库普通字段或测试产物；仓库地址必须
+  经 `domain.ParseGitRepositoryURL` 脱敏，内嵌凭据的地址直接拒绝。第一版不支持私有仓库
+  认证，需要认证时返回 `repository_auth_required`，不得静默降级为匿名访问。
+- 取消与超时必须传播到实际 Git 进程并分别记录为 `cancelled` / `timed_out`；执行结果无法
+  确认时记为 `uncertain`，不得判定为成功。
+- 代码获取不负责 Push、Merge、容器生命周期与重试决策；失败不得自动删除容器，也不得自动
+  无限重试。
+- 所有 Docker 命令与参数仍必须遵守既定兼容性基线（CLI 29.0.0、Engine 29.0.0、API 1.52）。
 ### 结果报告
 
 - 修改测试相关基础设施后，必须运行与修改范围相关的测试，并如实报告通过、失败、跳过与
