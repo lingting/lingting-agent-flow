@@ -47,6 +47,8 @@ func (e *validateExecutor) InspectContainer(
 	return app.ContainerDetail{
 		Container: domain.Container{
 			ID:       domain.ID(request.ContainerID),
+			HostID:   "host-1",
+			Name:     "agentflow-abcdef123456",
 			DockerID: "docker-" + request.ContainerID,
 		},
 		Inspect: &docker.ContainerInspect{Running: e.running},
@@ -312,7 +314,8 @@ func TestValidateAttemptAPI(t *testing.T) {
 	if !response.Persisted {
 		t.Fatalf("结果应已持久化: %v", response.PersistenceErrors)
 	}
-	if response.ExecutionEnv != "container" {
+	// 执行环境类型必须与统一执行环境契约一致：本版本只有远程容器。
+	if response.ExecutionEnv != "remote_container" {
 		t.Fatalf("执行环境未返回: %q", response.ExecutionEnv)
 	}
 	if len(response.Checks) != 1 {

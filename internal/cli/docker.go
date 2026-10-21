@@ -152,10 +152,24 @@ func withContainerService(
 	})
 }
 
+// withExecutionEnvironmentService 加载配置并执行一次执行环境服务调用。
+func withExecutionEnvironmentService(
+	ctx context.Context,
+	a *app.App,
+	configPath string,
+	run func(ctx context.Context, service *app.ExecutionEnvironmentService) error,
+) error {
+	return withDockerServices(ctx, a, configPath, func(ctx context.Context, services dockerServices) error {
+		return run(ctx, services.execution)
+	})
+}
+
 // dockerServices 是一次命令执行所需的远程 Docker 服务集合。
 type dockerServices struct {
 	environments *app.EnvironmentService
-	containers   *app.ContainerService
+	// execution 是统一执行环境实现，复用同一套远程 Docker 能力。
+	execution  *app.ExecutionEnvironmentService
+	containers *app.ContainerService
 	// store 是持久化入口，供任务命令直接读写任务记录。
 	store storage.Store
 	// ssh 是 SSH 服务，供任务命令构造凭据提供器。
@@ -201,8 +215,17 @@ func withDockerServices(
 	if err != nil {
 		return err
 	}
+	execution, err := app.NewExecutionEnvironmentService(app.ExecutionEnvironmentOptions{
+		Environments: environments,
+		Containers:   containers,
+		Logger:       a.Logger(),
+	})
+	if err != nil {
+		return err
+	}
 	return run(ctx, dockerServices{
 		environments: environments,
+		execution:    execution,
 		containers:   containers,
 		store:        store,
 		ssh:          sshService,

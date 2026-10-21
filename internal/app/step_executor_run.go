@@ -85,6 +85,7 @@ func (e *StepExecutor) callAgent(
 		SystemPrompt: request.role.SystemPrompt,
 		Prompt:       request.prompt,
 		SessionRoot:  e.sessions.LocalRoot(),
+		WorkDir:      request.task.Config.EffectiveWorkDir(),
 		Timeout:      request.timeout,
 	})
 	run := stepExecutionRun{result: agentResult.Result, runErr: runErr}

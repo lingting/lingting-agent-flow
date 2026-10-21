@@ -99,7 +99,7 @@ Docker 支持用 `DOCKER_API_VERSION` 让 CLI 使用指定 API 版本，但设�
 | `stop` | `--time` | `StopContainer` |
 | `rm` | `--force` | `RemoveContainer` |
 | `inspect` | — | `InspectContainer` |
-| `exec` | `--workdir`、`--interactive` | `ExecCommand` |
+| `exec` | `--workdir`、`--env`、`--interactive` | `ExecCommandIn` |
 | `logs` | `--tail` | `ContainerLogs` |
 | `run` | `--rm`、`--entrypoint` | `CheckRunContract` |
 | `ps` | `--all`、`--filter`、`--format` | `ListAgentFlowContainers` |

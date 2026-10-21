@@ -318,9 +318,11 @@ func (c *workflowCommands) Exec(
 		timeout = c.service.commandTimeout
 	}
 	result, err := c.service.containers.Exec(ctx, ExecRequest{
-		ContainerID: containerID,
-		Command:     command,
-		Timeout:     timeout,
+		ContainerID:    containerID,
+		Command:        command,
+		WorkDir:        run.WorkDir,
+		Timeout:        timeout,
+		MaxOutputBytes: run.MaxOutputBytes,
 	})
 	converted := domain.CommandResult{
 		Name:             run.Command.Name,

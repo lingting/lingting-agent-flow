@@ -110,6 +110,7 @@ func RequiredCLICommands() []CLICommand {
 			Subcommand: "exec",
 			Options: []CLIOption{
 				{Name: "--workdir", Source: "execCommandString"},
+				{Name: "--env", Source: "execEnvArgs"},
 				{Name: "--interactive", Source: "ExecCommandWithInput"},
 			},
 			Source: "ExecCommand",

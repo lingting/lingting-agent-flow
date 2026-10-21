@@ -235,6 +235,11 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
   SCP/SFTP 上传到宿主机后再 bind mount 进容器。
 - SourceProvider 只负责获取代码与初始化任务分支，不负责 Push、Merge 或删除容器。
 - Runner 不负责工作流重试决策，也不决定整个任务的成功清理策略。
+- 所有项目命令（代码拉取、Agent 开发、验证检查）都必须经由统一执行环境接口
+  （`execenv.Provider` / `execenv.ExecPort`）在容器内工作区执行；不得在宿主机当前目录
+  隐式执行任务代码，也不得在容器不可用时退化到本机。
+- 容器生命周期状态与任务执行状态分别记录：不得仅凭 Task 状态推断 Docker 容器一定存在，
+  也不得用容器状态推断任务是否成功。
 
 ### 统一 Pi Runner 与 Session 生命周期约束
 
@@ -267,6 +272,50 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
 - 测试产物（数据库、Session、日志、模拟可执行文件）必须留在随机 OS 临时目录的工作空间中，
   不得写入真实项目目录与其他用例的工作空间，也不在测试结束时删除。
 
+
+### 统一执行环境约束
+
+- 执行环境契约固定在 `internal/execenv`（`Kind`、`Workspace`、`ManagementWorkspace`、
+  `Environment`、`ExecSpec`、`ExecResult`、`PrepareSpec`、`Prepared`、`ReleaseRequest`、
+  `ReleaseResult`、`Provider`、`ExecPort`）。该包只放纯类型与纯函数，不得依赖 Docker、
+  SSH、SQLite 或外部进程。
+- 远程 Linux + Docker 容器实现固定为 `app.ExecutionEnvironmentService`
+  （`internal/app/execenv*.go`）。CLI、HTTP Handler、Pi Runner 与验证引擎都不得自行
+  拼接 Docker 命令，也不得自行创建或释放容器。
+- 未实现的执行环境类型（`local_linux`、`local_darwin`、`local_windows`）必须返回
+  `execenv.ErrUnsupportedKind`，不得静默回退到本机执行，也不得在宿主机当前目录执行
+  任务代码。
+- 工作区边界必须显式区分：容器内项目代码目录固定为 `/workspace/project`
+  （`execenv.DefaultProjectDir`），容器内临时 Session 目录默认为
+  `/tmp/agentflow/sessions`；远程管理工作区（默认 `~/.lingting/agentflow`）只存放
+  项目配置、Dockerfile 与镜像构建资源，不得存放项目源代码。
+- Session 目录不得位于项目代码目录之内；缓存卷挂载不得落在 `/workspace` 之下。
+- 容器准备固定分四个阶段：校验机器与项目配置 → 准备镜像 → 创建任务容器 →
+  验证容器可用性。失败结果必须保留已执行阶段的记录，使失败原因可定位。
+- 每次准备都创建全新的容器，不复用旧容器；容器创建失败时不得在数据库中留下
+  "已登记但实际不存在"的可用容器引用。
+- 命令执行一律使用可执行文件 + 参数数组，禁止拼接 shell 字符串；工作目录必须是
+  容器内 `/workspace` 之下的安全绝对路径；环境变量只能显式声明，执行层不继承
+  宿主机或服务进程环境。
+- 执行结果必须分别表达退出码、标准输出、标准错误、结束状态与"是否可确认"：
+  超时、取消、执行通道不可用与结果无法确认都不得判定为成功。
+- 容器生命周期与任务状态分离：`execenv.Retention`（keep / delete / detach）只表达
+  资源处置，处置结论由 `execenv.DecideRetention` 依据既有
+  `domain.DecideContainerLifecycle` 计算，不得在别处复制第二套规则。
+- 已脱离管理的容器不得被自动删除、启动、停止或重新接管；容器已不存在时删除按
+  成功处理。
+- 任务与执行环境的关联规则集中在 `ExecutionEnvironmentService.PrepareForTask`：
+  执行节点、语言环境、环境版本、缓存与工作目录全部来自任务记录，尝试标识必须
+  属于该任务；准备成功后才把容器登记记录写回任务。
+- Pi Runner 的工作目录与容器内 Session 目录必须来自执行环境描述
+  （`ContainerAgentRequest.WorkDir` / `SessionDir`），不得在 Runner 内硬编码另一套路径。
+- 验证引擎必须经由 `execenv.ExecPort` 在对应 Attempt 的容器工作区执行检查命令；
+  容器缺失、未运行或节点未通过预检时返回前置条件错误，不得回退到本机执行。
+- Session 文件、检查输出与执行记录一律落在本机持久化目录，不依赖容器继续存在；
+  容器删除不得导致已要求保留的 Session 与执行记录丢失。
+- 所有 Docker 命令与参数仍必须遵守既定兼容性基线（CLI 29.0.0、Engine 29.0.0、
+  API 1.52）；新增 `docker exec` 参数（例如 `--env`）必须同步更新
+  `docker.RequiredCLICommands`，否则环境预检会漏检。
 ### 工作流引擎约束
 
 - Task、Step、Attempt 的状态迁移只能通过 `domain` 的状态机方法完成；禁止在业务层直接

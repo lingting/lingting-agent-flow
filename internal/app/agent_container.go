@@ -53,6 +53,13 @@ type ContainerAgentRequest struct {
 	InvocationID string
 	// Timeout 是本次调用的超时时间，零值使用执行器默认值。
 	Timeout time.Duration
+	// WorkDir 是容器内工作目录，空值使用默认项目目录。
+	//
+	// 它来自任务的执行环境描述，不在本方法内硬编码：Pi 的工作目录必须与代码
+	// 拉取、验证检查使用同一个目录。
+	WorkDir string
+	// SessionDir 是容器内临时 Session 目录，空值使用 Runner 默认目录。
+	SessionDir string
 	// PiOptions 覆盖 Pi Runner 的默认配置。
 	PiOptions pi.Options
 }
@@ -93,6 +100,14 @@ func (s *ContainerService) RunAgent(
 		return ContainerAgentResult{}, fmt.Errorf(
 			"容器内 Agent 调用失败: 必须给出本机 Session 根目录",
 		)
+	}
+	// 工作目录来自执行环境描述：Pi 必须在项目代码目录内运行，不能使用其他目录。
+	workDir := strings.TrimSpace(request.WorkDir)
+	if workDir == "" {
+		workDir = domain.DefaultContainerWorkDir
+	}
+	if err := domain.ValidateContainerWorkDir(workDir); err != nil {
+		return ContainerAgentResult{}, fmt.Errorf("容器内 Agent 调用失败: %w", err)
 	}
 	var outcome ContainerAgentResult
 	err = s.withRemoteDocker(
@@ -135,14 +150,15 @@ func (s *ContainerService) RunAgent(
 				Model:        strings.TrimSpace(request.Model),
 				SystemPrompt: request.SystemPrompt,
 				Prompt:       request.Prompt,
-				WorkingDir:   domain.DefaultContainerWorkDir,
+				WorkingDir:   workDir,
 				SessionRoot:  sessionRoot,
 				InvocationID: invocationID,
 				Timeout:      request.Timeout,
 				Container: &agent.ContainerTarget{
 					ContainerID: current.ID.String(),
 					DockerID:    current.DockerID,
-					WorkDir:     domain.DefaultContainerWorkDir,
+					WorkDir:     workDir,
+					SessionDir:  strings.TrimSpace(request.SessionDir),
 				},
 			}
 			result, runErr := runner.Run(ctx, runRequest, func(event agent.Event) {

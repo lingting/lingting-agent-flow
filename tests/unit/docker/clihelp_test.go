@@ -98,6 +98,7 @@ func successHelp() string {
 		"      --time int       Seconds to wait before killing the container",
 		"  -f, --force          Force the removal of a running container",
 		"      --interactive    Keep STDIN open even if not attached",
+		"  -e, --env list       Set environment variables",
 		"      --tail string    Number of lines to show from the end of the logs",
 		"      --rm             Automatically remove the container",
 		"      --entrypoint string Overwrite the default ENTRYPOINT",

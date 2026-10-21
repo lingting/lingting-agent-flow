@@ -121,7 +121,7 @@ type ValidationStore interface {
 // ValidationContainerPort 是验证服务对任务容器的需求。
 //
 // 容器只被核验与使用：验证服务不会创建、启动、删除或接管容器，也不会在容器
-// 不可用时静默回退到宿主机执行。
+// 不可用时静默回退到宿主机执行。命令执行一律经由统一执行环境接口完成。
 type ValidationContainerPort interface {
 	// InspectContainer 核验容器当前状态。
 	InspectContainer(ctx context.Context, request InspectContainerRequest) (ContainerDetail, error)
@@ -267,22 +267,30 @@ func (s *ValidationService) Validate(
 	if err != nil {
 		return ValidationExecuteResult{}, err
 	}
-	executor, err := newContainerCheckExecutor(
-		s.containers,
-		container.ID.String(),
+	environment, err := resolveValidationEnvironment(
+		container,
 		task.Config.EffectiveWorkDir(),
 	)
 	if err != nil {
 		return ValidationExecuteResult{}, err
 	}
+	port, err := newContainerExecPort(s.containers)
+	if err != nil {
+		return ValidationExecuteResult{}, err
+	}
+	executor, err := newCheckEnvironment(port, environment)
+	if err != nil {
+		return ValidationExecuteResult{}, err
+	}
 	return s.runValidation(ctx, runValidationRequest{
-		task:      task,
-		step:      step,
-		attempt:   attempt,
-		spec:      spec,
-		container: container,
-		executor:  executor,
-		timeout:   s.validationTimeout(request.Timeout),
+		task:        task,
+		step:        step,
+		attempt:     attempt,
+		spec:        spec,
+		container:   container,
+		environment: environment,
+		executor:    executor,
+		timeout:     s.validationTimeout(request.Timeout),
 	})
 }
 

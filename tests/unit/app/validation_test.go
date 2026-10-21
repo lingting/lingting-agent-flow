@@ -66,6 +66,8 @@ func (f *fakeCheckContainer) InspectContainer(
 	return app.ContainerDetail{
 		Container: domain.Container{
 			ID:       domain.ID(request.ContainerID),
+			HostID:   "host-1",
+			Name:     "agentflow-abcdef123456",
 			DockerID: "docker-" + request.ContainerID,
 			Detached: f.detached,
 		},

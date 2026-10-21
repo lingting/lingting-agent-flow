@@ -438,6 +438,11 @@ type ExecOptions struct {
 	WorkDir string
 	// Timeout 是执行超时，零值使用 DefaultMutateTimeout。
 	Timeout time.Duration
+	// Env 是显式传入容器内进程的环境变量，形如 KEY=VALUE。
+	//
+	// 只接受调用方显式声明的变量：执行层不会自动继承远程宿主机或服务进程的环境，
+	// 也不允许借此读取容器内的敏感变量。键名由调用方负责校验。
+	Env []string
 	// MaxOutputBytes 是标准输出与标准错误各自保留的字节上限，
 	// 零值使用 sshclient.DefaultMaxOutputBytes。
 	MaxOutputBytes int
@@ -471,7 +476,11 @@ func (r *Runner) ExecCommandIn(
 			nil,
 		)
 	}
-	remote, err := execCommandStringIn(workDir, dockerID, command)
+	envArgs, err := execEnvArgs(options.Env)
+	if err != nil {
+		return CommandResult{}, err
+	}
+	remote, err := execCommandStringIn(workDir, dockerID, command, envArgs...)
 	if err != nil {
 		return CommandResult{}, err
 	}
@@ -542,6 +551,54 @@ func (r *Runner) ExecCommandWithInput(
 	return r.RunWithInput(ctx, "docker exec", remote, input, timeout)
 }
 
+// ExecCommandInWithInput 在容器内按给定选项执行命令并写入标准输入。
+//
+// 与 ExecCommandIn 的区别只在于标准输入：工作目录、环境变量、超时与输出上限
+// 使用同一套校验与构造逻辑，避免两条路径产生不一致的安全边界。
+func (r *Runner) ExecCommandInWithInput(
+	ctx context.Context,
+	dockerID string,
+	command []string,
+	input io.Reader,
+	options ExecOptions,
+) (CommandResult, error) {
+	if strings.TrimSpace(dockerID) == "" {
+		return CommandResult{}, newError(CodeInvalidArgument, "docker exec", "容器 ID 不能为空", nil)
+	}
+	if len(command) == 0 {
+		return CommandResult{}, newError(CodeInvalidArgument, "docker exec", "容器内命令不能为空", nil)
+	}
+	if input == nil {
+		return r.ExecCommandIn(ctx, dockerID, command, options)
+	}
+	workDir := strings.TrimSpace(options.WorkDir)
+	if workDir == "" {
+		workDir = domain.DefaultContainerWorkDir
+	}
+	if err := domain.ValidateContainerWorkDir(workDir); err != nil {
+		return CommandResult{}, newError(
+			CodeInvalidArgument,
+			"docker exec",
+			"容器内工作目录非法: "+err.Error(),
+			nil,
+		)
+	}
+	envArgs, err := execEnvArgs(options.Env)
+	if err != nil {
+		return CommandResult{}, err
+	}
+	extra := append(envArgs, "--interactive")
+	remote, err := execCommandStringIn(workDir, dockerID, command, extra...)
+	if err != nil {
+		return CommandResult{}, err
+	}
+	timeout := options.Timeout
+	if timeout <= 0 {
+		timeout = DefaultMutateTimeout
+	}
+	return r.RunWithInput(ctx, "docker exec", remote, input, timeout)
+}
+
 // execCommandString 构造 docker exec 的远程命令字符串。
 //
 // 额外参数只能来自本包的固定字面量，容器内命令的每个参数都会被单独转义。
@@ -567,6 +624,47 @@ func execCommandStringIn(
 	args = append(args, dockerID)
 	args = append(args, command...)
 	return dockerCommand("exec", args...)
+}
+
+// execEnvArgs 把显式环境变量转换为 docker exec 的 --env 参数。
+//
+// 键名与取值都必须已经由调用方校验：这里只做形式检查，拒绝空键、重复键与
+// 非 KEY=VALUE 形式，避免把任意字符串当作环境变量注入容器进程。
+func execEnvArgs(env []string) ([]string, error) {
+	if len(env) == 0 {
+		return nil, nil
+	}
+	args := make([]string, 0, len(env)*2)
+	seen := make(map[string]struct{}, len(env))
+	for _, entry := range env {
+		trimmed := strings.TrimSpace(entry)
+		if trimmed == "" {
+			continue
+		}
+		key, _, found := strings.Cut(trimmed, "=")
+		if !found || key == "" {
+			return nil, newError(
+				CodeInvalidArgument,
+				"docker exec",
+				"环境变量必须是 KEY=VALUE 形式",
+				nil,
+			)
+		}
+		if _, exists := seen[key]; exists {
+			return nil, newError(
+				CodeInvalidArgument,
+				"docker exec",
+				"环境变量重复声明: "+key,
+				nil,
+			)
+		}
+		seen[key] = struct{}{}
+		args = append(args, "--env", trimmed)
+	}
+	if len(args) == 0 {
+		return nil, nil
+	}
+	return args, nil
 }
 
 // ContainerLogs 读取容器日志的末尾内容。

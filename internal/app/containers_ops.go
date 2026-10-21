@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -423,6 +424,12 @@ type ExecRequest struct {
 	Command []string
 	// WorkDir 是容器内执行目录，必须位于 /workspace 之下；空值使用项目目录。
 	WorkDir string
+	// Env 是显式传入容器内进程的环境变量，形如 KEY=VALUE。
+	//
+	// 执行层不会自动继承远程宿主机或服务进程的环境变量，只传递这里显式声明的值。
+	Env []string
+	// Stdin 非空时写入容器内命令的标准输入，并在写入后关闭。
+	Stdin []byte
 	// Timeout 是执行超时时间，零值使用默认值。
 	Timeout time.Duration
 	// MaxOutputBytes 是标准输出与标准错误各自保留的字节上限，零值使用默认上限。
@@ -462,15 +469,11 @@ func (s *ContainerService) Exec(
 			if !inspect.Running {
 				return fmt.Errorf("容器 %s 当前未运行，无法执行命令", container.ID)
 			}
-			run, runErr := session.runner.ExecCommandIn(
+			run, runErr := s.execInContainer(
 				ctx,
+				session,
 				container.DockerID,
-				request.Command,
-				docker.ExecOptions{
-					WorkDir:        request.WorkDir,
-					Timeout:        request.Timeout,
-					MaxOutputBytes: request.MaxOutputBytes,
-				},
+				request,
 			)
 			result = ExecResult{Container: container, Result: run}
 			return runErr
@@ -480,6 +483,34 @@ func (s *ContainerService) Exec(
 		return result, err
 	}
 	return result, nil
+}
+
+// execInContainer 按请求执行一条容器内命令。
+//
+// 无标准输入时使用不带 --interactive 的路径，避免为普通命令额外打开标准输入通道；
+// 有标准输入时才启用交互模式，并在写入后立即关闭。
+func (s *ContainerService) execInContainer(
+	ctx context.Context,
+	session *remoteDocker,
+	dockerID string,
+	request ExecRequest,
+) (docker.CommandResult, error) {
+	options := docker.ExecOptions{
+		WorkDir:        request.WorkDir,
+		Env:            request.Env,
+		Timeout:        request.Timeout,
+		MaxOutputBytes: request.MaxOutputBytes,
+	}
+	if len(request.Stdin) == 0 {
+		return session.runner.ExecCommandIn(ctx, dockerID, request.Command, options)
+	}
+	return session.runner.ExecCommandInWithInput(
+		ctx,
+		dockerID,
+		request.Command,
+		bytes.NewReader(request.Stdin),
+		options,
+	)
 }
 
 // ApplyLifecycleRequest 是应用生命周期策略的输入。

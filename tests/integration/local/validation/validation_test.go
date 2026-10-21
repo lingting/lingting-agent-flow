@@ -441,7 +441,7 @@ func dockerHelpText() string {
 	return strings.Join([]string{
 		"Options:",
 		"--name --detach --workdir --label --mount",
-		"--time --force --interactive --tail",
+		"--time --force --interactive --env --tail",
 		"--rm --entrypoint --all --filter --format",
 		"--tag --file --build-arg --no-cache --progress",
 		"",

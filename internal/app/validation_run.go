@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
+	"github.com/lingting/agentflow/internal/execenv"
 	"github.com/lingting/agentflow/internal/storage"
 )
 
@@ -19,8 +20,10 @@ type runValidationRequest struct {
 	attempt   domain.Attempt
 	spec      domain.ValidationSpec
 	container domain.Container
-	executor  CheckExecutor
-	timeout   time.Duration
+	// environment 是本次验证使用的执行环境：检查命令只在这里执行。
+	environment execenv.Environment
+	executor    CheckExecutor
+	timeout     time.Duration
 }
 
 // runValidation 执行一次完整验证并持久化全部事实。

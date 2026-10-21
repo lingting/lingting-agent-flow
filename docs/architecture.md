@@ -5,8 +5,8 @@
 > 下文的架构图为**目标架构**，仅说明分层意图。当前代码实现了 CLI 骨架、配置加载与校验、
 > 日志封装、SQLite 数据层、执行节点管理与环境预检、SSH 服务探测与 SSH 连接层（主机密钥校验、
 > 私钥认证、远程命令执行、SFTP 传输与远端 Unix 套接字通道）、统一 Pi Runner（本机与容器内）、
-> 以及**单步骤执行协调器**与任务管理 HTTP 接口。图中调度、多步骤工作流编排与 UI 的完整形态
-> 尚未实现。
+> **单步骤执行协调器**、**确定性验证引擎**、**统一执行环境（远程 Linux + Docker）**
+> 与任务管理 HTTP 接口。图中调度、多步骤工作流编排与 UI 的完整形态尚未实现。
 
 ## 目标架构
 
@@ -38,10 +38,13 @@ SQLite
 cmd/agentflow/            CLI 入口，只做构建信息注入与启动
 internal/app/             应用服务，CLI 与 HTTP 的共同调用入口；
                           含单步骤执行协调器 step_executor*.go（校验、占用、调用与终态写入）
+                          与执行环境实现 execenv*.go（准备、状态、执行、释放）
 internal/cli/             Cobra 命令实现
 internal/config/          配置结构与 YAML 加载、校验
 internal/logging/         结构化日志封装
 internal/domain/          核心实体、状态与业务规则（含单步骤执行准入规则）
+internal/execenv/         统一执行环境契约：Kind、Workspace、Environment、ExecSpec/Result、
+                          PrepareSpec/Prepared、ReleaseRequest/Result、Provider 与 ExecPort
 internal/scheduler/       任务领取、并发控制、Worker 与恢复（未实现）
 internal/workflow/        Plan / Develop / Verify / Retry 状态迁移（引擎已实现，未接入 HTTP）
 internal/agent/           统一 Agent 接口：Runner、RunRequest、RunResult、Event
@@ -62,7 +65,8 @@ docs/                     架构与开发文档
 tests/unit/               快速单元测试（不依赖真实 Pi、SSH 或网络）
 tests/unit/ssh/           SSH 连接层单元测试（主机密钥与类型记录、认证配置、路径与结果状态）
 tests/unit/app/           应用服务单元测试（会话、Runner 生命周期、单步骤执行编排）
-tests/integration/local/  本机集成测试（数据库全链路、进程内 SSH/SFTP 服务端、TCP 探测）
+tests/integration/local/  本机集成测试（数据库全链路、进程内 SSH/SFTP 服务端、TCP 探测、
+                          执行环境生命周期与工作区隔离）
 tests/integration/pi/     需要本机真实 Pi CLI 的集成测试
 tests/integration/ssh/    需要真实远程机器的集成测试
 tests/e2e/                端到端测试（CLI 完整操作路径）
@@ -301,17 +305,75 @@ HTTP Handler（POST .../attempts/{attemptID}/validate）
 - 执行节点准入边界：任何使用持久化执行节点执行真实远程操作的入口都必须先确认
   `validation_status` 为 `normal`；该限制由后端强制实施，不能只依赖界面禁用。
 
+## 执行环境边界
+
+统一执行环境契约位于 `internal/execenv`，远程 Linux + Docker 实现位于
+`internal/app/execenv*.go`（`app.ExecutionEnvironmentService`）。
+
+```text
+Task / Pi Runner / Validator
+        │  只依赖 execenv.Provider / execenv.ExecPort
+        ▼
+Execution Environment（execenv）
+        ├── Prepare（校验 → 镜像 → 创建容器 → 核验可用性）
+        ├── Status（只读核验）
+        ├── Exec（参数数组 + 工作目录 + 显式环境变量）
+        └── Release（keep / delete / detach）
+                │
+                ▼
+      app.ExecutionEnvironmentService
+                │
+     ┌──────────┼───────────┐
+     ▼          ▼           ▼
+Environment  Container   docker.Runner
+ Service      Service     （SSH）
+```
+
+- 只有 `execenv.KindRemoteContainer` 已实现；`local_linux`、`local_darwin`、
+  `local_windows` 返回 `ErrUnsupportedKind`，不会静默回退到本机执行。
+- 准备阶段固定为 `validate` → `image` → `create` → `start` → `verify`，失败结果保留
+  已执行阶段，使失败可定位。每次准备创建全新容器，不复用旧容器。
+- `Exec` 只接受可执行文件 + 参数数组，工作目录必须是 `/workspace` 之下的安全绝对路径；
+  环境变量只能显式声明，执行层不继承宿主机或服务进程环境。
+- 执行结果分别表达退出码、stdout、stderr、结束状态与"是否可确认"：超时、取消、
+  执行通道不可用与结果无法确认都不判定为成功。
+- `Release` 的处置结论由 `execenv.DecideRetention` 复用
+  `domain.DecideContainerLifecycle`：成功删除、失败保留、中断默认保留。已脱离管理的
+  容器不会被自动删除或重新接管；容器已不存在时删除按成功处理。
+- 任务与执行环境的关联集中在 `ExecutionEnvironmentService.PrepareForTask`：执行节点、
+  语言环境、版本、缓存与工作目录全部来自任务记录，准备成功后才把容器写回任务。
+- Pi Runner 的工作目录与容器内 Session 目录来自执行环境描述
+  （`ContainerAgentRequest.WorkDir` / `SessionDir`），不在 Runner 内硬编码第二套路径。
+- 验证引擎通过 `execenv.ExecPort` 在对应 Attempt 的容器工作区执行检查命令，验证记录中的
+  `execution_env` 为 `remote_container`。
+
+### 当前能力边界
+
+- 只实现远程 Linux + Docker 容器执行环境；本机 Windows / macOS / Linux 执行环境尚未实现。
+- 项目代码只通过 Git Clone 进入容器（SourceProvider）；wget、curl、SCP 等获取方式未实现。
+- 不实现多步骤自动编排、自动重试与任务级调度队列。
+
 ## 工作区边界
 
+- 三种目录必须显式区分，不得互相替代：
+  - 容器内项目代码目录：`/workspace/project`（`execenv.DefaultProjectDir`），代码拉取、
+    Agent 开发与验证检查都在这里；不绑定挂载到远程宿主机。
+  - 容器内临时 Session 目录：默认 `/tmp/agentflow/sessions`，容器删除后消失，因此必须先
+    回传本机；不得位于项目代码目录之内。
+  - 远程 AgentFlow 管理工作区：默认 `~/.lingting/agentflow`，只存放项目配置、Dockerfile
+    与镜像构建资源，不得存放项目源代码。
+- 依赖缓存使用带 AgentFlow 标签的 Docker 命名卷，不得落在 `/workspace` 之下，避免项目
+  代码被共享缓存覆盖，也避免缓存成为项目代码的唯一保存位置。
 - 目标形态下每个 Task 拥有独立 Git Worktree，同任务多步骤共享该工作区；当前实现的远程任务
-  使用受管理容器内的工作目录（`/workspace/project`），本机 Worktree 尚未接入。
+  使用容器内工作目录，本机 Worktree 尚未接入。
 - 单步骤执行不会克隆代码、不会初始化仓库，也不会修改工作区路径：它只在已就绪的容器内
   执行 Agent 调用。
 - 未经明确配置，不得自动删除包含未提交代码的工作区。
 - 执行节点的远程工作空间默认 `~/.lingting/agentflow`，`~` 指远程 SSH 登录用户的 Home；
   路径遵循 POSIX 语义。SFTP 不会展开 `~`，因此必须先通过已认证连接取得远程 Home，再把
   配置解析为远程绝对路径；目录创建只在解析出的工作空间路径内进行，且必须显式授权。
-  本阶段不创建项目配置、Dockerfile 或容器目录结构。
+- 容器生命周期状态与任务执行状态分别记录：不得仅凭 Task 状态推断 Docker 容器一定存在。
+- Session 文件、检查输出与执行记录一律落在本机持久化目录，容器删除后仍然可读。
 
 ## 安全边界
 
