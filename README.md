@@ -559,6 +559,82 @@ Content-Type: application/json
 - 不实现确定性验证与 Validator 阶段：`completed` 只代表本次 Agent 调用正常结束。
 - 不提供执行队列与跨步骤并行调度。
 
+#### 执行前的前置步骤校验
+
+执行某个步骤前，全部 `sequence` 更小的步骤必须处于 `completed` 或 `skipped`，否则返回
+409 `state_conflict`。该规则只在 `domain.CheckStepPrerequisites` 中定义一次：跳过未完成的
+前置步骤会让后续步骤在错误的代码基础上运行，因此不做"警告后继续"。
+
+#### 代码状态记录
+
+每次执行在占用步骤之后采集一次执行前快照、在 Pi 结束后采集一次执行后快照，写入该次 Attempt：
+
+| 字段 | 含义 |
+|---|---|
+| `git_branch` | 采集时的工作区分支名 |
+| `git_before` / `git_after` | 分支、HEAD、是否存在未提交变更、变更条目计数、采集是否成功 |
+
+采集是只读的：只执行 `git status` 与 `git rev-parse`，不提交、不推送、不合并，也不写
+`code_saves`。采集失败会记录 `status_read: false` 与原因，不会被当作"工作区干净"，也不会把
+成功的执行改写为失败。完整 diff 不落库。
+
+### 顺序执行开发步骤
+
+按已保存的计划顺序依次执行开发步骤。这是**显式**入口：不生成计划、不自动重试、不自动执行
+验证与代码保存。
+
+```http
+POST /api/v1/tasks/{taskID}/execute-steps
+Content-Type: application/json
+
+{
+  "prompt": "可选补充说明",
+  "timeout_seconds": 600
+}
+```
+
+两个字段都是可选的，请求体可以为空。步骤顺序完全由数据库中的 `steps.sequence` 决定，调用方
+不能指定执行哪些步骤、跳过哪些步骤或改变顺序。
+
+执行语义：
+
+- 每次只执行一个 Step，前一步骤结束后才开始下一步。
+- 前一步骤失败、超时、取消或中断时立即停止，不自动重试，也不执行后续步骤。
+- `recovery_required` 的步骤与已被占用的步骤阻止自动推进，必须先人工核验现场。
+- 每个开发步骤使用独立 Attempt 与独立 Session，但共享同一任务容器的同一代码工作区。
+- 同一任务的并发顺序执行返回 409；跨进程并发仍由步骤占用的事务条件更新拒绝。
+- 不 Commit、不 Push、不 Merge，也不自动执行 Validator。
+
+响应示例（全部成功）：
+
+```json
+{
+  "task_id": "<任务标识>",
+  "steps": [
+    {
+      "step_id": "<步骤标识>",
+      "sequence": 1,
+      "title": "实现接口",
+      "attempt_id": "<尝试标识>",
+      "session_id": "<会话标识>",
+      "outcome": "completed",
+      "step_status": "completed",
+      "finalized": true
+    }
+  ],
+  "executed_steps": 1,
+  "stopped": false,
+  "success": true,
+  "task_status": "developing"
+}
+```
+
+`stopped` 表示是否提前停止，`success` 表示全部步骤是否都以正常结束且状态已完整写入，两者
+不能互相替代。提前停止时 `stopped_step_id` 与 `stop_reason` 给出实际失败步骤与原因。
+
+错误语义与单步骤执行一致：参数错误 400、任务不存在 404、状态冲突 409、前置条件缺失 412。
+协调器返回错误（例如缺少容器）时整个请求返回该错误，不会被伪装成"执行后正常停止"。
+
 ### 尚未实现的接口
 
 项目、环境、容器、代码保存与 Agent 调度均**没有** HTTP 接口。Web 页面中的对应入口仍为
@@ -567,8 +643,8 @@ Content-Type: application/json
 机器页面已接入执行节点接口与环境预检结果展示。
 
 后台服务目前注册了执行节点环境预检、统一 Pi Runner 与单步骤执行协调器：任务调度器、
-多步骤工作流引擎与 Docker 运维尚未接入，`agentflow server` 启动后提供 API、页面、环境预检
-与单步骤执行能力。
+自动 Plan / Verify / Retry 编排与 Docker 运维尚未接入，`agentflow server` 启动后提供 API、
+页面、环境预检、单步骤执行与显式顺序执行能力。
 
 ## 统一 Pi Runner 与 Session 生命周期
 

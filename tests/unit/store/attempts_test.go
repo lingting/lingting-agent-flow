@@ -240,3 +240,95 @@ func TestDeleteStepKeepsAttemptHistory(t *testing.T) {
 		t.Fatalf("尝试应保留原步骤标识: %s", attempt.StepID)
 	}
 }
+
+// TestAttemptGitStateRoundTrip 验证 Git 工作区状态快照可以完整往返。
+func TestAttemptGitStateRoundTrip(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ctx := testContext(t)
+	built := newFixture(t, db)
+
+	before := domain.GitWorktreeState{
+		StatusRead: true,
+		Branch:     "agent/task-1",
+		Head:       "1111111111111111111111111111111111111111",
+	}
+	after := domain.GitWorktreeState{
+		StatusRead: true,
+		Branch:     "agent/task-1",
+		Head:       "2222222222222222222222222222222222222222",
+		Dirty:      true,
+		Modified:   2,
+		Added:      1,
+	}
+	if err := built.attempt.SetGitBefore(before); err != nil {
+		t.Fatalf("记录执行前状态失败: %v", err)
+	}
+	if err := built.attempt.SetGitAfter(after); err != nil {
+		t.Fatalf("记录执行后状态失败: %v", err)
+	}
+	if err := db.UpdateAttempt(ctx, built.attempt); err != nil {
+		t.Fatalf("更新执行尝试失败: %v", err)
+	}
+	loaded, err := db.GetAttempt(ctx, built.attempt.ID)
+	if err != nil {
+		t.Fatalf("读取执行尝试失败: %v", err)
+	}
+	if loaded.GitBranch != after.Branch {
+		t.Fatalf("分支未保存: %s", loaded.GitBranch)
+	}
+	if loaded.GitBefore == nil || loaded.GitBefore.Head != before.Head {
+		t.Fatalf("执行前状态未保存: %+v", loaded.GitBefore)
+	}
+	if loaded.GitAfter == nil || !loaded.GitAfter.Dirty || loaded.GitAfter.Modified != 2 {
+		t.Fatalf("执行后状态未保存: %+v", loaded.GitAfter)
+	}
+}
+
+// TestAttemptWithoutGitStateKeepsNull 验证未采集时快照保持为空而不是空结构。
+func TestAttemptWithoutGitStateKeepsNull(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ctx := testContext(t)
+	built := newFixture(t, db)
+
+	loaded, err := db.GetAttempt(ctx, built.attempt.ID)
+	if err != nil {
+		t.Fatalf("读取执行尝试失败: %v", err)
+	}
+	if loaded.GitBefore != nil || loaded.GitAfter != nil {
+		t.Fatalf("未采集时不应有快照: %+v / %+v", loaded.GitBefore, loaded.GitAfter)
+	}
+	if loaded.GitBranch != "" {
+		t.Fatalf("未采集时不应有分支: %s", loaded.GitBranch)
+	}
+}
+
+// TestAttemptGitStateFailedReadIsPreserved 验证采集失败的状态被如实保留。
+func TestAttemptGitStateFailedReadIsPreserved(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ctx := testContext(t)
+	built := newFixture(t, db)
+
+	failed := domain.GitWorktreeState{StatusRead: false, StatusError: "git 命令失败"}
+	if err := built.attempt.SetGitAfter(failed); err != nil {
+		t.Fatalf("记录采集失败状态失败: %v", err)
+	}
+	if err := db.UpdateAttempt(ctx, built.attempt); err != nil {
+		t.Fatalf("更新执行尝试失败: %v", err)
+	}
+	loaded, err := db.GetAttempt(ctx, built.attempt.ID)
+	if err != nil {
+		t.Fatalf("读取执行尝试失败: %v", err)
+	}
+	if loaded.GitAfter == nil {
+		t.Fatal("采集失败的状态必须保留")
+	}
+	if loaded.GitAfter.StatusRead {
+		t.Fatal("采集失败不能被写成读取成功")
+	}
+	if loaded.GitAfter.StatusError == "" {
+		t.Fatal("采集失败必须保留原因")
+	}
+}

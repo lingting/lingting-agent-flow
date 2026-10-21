@@ -24,6 +24,9 @@ func (e *StepExecutor) runAttempt(
 ) StepExecutionResult {
 	run := e.callAgent(ctx, request)
 	outcome, summary, failure := classifyStepExecutionRun(run, ctx)
+	// 执行后快照在分类之后、写终态之前采集：此时进程已经结束，工作区不会再被本次
+	// 调用改动，而尝试仍处于 running，快照可以随终态一起写入。
+	after := e.captureGitState(ctx, request.task, request.container, "after", request.attempt.ID)
 	result := StepExecutionResult{
 		TaskID:             request.task.ID,
 		StepID:             request.step.ID,
@@ -51,13 +54,15 @@ func (e *StepExecutor) runAttempt(
 		result.FinishedAt = e.now()
 	}
 	finalization := e.finalizeExecution(ctx, finalizeRequest{
-		task:    request.task,
-		step:    request.step,
-		attempt: request.attempt,
-		run:     run,
-		outcome: outcome,
-		summary: summary,
-		failure: failure,
+		task:      request.task,
+		step:      request.step,
+		attempt:   request.attempt,
+		run:       run,
+		outcome:   outcome,
+		summary:   summary,
+		failure:   failure,
+		gitBefore: request.gitBefore,
+		gitAfter:  after,
 	})
 	result.AttemptStatus = finalization.attemptStatus
 	result.StepStatus = finalization.stepStatus
@@ -128,6 +133,9 @@ type finalizeRequest struct {
 	outcome domain.StepExecutionOutcome
 	summary string
 	failure string
+	// gitBefore 与 gitAfter 是执行前后的 Git 工作区状态，为空表示本次没有采集。
+	gitBefore *domain.GitWorktreeState
+	gitAfter  *domain.GitWorktreeState
 }
 
 // finalizeOutcome 描述最终状态写入的结果。
@@ -199,6 +207,16 @@ func (e *StepExecutor) finishAttempt(
 ) (domain.Attempt, error) {
 	attempt := request.attempt
 	attempt.ExitCode = request.run.result.ExitCode
+	if request.gitBefore != nil {
+		if err := attempt.SetGitBefore(*request.gitBefore); err != nil {
+			return attempt, fmt.Errorf("记录执行前 Git 状态失败: %w", err)
+		}
+	}
+	if request.gitAfter != nil {
+		if err := attempt.SetGitAfter(*request.gitAfter); err != nil {
+			return attempt, fmt.Errorf("记录执行后 Git 状态失败: %w", err)
+		}
+	}
 	if !request.run.session.ID.IsEmpty() {
 		if err := attempt.AddSession(request.run.session.ID); err != nil {
 			return attempt, fmt.Errorf("关联会话失败: %w", err)

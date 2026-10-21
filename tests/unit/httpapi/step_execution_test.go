@@ -590,3 +590,138 @@ var _ app.StepExecutionContainerPort = (*stepAPIExecutor)(nil)
 
 // 确认注入的错误仍可被识别。
 var _ = errors.Is
+
+// executeStepsPath 返回顺序执行接口路径。
+func (f *stepAPIFixture) executeStepsPath(taskID string) string {
+	return httpapi.PathTasks + "/" + taskID + "/execute-steps"
+}
+
+// TestExecuteStepsAPI 验证顺序执行返回每一步的结果与任务状态。
+func TestExecuteStepsAPI(t *testing.T) {
+	t.Parallel()
+	fixture := newStepAPIFixture(t, false)
+	recorder := fixture.post(t, fixture.executeStepsPath(fixture.task.ID.String()), nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("期望 200，实际 %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response httpapi.ExecuteStepsResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if len(response.Steps) != 1 {
+		t.Fatalf("应执行一个步骤，实际 %d", len(response.Steps))
+	}
+	if response.Stopped {
+		t.Fatalf("全部成功时不应提前停止: %s", response.StopReason)
+	}
+	if !response.Success {
+		t.Fatalf("全部步骤成功时应标记成功: %+v", response)
+	}
+	if response.TaskStatus != string(domain.TaskStatusDeveloping) {
+		t.Fatalf("任务状态不得被标记为成功: %s", response.TaskStatus)
+	}
+	entry := response.Steps[0]
+	if entry.AttemptID == "" || entry.SessionID == "" {
+		t.Fatal("每一步都必须给出尝试与会话标识")
+	}
+	if entry.Outcome != string(domain.StepExecutionCompleted) {
+		t.Fatalf("步骤执行结论不符: %s", entry.Outcome)
+	}
+	if fixture.port.calls != 1 {
+		t.Fatalf("接口应触发一次真实调用，实际 %d", fixture.port.calls)
+	}
+}
+
+// TestExecuteStepsAPIStopsOnFailure 验证失败后停止并报告实际失败步骤。
+func TestExecuteStepsAPIStopsOnFailure(t *testing.T) {
+	t.Parallel()
+	fixture := newStepAPIFixture(t, false)
+	fixture.port.reply = stepAPIReplies{status: agent.RunFailed, failure: "模型不可用"}
+	recorder := fixture.post(t, fixture.executeStepsPath(fixture.task.ID.String()), nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("顺序执行本身应返回 200，实际 %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response httpapi.ExecuteStepsResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if !response.Stopped {
+		t.Fatal("步骤失败后必须标记为已停止")
+	}
+	if response.Success {
+		t.Fatal("步骤失败时不能标记为成功")
+	}
+	if response.StoppedStepID != fixture.step.ID.String() {
+		t.Fatalf("停止步骤不符: %s", response.StoppedStepID)
+	}
+	if response.StopReason == "" {
+		t.Fatal("停止必须给出原因")
+	}
+	if response.Steps[0].Error == "" {
+		t.Fatal("失败步骤必须给出可诊断原因")
+	}
+}
+
+// TestExecuteStepsAPIRejectsQueuedTask 验证任务状态不允许时返回 409。
+func TestExecuteStepsAPIRejectsQueuedTask(t *testing.T) {
+	t.Parallel()
+	fixture := newStepAPIFixture(t, true)
+	recorder := fixture.post(t, fixture.executeStepsPath(fixture.task.ID.String()), nil)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("期望 409，实际 %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response httpapi.ErrorResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("解析错误响应失败: %v", err)
+	}
+	if response.Error.Code != httpapi.CodeConflict {
+		t.Fatalf("错误代码不符: %s", response.Error.Code)
+	}
+	if fixture.port.calls != 0 {
+		t.Fatal("状态不允许时不应调用执行器")
+	}
+}
+
+// TestExecuteStepsAPIRejectsInvalidTimeout 验证超时参数越界返回 400。
+func TestExecuteStepsAPIRejectsInvalidTimeout(t *testing.T) {
+	t.Parallel()
+	fixture := newStepAPIFixture(t, false)
+	recorder := fixture.post(t, fixture.executeStepsPath(fixture.task.ID.String()), map[string]any{
+		"timeout_seconds": -1,
+	})
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("期望 400，实际 %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if fixture.port.calls != 0 {
+		t.Fatal("参数非法时不应调用执行器")
+	}
+}
+
+// TestExecuteStepsAPIRejectsGet 验证顺序执行接口只接受 POST。
+func TestExecuteStepsAPIRejectsGet(t *testing.T) {
+	t.Parallel()
+	fixture := newStepAPIFixture(t, false)
+	request := httptest.NewRequest(
+		http.MethodGet,
+		fixture.executeStepsPath(fixture.task.ID.String()),
+		nil,
+	)
+	recorder := httptest.NewRecorder()
+	fixture.handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("期望 405，实际 %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+// TestExecuteStepsAPINotFound 验证不存在的任务返回 404。
+func TestExecuteStepsAPINotFound(t *testing.T) {
+	t.Parallel()
+	fixture := newStepAPIFixture(t, false)
+	recorder := fixture.post(t, fixture.executeStepsPath(domain.NewID().String()), nil)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("期望 404，实际 %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if fixture.port.calls != 0 {
+		t.Fatal("目标不存在时不应调用执行器")
+	}
+}

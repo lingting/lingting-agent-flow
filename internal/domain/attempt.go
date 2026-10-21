@@ -152,10 +152,18 @@ type Attempt struct {
 	// SessionIDs 是本次尝试关联的全部 Agent 会话标识。
 	SessionIDs []ID `json:"session_ids,omitempty"`
 	// CodeSaveID 是本次尝试关联的代码保存记录 ID。
-	CodeSaveID string     `json:"code_save_id,omitempty"`
-	StartedAt  time.Time  `json:"started_at"`
-	FinishedAt *time.Time `json:"finished_at,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
+	CodeSaveID string `json:"code_save_id,omitempty"`
+	// GitBranch 是本次执行所在的工作区分支名，未采集时为空。
+	GitBranch string `json:"git_branch,omitempty"`
+	// GitBefore 是执行前采集到的 Git 工作区状态。
+	//
+	// 为 nil 表示本次没有采集（例如采集能力缺失），与"采集成功且工作区干净"不同。
+	GitBefore *GitWorktreeState `json:"git_before,omitempty"`
+	// GitAfter 是执行后采集到的 Git 工作区状态。
+	GitAfter   *GitWorktreeState `json:"git_after,omitempty"`
+	StartedAt  time.Time         `json:"started_at"`
+	FinishedAt *time.Time        `json:"finished_at,omitempty"`
+	CreatedAt  time.Time         `json:"created_at"`
 }
 
 // NewAttempt 创建并校验执行尝试。
@@ -212,6 +220,63 @@ func (a Attempt) Validate() error {
 		if err := id.Validate(); err != nil {
 			return err
 		}
+	}
+	if branch := strings.TrimSpace(a.GitBranch); branch != "" {
+		if err := ValidateGitBranchName(branch); err != nil {
+			return err
+		}
+	}
+	for _, state := range []*GitWorktreeState{a.GitBefore, a.GitAfter} {
+		if state == nil {
+			continue
+		}
+		if err := state.Validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetGitBefore 记录执行前的 Git 工作区状态与分支。
+//
+// 采集失败的状态同样被记录：未知状态必须可诊断，不能被当成"工作区干净"。
+func (a *Attempt) SetGitBefore(state GitWorktreeState) error {
+	if a == nil {
+		return invalidField("Attempt", "", "实体为空")
+	}
+	if err := state.Validate(); err != nil {
+		return err
+	}
+	if branch := strings.TrimSpace(state.Branch); branch != "" {
+		if err := ValidateGitBranchName(branch); err != nil {
+			return err
+		}
+	}
+	copied := state
+	a.GitBefore = &copied
+	if branch := strings.TrimSpace(state.Branch); branch != "" {
+		a.GitBranch = branch
+	}
+	return nil
+}
+
+// SetGitAfter 记录执行后的 Git 工作区状态。
+func (a *Attempt) SetGitAfter(state GitWorktreeState) error {
+	if a == nil {
+		return invalidField("Attempt", "", "实体为空")
+	}
+	if err := state.Validate(); err != nil {
+		return err
+	}
+	if branch := strings.TrimSpace(state.Branch); branch != "" {
+		if err := ValidateGitBranchName(branch); err != nil {
+			return err
+		}
+	}
+	copied := state
+	a.GitAfter = &copied
+	if branch := strings.TrimSpace(state.Branch); branch != "" {
+		a.GitBranch = branch
 	}
 	return nil
 }

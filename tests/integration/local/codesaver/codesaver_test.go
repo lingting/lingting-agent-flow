@@ -661,3 +661,80 @@ func exitCodeOf(err error) int {
 	}
 	return -1
 }
+
+// TestInspectWorktreeReportsBranchAndChanges 校验只读核验返回真实分支、HEAD 与变更。
+//
+// 该用例直接使用本机真实 Git 仓库，验证"记录代码状态"与"保存代码"看到的是同一个
+// 工作区：核验不提交、不推送，也不写入任何代码保存记录。
+func TestInspectWorktreeReportsBranchAndChanges(t *testing.T) {
+	t.Parallel()
+	instance := newRepo(t)
+	executor := newExecutor(instance)
+	inspector, err := codesaver.NewInspector(codesaver.InspectorOptions{
+		Executor: executor,
+		Guard:    &fakeGuard{container: newContainer()},
+	})
+	if err != nil {
+		t.Fatalf("构造工作区核验器失败: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+
+	clean, err := inspector.Inspect(ctx, request())
+	if err != nil {
+		t.Fatalf("核验干净工作区失败: %v", err)
+	}
+	if clean.Branch != testTaskBranch {
+		t.Fatalf("分支不符: %s", clean.Branch)
+	}
+	if clean.Head != instance.rev(t, "HEAD") {
+		t.Fatalf("HEAD 不符: %s", clean.Head)
+	}
+	if !clean.Clean {
+		t.Fatalf("初始工作区应当是干净的: %+v", clean)
+	}
+
+	instance.writeFile(t, "internal/app.go", "package app\n// 修改\n")
+	instance.writeFile(t, "internal/new.go", "package app\n")
+	dirty, err := inspector.Inspect(ctx, request())
+	if err != nil {
+		t.Fatalf("核验脏工作区失败: %v", err)
+	}
+	if dirty.Clean {
+		t.Fatalf("存在未提交变更时不应报告干净: %+v", dirty)
+	}
+	if dirty.Modified == 0 {
+		t.Fatalf("应识别出已修改文件: %+v", dirty)
+	}
+	if dirty.Added == 0 {
+		t.Fatalf("应识别出新增文件: %+v", dirty)
+	}
+	// 核验不得提交：HEAD 必须与核验前一致。
+	if dirty.Head != clean.Head {
+		t.Fatalf("核验不应改变 HEAD: %s -> %s", clean.Head, dirty.Head)
+	}
+	if executor.pushedCount() != 0 {
+		t.Fatal("核验不应执行推送")
+	}
+}
+
+// TestInspectWorktreeRejectsUnmanagedContainer 校验容器不可用时核验直接失败。
+func TestInspectWorktreeRejectsUnmanagedContainer(t *testing.T) {
+	t.Parallel()
+	instance := newRepo(t)
+	detached := newContainer()
+	detached.Detached = true
+	detached.State = domain.ContainerStateDetached
+	inspector, err := codesaver.NewInspector(codesaver.InspectorOptions{
+		Executor: newExecutor(instance),
+		Guard:    &fakeGuard{container: detached},
+	})
+	if err != nil {
+		t.Fatalf("构造工作区核验器失败: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	if _, inspectErr := inspector.Inspect(ctx, request()); inspectErr == nil {
+		t.Fatal("已脱离管理的容器不应允许核验")
+	}
+}

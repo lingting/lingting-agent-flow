@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -16,10 +17,11 @@ import (
 const attemptColumns = `id, task_id, step_id, attempt_number, status, container_id,
 	docker_id, input_digest, exit_code, timed_out, cancelled, retry_reason, error_class,
 	failure_stage, failure_summary, verification_verdict, verification_summary,
-	verification_id, session_ids_json, code_save_id, started_at, finished_at, created_at`
+	verification_id, session_ids_json, code_save_id, git_branch, git_before_json,
+	git_after_json, started_at, finished_at, created_at`
 
 // attemptInsertCount 是写入尝试时的参数个数。
-const attemptInsertCount = 23
+const attemptInsertCount = 26
 
 // attemptStore 实现 storage.AttemptStore。
 type attemptStore struct {
@@ -28,8 +30,15 @@ type attemptStore struct {
 
 // attemptRecord 是写入尝试前的 JSON 编码结果。
 type attemptRecord struct {
-	attempt     domain.Attempt
+	attempt domain.Attempt
+	// sessionJSON 是会话标识列表的 JSON 编码。
 	sessionJSON string
+	// gitBeforeJSON 与 gitAfterJSON 是 Git 工作区状态快照的 JSON 编码。
+	//
+	// 空字符串表示本次没有采集，写入 NULL：数据库里"没有快照"与"快照显示工作区
+	// 干净"必须能区分。
+	gitBeforeJSON string
+	gitAfterJSON  string
 }
 
 // CreateAttempt 写入一次执行尝试。
@@ -201,7 +210,8 @@ UPDATE attempts SET
 	status = ?, container_id = ?, docker_id = ?, input_digest = ?, exit_code = ?,
 	timed_out = ?, cancelled = ?, retry_reason = ?, error_class = ?, failure_stage = ?,
 	failure_summary = ?, verification_verdict = ?, verification_summary = ?,
-	verification_id = ?, session_ids_json = ?, code_save_id = ?, finished_at = ?
+	verification_id = ?, session_ids_json = ?, code_save_id = ?, git_branch = ?,
+	git_before_json = ?, git_after_json = ?, finished_at = ?
 WHERE id = ?`
 	args := []any{
 		string(record.attempt.Status),
@@ -220,6 +230,9 @@ WHERE id = ?`
 		toIDPtrParam(record.attempt.VerificationID),
 		record.sessionJSON,
 		nullIfBlank(record.attempt.CodeSaveID),
+		nullIfBlank(record.attempt.GitBranch),
+		nullIfBlank(record.gitBeforeJSON),
+		nullIfBlank(record.gitAfterJSON),
 		toMillisPtr(record.attempt.FinishedAt),
 		toIDParam(record.attempt.ID),
 	}
@@ -373,7 +386,44 @@ func encodeAttempt(attempt domain.Attempt) (attemptRecord, error) {
 	if err != nil {
 		return attemptRecord{}, err
 	}
-	return attemptRecord{attempt: attempt, sessionJSON: encoded}, nil
+	before, err := encodeGitState("Attempt.git_before", attempt.GitBefore)
+	if err != nil {
+		return attemptRecord{}, err
+	}
+	after, err := encodeGitState("Attempt.git_after", attempt.GitAfter)
+	if err != nil {
+		return attemptRecord{}, err
+	}
+	return attemptRecord{
+		attempt:       attempt,
+		sessionJSON:   encoded,
+		gitBeforeJSON: before,
+		gitAfterJSON:  after,
+	}, nil
+}
+
+// encodeGitState 把 Git 工作区状态编码为 JSON；nil 表示本次没有采集，返回空字符串。
+func encodeGitState(field string, state *domain.GitWorktreeState) (string, error) {
+	if state == nil {
+		return "", nil
+	}
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		return "", fmt.Errorf("sqlite: 编码 %s 失败: %w", field, err)
+	}
+	return string(encoded), nil
+}
+
+// decodeGitState 把 JSON 快照还原为 Git 工作区状态；空值表示本次没有采集。
+func decodeGitState(field, raw string) (*domain.GitWorktreeState, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var state domain.GitWorktreeState
+	if err := json.Unmarshal([]byte(raw), &state); err != nil {
+		return nil, fmt.Errorf("sqlite: 解析 %s 失败: %w", field, err)
+	}
+	return &state, nil
 }
 
 // attemptArgs 构造写入尝试的参数列表。
@@ -400,6 +450,9 @@ func attemptArgs(record attemptRecord) []any {
 		toIDPtrParam(attempt.VerificationID),
 		record.sessionJSON,
 		nullIfBlank(attempt.CodeSaveID),
+		nullIfBlank(attempt.GitBranch),
+		nullIfBlank(record.gitBeforeJSON),
+		nullIfBlank(record.gitAfterJSON),
 		toMillis(attempt.StartedAt),
 		toMillisPtr(attempt.FinishedAt),
 		toMillis(attempt.CreatedAt),
@@ -428,6 +481,9 @@ func scanAttempt(row scanner) (*domain.Attempt, error) {
 		verificationID      sql.NullString
 		sessionJSON         string
 		codeSaveID          sql.NullString
+		gitBranch           sql.NullString
+		gitBeforeJSON       sql.NullString
+		gitAfterJSON        sql.NullString
 		startedAt           int64
 		finishedAt          sql.NullInt64
 		createdAt           int64
@@ -453,6 +509,9 @@ func scanAttempt(row scanner) (*domain.Attempt, error) {
 		&verificationID,
 		&sessionJSON,
 		&codeSaveID,
+		&gitBranch,
+		&gitBeforeJSON,
+		&gitAfterJSON,
 		&startedAt,
 		&finishedAt,
 		&createdAt,
@@ -477,6 +536,17 @@ func scanAttempt(row scanner) (*domain.Attempt, error) {
 	attempt.VerificationSummary = verificationSummary.String
 	attempt.VerificationID = fromIDPtr(verificationID)
 	attempt.CodeSaveID = codeSaveID.String
+	attempt.GitBranch = gitBranch.String
+	before, err := decodeGitState("Attempt.git_before", gitBeforeJSON.String)
+	if err != nil {
+		return nil, err
+	}
+	attempt.GitBefore = before
+	after, err := decodeGitState("Attempt.git_after", gitAfterJSON.String)
+	if err != nil {
+		return nil, err
+	}
+	attempt.GitAfter = after
 	attempt.StartedAt = fromMillis(startedAt)
 	attempt.FinishedAt = fromMillisPtr(finishedAt)
 	attempt.CreatedAt = fromMillis(createdAt)

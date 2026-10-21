@@ -102,7 +102,10 @@ func runServer(cmd *cobra.Command, a *app.App, configPath, address string, requi
 				Store:      store,
 				Containers: containers,
 				Sessions:   sessions,
-				Logger:     a.Logger().Slog(),
+				// Git 工作区状态采集复用同一容器服务的只读核验能力：
+				// 记录到的分支与 HEAD 必须与代码保存看到的是同一个工作区。
+				Git:    containers,
+				Logger: a.Logger().Slog(),
 			})
 		},
 		ValidationFactory: func(

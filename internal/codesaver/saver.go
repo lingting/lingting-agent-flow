@@ -577,7 +577,7 @@ func (x *Session) inspect(ctx context.Context) (WorktreeState, error) {
 	if err != nil {
 		return WorktreeState{}, err
 	}
-	state, err := parseStatus(raw)
+	state, err := ParseStatus(raw)
 	if err != nil {
 		return WorktreeState{}, err
 	}

@@ -373,6 +373,38 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
 - 本阶段不实现多步骤自动编排、自动重试、远程容器创建、Git 操作与执行队列；相关能力缺失
   时必须返回明确错误，不得伪装成已可用。
 
+### 开发步骤顺序执行与独立 Session 约束
+
+- 顺序执行入口固定为 `app.StepExecutor.ExecuteSteps`（`internal/app/step_sequence*.go`）：
+  HTTP Handler 与 CLI 不得自行串联步骤、自行判断"下一步该执行谁"，也不得跳过未完成的步骤。
+- 每个开发步骤必须使用独立 Session：Session 与 Step / Attempt 一一对应，不同 Step 不得复用
+  同一个 Session 文件；同一 Step 重新执行必须创建新的 Attempt 与新的 Session。
+- 每次真实执行必须创建新的 Attempt，禁止复用旧 Attempt、覆盖旧尝试的错误与耗时。
+- 多个开发步骤共享同一任务容器的同一代码工作区（`task.Config.EffectiveWorkDir()`），
+  创建新 Session 不得重新 Clone、重置或覆盖已有代码。
+- 后续步骤必须等待前置步骤满足执行条件：`domain.CheckStepPrerequisites` 要求全部序号更小的
+  步骤处于 `completed` 或 `skipped`，否则返回状态冲突；该规则只在 `domain` 中定义一次。
+- 顺序执行按 `steps.sequence` 推进，不依赖数据库默认返回顺序；每次只执行一个 Step，前一步骤
+  失败、超时、取消或中断时立即停止，不自动重试、不自动执行 Validator、不自动 Commit / Push /
+  Merge。
+- `recovery_required` 的步骤与已被占用的步骤（`running` / `developing` / `verifying`）一律
+  阻止自动推进，必须先人工核验现场。
+- 同一 Task 的两个顺序执行请求不得交错推进：进程内以任务为键串行化，跨进程仍由步骤占用的
+  事务条件更新拒绝。
+- Developer 执行成功只代表本次 Agent 调用按协议正常结束，不代表编译、测试或验证通过；Developer
+  不得改写 `verification_verdict` 等由验证阶段写入的字段，也不得通过修改状态宣告验收通过。
+- 每次执行必须记录执行前后的 Git 工作区状态（分支、HEAD、是否存在未提交变更、读取是否成功）：
+  采集失败必须如实记录为"读取失败"，不得用零值冒充"工作区干净"；只保存摘要，不保存完整 diff。
+- 代码状态采集必须只读：不得提交、推送、合并、切换分支或修改工作区，也不得写入 `code_saves`。
+- 任务重新开始必须遵循既有容器生命周期规则：失败任务重新执行需先处置旧容器，旧容器只能显式
+  `delete` 或 `detach`，不得自动接管。
+- 不允许静默退回宿主机执行 Pi 或 Git：容器缺失、未运行、已 detached 或节点未通过预检时一律
+  返回前置条件错误。
+- 所有 Docker 命令仍必须遵守既定最低版本与 API 基准（CLI 29.0.0、Engine 29.0.0、API 1.52）。
+- 顺序执行接口固定为 `POST /api/v1/tasks/{taskID}/execute-steps`，只接受执行参数（可选补充
+  提示词与超时），不接受步骤列表、顺序覆盖或任意 Session 路径；响应必须逐步骤返回 Attempt、
+  Session、执行结论与停止原因。
+
 ### 确定性验证引擎（Validator）约束
 
 - 验证入口固定为 `app.ValidationService`（`internal/app/validation*.go`）：HTTP Handler、CLI 与
@@ -520,6 +552,9 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
   不得设置取值白名单，未知取值必须能写入并原样读回。
 - 新增列的迁移必须可重复执行且只读取既有表：`attempts.task_id` 的历史回填通过
   `steps.task_id` 完成，步骤已不存在的孤立记录保持空值，不得因此失败或删除记录。
+- 执行尝试的 Git 工作区状态以 JSON 快照保存（`attempts.git_before_json` /
+  `git_after_json`），只受 `json_valid` 这类结构约束，不为快照内部字段建列或设白名单；
+  快照为空表示本次没有采集，与"采集成功且工作区干净"必须能区分。
 - 数据库相关测试集中在 `tests/`，必须覆盖 Schema 审计、旧库升级、数据保留、未知枚举
   值与并发访问，且不得把未执行、失败或跳过的测试报告为通过。
 

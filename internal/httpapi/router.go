@@ -125,6 +125,11 @@ func (rt *router) tasksHandler(w http.ResponseWriter, r *http.Request) {
 		rt.stepExec.serve(w, r, taskID, stepID)
 		return
 	}
+	// 顺序执行挂在单任务路径之下，同样是写操作，必须先于只读查询与任务处理器判定。
+	if taskID, ok := parseExecuteStepsPath(r.URL.Path); ok {
+		rt.stepExec.serveSteps(w, r, taskID)
+		return
+	}
 	// 验证动作与执行记录共享 {taskID}/steps/{stepID}/attempts 前缀，同样必须先判定
 	// 具体形状：验证是写操作，其余 attempts 路径仍按只读查询处理。
 	if taskID, stepID, attemptID, ok := parseValidatePath(r.URL.Path); ok {

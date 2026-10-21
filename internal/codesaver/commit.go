@@ -94,7 +94,7 @@ func (x *Session) refreshStatus(ctx context.Context) (WorktreeState, error) {
 	if err != nil {
 		return WorktreeState{}, err
 	}
-	return parseStatus(raw)
+	return ParseStatus(raw)
 }
 
 // stageAll 把全部非忽略变更加入暂存区。

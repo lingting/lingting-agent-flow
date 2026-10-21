@@ -7,11 +7,11 @@ import (
 // statusHeaderPrefix 是 `git status --porcelain` 分支行的前缀。
 const statusHeaderPrefix = "## "
 
-// parseStatus 解析 `git status --porcelain=v1 -z --branch` 的结构化输出。
+// ParseStatus 解析 `git status --porcelain=v1 -z --branch` 的结构化输出。
 //
 // 使用 -z 形式：条目之间以 NUL 分隔，重命名条目后面紧跟原始路径，因此路径中的
 // 空格、引号与换行都不会破坏解析。
-func parseStatus(raw string) (WorktreeState, error) {
+func ParseStatus(raw string) (WorktreeState, error) {
 	state := WorktreeState{}
 	entries := strings.Split(raw, "\x00")
 	for index := 0; index < len(entries); index++ {

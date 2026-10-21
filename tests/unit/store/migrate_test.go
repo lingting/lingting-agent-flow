@@ -14,7 +14,7 @@ import (
 )
 
 // latestSchemaVersion 是当前程序内置迁移的最新版本号。
-const latestSchemaVersion = 15
+const latestSchemaVersion = 16
 
 // migrationTableName 是记录已应用迁移版本的元数据表名。
 const migrationTableName = "schema_migrations"
@@ -156,7 +156,12 @@ func TestMigrateUpgradesExistingDatabase(t *testing.T) {
 		`ALTER TABLE sessions DROP COLUMN container_id`,
 		`ALTER TABLE sessions DROP COLUMN docker_id`,
 		// 执行记录模型同样需要回退，才能重新执行 0012。
+		// 索引必须在删除列之前移除：SQLite 不允许删除被索引引用的列。
+		`DROP INDEX idx_attempts_git_branch`,
 		`DROP INDEX idx_attempts_task`,
+		`ALTER TABLE attempts DROP COLUMN git_branch`,
+		`ALTER TABLE attempts DROP COLUMN git_before_json`,
+		`ALTER TABLE attempts DROP COLUMN git_after_json`,
 		`ALTER TABLE attempts DROP COLUMN task_id`,
 		`ALTER TABLE steps DROP COLUMN failure_summary`,
 		// 输出日志位置同样需要回退，才能重新执行 0013。
@@ -173,7 +178,7 @@ func TestMigrateUpgradesExistingDatabase(t *testing.T) {
 	testkit.MustExec(
 		t,
 		rawDB(t, db),
-		`DELETE FROM `+migrationTableName+` WHERE version IN (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)`,
+		`DELETE FROM `+migrationTableName+` WHERE version IN (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)`,
 	)
 	if version, err := db.SchemaVersion(ctx); err != nil || version != 1 {
 		t.Fatalf("模拟旧库版本失败: %d, %v", version, err)

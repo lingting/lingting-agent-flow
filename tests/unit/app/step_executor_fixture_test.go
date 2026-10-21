@@ -245,12 +245,53 @@ func fakeStepSession(
 	return session
 }
 
+// fakeGitPort 是 Git 工作区状态采集的受控替身。
+//
+// 它不执行任何真实 Git 命令：用例通过 before / after 指定采集结果，通过 err 指定
+// 采集失败，从而验证"采集失败不会被当作工作区干净"这条业务规则。
+type fakeGitPort struct {
+	mu     sync.Mutex
+	before domain.GitWorktreeState
+	after  domain.GitWorktreeState
+	// err 使所有采集失败。
+	err error
+	// calls 记录收到的采集请求，按调用顺序排列。
+	calls []app.GitWorktreeRequest
+}
+
+// InspectWorktree 返回受控的采集结果。
+func (f *fakeGitPort) InspectWorktree(
+	ctx context.Context,
+	request app.GitWorktreeRequest,
+) (domain.GitWorktreeState, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, request)
+	index := len(f.calls) - 1
+	before, after, err := f.before, f.after, f.err
+	f.mu.Unlock()
+	if err != nil {
+		return domain.GitWorktreeState{StatusRead: false, StatusError: err.Error()}, err
+	}
+	if index == 0 {
+		return before, nil
+	}
+	return after, nil
+}
+
+// count 返回采集次数。
+func (f *fakeGitPort) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.calls)
+}
+
 // stepExecutorFixture 是一套单步骤执行测试数据。
 type stepExecutorFixture struct {
 	db         *sqlite.DB
 	store      *stepExecutorStore
 	executor   *app.StepExecutor
 	containers *fakeContainerPort
+	git        *fakeGitPort
 	role       domain.Role
 	host       domain.ExecutionHost
 	task       domain.Task
@@ -273,6 +314,10 @@ type stepExecutorOptions struct {
 	noContainer bool
 	// updateAttemptErr 使尝试终态写入失败。
 	updateAttemptErr error
+	// git 覆盖 Git 采集替身，为空时使用默认的"干净工作区"替身。
+	git *fakeGitPort
+	// skipGit 表示不注入 Git 采集能力。
+	skipGit bool
 }
 
 // newStepExecutorFixture 在测试工作空间中准备一套可执行的步骤，并启动协调器。
@@ -389,10 +434,32 @@ func newStepExecutorFixtureWithStart(
 		StepExecutionStore: db,
 		updateAttemptErr:   options.updateAttemptErr,
 	}
+	gitPort := options.git
+	if gitPort == nil {
+		gitPort = &fakeGitPort{
+			before: domain.GitWorktreeState{
+				StatusRead: true,
+				Branch:     "agent/" + task.ID.String(),
+				Head:       "1111111111111111111111111111111111111111",
+			},
+			after: domain.GitWorktreeState{
+				StatusRead: true,
+				Branch:     "agent/" + task.ID.String(),
+				Head:       "2222222222222222222222222222222222222222",
+				Dirty:      true,
+				Modified:   1,
+			},
+		}
+	}
+	var gitCapability app.StepExecutionGitPort
+	if !options.skipGit {
+		gitCapability = gitPort
+	}
 	executor, err := app.NewStepExecutor(app.StepExecutorOptions{
 		Store:      store,
 		Containers: containers,
 		Sessions:   sessions,
+		Git:        gitCapability,
 		Logger:     logger.Slog(),
 	})
 	if err != nil {
@@ -415,6 +482,7 @@ func newStepExecutorFixtureWithStart(
 		store:      store,
 		executor:   executor,
 		containers: containers,
+		git:        gitPort,
 		role:       role,
 		host:       host,
 		task:       task,

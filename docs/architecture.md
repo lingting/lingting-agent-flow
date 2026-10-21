@@ -5,8 +5,8 @@
 > 下文的架构图为**目标架构**，仅说明分层意图。当前代码实现了 CLI 骨架、配置加载与校验、
 > 日志封装、SQLite 数据层、执行节点管理与环境预检、SSH 服务探测与 SSH 连接层（主机密钥校验、
 > 私钥认证、远程命令执行、SFTP 传输与远端 Unix 套接字通道）、统一 Pi Runner（本机与容器内）、
-> **单步骤执行协调器**、**确定性验证引擎**、**统一执行环境（远程 Linux + Docker）**、
-> **代码获取（CodeFetcher）与代码初始化协调器**与任务管理 HTTP 接口。
+> **单步骤执行协调器与开发步骤顺序执行**、**确定性验证引擎**、**统一执行环境（远程 Linux +
+> Docker）**、**代码获取（CodeFetcher）与代码初始化协调器**与任务管理 HTTP 接口。
 > 图中调度、多步骤工作流编排与 UI 的完整形态尚未实现。
 
 ## 目标架构
@@ -28,7 +28,7 @@ SQLite
 - **CLI / Web UI**：只负责发起操作与展示结果。
 - **Application Services**：CLI 与 HTTP 的共同入口，编排各领域能力。
 - **Scheduler / Workflow Engine**：任务领取、并发控制与 Plan / Develop / Verify / Retry 状态迁移；
-  当前只有单步骤执行协调器接入，多步骤编排未接入 HTTP。
+  当前只接入单步骤执行与显式顺序执行，自动 Plan / Verify / Retry 编排仍未接入 HTTP。
 - **Agent Runner / Process Manager**：以独立子进程方式驱动 Pi，并管理进程生命周期。
 - **Pi CLI / 任务容器**：非交互 `pi --print --session` 调用与任务工作区隔离。
 - **SQLite**：唯一真相来源。
@@ -143,9 +143,15 @@ cmd/agentflow → cli / httpapi / server → app → config / logging / storage 
 - `app` 中的 `HostValidator` 编排三项必需检查，`HostValidationService` 作为后台服务接入
   `internal/lifecycle`，两者都不在 HTTP Handler 内创建长期 goroutine。
 - `app.StepExecutor` 是单步骤执行协调器（`internal/app/step_executor*.go`），按职责拆分为
-  校验与占用、提示词构造、执行与终态写入、生命周期四部分。它是所有执行入口里唯一负责
-  "创建 Attempt → 调用 Pi → 写终态"的组件，同时实现 `lifecycle.Service`，因此 Server 停止时
-  能取消在途执行并等待收敛。
+  校验与占用、提示词构造、执行与终态写入、Git 状态采集、生命周期五部分。它是所有执行入口里
+  唯一负责"创建 Attempt → 调用 Pi → 写终态"的组件，同时实现 `lifecycle.Service`，因此
+  Server 停止时能取消在途执行并等待收敛。
+- `app.StepExecutor.ExecuteSteps`（`internal/app/step_sequence.go`）是显式的顺序执行入口：
+  它按 `steps.sequence` 逐个调用 `Execute`，不生成计划、不自动重试、不串联验证与代码保存，
+  遇到失败、超时、取消或中断立即停止。顺序执行不新增调度器，也不复制状态迁移规则。
+- Git 工作区状态采集经由 `StepExecutionGitPort`，默认实现是
+  `ContainerService.InspectWorktree`（`internal/app/code_inspect.go`），它复用
+  `codesaver.Inspector` 的只读核验：不提交、不推送、不合并，也不写入 `code_saves`。
 - `httpapi` 只做协议转换：解析执行参数、把错误类别映射为状态码、序列化结果。它不判断任务
   是否可执行，也不读数据库。
 - `workflow` 引擎（多步骤编排）已经存在并可在 CLI 下使用，但 `agentflow server` 构造的任务
@@ -232,7 +238,39 @@ HTTP Handler
 - 失败与超时把任务收敛为 `recovery_required` 而不是终态 `failed`：是否重试需要完整工作流判断。
 - 终态写入失败必须如实报告（`Finalized=false` / `execution_not_persisted`），不得因响应
   写入失败而跳过 Session 保存与状态更新。
-- 本层不创建、启动、停止或接管容器，也不执行 Git 操作。
+- 本层不创建、启动、停止或接管容器，也不执行 Commit / Push / Merge。
+
+### 开发步骤顺序执行
+
+顺序执行是"单步骤执行"之上的一层薄协调，而不是新的调度器：
+
+```text
+HTTP Handler（POST /api/v1/tasks/{taskID}/execute-steps）
+  └── app.StepExecutor.ExecuteSteps
+        ├── 任务状态准入（domain.TaskStatus.AllowsStepExecution）
+        ├── storage.StepStore.ListStepsByTask（按 sequence 排序）
+        ├── domain.NextStepToExecute（跳过非开发步骤、拒绝不确定与已占用步骤）
+        ├── domain.CheckStepPrerequisites（前序步骤必须 completed / skipped）
+        └── app.StepExecutor.Execute（复用单步骤执行，每次新建 Attempt 与 Session）
+```
+
+- 每个开发步骤使用独立 Session，但共享同一任务容器的同一代码工作区；新建 Session 不会
+  重新 Clone，也不会覆盖已有代码。
+- 执行前必须校验前置步骤：全部序号更小的步骤处于 `completed` 或 `skipped` 才允许执行，
+  否则返回 409。该规则只在 `domain` 中定义一次。
+- 失败、超时、取消与中断都会立即停止，不自动重试，也不自动执行验证与代码保存。
+- 同一任务的顺序执行在进程内以任务为键串行化，跨进程仍由步骤占用的事务条件更新拒绝。
+
+### 代码状态记录
+
+- 每次执行在占用步骤之后采集一次"执行前"快照，在 Pi 结束后采集一次"执行后"快照，记录到
+  对应 Attempt（`git_branch` / `git_before_json` / `git_after_json`）。
+- 快照只包含分支、HEAD、是否存在未提交变更与变更条目计数：不保存完整 diff，也不写入
+  `code_saves`。
+- 采集失败必须记录为 `status_read = false` 与原因，不能被当作"工作区干净"，也不能把成功的
+  执行改写为失败。
+- 采集是只读的：`codesaver.Inspector` 复用代码保存的前置核验，但只执行 `git status` 与
+  `git rev-parse`。
 
 ## 确定性验证引擎边界
 

@@ -248,6 +248,8 @@ var expectedIndexes = []string{
 	"idx_steps_status",
 	"idx_attempts_step",
 	"idx_attempts_status",
+	"idx_attempts_task",
+	"idx_attempts_git_branch",
 	"idx_sessions_task",
 	"idx_sessions_step",
 	"idx_sessions_attempt",

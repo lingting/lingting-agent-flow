@@ -104,6 +104,8 @@ type StepExecutionResult struct {
 // StepExecutorStepRepository 是执行协调器需要的步骤读写能力。
 type StepExecutorStepRepository interface {
 	GetStep(ctx context.Context, id domain.ID) (*domain.Step, error)
+	// ListStepsByTask 按序号返回任务的全部步骤，用于校验前置步骤是否已完成。
+	ListStepsByTask(ctx context.Context, taskID domain.ID) ([]domain.Step, error)
 	UpdateStepIfStatus(
 		ctx context.Context,
 		step domain.Step,
@@ -127,6 +129,8 @@ type StepExecutorTaskRepository interface {
 // 替身可以让它失败，从而验证业务代码是否如实报告而不是伪造成功。
 type StepExecutorAttemptRepository interface {
 	GetAttempt(ctx context.Context, id domain.ID) (*domain.Attempt, error)
+	// UpdateAttempt 无条件写入尝试，用于补写执行前后的 Git 工作区状态快照。
+	UpdateAttempt(ctx context.Context, attempt domain.Attempt) error
 	UpdateAttemptIfStatus(
 		ctx context.Context,
 		attempt domain.Attempt,
@@ -181,6 +185,11 @@ type StepExecutorOptions struct {
 	Containers StepExecutionContainerPort
 	// Sessions 是会话服务，用于核验会话记录，必填。
 	Sessions *SessionService
+	// Git 是 Git 工作区状态采集能力，可选。
+	//
+	// 为空表示本次运行不采集代码状态：Attempt 的 Git 字段保持为空，执行本身不受
+	// 影响。采集能力缺失不能被当作"工作区干净"。
+	Git StepExecutionGitPort
 	// Logger 是日志器，为空时使用默认日志器。
 	Logger *slog.Logger
 	// Now 是可注入的时钟，零值使用当前时间。
@@ -203,6 +212,7 @@ type StepExecutor struct {
 	store          StepExecutionStore
 	containers     StepExecutionContainerPort
 	sessions       *SessionService
+	git            StepExecutionGitPort
 	logger         *slog.Logger
 	now            func() time.Time
 	defaultTimeout time.Duration
@@ -210,6 +220,9 @@ type StepExecutor struct {
 	//
 	// 它是第一道防线而不是一致性保证：真正的占用由数据库条件更新完成。
 	running *stepExecutionRegistry
+	// sequences 记录本进程内正在顺序执行的任务，用于拒绝同一任务的两个顺序执行
+	// 请求交错推进。跨进程的并发仍由步骤占用的事务条件更新拒绝。
+	sequences *stepExecutionRegistry
 	// lifecycle 管理后台服务状态与在途执行，使 Server 停止时能取消并等待收敛。
 	lifecycle lifecycleState
 }
@@ -241,10 +254,12 @@ func NewStepExecutor(options StepExecutorOptions) (*StepExecutor, error) {
 		store:          options.Store,
 		containers:     options.Containers,
 		sessions:       options.Sessions,
+		git:            options.Git,
 		logger:         logger,
 		now:            now,
 		defaultTimeout: timeout,
 		running:        newStepExecutionRegistry(),
+		sequences:      newStepExecutionRegistry(),
 	}, nil
 }
 
@@ -281,6 +296,9 @@ func (e *StepExecutor) Execute(
 	if err := domain.CheckStepExecutionStart(task, step); err != nil {
 		return StepExecutionResult{}, fmt.Errorf("%w: %w", ErrStepExecutionConflict, err)
 	}
+	if err := e.checkPrerequisites(ctx, task, step); err != nil {
+		return StepExecutionResult{}, err
+	}
 	role, err := e.loadRole(ctx, step)
 	if err != nil {
 		return StepExecutionResult{}, err
@@ -315,6 +333,9 @@ func (e *StepExecutor) Execute(
 	if err != nil {
 		return StepExecutionResult{}, err
 	}
+	// 执行前快照在占用之后采集：此时步骤已被本次执行占用，其他请求无法并发改动
+	// 同一个工作区，因此"执行前"与"执行后"的差异确实来自本次调用。
+	before := e.captureGitState(runCtx, task, container, "before", started.Attempt.ID)
 	e.logger.InfoContext(
 		runCtx,
 		"步骤执行已开始",
@@ -330,10 +351,12 @@ func (e *StepExecutor) Execute(
 		step:        started.Step,
 		attempt:     started.Attempt,
 		role:        role,
+		container:   container,
 		containerID: started.Attempt.ContainerID,
 		dockerID:    started.Attempt.DockerID,
 		prompt:      prompt,
 		timeout:     timeout,
+		gitBefore:   before,
 	})
 	result.AttemptNumber = started.Attempt.AttemptNumber
 	return result, nil
@@ -345,10 +368,127 @@ type runAttemptRequest struct {
 	step        domain.Step
 	attempt     domain.Attempt
 	role        domain.Role
+	container   domain.Container
 	containerID string
 	dockerID    string
 	prompt      string
 	timeout     time.Duration
+	// gitBefore 是执行前采集到的 Git 工作区状态，为空表示本次没有采集。
+	gitBefore *domain.GitWorktreeState
+}
+
+// checkPrerequisites 校验指定步骤的全部前序步骤是否已完成。
+//
+// 规则只在 domain 中定义一次（domain.CheckStepPrerequisites）：这里只负责读取
+// 同一任务的步骤列表并把拒绝原因映射为状态冲突。跳过未完成的前序步骤会让后续
+// 步骤在错误的代码基础上运行，因此必须拒绝，而不是给出警告。
+func (e *StepExecutor) checkPrerequisites(
+	ctx context.Context,
+	task domain.Task,
+	step domain.Step,
+) error {
+	steps, err := e.store.ListStepsByTask(ctx, task.ID)
+	if err != nil {
+		return fmt.Errorf("读取计划步骤失败: %w", err)
+	}
+	if len(steps) == 0 {
+		// 没有其他步骤时不存在前置条件：单步骤计划同样可以执行。
+		return nil
+	}
+	if err := domain.CheckStepPrerequisites(steps, step); err != nil {
+		return fmt.Errorf("%w: %w", ErrStepExecutionConflict, err)
+	}
+	return nil
+}
+
+// captureGitState 采集一次 Git 工作区状态并写入执行尝试。
+//
+// 采集失败不会中断执行：Git 状态是诊断信息而不是执行前提，但失败必须被如实记录，
+// 不能被当作"工作区干净"。写库失败同样只记录日志——执行事实不因诊断信息缺失而改变。
+func (e *StepExecutor) captureGitState(
+	ctx context.Context,
+	task domain.Task,
+	container domain.Container,
+	phase string,
+	attemptID domain.ID,
+) *domain.GitWorktreeState {
+	if e.git == nil {
+		return nil
+	}
+	// 采集使用未取消的上下文：取消与超时恰恰是最需要"执行后现场"的场景，采集本身
+	// 有独立的超时上限，不会无限期占用执行路径。
+	inspectCtx := context.WithoutCancel(ctx)
+	state, err := e.git.InspectWorktree(inspectCtx, GitWorktreeRequest{
+		ContainerID: container.ID.String(),
+		DockerID:    container.DockerID,
+		WorkDir:     task.Config.EffectiveWorkDir(),
+		TaskID:      task.ID.String(),
+	})
+	if err != nil {
+		e.logger.WarnContext(
+			ctx,
+			"采集 Git 工作区状态失败",
+			slog.String("task_id", task.ID.String()),
+			slog.String("attempt_id", attemptID.String()),
+			slog.String("phase", phase),
+			slog.String("error", errorSummary(err)),
+		)
+	}
+	if !state.StatusRead && state.StatusError == "" {
+		state = failedGitState(err)
+	}
+	persistCtx := context.WithoutCancel(ctx)
+	if writeErr := e.storeGitState(persistCtx, attemptID, phase, state); writeErr != nil {
+		e.logger.WarnContext(
+			persistCtx,
+			"写入 Git 工作区状态失败",
+			slog.String("task_id", task.ID.String()),
+			slog.String("attempt_id", attemptID.String()),
+			slog.String("phase", phase),
+			slog.String("error", errorSummary(writeErr)),
+		)
+	}
+	return &state
+}
+
+// storeGitState 把 Git 工作区状态写入执行尝试。
+//
+// 写入使用带状态前置条件的更新：尝试已经进入终态时不再改写，迟到的快照不能覆盖
+// 已确认的记录。
+func (e *StepExecutor) storeGitState(
+	ctx context.Context,
+	attemptID domain.ID,
+	phase string,
+	state domain.GitWorktreeState,
+) error {
+	attempt, err := e.store.GetAttempt(ctx, attemptID)
+	if err != nil {
+		return fmt.Errorf("读取执行尝试失败: %w", err)
+	}
+	if phase == "before" {
+		if err := attempt.SetGitBefore(state); err != nil {
+			return err
+		}
+	} else {
+		if err := attempt.SetGitAfter(state); err != nil {
+			return err
+		}
+	}
+	if attempt.Status.IsTerminal() {
+		// 终态记录仍允许补写诊断快照：它不改变执行结论，只补充可核验的事实。
+		return e.store.UpdateAttempt(ctx, *attempt)
+	}
+	if err := e.store.UpdateAttemptIfStatus(
+		ctx,
+		*attempt,
+		[]domain.AttemptStatus{domain.AttemptStatusRunning},
+	); err != nil {
+		if errors.Is(err, storage.ErrConflict) {
+			return nil
+		}
+		return fmt.Errorf("写入执行尝试失败: %w", err)
+	}
+	return nil
 }
 
 // loadTask 读取任务，不存在或已删除时返回"不存在"。
