@@ -31,6 +31,7 @@ func newCodeCommand(a *app.App) *cobra.Command {
 	command.AddCommand(newCodePushCommand(a))
 	command.AddCommand(newCodeMergeCommand(a))
 	command.AddCommand(newCodeStatusCommand(a))
+	command.AddCommand(newCodeVerifyCommand(a))
 	command.PersistentFlags().String(
 		"config",
 		"",
@@ -279,6 +280,98 @@ func printCodeSaveResult(a *app.App, result app.CodeSaveResult) error {
 	return err
 }
 
+// newCodeVerifyCommand 构建 code verify 子命令。
+func newCodeVerifyCommand(a *app.App) *cobra.Command {
+	var (
+		recordID    string
+		containerID string
+		workDir     string
+	)
+	command := &cobra.Command{
+		Use:   "verify",
+		Short: "只读核验一次代码保存记录对应的真实仓库状态",
+		Long: "读取已持久化的代码保存记录，并在容器内执行只读 Git 查询，判断提交、推送与\n" +
+			"合并是否真的已经发生。\n" +
+			"该命令不提交、不推送、不合并，也不会删除或接管容器；核验结论会写回记录的\n" +
+			"恢复状态，其余字段保持不变。\n" +
+			"记录仍是 pending 时，禁止仅凭记录重新执行有副作用的 Git 操作。",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return withContainerService(cmd.Context(), a, hostConfigPath(cmd), func(
+				ctx context.Context,
+				service *app.ContainerService,
+			) error {
+				result, verifyErr := service.VerifyCodeSave(ctx, app.CodeSaveVerifyRequest{
+					RecordID:    recordID,
+					ContainerID: containerID,
+					WorkDir:     workDir,
+				})
+				if printErr := printCodeSaveVerifyResult(a, result); printErr != nil {
+					return printErr
+				}
+				return verifyErr
+			})
+		},
+	}
+	command.Flags().StringVar(&recordID, "record", "", "代码保存记录标识（必填）")
+	command.Flags().StringVar(&containerID, "container", "", "覆盖记录中的容器登记记录标识")
+	command.Flags().StringVar(
+		&workDir,
+		"workdir",
+		"",
+		"容器内 Git 工作区路径，省略时使用 "+domain.DefaultContainerWorkDir,
+	)
+	if err := command.MarkFlagRequired("record"); err != nil {
+		panic(fmt.Sprintf("cli: 标记必需参数失败: %v", err))
+	}
+	return command
+}
+
+// printCodeSaveVerifyResult 输出一次只读核验的结论。
+func printCodeSaveVerifyResult(a *app.App, result app.CodeSaveVerifyResult) error {
+	if result.Record.ID.IsEmpty() {
+		return nil
+	}
+	lines := []string{
+		fmt.Sprintf("记录: %s", result.Record.ID),
+		fmt.Sprintf("任务分支: %s", result.Record.TaskBranch),
+		fmt.Sprintf("核验前提交: %s %s", result.Record.CommitStatus, emptyAsUnknown(result.Record.CommitSHA)),
+		fmt.Sprintf("核验前推送: %s %s", result.Record.PushStatus, emptyAsUnknown(result.Record.RemoteCommitSHA)),
+		fmt.Sprintf("核验前合并: %s %s", result.Record.MergeStatus, emptyAsUnknown(result.Record.MergeSHA)),
+	}
+	if result.Observation.ReadFailed {
+		lines = append(lines, "核验状态: 无法核验")
+	}
+	if result.Observation.HeadCommit != "" {
+		lines = append(lines, fmt.Sprintf("当前 HEAD: %s", result.Observation.HeadCommit))
+	}
+	if result.Observation.RemoteTaskCommit != "" {
+		lines = append(lines, fmt.Sprintf("远程任务分支: %s", result.Observation.RemoteTaskCommit))
+	}
+	if result.Observation.RemoteBaseCommit != "" {
+		lines = append(lines, fmt.Sprintf("远程基础分支: %s", result.Observation.RemoteBaseCommit))
+	}
+	if result.Observation.ExpectedMergeCommit != "" {
+		lines = append(lines, fmt.Sprintf("预期合并提交: %s", result.Observation.ExpectedMergeCommit))
+	}
+	lines = append(lines,
+		fmt.Sprintf("恢复结论: %s", result.Decision.Status),
+		"判定说明: "+result.Decision.Summary,
+	)
+	if result.Decision.SafeToRetry {
+		lines = append(lines, "后续操作: 可以安全地重新执行对应操作")
+	} else {
+		lines = append(lines, "后续操作: 不要自动重试，先按判定说明人工核验")
+	}
+	if result.Persisted {
+		lines = append(lines, "结论已写回记录")
+	} else {
+		lines = append(lines, "结论未写回记录，请保存本次输出")
+	}
+	_, err := fmt.Fprintln(a.Stdout(), strings.Join(lines, "\n"))
+	return err
+}
+
 // printCodeSaveStatus 输出任务的代码保存记录列表。
 func printCodeSaveStatus(a *app.App, records []domain.CodeSaveRecord) error {
 	if len(records) == 0 {
@@ -293,9 +386,22 @@ func printCodeSaveStatus(a *app.App, records []domain.CodeSaveRecord) error {
 			fmt.Sprintf("提交: %s %s", record.CommitStatus, emptyAsUnknown(record.CommitSHA)),
 			fmt.Sprintf("推送: %s %s", record.PushStatus, emptyAsUnknown(record.RemoteCommitSHA)),
 			fmt.Sprintf("合并: %s %s", record.MergeStatus, emptyAsUnknown(record.MergeSHA)),
+			fmt.Sprintf("记录写入: %s", record.PersistStatus.Normalized()),
+		}
+		if record.BaselineCommitSHA != "" {
+			lines = append(lines, fmt.Sprintf("提交基线: %s", record.BaselineCommitSHA))
+		}
+		if record.BaselineBaseCommitSHA != "" {
+			lines = append(lines, fmt.Sprintf("合并基线: %s", record.BaselineBaseCommitSHA))
+		}
+		if record.RecoveryStatus != "" {
+			lines = append(lines, fmt.Sprintf("恢复结论: %s", record.RecoveryStatus))
 		}
 		if record.ErrorSummary != "" {
 			lines = append(lines, fmt.Sprintf("失败摘要: %s", record.ErrorSummary))
+		}
+		if record.PersistError != "" {
+			lines = append(lines, fmt.Sprintf("写入失败: %s", record.PersistError))
 		}
 		blocks = append(blocks, strings.Join(lines, "\n"))
 	}
@@ -306,6 +412,10 @@ func printCodeSaveStatus(a *app.App, records []domain.CodeSaveRecord) error {
 // codeSaveHint 根据记录状态给出可诊断的下一步建议。
 func codeSaveHint(record domain.CodeSaveRecord) string {
 	switch {
+	case record.PersistStatus.IsUnconfirmed():
+		return "记录可能落后于真实 Git 状态；先执行 code verify 核验，不要直接重试"
+	case record.RecoveryStatus == domain.RecoveryStatusUnverifiable:
+		return "上次核验无法确认仓库状态；请检查容器与远程可达性后重新执行 code verify"
 	case record.PushStatus == domain.PushStatusUnknown:
 		return "先核验远程任务分支实际指向的 commit，再决定是否重试推送"
 	case record.PushStatus == domain.PushStatusConflict:

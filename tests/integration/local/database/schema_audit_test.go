@@ -165,7 +165,10 @@ func TestSchemaHasNoEnumWhitelist(t *testing.T) {
 		}
 	}
 	// 交叉核验：直接向枚举字段写入未知值必须成功。
-	for _, probe := range enumProbes {
+	// 代码保存的恢复状态是 0019 新增的枚举式字段，同样不允许取值白名单。
+	probes := append([]enumProbe{}, enumProbes...)
+	probes = append(probes, codeSaveRecoveryProbes...)
+	for _, probe := range probes {
 		if err := insertUnknownEnumValue(ctx, conn, probe); err != nil {
 			t.Fatalf("枚举字段 %s.%s 无法保存未知值: %v", probe.table, probe.column, err)
 		}

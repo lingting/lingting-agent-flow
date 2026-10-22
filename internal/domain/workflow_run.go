@@ -671,6 +671,11 @@ type WorkflowCloseoutInput struct {
 	CodeSaveSucceeded bool
 	// CodeSaveIndeterminate 表示代码保存结果无法确认（未请求时忽略）。
 	CodeSaveIndeterminate bool
+	// CodeSaveUnconfirmed 表示代码保存记录的写入未确认（未请求时忽略）。
+	//
+	// 它与 CodeSaveIndeterminate 是不同的事实：后者是"Git 结果未知"，前者是"我们对
+	// Git 结果的记录不可信"。记录不可信时即便内存中看起来成功，也不能判定任务完成。
+	CodeSaveUnconfirmed bool
 	// SessionPersisted 表示必需的会话归档是否已完成。
 	SessionPersisted bool
 }
@@ -694,10 +699,11 @@ func (d WorkflowCloseoutDecision) Completed() bool {
 //
 // 规则（顺序固定）：
 //  1. 还有未完成的开发步骤：不进入收尾，保持 blocked；
-//  2. 需要代码保存但结果不确定：recovery_required，不伪装成成功也不伪装成失败；
-//  3. 需要代码保存但未成功：blocked，等待用户显式决定；
-//  4. 会话未可靠归档：recovery_required；
-//  5. 全部条件满足：completed。
+//  2. 需要代码保存但记录写入未确认：recovery_required，先核验记录对应的真实状态；
+//  3. 需要代码保存但 Git 结果不确定：recovery_required，不伪装成成功也不伪装成失败；
+//  4. 需要代码保存但未成功：blocked，等待用户显式决定；
+//  5. 会话未可靠归档：recovery_required；
+//  6. 全部条件满足：completed。
 //
 // 该函数是纯函数：不读数据库、不启动进程，因此可以被完整地单元测试。
 func DecideWorkflowCloseout(input WorkflowCloseoutInput) WorkflowCloseoutDecision {
@@ -710,6 +716,12 @@ func DecideWorkflowCloseout(input WorkflowCloseoutInput) WorkflowCloseoutDecisio
 	}
 	if input.CodeSaveRequested {
 		switch {
+		case input.CodeSaveUnconfirmed:
+			return WorkflowCloseoutDecision{
+				Status:     WorkflowRunRecoveryRequired,
+				ErrorClass: "code_save_unconfirmed",
+				Summary:    "代码保存记录未能可靠写入，需要先核验真实仓库状态",
+			}
 		case input.CodeSaveIndeterminate:
 			return WorkflowCloseoutDecision{
 				Status:     WorkflowRunRecoveryRequired,

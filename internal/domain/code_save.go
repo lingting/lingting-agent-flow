@@ -197,6 +197,152 @@ func (s MergeStatus) Validate() error {
 	return invalidField("CodeSave", "merge_status", "未知的合并状态 "+string(s))
 }
 
+// PersistStatus 表达代码保存记录自身是否被可靠写入。
+//
+// 它与 CommitStatus / PushStatus / MergeStatus 是不同维度的事实：后者描述 Git 做了
+// 什么，前者描述"我们对 Git 做了什么"这条记录是否可信。Git 已经成功但记录写入失败时，
+// 记录内容仍是 pending，此时不能依据记录判定 Git 没有执行。
+type PersistStatus string
+
+// 记录写入状态取值。
+const (
+	// PersistStatusPersisted 表示最后一次写入成功，记录内容可信。
+	//
+	// 空值等价于 persisted：历史记录写入时还没有该字段，不能因此被判定为不可信。
+	PersistStatusPersisted PersistStatus = "persisted"
+	// PersistStatusUnconfirmed 表示最后一次写入失败，记录可能落后于真实 Git 状态。
+	PersistStatusUnconfirmed PersistStatus = "unconfirmed"
+)
+
+// persistStatusMachine 定义记录写入状态的迁移。
+//
+// 只允许 unconfirmed → persisted：写入成功之后不会因为后续读取而重新变成不可信，
+// 除非再次写入失败。历史记录的空值由 persisted 归一化处理，因此也可以收敛。
+var persistStatusMachine = statusMachine{
+	entity: "CodeSave",
+	transitions: map[string][]string{
+		string(PersistStatusUnconfirmed): {
+			string(PersistStatusPersisted),
+		},
+	},
+	terminal: []string{
+		string(PersistStatusPersisted),
+	},
+}
+
+// String 返回记录写入状态的字符串形式。
+func (s PersistStatus) String() string {
+	return string(s)
+}
+
+// Normalized 把空值归一化为 persisted，其余取值原样返回。
+//
+// 历史记录写入时没有该字段，空值必须按"可信"处理；未知取值保持原样，由 Validate
+// 决定是否接受，读取层不得把它映射为默认状态。
+func (s PersistStatus) Normalized() PersistStatus {
+	if strings.TrimSpace(string(s)) == "" {
+		return PersistStatusPersisted
+	}
+	return s
+}
+
+// IsUnconfirmed 判断记录是否可能落后于真实 Git 状态。
+func (s PersistStatus) IsUnconfirmed() bool {
+	return s.Normalized() == PersistStatusUnconfirmed
+}
+
+// Validate 校验记录写入状态是否属于已知取值。
+//
+// 空值是允许的：它表示该字段写入之前的历史记录。
+func (s PersistStatus) Validate() error {
+	if strings.TrimSpace(string(s)) == "" {
+		return nil
+	}
+	if persistStatusMachine.isKnown(string(s)) {
+		return nil
+	}
+	return invalidField("CodeSave", "persist_status", "未知的记录写入状态 "+string(s))
+}
+
+// RecoveryStatus 描述一次只读核验得到的恢复结论。
+//
+// unverified 与 unverifiable 必须区分：前者表示"还没有核验"，后者表示"已经尝试
+// 核验但无法取得可信事实"。两者都不得被当作失败或成功。
+type RecoveryStatus string
+
+// 恢复结论取值。
+const (
+	// RecoveryStatusUnverified 表示尚未核验，记录仍停留在原始状态。
+	RecoveryStatusUnverified RecoveryStatus = "unverified"
+	// RecoveryStatusConfirmedApplied 表示已核验：Git 操作确实已经发生。
+	RecoveryStatusConfirmedApplied RecoveryStatus = "confirmed_applied"
+	// RecoveryStatusConfirmedNotApplied 表示已核验：Git 操作确实没有发生。
+	RecoveryStatusConfirmedNotApplied RecoveryStatus = "confirmed_not_applied"
+	// RecoveryStatusUnverifiable 表示无法取得可信事实，必须人工核验。
+	RecoveryStatusUnverifiable RecoveryStatus = "unverifiable"
+)
+
+// recoveryStatusMachine 定义恢复结论的迁移。
+//
+// 核验结论可以因新的核验而修正（例如远端恢复可达后重新核验），但已经收敛为
+// applied 或 not_applied 之后不允许在记录层被反复改写为不确定状态：真实 Git 事实
+// 不会因为一次查询失败而消失，此时应当保留既有结论并单独记录查询错误。
+var recoveryStatusMachine = statusMachine{
+	entity: "CodeSave",
+	transitions: map[string][]string{
+		string(RecoveryStatusUnverified): {
+			string(RecoveryStatusConfirmedApplied),
+			string(RecoveryStatusConfirmedNotApplied),
+			string(RecoveryStatusUnverifiable),
+		},
+		string(RecoveryStatusUnverifiable): {
+			string(RecoveryStatusConfirmedApplied),
+			string(RecoveryStatusConfirmedNotApplied),
+		},
+	},
+	terminal: []string{
+		string(RecoveryStatusConfirmedApplied),
+		string(RecoveryStatusConfirmedNotApplied),
+	},
+}
+
+// String 返回恢复结论的字符串形式。
+func (s RecoveryStatus) String() string {
+	return string(s)
+}
+
+// Validate 校验恢复结论是否属于已知取值。
+func (s RecoveryStatus) Validate() error {
+	if strings.TrimSpace(string(s)) == "" {
+		return nil
+	}
+	if recoveryStatusMachine.isKnown(string(s)) {
+		return nil
+	}
+	return invalidField("CodeSave", "recovery_status", "未知的恢复结论 "+string(s))
+}
+
+// normalized 把空值归一化为 unverified，其余取值原样返回。
+//
+// 空值表示核验字段写入之前的记录，等价于"尚未核验"；它不是一条独立的取值，
+// 也不允许出现在状态迁移表里。
+func (s RecoveryStatus) normalized() RecoveryStatus {
+	if strings.TrimSpace(string(s)) == "" {
+		return RecoveryStatusUnverified
+	}
+	return s
+}
+
+// NeedsVerification 判断记录是否仍然需要核验才能继续。
+func (s RecoveryStatus) NeedsVerification() bool {
+	switch s {
+	case RecoveryStatusConfirmedApplied, RecoveryStatusConfirmedNotApplied:
+		return false
+	default:
+		return true
+	}
+}
+
 // gitCommitSHAPattern 约束 Git 提交 SHA 的书写形式。
 //
 // SHA-1 仓库为 40 位，SHA-256 仓库为 64 位；两者都只允许小写十六进制字符。
@@ -330,6 +476,22 @@ type CodeSaveRecord struct {
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
 	// UpdatedAt 是记录最后更新时间。
 	UpdatedAt time.Time `json:"updated_at"`
+	// BaselineCommitSHA 是提交前 HEAD 指向的 commit。
+	//
+	// 它只在提交之前读取并落盘，用于判断"记录仍是 pending 时 HEAD 是否已经被本次
+	// 操作推进"。历史记录没有该值，表示无法判定，不得推断。
+	BaselineCommitSHA string `json:"baseline_commit_sha,omitempty"`
+	// BaselineBaseCommitSHA 是合并前远程基础分支指向的 commit。
+	//
+	// 仅凭"基础分支发生变化"不足以证明是本次合并造成的，必须与预期的合并提交
+	// 一起比对；没有该值时同样只能转人工核验。
+	BaselineBaseCommitSHA string `json:"baseline_base_commit_sha,omitempty"`
+	// PersistStatus 表达最后一次状态写入是否成功。
+	PersistStatus PersistStatus `json:"persist_status,omitempty"`
+	// PersistError 是最后一次写入失败的脱敏摘要，写入成功后清空。
+	PersistError string `json:"persist_error,omitempty"`
+	// RecoveryStatus 是只读核验得到的恢复结论，空值表示尚未核验。
+	RecoveryStatus RecoveryStatus `json:"recovery_status,omitempty"`
 }
 
 // NewCodeSaveRecord 创建一条待执行的代码保存记录。
@@ -418,6 +580,29 @@ func (r CodeSaveRecord) Validate() error {
 	}
 	if r.MergeStatus == MergeStatusSucceeded {
 		if err := ValidateGitCommitSHA("merge_sha", r.MergeSHA); err != nil {
+			return err
+		}
+	}
+	if !r.MergeEnabled && r.MergeStatus != MergeStatusNotRequested {
+		return invalidField(
+			"CodeSave",
+			"merge_status",
+			"未请求合并时合并状态必须是 not_requested",
+		)
+	}
+	if err := r.PersistStatus.Validate(); err != nil {
+		return err
+	}
+	if err := r.RecoveryStatus.Validate(); err != nil {
+		return err
+	}
+	if baseline := strings.TrimSpace(r.BaselineCommitSHA); baseline != "" {
+		if err := ValidateGitCommitSHA("baseline_commit_sha", baseline); err != nil {
+			return err
+		}
+	}
+	if baseline := strings.TrimSpace(r.BaselineBaseCommitSHA); baseline != "" {
+		if err := ValidateGitCommitSHA("baseline_base_commit_sha", baseline); err != nil {
 			return err
 		}
 	}
@@ -559,6 +744,90 @@ func (r *CodeSaveRecord) Finish(at time.Time) {
 	r.UpdatedAt = now
 }
 
+// MarkBaselineCommit 记录提交前的 HEAD，作为"是否已经提交"的判定基线。
+//
+// 基线必须在执行提交之前读取并落盘：事后补写会把未知状态伪造成已知状态。
+func (r *CodeSaveRecord) MarkBaselineCommit(sha string, at time.Time) error {
+	if r == nil {
+		return invalidField("CodeSave", "", "实体为空")
+	}
+	trimmed := strings.TrimSpace(sha)
+	if err := ValidateGitCommitSHA("baseline_commit_sha", trimmed); err != nil {
+		return err
+	}
+	r.BaselineCommitSHA = trimmed
+	r.UpdatedAt = normalizeTime(at)
+	return nil
+}
+
+// MarkBaselineBaseCommit 记录合并前的远程基础分支 commit。
+//
+// 与提交基线同理：它描述"合并之前远程基础分支是什么"，用于把后续观察到的变化
+// 归因为本次合并，而不是任意一次他人推送。
+func (r *CodeSaveRecord) MarkBaselineBaseCommit(sha string, at time.Time) error {
+	if r == nil {
+		return invalidField("CodeSave", "", "实体为空")
+	}
+	trimmed := strings.TrimSpace(sha)
+	if err := ValidateGitCommitSHA("baseline_base_commit_sha", trimmed); err != nil {
+		return err
+	}
+	r.BaselineBaseCommitSHA = trimmed
+	r.UpdatedAt = normalizeTime(at)
+	return nil
+}
+
+// MarkPersisted 标记本次状态已成功写入。
+//
+// 写入成功后清空上一次的写入失败摘要：保留已经消失的故障会让后续读者误判记录
+// 仍然不可信。
+func (r *CodeSaveRecord) MarkPersisted(at time.Time) {
+	if r == nil {
+		return
+	}
+	r.PersistStatus = PersistStatusPersisted
+	r.PersistError = ""
+	r.UpdatedAt = normalizeTime(at)
+}
+
+// MarkPersistFailure 记录状态写入失败。
+//
+// 记录此时可能落后于真实 Git 状态，因此必须显式标记为 unconfirmed：后续恢复流程
+// 据此拒绝"仅凭 pending 就重新执行提交、推送或合并"。
+func (r *CodeSaveRecord) MarkPersistFailure(summary string, at time.Time) {
+	if r == nil {
+		return
+	}
+	r.PersistStatus = PersistStatusUnconfirmed
+	r.PersistError = summarizeCommitMessage(ClipFeedbackText(summary, persistErrorLimit))
+	r.UpdatedAt = normalizeTime(at)
+}
+
+// MarkRecovery 记录一次只读核验得到的恢复结论。
+//
+// 状态迁移由 recoveryStatusMachine 校验：已确认的事实不会被一次查询失败改写成
+// 不确定状态。
+func (r *CodeSaveRecord) MarkRecovery(status RecoveryStatus, at time.Time) error {
+	if r == nil {
+		return invalidField("CodeSave", "", "实体为空")
+	}
+	if err := status.Validate(); err != nil {
+		return err
+	}
+	if err := recoveryStatusMachine.validate(string(r.RecoveryStatus.normalized()), string(status)); err != nil {
+		return err
+	}
+	r.RecoveryStatus = status
+	r.UpdatedAt = normalizeTime(at)
+	return nil
+}
+
+// persistErrorLimit 限制写入失败摘要的长度。
+//
+// 摘要会写入数据库并被 CLI 展示，必须与其余失败摘要保持同样的上限与脱敏规则。
+const persistErrorLimit = 512
+
+// Finish 记录操作结束时间。
 // SavedToRemote 判断任务产生的提交是否已经确认存在于远程仓库。
 //
 // 只有任务分支推送成功才算安全保存；合并冲突或结果未知都不影响该判断，
@@ -572,6 +841,10 @@ func (r CodeSaveRecord) SavedToRemote() bool {
 // 提交、推送与合并三个阶段的结果未知都必须先核验真实仓库状态：unknown 既不代表
 // 成功也不代表失败，自动重试可能在结果未知时产生重复提交或覆盖远程历史。
 func (r CodeSaveRecord) RequiresManualRecovery() bool {
+	if r.PersistStatus.IsUnconfirmed() {
+		// 记录本身可能落后于真实 Git 状态：此时 pending 不能证明操作没有发生。
+		return true
+	}
 	switch r.CommitStatus {
 	case CommitStatusUnknown:
 		return true

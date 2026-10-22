@@ -376,12 +376,14 @@ func (s *TaskWorkflowService) finalize(
 		CodeSaveRequested:     true,
 		CodeSaveSucceeded:     codeSave.succeeded,
 		CodeSaveIndeterminate: codeSave.indeterminate,
+		CodeSaveUnconfirmed:   codeSave.unconfirmed,
 		SessionPersisted:      sessionPersisted,
 	})
 	errorClass := decision.ErrorClass
 	summary := decision.Summary
 	switch {
-	case codeSaveErr != nil && !codeSave.indeterminate && decision.Status == domain.WorkflowRunBlocked:
+	case codeSaveErr != nil && !codeSave.indeterminate && !codeSave.unconfirmed &&
+		decision.Status == domain.WorkflowRunBlocked:
 		summary = summary + "：" + errorSummary(codeSaveErr)
 	case codeSave.unavailable:
 		errorClass = "code_saver_unavailable"
@@ -666,8 +668,10 @@ func (s *TaskWorkflowService) failRun(
 type codeSaveOutcome struct {
 	// succeeded 表示任务分支已成功推送（并按配置完成合并）。
 	succeeded bool
-	// indeterminate 表示结果无法确认，需要先核验远程分支。
+	// indeterminate 表示 Git 结果无法确认，需要先核验远程分支。
 	indeterminate bool
+	// unconfirmed 表示记录本身未能可靠写入，数据库可能落后于真实 Git 状态。
+	unconfirmed bool
 	// unavailable 表示本次运行没有代码保存能力。
 	unavailable bool
 }
@@ -702,16 +706,19 @@ func (s *TaskWorkflowService) saveCode(
 	})
 	record := result.Result.Record
 	outcome := codeSaveOutcome{
-		succeeded:     codeSaveSucceeded(record),
-		indeterminate: codeSaveIndeterminate(record),
+		succeeded:     codeSaveSucceeded(result, record),
+		indeterminate: codeSaveIndeterminate(result, record),
+		unconfirmed:   !result.Result.Persisted(),
 	}
 	s.appendEvent(ctx, task.ID, nil, nil, domain.EventTypeWorkflowCodeSaved, map[string]any{
-		"run_id":        run.ID.String(),
-		"record_id":     record.ID.String(),
-		"commit_status": record.CommitStatus.String(),
-		"push_status":   record.PushStatus.String(),
-		"merge_status":  record.MergeStatus.String(),
-		"error_summary": record.ErrorSummary,
+		"run_id":         run.ID.String(),
+		"record_id":      record.ID.String(),
+		"commit_status":  record.CommitStatus.String(),
+		"push_status":    record.PushStatus.String(),
+		"merge_status":   record.MergeStatus.String(),
+		"persist_status": record.PersistStatus.Normalized().String(),
+		"persisted":      result.Result.Persisted(),
+		"error_summary":  record.ErrorSummary,
 	})
 	return outcome, err
 }
@@ -782,8 +789,14 @@ func allDevelopStepsCompleted(steps []domain.Step) bool {
 // codeSaveSucceeded 判断代码保存是否达到"已安全保存"的门槛。
 //
 // 只有任务分支推送成功才算安全保存；合并按配置要求单独判断。
-func codeSaveSucceeded(record domain.CodeSaveRecord) bool {
-	if record.ID.IsEmpty() {
+//
+// 前置条件是"记录已可靠落盘"：内存中的结论不能替代数据库事实，否则持续写入失败时
+// 任务会被误判为完整成功。
+func codeSaveSucceeded(
+	result CodeSaveResult,
+	record domain.CodeSaveRecord,
+) bool {
+	if record.ID.IsEmpty() || !result.Result.Persisted() {
 		return false
 	}
 	if record.PushStatus != domain.PushStatusSucceeded {
@@ -796,8 +809,14 @@ func codeSaveSucceeded(record domain.CodeSaveRecord) bool {
 }
 
 // codeSaveIndeterminate 判断代码保存结果是否需要人工核验。
-func codeSaveIndeterminate(record domain.CodeSaveRecord) bool {
-	if record.ID.IsEmpty() {
+//
+// 记录写入未确认时不在此处判定：它由 codeSaveOutcome.unconfirmed 单独表达，两者的
+// 恢复动作不同，不能合并成一个分类。
+func codeSaveIndeterminate(
+	result CodeSaveResult,
+	record domain.CodeSaveRecord,
+) bool {
+	if record.ID.IsEmpty() || !result.Result.Persisted() {
 		return false
 	}
 	return record.RequiresManualRecovery()

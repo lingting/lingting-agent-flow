@@ -218,6 +218,10 @@ func (g *fakeGuard) EnsureExecutable(
 type memoryRecorder struct {
 	mu      sync.Mutex
 	records map[domain.ID]domain.CodeSaveRecord
+	// updateErr 非空时让满足 updateErrIf 的写入失败，用于构造落盘失败窗口。
+	updateErr error
+	// updateErrIf 是失败谓词，nil 表示全部写入都失败。
+	updateErrIf func(domain.CodeSaveRecord) bool
 }
 
 // newRecorder 构造空的内存仓储。
@@ -234,11 +238,37 @@ func (r *memoryRecorder) Create(ctx context.Context, record domain.CodeSaveRecor
 }
 
 // Update 更新记录。
+//
+// updateErr 用于构造"Git 已经成功、但状态写不进数据库"的窗口：真实 Git 仓库
+// 会真的产生提交或推送，只有数据库这一侧失败。
 func (r *memoryRecorder) Update(ctx context.Context, record domain.CodeSaveRecord) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.updateErr != nil && (r.updateErrIf == nil || r.updateErrIf(record)) {
+		return r.updateErr
+	}
 	r.records[record.ID] = record
 	return nil
+}
+
+// failUpdateWhen 让满足条件的写入失败。
+func (r *memoryRecorder) failUpdateWhen(err error, when func(domain.CodeSaveRecord) bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.updateErr = err
+	r.updateErrIf = when
+}
+
+// snapshot 返回记录副本，用于断言数据库中的真实状态。
+func (r *memoryRecorder) snapshot(t *testing.T, id domain.ID) domain.CodeSaveRecord {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	record, ok := r.records[id]
+	if !ok {
+		t.Fatalf("没有找到记录 %s", id)
+	}
+	return record
 }
 
 // Get 读取记录。
@@ -736,5 +766,191 @@ func TestInspectWorktreeRejectsUnmanagedContainer(t *testing.T) {
 	defer cancel()
 	if _, inspectErr := inspector.Inspect(ctx, request()); inspectErr == nil {
 		t.Fatal("已脱离管理的容器不应允许核验")
+	}
+}
+
+// TestCommitSucceededButRecordFailedIsRecoverable 校验真实 Git 下的提交落盘失败窗口。
+//
+// 场景：Git 真的产生了提交，但提交结果写不进数据库。此时数据库停留在
+// commit_status=pending，唯一能区分"已提交"与"未提交"的证据是提交之前落盘的
+// HEAD 基线。本用例验证这条证据链在真实 Git 上成立。
+func TestCommitSucceededButRecordFailedIsRecoverable(t *testing.T) {
+	t.Parallel()
+	instance := newRepo(t)
+	executor := newExecutor(instance)
+	recorder := newRecorder()
+	saver := newSaver(t, instance, recorder, executor)
+	headBefore := instance.rev(t, "HEAD")
+	// 只让"提交成功"那一次写入失败，基线写入仍然成功。
+	recorder.failUpdateWhen(errors.New("database is locked"), func(record domain.CodeSaveRecord) bool {
+		return record.CommitStatus == domain.CommitStatusSucceeded
+	})
+	instance.writeFile(t, "internal/feature.go", "package internal\n")
+	result, err := saver.Run(context.Background(), request())
+	if err == nil {
+		t.Fatal("状态写入失败时必须返回错误")
+	}
+	if codesaver.ErrorCodeOf(err) != codesaver.CodeStateUnconfirmed {
+		t.Fatalf("期望 state_unconfirmed，实际 %v", err)
+	}
+	// 真实 Git 已经产生了提交。
+	headAfter := instance.rev(t, "HEAD")
+	if headAfter == headBefore {
+		t.Fatal("真实 Git 应已产生新提交")
+	}
+	stored := recorder.snapshot(t, result.Record.ID)
+	if stored.CommitStatus != domain.CommitStatusPending {
+		t.Fatalf("数据库应停留在 pending，实际 %s", stored.CommitStatus)
+	}
+	if stored.BaselineCommitSHA != headBefore {
+		t.Fatalf("提交基线应为提交前的 HEAD %s，实际 %q", headBefore, stored.BaselineCommitSHA)
+	}
+	// 只读核验可以依据基线与真实 HEAD 确认"提交已经发生"。
+	observation := saver.Observe(context.Background(), request(), stored)
+	if observation.ReadFailed {
+		t.Fatalf("核验不应失败: %s", observation.ReadError)
+	}
+	if observation.HeadCommit != headAfter {
+		t.Fatalf("核验读到的 HEAD 应为 %s，实际 %s", headAfter, observation.HeadCommit)
+	}
+	decision := domain.DecideCodeSaveRecovery(stored, observation)
+	if decision.Status != domain.RecoveryStatusConfirmedApplied {
+		t.Fatalf("应确认提交已经发生，实际 %s（%s）", decision.Status, decision.Summary)
+	}
+	if decision.CommitSHA != headAfter {
+		t.Fatalf("确认的提交应为 %s，实际 %s", headAfter, decision.CommitSHA)
+	}
+	if decision.SafeToRetry {
+		t.Fatal("提交已发生时不得提示可以重试")
+	}
+}
+
+// TestObserveDetectsRemoteMismatch 校验核验能识别远程与预期提交不一致。
+//
+// 远端指向其他提交时必须判为不确定并禁止自动重试：重推可能覆盖远程历史。
+func TestObserveDetectsRemoteMismatch(t *testing.T) {
+	t.Parallel()
+	instance := newRepo(t)
+	executor := newExecutor(instance)
+	recorder := newRecorder()
+	saver := newSaver(t, instance, recorder, executor)
+	// 在任务分支之外推进远程任务分支：模拟其他来源已经推送过。
+	instance.writeFile(t, "internal/other.go", "package internal\n")
+	instance.git(t, instance.work, "add", "--all")
+	instance.git(t, instance.work, "commit", "-m", "他人提交")
+	// 直接推到 bare 仓库：工作仓库的 origin 已被改写成 https 形式，不能访问公网。
+	instance.git(t, instance.work, "push", instance.bare, "HEAD:refs/heads/"+testTaskBranch)
+	head := instance.rev(t, "HEAD")
+	// 构造一条"提交已成功、推送仍是 pending"的记录，但预期提交指向别的 commit。
+	record := domain.CodeSaveRecord{
+		ID:           domain.NewID(),
+		TaskID:       testTaskID,
+		TaskBranch:   testTaskBranch,
+		ContainerID:  testContainerID,
+		RemoteName:   testRemoteName,
+		BaseBranch:   testBaseBranch,
+		CommitStatus: domain.CommitStatusSucceeded,
+		CommitSHA:    "1111111111111111111111111111111111111111",
+		PushStatus:   domain.PushStatusPending,
+		MergeStatus:  domain.MergeStatusNotRequested,
+	}
+	observation := saver.Observe(context.Background(), request(), record)
+	if observation.ReadFailed {
+		t.Fatalf("核验不应失败: %s", observation.ReadError)
+	}
+	if observation.RemoteTaskCommit != head {
+		t.Fatalf("远程任务分支应为 %s，实际 %s", head, observation.RemoteTaskCommit)
+	}
+	decision := domain.DecideCodeSaveRecovery(record, observation)
+	if decision.Status != domain.RecoveryStatusUnverifiable {
+		t.Fatalf("远程与预期不一致时应转人工核验，实际 %s", decision.Status)
+	}
+	if decision.SafeToRetry {
+		t.Fatal("远程与预期不一致时不得提示可以重试")
+	}
+}
+
+// TestObserveReportsUnreachableRemote 校验远程不可达时保留不确定性。
+func TestObserveReportsUnreachableRemote(t *testing.T) {
+	t.Parallel()
+	instance := newRepo(t)
+	executor := newExecutor(instance)
+	recorder := newRecorder()
+	saver := newSaver(t, instance, recorder, executor)
+	executor.mu.Lock()
+	executor.brokenRemote = true
+	executor.mu.Unlock()
+	record := domain.CodeSaveRecord{
+		ID:           domain.NewID(),
+		TaskID:       testTaskID,
+		TaskBranch:   testTaskBranch,
+		ContainerID:  testContainerID,
+		RemoteName:   testRemoteName,
+		BaseBranch:   testBaseBranch,
+		CommitStatus: domain.CommitStatusSucceeded,
+		CommitSHA:    instance.rev(t, "HEAD"),
+		PushStatus:   domain.PushStatusPending,
+		MergeStatus:  domain.MergeStatusNotRequested,
+	}
+	observation := saver.Observe(context.Background(), request(), record)
+	if !observation.ReadFailed {
+		t.Fatal("远程不可达时必须报告核验失败")
+	}
+	decision := domain.DecideCodeSaveRecovery(record, observation)
+	if decision.Status != domain.RecoveryStatusUnverifiable {
+		t.Fatalf("远程不可达时必须保留不确定性，实际 %s", decision.Status)
+	}
+	if decision.SafeToRetry {
+		t.Fatal("远程不可达时不得提示可以重试")
+	}
+}
+
+// TestObserveConfirmsMergeApplied 校验真实合并后可以确认合并已经发生。
+//
+// 判定要求远程基础分支等于唯一的候选合并提交：第一父为合并前基线、第二父为
+// 任务分支提交。仅仅"基础分支变了"不构成证据。
+func TestObserveConfirmsMergeApplied(t *testing.T) {
+	t.Parallel()
+	instance := newRepo(t)
+	executor := newExecutor(instance)
+	recorder := newRecorder()
+	saver := newSaver(t, instance, recorder, executor)
+	instance.writeFile(t, "internal/feature.go", "package internal\n")
+	requestWithMerge := request()
+	requestWithMerge.MergeAfterPush = true
+	result, err := saver.Run(context.Background(), requestWithMerge)
+	if err != nil {
+		t.Fatalf("保存流程应成功: %v", err)
+	}
+	stored := recorder.snapshot(t, result.Record.ID)
+	if stored.MergeStatus != domain.MergeStatusSucceeded {
+		t.Fatalf("合并状态应为 succeeded，实际 %s", stored.MergeStatus)
+	}
+	if stored.BaselineBaseCommitSHA == "" {
+		t.Fatal("合并前必须落盘基础分支基线")
+	}
+	// 把记录回退成"合并仍是 pending"，模拟合并结果没落盘的窗口。
+	pending := stored
+	pending.MergeStatus = domain.MergeStatusPending
+	pending.MergeSHA = ""
+	observation := saver.Observe(context.Background(), request(), pending)
+	if observation.ReadFailed {
+		t.Fatalf("核验不应失败: %s", observation.ReadError)
+	}
+	if !observation.MergeCommitResolvable {
+		t.Fatalf("应能唯一确定合并提交，实际无法推算（%+v）", observation)
+	}
+	if observation.ExpectedMergeCommit != stored.MergeSHA {
+		t.Fatalf("推算的合并提交应为 %s，实际 %s", stored.MergeSHA, observation.ExpectedMergeCommit)
+	}
+	decision := domain.DecideCodeSaveRecovery(pending, observation)
+	if decision.Status != domain.RecoveryStatusConfirmedApplied {
+		t.Fatalf("应确认合并已经发生，实际 %s（%s）", decision.Status, decision.Summary)
+	}
+	if decision.MergeSHA != stored.MergeSHA {
+		t.Fatalf("确认的合并提交应为 %s，实际 %s", stored.MergeSHA, decision.MergeSHA)
+	}
+	if decision.SafeToRetry {
+		t.Fatal("合并已发生时不得提示可以重试")
 	}
 }

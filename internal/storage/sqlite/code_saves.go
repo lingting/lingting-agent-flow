@@ -13,10 +13,11 @@ const codeSaveColumns = `id, project_id, task_id, container_id, docker_id, attem
 	remote_name, repository, task_branch, base_branch, commit_status, commit_sha,
 	commit_message, push_status, remote_commit_sha, merge_enabled, merge_status,
 	merge_sha, stage, error_code, error_summary, created_at, started_at,
-	finished_at, updated_at`
+	finished_at, updated_at, baseline_commit_sha, baseline_base_commit_sha,
+	persist_status, persist_error, recovery_status`
 
 // codeSaveInsertCount 是写入代码保存记录时的参数个数。
-const codeSaveInsertCount = 25
+const codeSaveInsertCount = 30
 
 // codeSaveStore 实现 storage.CodeSaveStore。
 type codeSaveStore struct {
@@ -56,7 +57,9 @@ UPDATE code_saves SET
 	task_branch = ?, base_branch = ?, commit_status = ?, commit_sha = ?,
 	commit_message = ?, push_status = ?, remote_commit_sha = ?, merge_enabled = ?,
 	merge_status = ?, merge_sha = ?, stage = ?, error_code = ?, error_summary = ?,
-	started_at = ?, finished_at = ?, updated_at = ?
+	started_at = ?, finished_at = ?, updated_at = ?,
+	baseline_commit_sha = ?, baseline_base_commit_sha = ?,
+	persist_status = ?, persist_error = ?, recovery_status = ?
 WHERE id = ?`
 	result, err := s.q.ExecContext(
 		ctx,
@@ -82,6 +85,11 @@ WHERE id = ?`
 		toMillisPtr(record.StartedAt),
 		toMillisPtr(record.FinishedAt),
 		toMillis(record.UpdatedAt),
+		nullIfBlank(record.BaselineCommitSHA),
+		nullIfBlank(record.BaselineBaseCommitSHA),
+		nullIfBlank(record.PersistStatus.String()),
+		nullIfBlank(record.PersistError),
+		nullIfBlank(record.RecoveryStatus.String()),
 		toIDParam(record.ID),
 	)
 	if err != nil {
@@ -120,6 +128,11 @@ func codeSaveArgs(record domain.CodeSaveRecord) []any {
 		toMillisPtr(record.StartedAt),
 		toMillisPtr(record.FinishedAt),
 		toMillis(record.UpdatedAt),
+		nullIfBlank(record.BaselineCommitSHA),
+		nullIfBlank(record.BaselineBaseCommitSHA),
+		nullIfBlank(record.PersistStatus.String()),
+		nullIfBlank(record.PersistError),
+		nullIfBlank(record.RecoveryStatus.String()),
 	}
 }
 
@@ -193,6 +206,11 @@ func scanCodeSaveRecord(row scanner) (domain.CodeSaveRecord, error) {
 		startedAt       sql.NullInt64
 		finishedAt      sql.NullInt64
 		updatedAt       int64
+		baselineCommit  sql.NullString
+		baselineBase    sql.NullString
+		persistStatus   sql.NullString
+		persistError    sql.NullString
+		recoveryStatus  sql.NullString
 	)
 	err := row.Scan(
 		&id,
@@ -220,6 +238,11 @@ func scanCodeSaveRecord(row scanner) (domain.CodeSaveRecord, error) {
 		&startedAt,
 		&finishedAt,
 		&updatedAt,
+		&baselineCommit,
+		&baselineBase,
+		&persistStatus,
+		&persistError,
+		&recoveryStatus,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -253,5 +276,11 @@ func scanCodeSaveRecord(row scanner) (domain.CodeSaveRecord, error) {
 		StartedAt:       fromMillisPtr(startedAt),
 		FinishedAt:      fromMillisPtr(finishedAt),
 		UpdatedAt:       fromMillis(updatedAt),
+		// 空值保持为空：数据库里没有写过的字段不得被映射成"默认状态"。
+		BaselineCommitSHA:     baselineCommit.String,
+		BaselineBaseCommitSHA: baselineBase.String,
+		PersistStatus:         domain.PersistStatus(persistStatus.String),
+		PersistError:          persistError.String,
+		RecoveryStatus:        domain.RecoveryStatus(recoveryStatus.String),
 	}, nil
 }

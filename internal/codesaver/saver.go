@@ -410,17 +410,41 @@ func (x *Session) createRecord(ctx context.Context) error {
 //
 // 每个阶段推进后都必须单独落盘：远程 Git 操作与数据库无法共享事务，
 // 只有及时写入才能在中断后定位最后一个已确认完成的阶段。
+//
+// 写入失败时记录会被标记为 unconfirmed：此时内存中的状态可能是"Git 已经成功"，
+// 而数据库里仍是 pending，后续恢复流程不得仅凭 pending 就重新执行 Git 操作。
+// 标记本身不需要额外写入：它只影响本次返回的记录与错误分类。
 func (x *Session) persist(ctx context.Context) error {
 	if err := x.record.Validate(); err != nil {
 		return recordError(x.record.Stage, err)
 	}
 	if err := x.saver.recorder.Update(ctx, x.record); err != nil {
+		x.record.MarkPersistFailure(err.Error(), time.Now())
 		return recordError(x.record.Stage, err)
 	}
+	x.record.MarkPersisted(time.Now())
 	return nil
 }
 
+// persistFailure 把"状态写入失败"报告为可区分的错误。
+//
+// 返回的错误使用 CodeStateUnconfirmed 类别，摘要会明确说明"Git 结果已确定、记录未
+// 落盘"，使调用方不会把写入失败误读为 Git 操作失败。
+func (x *Session) persistFailure(err error) error {
+	if err == nil {
+		return nil
+	}
+	detail := "代码保存结果已经确定，但状态写入失败；记录可能落后于真实 Git 状态，请先核验"
+	if summary := strings.TrimSpace(x.record.PersistError); summary != "" {
+		detail += ": " + summary
+	}
+	return newError(CodeStateUnconfirmed, x.record.Stage, detail, err)
+}
+
 // fail 记录失败信息并落盘，返回带类别的错误。
+//
+// 落盘使用未取消的上下文：调用方取消或超时是失败的原因之一，不能同时成为
+// "失败记录写不进去"的原因，否则中断现场会永久丢失。
 func (x *Session) fail(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
@@ -433,8 +457,15 @@ func (x *Session) fail(ctx context.Context, err error) error {
 	}
 	x.record.MarkError(stage, statusForErrorCode(code), errorDetail(err), time.Now())
 	x.record.Finish(time.Now())
-	if persistErr := x.persist(ctx); persistErr != nil {
-		return persistErr
+	writeCtx := context.WithoutCancel(ctx)
+	if persistErr := x.persist(writeCtx); persistErr != nil {
+		// 真实原因优先：写入失败不能掩盖 Git 操作本身的结论，两者都必须可见。
+		return newError(
+			code,
+			stage,
+			errorDetail(err)+"；失败记录未能写入数据库，现场可能丢失，请先核验",
+			errors.Join(err, persistErr),
+		)
 	}
 	return err
 }
@@ -484,6 +515,14 @@ func (x *Session) Execute(ctx context.Context) (Result, error) {
 	x.base = base
 	result.Base = base
 	if err := x.commit(ctx, state); err != nil {
+		// 记录写入未确认时不再继续推进：后续的 abandonPush 会用 pending 覆盖，
+		// 让真实的提交结论与失败原因一起丢掉。
+		if x.record.PersistStatus.IsUnconfirmed() {
+			result.Record = x.record
+			result.PersistenceErrors = []string{err.Error()}
+			result.Duration = time.Since(x.started)
+			return result, err
+		}
 		if abandonErr := x.abandonPush(ctx); abandonErr != nil {
 			return result, abandonErr
 		}
@@ -503,7 +542,12 @@ func (x *Session) Execute(ctx context.Context) (Result, error) {
 	}
 	x.record.Finish(time.Now())
 	if err := x.persist(ctx); err != nil {
-		return result, err
+		// Git 操作已经全部完成，只是记录没落盘：必须让调用方看到这个区别。
+		// persist 已经把记录标记为 unconfirmed，Persisted() 由此返回 false。
+		result.Record = x.record
+		result.PersistenceErrors = []string{err.Error()}
+		result.Duration = time.Since(x.started)
+		return result, x.persistFailure(err)
 	}
 	result.Record = x.record
 	result.Duration = time.Since(x.started)

@@ -475,10 +475,46 @@ CodeSaver 已真实实现（`internal/codesaver` + `app.ContainerService.SaveCod
 
 - 只有任务分支**推送成功**才算"已安全保存到远程"；
 - `merge_after_push` 默认关闭，开启时合并成功才算完成；
-- 结果不确定时先核验远程分支，工作流进入 `recovery_required`。
+- 结果不确定时先核验远程分支，工作流进入 `recovery_required`；
+- 记录本身未能可靠写入（`persist_status = unconfirmed`）时同样进入 `recovery_required`，
+  错误分类是独立的 `code_save_unconfirmed`。
 
 CodeSaver 缺失时编排器仍会按顺序执行并验证全部步骤，但收尾停留在 `blocked`
 （`code_saver_unavailable`），任务不会被标记为 `completed`：**步骤全部通过验证不等于任务成功**。
+
+### CodeSaver 的状态写入失败与恢复边界
+
+远程 Git 操作与本机 SQLite 无法共享事务，因此"Git 做了什么"与"我们把它写进数据库了吗"必须是
+两个独立事实。提交、推送与合并成功后写回 `code_saves` 仍可能失败：数据库停留在 `pending`，
+而仓库已经是另一个状态。仅凭 `pending` 重新执行 Git 操作会产生重复提交或覆盖远程历史。
+
+**持久化依据。** `0019_code_save_recovery.sql` 增加五个可空列：`baseline_commit_sha`、
+`baseline_base_commit_sha`、`persist_status`、`persist_error`、`recovery_status`。基线一律在
+副作用之前落盘——写不进去就中止该阶段，不在未知起点上产生新提交或合并。历史记录保持 `NULL`，
+按"没有基线 → 转人工核验"处理，不补造基线。
+
+**状态分层。** `PersistStatus`（`persisted` / `unconfirmed`，空值归一化为 `persisted`）与
+`RecoveryStatus`（`unverified` / `confirmed_applied` / `confirmed_not_applied` /
+`unverifiable`）各自带状态机，与 `CommitStatus` / `PushStatus` / `MergeStatus` 完全分开：
+`RequiresManualRecovery` 会把 `unconfirmed` 纳入，`Result.Persisted()` 从记录派生而不是新增
+一个默认为 `false` 的布尔字段。
+
+**判定入口。** 结论只由纯函数 `domain.DecideCodeSaveRecovery(record, observation)` 计算，
+三个阶段共用一套判据：
+
+| 阶段 | 确认已发生 | 确认未发生 | 其余 |
+|---|---|---|---|
+| 提交 | 有基线且 HEAD ≠ 基线 | 有基线且 HEAD = 基线 | 无基线或读不到 HEAD → `unverifiable` |
+| 推送 | 远程任务分支 = 预期提交 | 远程任务分支不存在 | 指向其他提交 → `unverifiable` |
+| 合并 | 远程基础分支 = 唯一候选合并提交 | 远程基础分支 = 基线 | 无法推算或不一致 → `unverifiable` |
+
+唯一候选合并提交要求同时满足：是合并提交、第一父提交等于基线、第二父提交等于任务分支提交。
+仅"基础分支发生了变化"不构成证据。只有"确认未发生"才标记 `SafeToRetry`。
+
+**只读核验。** `Saver.Observe` 只执行 `rev-parse`、`ls-remote` 与 `rev-list --first-parent`，
+不提交、不推送、不切换分支、不写 `code_saves`；失败时返回 `ReadFailed` 而不是错误，让判定收敛为
+`unverifiable`。人工入口是 `agentflow code verify --record <id>`，结论写回 `recovery_status`。
+本轮不引入自动重试、后台恢复调度与新的工作流功能。
 
 ### 当前能力边界
 

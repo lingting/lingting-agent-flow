@@ -374,7 +374,14 @@ type memoryRecorder struct {
 	creates int
 	// updates 记录更新次数。
 	updates int
-	err     error
+	// updateErr 非空时让 Update 返回该错误，用于构造"Git 已成功但记录没落盘"。
+	updateErr error
+	// updateErrTimes 限制 updateErr 的生效次数，负数表示一直生效。
+	updateErrTimes int
+	// updateErrIf 非空时只在谓词命中该次写入时失败，用于精确定位到某个阶段。
+	updateErrIf func(domain.CodeSaveRecord) bool
+	// err 让 Create 与 Update 统一失败。
+	err error
 }
 
 // newRecorder 构造空的内存仓储。
@@ -395,15 +402,62 @@ func (r *memoryRecorder) Create(ctx context.Context, record domain.CodeSaveRecor
 }
 
 // Update 更新记录。
+//
+// updateErr 可以只生效有限次，用于验证"第一次写入失败、后续恢复成功"的窗口。
 func (r *memoryRecorder) Update(ctx context.Context, record domain.CodeSaveRecord) error {
 	if r.err != nil {
 		return r.err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.updateErr != nil {
+		switch {
+		case r.updateErrIf != nil:
+			// 谓词模式只让命中的那一次写入失败，其余正常落盘。
+			if !r.updateErrIf(record) {
+				break
+			}
+			return r.updateErr
+		case r.updateErrTimes < 0:
+			return r.updateErr
+		case r.updateErrTimes > 0:
+			r.updateErrTimes--
+			return r.updateErr
+		}
+	}
 	r.records[record.ID] = record
 	r.updates++
 	return nil
+}
+
+// failUpdates 让接下来的 times 次更新失败，times 为负数表示一直失败。
+func (r *memoryRecorder) failUpdates(err error, times int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.updateErr = err
+	r.updateErrTimes = times
+	r.updateErrIf = nil
+}
+
+// failUpdateWhen 让满足条件的写入失败，用于精确定位"某个阶段落盘失败"。
+func (r *memoryRecorder) failUpdateWhen(err error, when func(domain.CodeSaveRecord) bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.updateErr = err
+	r.updateErrTimes = -1
+	r.updateErrIf = when
+}
+
+// snapshot 返回记录副本，用于断言数据库中的真实状态。
+func (r *memoryRecorder) snapshot(t *testing.T, id domain.ID) domain.CodeSaveRecord {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	record, ok := r.records[id]
+	if !ok {
+		t.Fatalf("没有找到记录 %s", id)
+	}
+	return record
 }
 
 // Get 读取记录。
@@ -1613,4 +1667,310 @@ func itoa(value int) string {
 		value /= 10
 	}
 	return digits
+}
+
+// TestPersistFailureAfterCommitKeepsGitResult 校验"Git 已提交但记录没落盘"。
+//
+// 这是本轮最关键的失败窗口：内存中提交已经成功，数据库里仍是 pending。
+// 结果必须同时表达"Git 成功"与"记录未落盘"，且返回的错误类别必须是
+// state_unconfirmed，而不是普通的 record_failed。
+func TestPersistFailureAfterCommitKeepsGitResult(t *testing.T) {
+	t.Parallel()
+	instance := newHarness(t)
+	instance.repo.set(func() {
+		instance.repo.dirty = true
+	})
+	// 只让"提交成功"那一次写入失败，其余阶段正常落盘。
+	instance.recorder.failUpdateWhen(errors.New("database is locked"), func(record domain.CodeSaveRecord) bool {
+		return record.CommitStatus == domain.CommitStatusSucceeded &&
+			record.PushStatus == domain.PushStatusPending
+	})
+	result, err := instance.saver.Run(context.Background(), baseRequest())
+	if err == nil {
+		t.Fatal("记录写入失败时必须返回错误")
+	}
+	if codesaver.ErrorCodeOf(err) != codesaver.CodeStateUnconfirmed {
+		t.Fatalf("期望 state_unconfirmed，实际 %v", err)
+	}
+	if !result.Record.PersistStatus.IsUnconfirmed() {
+		t.Fatal("写入失败时记录必须被标记为未确认")
+	}
+	if len(result.PersistenceErrors) == 0 {
+		t.Fatal("必须保留写入失败摘要")
+	}
+	// Git 的事实不能被写坏：内存记录仍是提交成功。
+	if result.Record.CommitStatus != domain.CommitStatusSucceeded {
+		t.Fatalf("内存记录应保留真实的提交结论，实际 %s", result.Record.CommitStatus)
+	}
+	if result.Record.PersistStatus.IsUnconfirmed() == false {
+		t.Fatal("内存记录必须被标记为未确认")
+	}
+}
+
+// TestPersistFailureLeavesPendingInDatabase 校验数据库确实停在 pending。
+//
+// 该用例与上一条互补：上一条验证返回值，这一条验证"记录落后于真实 Git 状态"
+// 这个事实真的发生了，后续恢复判定必须依赖它。
+func TestPersistFailureLeavesPendingInDatabase(t *testing.T) {
+	t.Parallel()
+	instance := newHarness(t)
+	instance.repo.set(func() {
+		instance.repo.dirty = true
+	})
+	instance.recorder.failUpdateWhen(errors.New("database is locked"), func(record domain.CodeSaveRecord) bool {
+		return record.CommitStatus == domain.CommitStatusSucceeded &&
+			record.PushStatus == domain.PushStatusPending
+	})
+	// 让提交成功后的所有写入都失败：数据库会停留在"基线已落盘、提交仍 pending"，
+	// 这正是需要被恢复判定识别出来的窗口。
+	instance.recorder.failUpdateWhen(errors.New("database is locked"), func(record domain.CodeSaveRecord) bool {
+		return record.CommitStatus != domain.CommitStatusPending
+	})
+	result, err := instance.saver.Run(context.Background(), baseRequest())
+	if err == nil {
+		t.Fatal("记录写入失败时必须返回错误")
+	}
+	stored := instance.recorder.snapshot(t, result.Record.ID)
+	if stored.CommitStatus != domain.CommitStatusPending {
+		t.Fatalf("数据库应停留在 pending，实际 %s", stored.CommitStatus)
+	}
+	if stored.BaselineCommitSHA != testHeadCommit {
+		t.Fatalf("提交基线必须在副作用之前落盘，实际 %q", stored.BaselineCommitSHA)
+	}
+	// 有了基线，恢复判定就可以确认"提交已经发生"。
+	decision := domain.DecideCodeSaveRecovery(stored, domain.CodeSaveObservation{
+		HeadCommit: testCommitSHA,
+	})
+	if decision.Status != domain.RecoveryStatusConfirmedApplied {
+		t.Fatalf("依据基线应确认提交已发生，实际 %s", decision.Status)
+	}
+	if decision.CommitSHA != testCommitSHA {
+		t.Fatalf("确认的提交应是新的 HEAD，实际 %s", decision.CommitSHA)
+	}
+	if decision.SafeToRetry {
+		t.Fatal("提交已发生时不得提示可以重试")
+	}
+}
+
+// TestPersistFailureRecoversOnNextWrite 校验短暂写入故障会被后续写入修复。
+func TestPersistFailureRecoversOnNextWrite(t *testing.T) {
+	t.Parallel()
+	instance := newHarness(t)
+	instance.repo.set(func() {
+		instance.repo.dirty = true
+	})
+	// 只让一次中间写入失败：后续阶段推进时会再次落盘。
+	// 该次失败会中断本次调用（失败状态无法确认，不能继续推送），
+	// 但数据库中的记录必须仍然可用，并且不再被标记为未确认。
+	instance.recorder.failUpdateWhen(errors.New("database is locked"), func(record domain.CodeSaveRecord) bool {
+		return record.CommitStatus == domain.CommitStatusSucceeded &&
+			record.PushStatus == domain.PushStatusPending
+	})
+	if _, err := instance.saver.Run(context.Background(), baseRequest()); err == nil {
+		t.Fatal("状态写入失败时必须返回错误，不能静默继续")
+	}
+	// 第一次调用因提交阶段落盘失败而中断，数据库停在"基线已落盘、提交 pending"。
+	first := instance.recorder.single(t)
+	if first.CommitStatus != domain.CommitStatusPending {
+		t.Fatalf("第一次调用后数据库应停留在 pending，实际 %s", first.CommitStatus)
+	}
+	// 故障消失后重新执行：新的写入必须成功，记录完整落盘且不再标记为未确认。
+	if _, err := instance.saver.Run(context.Background(), baseRequest()); err != nil {
+		t.Fatalf("故障恢复后应能成功保存: %v", err)
+	}
+	records, listErr := instance.recorder.ListByTask(context.Background(), testTaskID)
+	if listErr != nil {
+		t.Fatalf("读取记录失败: %v", listErr)
+	}
+	if len(records) != 2 {
+		t.Fatalf("两次执行应产生两条独立记录，实际 %d 条", len(records))
+	}
+	// ListByTask 的返回顺序由替身决定，这里按 ID 找到第二次执行的记录。
+	var second domain.CodeSaveRecord
+	for _, candidate := range records {
+		if candidate.ID != first.ID {
+			second = candidate
+		}
+	}
+	if second.ID.IsEmpty() {
+		t.Fatal("没有找到第二次执行的记录")
+	}
+	if second.CommitStatus != domain.CommitStatusNoChanges {
+		t.Fatalf("第二次执行时工作区已干净，应记录 no_changes，实际 %s", second.CommitStatus)
+	}
+	if second.PushStatus != domain.PushStatusSucceeded {
+		t.Fatalf("推送状态应完整落盘，实际 %s", second.PushStatus)
+	}
+	if second.PersistStatus.IsUnconfirmed() {
+		t.Fatalf("写入成功后不得保留未确认标记，实际 %s", second.PersistStatus)
+	}
+	if second.PersistError != "" {
+		t.Fatalf("写入成功后必须清空失败摘要，实际 %q", second.PersistError)
+	}
+}
+
+// TestFailUsesUncancelledContext 校验取消不会让失败记录写不进去。
+//
+// fail 必须使用未取消的上下文：调用方取消是失败原因之一，不能同时成为
+// "失败记录写不进去"的原因，否则中断现场会永久丢失。
+func TestFailUsesUncancelledContext(t *testing.T) {
+	t.Parallel()
+	instance := newHarness(t)
+	instance.repo.set(func() {
+		instance.repo.dirty = true
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	// 在推送阶段取消：fail 会用未取消的上下文写入失败记录。
+	instance.repo.overrides["push"] = func(repo *fakeRepo, args []string) (
+		docker.CommandResult,
+		bool,
+	) {
+		cancel()
+		return uncertain(sshclient.CommandStatusCancelled), true
+	}
+	_, err := instance.saver.Run(ctx, baseRequest())
+	if err == nil {
+		t.Fatal("取消后必须返回错误")
+	}
+	stored := instance.recorder.single(t)
+	if stored.PushStatus == domain.PushStatusPending {
+		t.Fatal("取消后推送状态必须被写为终态，不能停留在 pending")
+	}
+	if stored.FinishedAt == nil {
+		t.Fatal("失败记录应写入结束时间")
+	}
+}
+
+// TestCommitBaselineIsPersistedBeforeCommit 校验基线在提交命令之前落盘。
+func TestCommitBaselineIsPersistedBeforeCommit(t *testing.T) {
+	t.Parallel()
+	instance := newHarness(t)
+	instance.repo.set(func() {
+		instance.repo.dirty = true
+	})
+	var baselineAtCommit string
+	instance.repo.overrides["commit"] = func(repo *fakeRepo, args []string) (
+		docker.CommandResult,
+		bool,
+	) {
+		// 提交命令到达时，数据库中的记录必须已经带有基线。
+		instance.recorder.mu.Lock()
+		for _, record := range instance.recorder.records {
+			baselineAtCommit = record.BaselineCommitSHA
+		}
+		instance.recorder.mu.Unlock()
+		repo.set(func() {
+			repo.head = testCommitSHA
+			repo.dirty = false
+			repo.staged = false
+		})
+		return succeeded(""), true
+	}
+	if _, err := instance.saver.Run(context.Background(), baseRequest()); err != nil {
+		t.Fatalf("保存流程应成功: %v", err)
+	}
+	if baselineAtCommit != testHeadCommit {
+		t.Fatalf("提交前必须已落盘基线 %s，实际 %q", testHeadCommit, baselineAtCommit)
+	}
+}
+
+// TestMergeBaselineIsPersistedBeforeMerge 校验合并基线在合并前落盘。
+func TestMergeBaselineIsPersistedBeforeMerge(t *testing.T) {
+	t.Parallel()
+	instance := newHarness(t)
+	instance.repo.set(func() {
+		instance.repo.dirty = true
+	})
+	var baselineBeforeMerge string
+	instance.repo.overrides["merge"] = func(repo *fakeRepo, args []string) (
+		docker.CommandResult,
+		bool,
+	) {
+		for _, arg := range args {
+			if arg == "--abort" {
+				return succeeded(""), true
+			}
+		}
+		instance.recorder.mu.Lock()
+		for _, record := range instance.recorder.records {
+			baselineBeforeMerge = record.BaselineBaseCommitSHA
+		}
+		instance.recorder.mu.Unlock()
+		repo.set(func() {
+			repo.head = testMergeSHA
+		})
+		return succeeded(""), true
+	}
+	request := baseRequest()
+	request.MergeAfterPush = true
+	if _, err := instance.saver.Run(context.Background(), request); err != nil {
+		t.Fatalf("保存流程应成功: %v", err)
+	}
+	if baselineBeforeMerge != testBaseRemoteSHA {
+		t.Fatalf("合并前必须已落盘基础分支基线 %s，实际 %q", testBaseRemoteSHA, baselineBeforeMerge)
+	}
+}
+
+// TestObserveConfirmsCommitApplied 校验只读核验能确认提交已经发生。
+func TestObserveConfirmsCommitApplied(t *testing.T) {
+	t.Parallel()
+	instance := newHarness(t)
+	record := domain.CodeSaveRecord{
+		ID:                domain.NewID(),
+		TaskID:            testTaskID,
+		TaskBranch:        testTaskBranch,
+		ContainerID:       testContainerID,
+		RemoteName:        testRemoteName,
+		CommitStatus:      domain.CommitStatusPending,
+		PushStatus:        domain.PushStatusPending,
+		MergeStatus:       domain.MergeStatusNotRequested,
+		BaselineCommitSHA: testHeadCommit,
+	}
+	observation := instance.saver.Observe(context.Background(), baseRequest(), record)
+	if observation.ReadFailed {
+		t.Fatalf("核验不应失败: %s", observation.ReadError)
+	}
+	if observation.HeadCommit != testHeadCommit {
+		t.Fatalf("HEAD 应为 %s，实际 %s", testHeadCommit, observation.HeadCommit)
+	}
+	decision := domain.DecideCodeSaveRecovery(record, observation)
+	if decision.Status != domain.RecoveryStatusConfirmedNotApplied {
+		t.Fatalf("HEAD 未变化时应确认提交未发生，实际 %s", decision.Status)
+	}
+	if !decision.SafeToRetry {
+		t.Fatal("确认未发生时应提示可以安全重试")
+	}
+}
+
+// TestObserveDoesNotWriteRecord 校验核验本身不写记录、不做有副作用的 Git 操作。
+func TestObserveDoesNotWriteRecord(t *testing.T) {
+	t.Parallel()
+	instance := newHarness(t)
+	record := domain.CodeSaveRecord{
+		ID:                domain.NewID(),
+		TaskID:            testTaskID,
+		TaskBranch:        testTaskBranch,
+		ContainerID:       testContainerID,
+		RemoteName:        testRemoteName,
+		CommitStatus:      domain.CommitStatusPending,
+		PushStatus:        domain.PushStatusPending,
+		MergeStatus:       domain.MergeStatusNotRequested,
+		BaselineCommitSHA: testHeadCommit,
+	}
+	instance.recorder.mu.Lock()
+	before := instance.recorder.updates
+	instance.recorder.mu.Unlock()
+	instance.saver.Observe(context.Background(), baseRequest(), record)
+	instance.recorder.mu.Lock()
+	after := instance.recorder.updates
+	instance.recorder.mu.Unlock()
+	if after != before {
+		t.Fatalf("核验不得写入保存记录: %d -> %d", before, after)
+	}
+	for _, subcommand := range instance.repo.recorded() {
+		switch subcommand {
+		case "commit", "add", "push", "merge", "checkout", "fetch":
+			t.Fatalf("核验不得执行有副作用的 Git 操作: %s", subcommand)
+		}
+	}
 }

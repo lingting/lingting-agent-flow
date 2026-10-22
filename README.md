@@ -874,7 +874,9 @@ Content-Type: application/json
 - 停止分类固定：开发失败 `blocked` / `developer_failed`；开发超时或中断
   `recovery_required` / `developer_interrupted`；验证未通过 `blocked` /
   `verification_failed`；证据未可靠写入 `recovery_required` / `verification_unconfirmed`；
-  无代码保存能力 `blocked` / `code_saver_unavailable`。
+  代码保存记录未确认 `recovery_required` / `code_save_unconfirmed`；代码保存结果不确定
+  `recovery_required` / `code_save_indeterminate`；代码保存未成功 `blocked` /
+  `code_save_failed`；无代码保存能力 `blocked` / `code_saver_unavailable`。
 - 不自动重试、不自动修复代码、不自动删除容器；停止后等待用户显式决定。
 
 #### 错误语义
@@ -893,6 +895,75 @@ Content-Type: application/json
 - 不在执行路径上创建、启动或接管容器。
 - 不发起 Validator Agent 调用：验证结论只来自确定性检查命令。
 - 不自动重试、不自动修复代码、不提供多任务并发调度队列。
+
+### 代码保存的状态写入失败与恢复边界
+
+远程 Git 操作与本机 SQLite 无法共享事务。提交、推送或合并成功之后，写回 `code_saves` 仍可能
+失败：此时数据库里仍是 `pending`，而仓库已经是另一个事实。因此这三组状态必须与"记录本身
+是否可信"分开表达。
+
+#### 失败窗口
+
+| 场景 | 仓库真实状态 | 记录可能的状态 | 风险 |
+|---|---|---|---|
+| 提交成功、记录写入失败 | 任务分支已产生新提交 | `commit_status=pending` | 重启后无法仅凭记录判断是否已提交 |
+| 推送成功、记录写入失败 | 远程任务分支已指向目标提交 | `push_status=pending` | 重复推送或误报保存失败 |
+| 基础分支推送成功、记录写入失败 | 远程基础分支已包含合并提交 | `merge_status=pending` | 重复合并或无法确认合并结果 |
+
+#### 记录字段
+
+补齐 `0019_code_save_recovery.sql` 后，`code_saves` 增加五个可空列：
+
+| 字段 | 含义 |
+|---|---|
+| `baseline_commit_sha` | 执行提交**之前**的 HEAD：判断 HEAD 是否被本次操作推进 |
+| `baseline_base_commit_sha` | 执行合并**之前**的远程基础分支 commit：把基础分支的变化归因到本次操作 |
+| `persist_status` | `persisted` / `unconfirmed`；空值按 `persisted` 处理，历史记录仍然可读 |
+| `persist_error` | 最后一次写入失败的脱敏摘要，写入成功后清空 |
+| `recovery_status` | `unverified` / `confirmed_applied` / `confirmed_not_applied` / `unverifiable` |
+
+基线一律在**副作用之前**落盘：基线写不进去就中止该阶段，不在未知起点上产生新提交或合并。
+历史记录没有基线，保持 `NULL`，不会被补造。
+
+#### 恢复原则
+
+1. **写入失败不等于 Git 失败**：`codesaver.Result` 分别暴露 Git 结论与 `PersistenceErrors`，
+   写盘失败返回 `state_unconfirmed` 而不是 `record_failed`。
+2. **恢复前先核验真实状态**：不得仅因记录是 `pending` 就再次提交、推送或合并。
+3. **不能核验就保留不确定性**：容器不可访问、远程不可达、无法唯一确定合并提交时一律
+   `unverifiable`，不伪造成功或失败结论。
+4. **恢复动作可重复执行**：重复核验得到相同结论，且不产生任何副作用。
+5. **保留原始故障证据**：最后已落盘的阶段、写入失败摘要、可读取的 Git 状态与恢复判定分别保存，
+   新的失败摘要不覆盖旧证据。
+
+#### 判定依据
+
+结论只由纯函数 `domain.DecideCodeSaveRecovery` 计算，三个阶段使用同一套判据：
+
+| 阶段 | 确认已发生 | 确认未发生 | 其余情况 |
+|---|---|---|---|
+| 提交 | 有基线且当前 HEAD ≠ 基线 | 有基线且 HEAD = 基线 | 无基线或读不到 HEAD → `unverifiable` |
+| 推送 | 远程任务分支 = 预期提交 | 远程任务分支不存在 | 指向其他提交 → `unverifiable`（禁止 force push） |
+| 合并 | 远程基础分支 = 唯一候选合并提交 | 远程基础分支 = 基线 | 无法推算或与预期不一致 → `unverifiable` |
+
+"唯一候选合并提交"要求同时满足：候选是合并提交、第一父提交等于基线、第二父提交等于任务
+分支提交。仅发现基础分支发生变化，不足以证明合并由本次操作产生。只有"确认未发生"才标记为
+可以安全重试。
+
+#### 只读核验
+
+`agentflow code verify` 是唯一的恢复入口，需要人工显式执行：
+
+```bash
+./bin/agentflow code verify --record <code-save-record-id>
+./bin/agentflow code verify --record <code-save-record-id> --container <container-id>
+```
+
+它只执行 `rev-parse`、`ls-remote` 与 `rev-list --first-parent`，不提交、不推送、不合并、
+不切换分支、不删除或接管容器，也不改动记录的 Git 状态字段；核验结论写回 `recovery_status`。
+`agentflow code status --task <task-id>` 同时展示基线、写入状态、写入失败摘要与恢复结论。
+
+本轮不引入自动重试、后台恢复调度与新的工作流功能：恢复语义先由人工核验确立。
 
 ### 尚未实现的接口
 

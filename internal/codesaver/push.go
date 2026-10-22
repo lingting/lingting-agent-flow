@@ -220,12 +220,18 @@ func (x *Session) remoteBranchCommit(ctx context.Context, branch string) (string
 }
 
 // markPushSucceeded 记录推送成功并落盘。
+//
+// 落盘失败时按"记录未确认"报告：远程可能已经收到提交，此时不能把写入失败
+// 误读为推送失败，也不能仅凭 pending 重新推送。
 func (x *Session) markPushSucceeded(ctx context.Context, sha string) error {
 	x.record.Stage = "push"
 	if err := x.record.MarkPush(domain.PushStatusSucceeded, sha, time.Now()); err != nil {
 		return newError(CodePushFailed, "push", err.Error(), err)
 	}
-	return x.persist(ctx)
+	if err := x.persist(ctx); err != nil {
+		return x.persistFailure(err)
+	}
+	return nil
 }
 
 // markPushFailed 记录推送失败并落盘。

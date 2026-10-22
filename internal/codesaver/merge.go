@@ -148,6 +148,10 @@ func (x *Session) runMerge(ctx context.Context) error {
 		))
 	}
 	x.base.RemoteCommit = remoteSHA
+	if err := x.recordBaselineBaseCommit(ctx, remoteSHA); err != nil {
+		// 基线写入失败时不执行合并：没有基线就无法把后续的基础分支变化归因为本次操作。
+		return x.failMerge(ctx, recordError("merge", err))
+	}
 	if err := x.prepareBaseBranch(ctx, remoteSHA); err != nil {
 		return x.failMerge(ctx, err)
 	}
@@ -366,6 +370,21 @@ func (x *Session) resolveMergePushFailure(
 func (x *Session) markMergeSucceeded(ctx context.Context, mergeSHA string) error {
 	x.record.Stage = "merge"
 	if err := x.record.MarkMerge(domain.MergeStatusSucceeded, mergeSHA, time.Now()); err != nil {
+		return newError(CodeMergeFailed, "merge", err.Error(), err)
+	}
+	if err := x.persist(ctx); err != nil {
+		return x.persistFailure(err)
+	}
+	return nil
+}
+
+// recordBaselineBaseCommit 在合并之前把远程基础分支落盘。
+//
+// 它使"基础分支发生了变化"可以被归因：只有远程基础分支等于唯一的候选合并提交
+// （第一父为基线、第二父为任务分支提交）时，才认定本次合并已经发生。
+func (x *Session) recordBaselineBaseCommit(ctx context.Context, sha string) error {
+	x.record.Stage = "merge"
+	if err := x.record.MarkBaselineBaseCommit(sha, time.Now()); err != nil {
 		return newError(CodeMergeFailed, "merge", err.Error(), err)
 	}
 	return x.persist(ctx)

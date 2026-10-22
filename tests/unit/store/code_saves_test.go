@@ -262,3 +262,175 @@ func itoa(value int) string {
 	}
 	return digits
 }
+
+// TestCodeSaveRecordRecoveryFields 校验恢复判定字段可以被完整读写。
+//
+// 这五个字段是"Git 已成功但记录没落盘"这一失败窗口的唯一判据，必须能独立
+// 持久化：基线、落盘状态、落盘失败摘要与核验结论互不覆盖。
+func TestCodeSaveRecordRecoveryFields(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ctx := testContext(t)
+	record := newCodeSaveRecord(t, "task-recovery")
+	if err := db.CreateCodeSaveRecord(ctx, record); err != nil {
+		t.Fatalf("写入代码保存记录失败: %v", err)
+	}
+	baseline := "1111111111111111111111111111111111111111"
+	baselineBase := "2222222222222222222222222222222222222222"
+	if err := record.MarkBaselineCommit(baseline, time.Now().UTC()); err != nil {
+		t.Fatalf("记录提交基线失败: %v", err)
+	}
+	if err := record.MarkBaselineBaseCommit(baselineBase, time.Now().UTC()); err != nil {
+		t.Fatalf("记录合并基线失败: %v", err)
+	}
+	record.MarkPersistFailure("database is locked", time.Now().UTC())
+	if err := db.UpdateCodeSaveRecord(ctx, record); err != nil {
+		t.Fatalf("更新代码保存记录失败: %v", err)
+	}
+	stored, err := db.GetCodeSaveRecord(ctx, record.ID)
+	if err != nil {
+		t.Fatalf("读取代码保存记录失败: %v", err)
+	}
+	if stored.BaselineCommitSHA != baseline {
+		t.Fatalf("提交基线丢失: %s", stored.BaselineCommitSHA)
+	}
+	if stored.BaselineBaseCommitSHA != baselineBase {
+		t.Fatalf("合并基线丢失: %s", stored.BaselineBaseCommitSHA)
+	}
+	if stored.PersistStatus != domain.PersistStatusUnconfirmed {
+		t.Fatalf("落盘状态应为 unconfirmed，实际 %s", stored.PersistStatus)
+	}
+	if stored.PersistError == "" {
+		t.Fatal("落盘失败摘要必须被保存")
+	}
+	if !stored.RequiresManualRecovery() {
+		t.Fatal("记录未可靠写入时必须要求人工核验")
+	}
+	// 落盘恢复成功后摘要必须清空，否则读者会误判记录仍然不可信。
+	stored.MarkPersisted(time.Now().UTC())
+	if err := db.UpdateCodeSaveRecord(ctx, *stored); err != nil {
+		t.Fatalf("更新落盘状态失败: %v", err)
+	}
+	recovered, err := db.GetCodeSaveRecord(ctx, record.ID)
+	if err != nil {
+		t.Fatalf("再次读取记录失败: %v", err)
+	}
+	if recovered.PersistStatus != domain.PersistStatusPersisted {
+		t.Fatalf("落盘状态应为 persisted，实际 %s", recovered.PersistStatus)
+	}
+	if recovered.PersistError != "" {
+		t.Fatalf("落盘成功后摘要必须清空，实际 %q", recovered.PersistError)
+	}
+}
+
+// TestCodeSaveRecordRecoveryStatus 校验核验结论可以写入并被读回。
+func TestCodeSaveRecordRecoveryStatus(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ctx := testContext(t)
+	record := newCodeSaveRecord(t, "task-verify")
+	if err := db.CreateCodeSaveRecord(ctx, record); err != nil {
+		t.Fatalf("写入代码保存记录失败: %v", err)
+	}
+	if err := record.MarkRecovery(domain.RecoveryStatusUnverifiable, time.Now().UTC()); err != nil {
+		t.Fatalf("记录核验结论失败: %v", err)
+	}
+	if err := db.UpdateCodeSaveRecord(ctx, record); err != nil {
+		t.Fatalf("更新代码保存记录失败: %v", err)
+	}
+	stored, err := db.GetCodeSaveRecord(ctx, record.ID)
+	if err != nil {
+		t.Fatalf("读取代码保存记录失败: %v", err)
+	}
+	if stored.RecoveryStatus != domain.RecoveryStatusUnverifiable {
+		t.Fatalf("恢复结论未原样保存: %s", stored.RecoveryStatus)
+	}
+	// 远端恢复可达后可以依据新事实收敛为确定结论。
+	if err := stored.MarkRecovery(domain.RecoveryStatusConfirmedApplied, time.Now().UTC()); err != nil {
+		t.Fatalf("修正核验结论失败: %v", err)
+	}
+	if err := db.UpdateCodeSaveRecord(ctx, *stored); err != nil {
+		t.Fatalf("更新恢复结论失败: %v", err)
+	}
+	confirmed, err := db.GetCodeSaveRecord(ctx, record.ID)
+	if err != nil {
+		t.Fatalf("再次读取记录失败: %v", err)
+	}
+	if confirmed.RecoveryStatus != domain.RecoveryStatusConfirmedApplied {
+		t.Fatalf("恢复结论未更新: %s", confirmed.RecoveryStatus)
+	}
+	// 已确认的事实不允许退回不确定：真实 Git 事实不会因一次查询失败而消失。
+	if err := confirmed.MarkRecovery(domain.RecoveryStatusUnverifiable, time.Now().UTC()); err == nil {
+		t.Fatal("已确认的恢复结论不应退回不确定状态")
+	}
+}
+
+// TestCodeSaveRecordLegacyRowsRemainReadable 校验历史记录（新列为 NULL）仍可读取。
+//
+// 0019 之前写入的记录没有基线与落盘状态：空值必须按 persisted 处理，
+// 不得被误判为"记录不可信"，也不得凭空生成基线。
+func TestCodeSaveRecordLegacyRowsRemainReadable(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ctx := testContext(t)
+	raw := rawDB(t, db)
+	if _, err := raw.ExecContext(ctx, `INSERT INTO code_saves
+		(id, task_id, container_id, remote_name, task_branch, commit_status,
+		 push_status, merge_enabled, merge_status, created_at, updated_at)
+		VALUES ('legacy-save', 'task-legacy', 'container-1', 'origin',
+		 'agent/task-legacy', 'pending', 'pending', 0, 'not_requested', 1, 1)`); err != nil {
+		t.Fatalf("写入历史记录失败: %v", err)
+	}
+	loaded, err := db.GetCodeSaveRecord(ctx, "legacy-save")
+	if err != nil {
+		t.Fatalf("读取历史记录失败: %v", err)
+	}
+	if loaded.BaselineCommitSHA != "" || loaded.BaselineBaseCommitSHA != "" {
+		t.Fatal("历史记录不应凭空产生基线")
+	}
+	if loaded.PersistStatus.IsUnconfirmed() {
+		t.Fatal("空落盘状态必须按 persisted 处理")
+	}
+	if loaded.RequiresManualRecovery() {
+		t.Fatal("历史记录的空落盘状态不应触发人工核验")
+	}
+	// 没有基线的 pending 记录在恢复判定中必须转人工，而不是被推断为未发生。
+	decision := domain.DecideCodeSaveRecovery(*loaded, domain.CodeSaveObservation{
+		HeadCommit: "1111111111111111111111111111111111111111",
+	})
+	if decision.Status != domain.RecoveryStatusUnverifiable {
+		t.Fatalf("缺少基线的历史记录不得被推断，实际 %s", decision.Status)
+	}
+	if decision.SafeToRetry {
+		t.Fatal("缺少基线的历史记录不得提示可以安全重试")
+	}
+}
+
+// TestCodeSaveRecordAcceptsUnknownRecoveryValues 校验未知恢复状态可以写入并原样读回。
+//
+// 数据库不声明枚举白名单：新增取值必须能在不修改 Schema 的情况下写入。
+func TestCodeSaveRecordAcceptsUnknownRecoveryValues(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ctx := testContext(t)
+	raw := rawDB(t, db)
+	if _, err := raw.ExecContext(ctx, `INSERT INTO code_saves
+		(id, task_id, container_id, remote_name, task_branch, commit_status,
+		 push_status, merge_enabled, merge_status, persist_status, recovery_status,
+		 created_at, updated_at)
+		VALUES ('probe-save', 'task-probe', 'container-1', 'origin',
+		 'agent/task-probe', 'pending', 'pending', 0, 'not_requested',
+		 'awaiting_review', 'mirror_confirmed', 1, 1)`); err != nil {
+		t.Fatalf("写入未知恢复状态失败: %v", err)
+	}
+	loaded, err := db.GetCodeSaveRecord(ctx, "probe-save")
+	if err != nil {
+		t.Fatalf("读取代码保存记录失败: %v", err)
+	}
+	if loaded.PersistStatus != domain.PersistStatus("awaiting_review") {
+		t.Fatalf("未知落盘状态未原样保存: %s", loaded.PersistStatus)
+	}
+	if loaded.RecoveryStatus != domain.RecoveryStatus("mirror_confirmed") {
+		t.Fatalf("未知恢复结论未原样保存: %s", loaded.RecoveryStatus)
+	}
+}

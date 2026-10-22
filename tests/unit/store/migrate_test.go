@@ -14,7 +14,7 @@ import (
 )
 
 // latestSchemaVersion 是当前程序内置迁移的最新版本号。
-const latestSchemaVersion = 18
+const latestSchemaVersion = 19
 
 // migrationTableName 是记录已应用迁移版本的元数据表名。
 const migrationTableName = "schema_migrations"
@@ -177,13 +177,16 @@ func TestMigrateUpgradesExistingDatabase(t *testing.T) {
 		`DROP TABLE validation_feedbacks`,
 		// 工作流执行记录表同样需要回退，才能重新执行 0018。
 		`DROP TABLE workflow_runs`,
+		// 代码保存表在上方已整体删除（第 136 行），因此 0019 新增的恢复字段
+		// 会随 CREATE TABLE 一起重建：不需要单独回退，也不应该在已删除的表上
+		// 执行 ALTER。此处只需确保建表语句包含全部列。
 	} {
 		testkit.MustExec(t, rawDB(t, db), statement)
 	}
 	testkit.MustExec(
 		t,
 		rawDB(t, db),
-		`DELETE FROM `+migrationTableName+` WHERE version IN (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)`,
+		`DELETE FROM `+migrationTableName+` WHERE version IN (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19)`,
 	)
 	if version, err := db.SchemaVersion(ctx); err != nil || version != 1 {
 		t.Fatalf("模拟旧库版本失败: %d, %v", version, err)

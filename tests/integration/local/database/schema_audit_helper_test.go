@@ -460,3 +460,32 @@ func hasConstraint(t *testing.T, conn *sql.DB, table, fragment string) bool {
 func normalizeSQL(value string) string {
 	return strings.Join(strings.Fields(strings.ToLower(value)), " ")
 }
+
+// codeSaveRecoveryProbes 是代码保存恢复字段的 Schema 审计探针。
+//
+// 0019 新增的五个列全部可空，且不声明枚举白名单：历史记录（全部为 NULL）
+// 必须可读，未知状态值必须能写入并原样读回。
+var codeSaveRecoveryProbes = []enumProbe{
+	{
+		table:  "code_saves",
+		column: "persist_status",
+		value:  "awaiting_review",
+		statement: `INSERT INTO code_saves
+			(id, task_id, container_id, remote_name, task_branch, commit_status,
+			 push_status, merge_status, persist_status, created_at, updated_at)
+			VALUES ('probe-code-save-persist', 'probe-task', 'probe-container', 'origin',
+			 'agent/probe-task', 'pending', 'pending', 'not_requested',
+			 'awaiting_review', 1, 1)`,
+	},
+	{
+		table:  "code_saves",
+		column: "recovery_status",
+		value:  "mirror_confirmed",
+		statement: `INSERT INTO code_saves
+			(id, task_id, container_id, remote_name, task_branch, commit_status,
+			 push_status, merge_status, recovery_status, created_at, updated_at)
+			VALUES ('probe-code-save-recovery', 'probe-task', 'probe-container', 'origin',
+			 'agent/probe-task', 'pending', 'pending', 'not_requested',
+			 'mirror_confirmed', 1, 1)`,
+	},
+}

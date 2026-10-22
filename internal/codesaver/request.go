@@ -169,10 +169,30 @@ type Result struct {
 	NoChanges bool
 	// Duration 是本次操作的耗时。
 	Duration time.Duration
+	// PersistenceErrors 是状态写入失败的摘要列表。
+	//
+	// 它与 Git 操作结果互相独立：Git 可能已经完全成功，只是记录没落盘。此时
+	// Record 保留内存中的真实结论，Persisted() 返回 false，调用方不得据此判定成功。
+	PersistenceErrors []string
+}
+
+// Persisted 判断最终记录是否已可靠写入数据库。
+//
+// 判定依据是记录自身的 PersistStatus，而不是另一个布尔字段：新增一个默认为 false
+// 的字段，会让所有没有显式赋值的历史调用点被误判为"未落盘"。空值按 persisted
+// 处理，与历史记录保持一致。
+func (r Result) Persisted() bool {
+	return !r.Record.PersistStatus.IsUnconfirmed()
 }
 
 // Succeeded 判断本次代码保存是否完成了被请求的全部操作。
+//
+// 记录未可靠落盘时一律返回 false：内存里的结论不能替代数据库中的事实，
+// 否则"写入失败"会被误报为成功。
 func (r Result) Succeeded() bool {
+	if !r.Persisted() {
+		return false
+	}
 	record := r.Record
 	if record.CommitStatus != domain.CommitStatusSucceeded &&
 		record.CommitStatus != domain.CommitStatusNoChanges &&

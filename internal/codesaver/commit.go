@@ -163,6 +163,9 @@ func (x *Session) runCommit(
 	before WorktreeState,
 	author domain.GitAuthor,
 ) error {
+	if err := x.recordBaselineCommit(ctx, before.Head); err != nil {
+		return err
+	}
 	args := []string{}
 	if !author.IsZero() {
 		args = append(
@@ -259,5 +262,27 @@ func (x *Session) markCommitSucceeded(ctx context.Context, sha string) error {
 	); err != nil {
 		return newError(CodeCommitFailed, "commit", err.Error(), err)
 	}
-	return x.persist(ctx)
+	if err := x.persist(ctx); err != nil {
+		return x.persistFailure(err)
+	}
+	return nil
+}
+
+// recordBaselineCommit 在提交之前把 HEAD 落盘，作为"是否已经提交"的判定基线。
+//
+// 基线必须在副作用之前写入：提交成功但状态写入失败时，只有回读这条基线才能区分
+// "HEAD 已经前进"与"提交根本没有发生"。基线写入失败时直接终止本次操作——在不知道
+// 起点的情况下产生新提交，会让后续恢复永远无法判定。
+func (x *Session) recordBaselineCommit(ctx context.Context, sha string) error {
+	if strings.TrimSpace(sha) == "" {
+		return newError(CodeWorktreeInvalid, "commit", "提交前的 HEAD 为空，无法记录基线", nil)
+	}
+	x.record.Stage = "commit"
+	if err := x.record.MarkBaselineCommit(sha, time.Now()); err != nil {
+		return newError(CodeCommitFailed, "commit", err.Error(), err)
+	}
+	if err := x.persist(ctx); err != nil {
+		return recordError("commit", err)
+	}
+	return nil
 }

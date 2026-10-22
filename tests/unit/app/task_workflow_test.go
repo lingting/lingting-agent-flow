@@ -1514,3 +1514,40 @@ func TestWorkflowCloseoutRequiresRecoveryOnUnknownCommit(t *testing.T) {
 		t.Fatal("提交结果未知时任务不得标记为完成")
 	}
 }
+
+// TestWorkflowCloseoutRequiresRecoveryOnUnconfirmedRecord 验证记录写入未确认时的收尾。
+//
+// 内存中的记录看起来"推送成功"，但数据库没能写进去：此时不能依据内存结论判定任务
+// 完成，必须先把"记录是否可信"这件事交给人核验。它与 code_save_indeterminate 是
+// 不同的事实，因此使用独立的错误分类。
+func TestWorkflowCloseoutRequiresRecoveryOnUnconfirmedRecord(t *testing.T) {
+	t.Parallel()
+	record := succeededCodeSaveRecord()
+	record.PersistStatus = domain.PersistStatusUnconfirmed
+	record.PersistError = "database is locked"
+	fixture := newTaskWorkflowFixture(t, taskWorkflowOptions{
+		stepCount:      1,
+		codeSaver:      true,
+		sessions:       true,
+		codeSaveRecord: record,
+	})
+	if _, err := fixture.service.StartWorkflow(fixture.ctx, app.StartWorkflowRequest{
+		TaskID: fixture.task.ID.String(),
+	}); err != nil {
+		t.Fatalf("启动工作流失败: %v", err)
+	}
+	result := waitTaskRunStatus(t, fixture.service, fixture.task.ID, workflowSettled)
+	if result.Run.Status != domain.WorkflowRunRecoveryRequired {
+		t.Fatalf("记录写入未确认时应需要人工核验，实际 %s", result.Run.Status)
+	}
+	if result.Run.ErrorClass != "code_save_unconfirmed" {
+		t.Fatalf("错误分类不正确: %s", result.Run.ErrorClass)
+	}
+	task, err := fixture.db.GetTask(fixture.ctx, fixture.task.ID)
+	if err != nil {
+		t.Fatalf("读取任务失败: %v", err)
+	}
+	if task.Status == domain.TaskStatusCompleted {
+		t.Fatal("记录写入未确认时任务不得标记为完成")
+	}
+}

@@ -65,6 +65,11 @@ const (
 	CodeTimeout ErrorCode = "timeout"
 	// CodeRecordFailed 表示保存记录写入失败。
 	CodeRecordFailed ErrorCode = "record_failed"
+	// CodeStateUnconfirmed 表示状态写入未确认，记录可能落后于真实 Git 状态。
+	//
+	// 它与 CodeStateUncertain 的区别：后者是"Git 结果未知"，前者是"我们对 Git 结果
+	// 的记录不可信"。两者的恢复动作不同，不能合并为一个分类。
+	CodeStateUnconfirmed ErrorCode = "state_unconfirmed"
 )
 
 // String 返回错误类别的字符串形式。
