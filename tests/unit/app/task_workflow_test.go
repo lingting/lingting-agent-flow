@@ -8,10 +8,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/lingting/agentflow/internal/agent"
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/codesaver"
 	"github.com/lingting/agentflow/internal/docker"
@@ -184,6 +186,14 @@ type taskWorkflowContainer struct {
 	removed    bool
 	running    bool
 	inspected  int
+	// agentReplies 是计划生成路径上依次返回的 Agent 调用结果。
+	agentReplies []fakeAgentReply
+	// agentRequests 记录收到的 Agent 调用请求。
+	agentRequests []app.ContainerAgentRequest
+	// agentCalls 统计 Agent 调用次数。
+	agentCalls int
+	// sessions 非空时把会话记录写入数据库，模拟真实容器执行的持久化行为。
+	sessions storage.SessionStore
 }
 
 // InspectContainer 返回受控的容器状态。
@@ -212,6 +222,58 @@ func (p *taskWorkflowContainer) InspectContainer(
 		},
 		Inspect: &docker.ContainerInspect{Running: p.running},
 	}, nil
+}
+
+// RunAgent 返回受控的 Agent 调用结果。
+//
+// 计划生成用例通过它注入 Planner 的最终输出，因此不需要真实 Pi、模型或 Docker。
+func (p *taskWorkflowContainer) RunAgent(
+	ctx context.Context,
+	request app.ContainerAgentRequest,
+) (app.ContainerAgentResult, error) {
+	p.mu.Lock()
+	p.agentRequests = append(p.agentRequests, request)
+	p.agentCalls++
+	index := p.agentCalls - 1
+	reply := fakeAgentReply{status: agent.RunCompleted, finalText: "已完成"}
+	if index < len(p.agentReplies) {
+		reply = p.agentReplies[index]
+	}
+	sessions := p.sessions
+	p.mu.Unlock()
+	now := time.Now().UTC()
+	sessionID := domain.ID(strings.TrimSpace(request.SessionID))
+	if sessionID.IsEmpty() {
+		sessionID = domain.NewID()
+	}
+	result := agent.RunResult{
+		SessionID:    sessionID.String(),
+		InvocationID: request.InvocationID,
+		Status:       reply.status,
+		FinalText:    reply.finalText,
+		Failure:      reply.failure,
+		ExitCode:     reply.exitCode,
+		StartedAt:    now,
+		FinishedAt:   now,
+		Session: agent.SessionFiles{
+			JSONLPath:    "sessions/" + sessionID.String() + "/session.jsonl",
+			Completeness: reply.completeness,
+			ExportStatus: agent.ExportNotAttempted,
+		},
+	}
+	if result.Session.Completeness == "" {
+		if reply.status == agent.RunCompleted {
+			result.Session.Completeness = agent.SessionComplete
+		} else {
+			result.Session.Completeness = agent.SessionPartial
+		}
+	}
+	if sessions != nil {
+		if err := sessions.CreateSession(ctx, fakeStepSession(request, result, now)); err != nil {
+			return app.ContainerAgentResult{Result: result}, err
+		}
+	}
+	return app.ContainerAgentResult{Result: result}, reply.err
 }
 
 // taskWorkflowCodeSaver 是代码保存的替身。

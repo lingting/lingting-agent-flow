@@ -27,7 +27,13 @@ var (
 	// ErrWorkflowPrerequisite 表示启动工作流所需的前置条件未满足。
 	ErrWorkflowPrerequisite = errors.New("app: 工作流前置条件未满足")
 	// ErrWorkflowStopped 表示服务已停止，不再接受新的工作流请求。
+	// ErrWorkflowStopped 表示服务已停止，不再接受新的工作流请求。
 	ErrWorkflowStopped = errors.New("app: 工作流编排器已停止")
+	// ErrPlanInvalidOutput 表示 Planner 输出无法构成一份可执行计划。
+	//
+	// 它与"Planner 调用失败"是不同的事实：进程可能正常退出，但输出为空、不是结构化
+	// 计划或未通过确定性校验。两者都不能让任务进入 planned，但必须能被调用方区分。
+	ErrPlanInvalidOutput = errors.New("app: Planner 输出不是合法计划")
 )
 
 // errWorkflowCancelRequested 是用户取消工作流时的取消原因。
@@ -63,6 +69,8 @@ type WorkflowTaskRepository interface {
 		task domain.Task,
 		expected []domain.TaskStatus,
 	) error
+	// ListTasks 按状态筛选任务，用于启动时收敛计划生成的残留现场。
+	ListTasks(ctx context.Context, filter storage.TaskFilter) ([]domain.Task, error)
 }
 
 // WorkflowStepRepository 是编排器需要的步骤读写能力。
@@ -104,10 +112,13 @@ type WorkflowHostRepository interface {
 // WorkflowContainerPort 是编排器对任务容器的需求。
 //
 // 编排器只核验与使用容器：它不创建、启动、删除或接管容器，也不会在容器不可用时
-// 静默回退到本机执行。
+// 静默回退到本机执行。RunAgent 用于计划生成：Planner 必须在真实仓库上下文所在的
+// 任务容器内运行。
 type WorkflowContainerPort interface {
 	// InspectContainer 核验容器当前状态。
 	InspectContainer(ctx context.Context, request InspectContainerRequest) (ContainerDetail, error)
+	// RunAgent 在受管理的任务容器内执行一次 Agent 调用。
+	RunAgent(ctx context.Context, request ContainerAgentRequest) (ContainerAgentResult, error)
 }
 
 // WorkflowCodeSaverPort 是编排器对代码保存的需求。
@@ -139,6 +150,10 @@ type TaskWorkflowStore interface {
 	WorkflowSessionRepository
 	WorkflowRunRepository
 	WorkflowHostRepository
+	// GetRole 读取角色，用于计划生成时锁定规划角色。
+	GetRole(ctx context.Context, id domain.ID) (*domain.Role, error)
+	// WithTx 在单个事务内执行 fn，用于把计划步骤与任务状态一次写入。
+	WithTx(ctx context.Context, fn func(ctx context.Context, tx storage.Tx) error) error
 	// AppendEvent 追加任务事件。
 	AppendEvent(ctx context.Context, event domain.Event) (domain.Event, error)
 }
@@ -157,6 +172,11 @@ type TaskWorkflowOptions struct {
 	// 收尾会停留在 blocked 并给出"代码保存未完成"的明确原因，绝不把"步骤全部通过
 	// 验证"当作任务完整成功。
 	CodeSaver WorkflowCodeSaverPort
+	// Sessions 是会话服务，计划生成用它创建并收敛 Planner 会话记录。
+	//
+	// 为空表示本次运行不提供计划生成：GeneratePlan 直接返回错误，而不是生成一份
+	// 没有可追溯会话记录的计划。
+	Sessions *SessionService
 	// Logger 是日志器，为空时使用默认日志器。
 	Logger *slog.Logger
 	// Now 是可注入的时钟，零值使用当前时间。
@@ -167,6 +187,8 @@ type TaskWorkflowOptions struct {
 	DefaultTimeout time.Duration
 	// DefaultValidationTimeout 是单个步骤验证阶段的默认超时。
 	DefaultValidationTimeout time.Duration
+	// DefaultPlanTimeout 是 Planner 调用的默认超时，零值使用默认值。
+	DefaultPlanTimeout time.Duration
 }
 
 // TaskWorkflowService 是任务级工作流编排器。
@@ -178,13 +200,15 @@ type TaskWorkflowOptions struct {
 //   - 在失败、取消或不确定状态时停止推进，等待用户显式决定；
 //   - 协调已有的代码保存能力完成任务收尾。
 //
-// 它不实现 Planner、不拼接 Pi 命令、不构造 Docker 命令、不实现 Git 操作，也不
-// 重复创建 Attempt 与 Session：这些职责仍属于既有组件。
+// 它同时承担计划生成（GeneratePlan）：在任务容器内调用 Planner、把输出校验为
+// 结构化计划并一次写入数据库。它不拼接 Pi 命令、不构造 Docker 命令、不实现 Git
+// 操作，也不重复创建 Session：这些职责仍属于既有组件。
 type TaskWorkflowService struct {
 	store      TaskWorkflowStore
 	steps      WorkflowStepRunner
 	containers WorkflowContainerPort
 	codeSaver  WorkflowCodeSaverPort
+	sessions   *SessionService
 	logger     *slog.Logger
 	now        func() time.Time
 	owner      string
@@ -192,7 +216,7 @@ type TaskWorkflowService struct {
 	lease                    time.Duration
 	defaultTimeout           time.Duration
 	defaultValidationTimeout time.Duration
-
+	defaultPlanTimeout       time.Duration
 	// taskLocks 保证同一任务在本进程内不会被两个 goroutine 同时推进。
 	//
 	// 它是第一道防线而不是一致性保证：跨进程并发仍由 workflow_runs 的部分唯一索引
@@ -232,12 +256,14 @@ func NewTaskWorkflowService(options TaskWorkflowOptions) (*TaskWorkflowService, 
 		steps:                    options.Steps,
 		containers:               options.Containers,
 		codeSaver:                options.CodeSaver,
+		sessions:                 options.Sessions,
 		logger:                   logger,
 		now:                      now,
 		owner:                    "workflow-" + domain.NewID().String(),
 		lease:                    lease,
 		defaultTimeout:           options.DefaultTimeout,
 		defaultValidationTimeout: options.DefaultValidationTimeout,
+		defaultPlanTimeout:       options.DefaultPlanTimeout,
 	}, nil
 }
 
@@ -277,7 +303,12 @@ func (s *TaskWorkflowService) Start(ctx context.Context) error {
 	state.stopSignal = stopSignal
 	state.stopOnce = stop
 	state.mu.Unlock()
-	return s.recoverUnfinished(ctx)
+	if err := s.recoverUnfinished(ctx); err != nil {
+		return err
+	}
+	// 计划生成的现场同样在启动时收敛：停留在 planning 的任务不能仅凭状态就再次
+	// 调用 Planner，必须先按持久化事实判断上一轮到底走到哪一步。
+	return s.recoverPlanGeneration(ctx)
 }
 
 // Stop 取消在途工作流并等待其收敛。

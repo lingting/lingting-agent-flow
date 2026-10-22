@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -106,6 +107,17 @@ func (taskWorkflowAPIContainer) InspectContainer(
 		},
 		Inspect: &docker.ContainerInspect{Running: true},
 	}, nil
+}
+
+// RunAgent 在计划生成路径上不应被调用。
+//
+// 该替身只用于工作流启动用例，计划生成用例使用带受控返回的替身；这里显式失败，
+// 避免用例静默走到真实 Planner 调用路径。
+func (taskWorkflowAPIContainer) RunAgent(
+	ctx context.Context,
+	request app.ContainerAgentRequest,
+) (app.ContainerAgentResult, error) {
+	return app.ContainerAgentResult{}, errors.New("该替身不提供容器内 Agent 调用")
 }
 
 // taskWorkflowAPICodeSaver 是代码保存的受控替身。

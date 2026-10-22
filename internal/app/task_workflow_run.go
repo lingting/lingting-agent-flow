@@ -578,6 +578,71 @@ func (s *TaskWorkflowService) verifyPlanUnchanged(
 	return nil
 }
 
+// recoverPlanGeneration 在服务启动时处理停留在 planning 的任务。
+//
+// 进程在 Planner 调用期间退出会留下 planning 任务。这里只依据持久化事实收敛，
+// 绝不重放 Planner 调用：存在步骤说明上一轮事务已提交，收敛为 planned；没有任何
+// 步骤说明无法判断调用是否真的发生，收敛为 recovery_required 等待人工核验。
+func (s *TaskWorkflowService) recoverPlanGeneration(ctx context.Context) error {
+	tasks, err := s.store.ListTasks(ctx, storage.TaskFilter{
+		Statuses: []domain.TaskStatus{domain.TaskStatusPlanning},
+	})
+	if err != nil {
+		return fmt.Errorf("恢复计划生成现场失败: %w", err)
+	}
+	for _, task := range tasks {
+		steps, stepsErr := s.store.ListStepsByTask(ctx, task.ID)
+		if stepsErr != nil {
+			s.logger.WarnContext(
+				ctx,
+				"读取计划步骤失败",
+				slog.String("task_id", task.ID.String()),
+				slog.String("error", errorSummary(stepsErr)),
+			)
+			continue
+		}
+		next := domain.DecidePlanGenerationRecovery(len(steps) > 0)
+		recovered := task
+		previous := recovered.Status
+		if err := recovered.Transition(next, s.now()); err != nil {
+			s.logger.WarnContext(
+				ctx,
+				"收敛计划生成现场失败",
+				slog.String("task_id", task.ID.String()),
+				slog.String("target", string(next)),
+				slog.String("error", errorSummary(err)),
+			)
+			continue
+		}
+		if next == domain.TaskStatusRecoveryRequired {
+			recovered.FailureSummary = "计划生成在服务退出时中断，无法确认是否真的调用过 Planner，需要人工核验"
+		}
+		if err := s.store.UpdateTaskIfStatus(
+			context.WithoutCancel(ctx),
+			recovered,
+			[]domain.TaskStatus{previous},
+		); err != nil {
+			s.logger.WarnContext(
+				ctx,
+				"写入计划生成恢复状态失败",
+				slog.String("task_id", task.ID.String()),
+				slog.String("error", errorSummary(err)),
+			)
+			continue
+		}
+		eventType := domain.EventTypePlanCreated
+		if next == domain.TaskStatusRecoveryRequired {
+			eventType = domain.EventTypeTaskRecoveryRequired
+		}
+		s.appendEvent(ctx, task.ID, nil, nil, eventType, map[string]any{
+			"stage":  "recover_plan",
+			"status": string(next),
+			"steps":  len(steps),
+		})
+	}
+	return nil
+}
+
 // recoverUnfinished 在服务启动时处理未结束的执行记录。
 //
 // 处理方式严格依据数据库事实：

@@ -58,6 +58,41 @@ type workflowAPIStatus struct {
 	Run        *workflowAPIRun `json:"run"`
 }
 
+// workflowAPIPlanRequest 是生成计划请求的请求体。
+//
+// 只包含执行参数：要生成哪些步骤、使用哪个角色完全由服务端依据任务配置决定。
+type workflowAPIPlanRequest struct {
+	Prompt         string `json:"prompt"`
+	TimeoutSeconds int    `json:"timeout_seconds"`
+}
+
+// workflowAPIPlan 是一次计划生成的结果。
+//
+// Persisted 为 false 时任务不会处于 planned，命令必须如实报告失败而不是展示步骤。
+type workflowAPIPlan struct {
+	TaskID       string                `json:"task_id"`
+	TaskStatus   string                `json:"task_status"`
+	Persisted    bool                  `json:"persisted"`
+	Summary      string                `json:"summary"`
+	Steps        []workflowAPIPlanStep `json:"steps"`
+	SessionID    string                `json:"session_id"`
+	FailureStage string                `json:"failure_stage"`
+	Failure      string                `json:"failure"`
+	StartedAt    time.Time             `json:"started_at"`
+	FinishedAt   time.Time             `json:"finished_at"`
+}
+
+// workflowAPIPlanStep 是计划中单个步骤的对外表示。
+type workflowAPIPlanStep struct {
+	StepID         string   `json:"step_id"`
+	Sequence       int      `json:"sequence"`
+	Title          string   `json:"title"`
+	Type           string   `json:"step_type"`
+	Status         string   `json:"status"`
+	RoleID         string   `json:"role_id"`
+	RequiredChecks []string `json:"required_checks"`
+}
+
 // workflowAPIError 是统一错误响应。
 type workflowAPIError struct {
 	Error struct {
@@ -90,6 +125,27 @@ func newWorkflowAPIClient(address string, logger *slog.Logger) *workflowAPIClien
 		client:  &http.Client{},
 		logger:  logger,
 	}
+}
+
+// generatePlan 发起一次计划生成请求。
+//
+// 该请求是同步的：服务端在计划写入数据库或失败收敛完成后才返回，因此命令层不需要
+// 轮询，也不能在失败时假定计划已就绪。
+func (c *workflowAPIClient) generatePlan(
+	ctx context.Context,
+	taskID string,
+	request workflowAPIPlanRequest,
+) (workflowAPIPlan, error) {
+	body, err := json.Marshal(request)
+	if err != nil {
+		return workflowAPIPlan{}, fmt.Errorf("构造请求失败: %w", err)
+	}
+	url := c.baseURL + httpapi.PathTasks + "/" + strings.TrimSpace(taskID) + "/plan"
+	var plan workflowAPIPlan
+	if err := c.do(ctx, http.MethodPost, url, body, &plan); err != nil {
+		return workflowAPIPlan{}, err
+	}
+	return plan, nil
 }
 
 // start 发起一次任务级工作流执行。
@@ -250,6 +306,46 @@ func printWorkflowRun(a *app.App, run workflowAPIRun) error {
 	}
 	if summary := strings.TrimSpace(run.ErrorSummary); summary != "" {
 		lines = append(lines, fmt.Sprintf("说明: %s", summary))
+	}
+	_, err := fmt.Fprintln(a.Stdout(), strings.Join(lines, "\n"))
+	return err
+}
+
+// printPlanResult 输出计划生成结果。
+//
+// 未写入数据库时只报告失败阶段与原因：把失败的计划展示成"已生成"会让用户误以为
+// 任务可以直接执行。
+func printPlanResult(a *app.App, plan workflowAPIPlan) error {
+	if !plan.Persisted {
+		lines := []string{
+			fmt.Sprintf("任务: %s", plan.TaskID),
+			fmt.Sprintf("任务状态: %s", emptyAsUnknown(plan.TaskStatus)),
+			"计划未写入数据库",
+		}
+		if stage := strings.TrimSpace(plan.FailureStage); stage != "" {
+			lines = append(lines, fmt.Sprintf("失败阶段: %s", stage))
+		}
+		if failure := strings.TrimSpace(plan.Failure); failure != "" {
+			lines = append(lines, fmt.Sprintf("原因: %s", failure))
+		}
+		_, err := fmt.Fprintln(a.Stdout(), strings.Join(lines, "\n"))
+		return err
+	}
+	lines := []string{
+		fmt.Sprintf("任务: %s", plan.TaskID),
+		fmt.Sprintf("任务状态: %s", emptyAsUnknown(plan.TaskStatus)),
+		fmt.Sprintf("计划摘要: %s", emptyAsUnknown(plan.Summary)),
+		fmt.Sprintf("步骤数: %d", len(plan.Steps)),
+		fmt.Sprintf("规划会话: %s", emptyAsUnknown(plan.SessionID)),
+	}
+	for _, step := range plan.Steps {
+		lines = append(lines, fmt.Sprintf(
+			"  %d. %s（%s，必需检查 %d 项）",
+			step.Sequence,
+			step.Title,
+			emptyAsUnknown(step.Status),
+			len(step.RequiredChecks),
+		))
 	}
 	_, err := fmt.Fprintln(a.Stdout(), strings.Join(lines, "\n"))
 	return err

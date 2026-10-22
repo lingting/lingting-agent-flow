@@ -32,6 +32,7 @@ func newTaskCommand(a *app.App) *cobra.Command {
 		"配置文件路径（默认 "+config.DefaultPath+"）",
 	)
 	command.AddCommand(newTaskCreateCommand(a))
+	command.AddCommand(newTaskPlanCommand(a))
 	command.AddCommand(newTaskRunCommand(a))
 	command.AddCommand(newTaskGetCommand(a))
 	command.AddCommand(newTaskListCommand(a))
@@ -342,6 +343,54 @@ func newTaskRunCommand(a *app.App) *cobra.Command {
 	command.Flags().StringVar(&verifyTimeout, "verify-timeout", "", "单个步骤验证阶段的超时时间，例如 10m")
 	command.Flags().BoolVar(&wait, "wait", true, "轮询真实进度直到执行收敛")
 	command.Flags().DurationVar(&interval, "interval", 2*time.Second, "轮询间隔")
+	return command
+}
+
+// newTaskPlanCommand 构建 task plan 子命令。
+//
+// 计划生成由 agentflow server 内的任务级编排器负责：本命令只发起一次请求并报告
+// 真实结果，不装配 SSH、容器、Pi，也不自行拼接提示词。
+func newTaskPlanCommand(a *app.App) *cobra.Command {
+	var (
+		address string
+		prompt  string
+		timeout string
+	)
+	command := &cobra.Command{
+		Use:   "plan <task-id>",
+		Short: "通过本地服务在任务容器内生成并持久化计划",
+		Long: "向本地 API 发起 POST /api/v1/tasks/{taskID}/plan，由服务内的任务级编排器\n" +
+			"调用 Planner 并把输出校验为结构化计划后一次写入数据库。\n" +
+			"该命令不创建容器、不自动重试、不覆盖已有计划；任务缺少受管理容器或已有计划时\n" +
+			"直接返回错误。服务地址默认取配置文件的 server 段，可用 --address 覆盖。",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := a.ValidateConfig(cmd.Context(), hostConfigPath(cmd))
+			if err != nil {
+				return err
+			}
+			target := strings.TrimSpace(address)
+			if target == "" {
+				target = cfg.Server.Address()
+			}
+			planTimeout, err := parseOptionalDuration(timeout)
+			if err != nil {
+				return err
+			}
+			client := newWorkflowAPIClient(target, a.Logger().Slog())
+			plan, err := client.generatePlan(cmd.Context(), args[0], workflowAPIPlanRequest{
+				Prompt:         strings.TrimSpace(prompt),
+				TimeoutSeconds: int(planTimeout.Seconds()),
+			})
+			if err != nil {
+				return err
+			}
+			return printPlanResult(a, plan)
+		},
+	}
+	command.Flags().StringVar(&address, "address", "", "服务地址，省略时使用配置文件的 server 段")
+	command.Flags().StringVar(&prompt, "prompt", "", "追加在规划提示词之后的补充说明")
+	command.Flags().StringVar(&timeout, "timeout", "", "本次规划调用的超时时间，例如 10m")
 	return command
 }
 

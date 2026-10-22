@@ -273,6 +273,11 @@ func (h *workflowHandler) writeError(w http.ResponseWriter, r *http.Request, err
 	status := http.StatusInternalServerError
 	code := CodeInternal
 	switch {
+	case errors.Is(err, app.ErrPlanInvalidOutput):
+		// Planner 输出无法构成计划：这是调用成功但内容不可用，按参数错误返回，
+		// 与"调用失败"（前置条件未满足）区分开。
+		status = http.StatusBadRequest
+		code = CodeInvalidRequest
 	case errors.Is(err, app.ErrWorkflowInvalidInput),
 		errors.Is(err, app.ErrStepExecutionInvalidInput),
 		errors.Is(err, app.ErrStepWorkflowInvalidConfig),

@@ -138,6 +138,11 @@ func (rt *router) tasksHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// 任务级工作流的动作路径与状态查询同样挂在单任务路径之下，必须先于任务处理器判定，
 	// 否则它们会被当作未知子路径返回 404。
+	// 计划生成与工作流动作同样挂在单任务路径之下，必须先于任务处理器判定。
+	if matchActionPath(r.URL.Path, planSegment) {
+		rt.servePlan(w, r)
+		return
+	}
 	if isWorkflowPath(r.URL.Path) {
 		rt.serveWorkflow(w, r)
 		return

@@ -170,6 +170,14 @@ func runServer(cmd *cobra.Command, a *app.App, configPath, address string, requi
 			if containersErr != nil {
 				return nil, containersErr
 			}
+			sessions, sessionsErr := app.NewSessionService(
+				store,
+				app.SessionRoot(cfg),
+				a.Logger().Slog(),
+			)
+			if sessionsErr != nil {
+				return nil, sessionsErr
+			}
 			return app.NewTaskWorkflowService(app.TaskWorkflowOptions{
 				Store: store,
 				Steps: steps,
@@ -177,7 +185,9 @@ func runServer(cmd *cobra.Command, a *app.App, configPath, address string, requi
 				Containers: containers,
 				// 代码保存复用已有实现：编排器不构造 Git 命令。
 				CodeSaver: containers,
-				Logger:    a.Logger().Slog(),
+				// 计划生成复用同一会话服务：每次 Planner 调用写入独立会话记录。
+				Sessions: sessions,
+				Logger:   a.Logger().Slog(),
 			})
 		},
 		SystemInfo:   a.SystemInfo,
