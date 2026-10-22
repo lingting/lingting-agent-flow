@@ -41,7 +41,7 @@ API 兼容性、Docker CLI 帮助信息、基础 Dockerfile 的外部 `FROM` 镜
 - SSH 身份认证：只支持本机私钥认证（`private_key`）。节点配置只保存私钥文件路径，
   私钥文件只被读取，不复制、不修改、不写入数据库或日志；不支持 SSH Agent、密码认证
   与加密私钥（口令）。
-- 主机密钥校验：复用 OpenSSH `known_hosts` 并维护 AgentFlow 自己的信任记录文件；未知主机必须核验 SHA-256 指纹后显式信任，已信任密钥发生变化时拒绝连接，禁止跳过校验。
+- 主机密钥校验：只读复用 OpenSSH `known_hosts`，程序自身不创建、不追加、不加锁写任何信任文件；未知主机必须核验 SHA-256 指纹后显式确认，已信任密钥发生变化时拒绝连接，禁止跳过校验。
 - 主机密钥类型协商：按 `known_hosts` 中该主机已记录的类型依次尝试握手，取第一个校验
   通过的；没有任何记录时交给 `golang.org/x/crypto/ssh` 自身协商。
 - 远程命令执行：返回退出码、标准输出、标准错误、耗时与结果状态，区分成功、非零退出、超时、取消与连接中断；输出超过上限时标记截断，取消与超时只关闭对应会话而不影响同连接的其他操作。
@@ -1235,7 +1235,7 @@ go run ./cmd/agentflow --help
 # 执行节点：配置、认证、主机密钥与远程工作空间
 ./bin/agentflow host add --id node-a --host 192.0.2.10 --user deploy --key ~/.ssh/id_ed25519
 ./bin/agentflow host probe node-a      # 只探测 TCP 与 SSH 协议标识
-./bin/agentflow host trust node-a      # 探测并展示主机密钥指纹
+./bin/agentflow host trust node-a      # 探测并展示主机密钥指纹（只记录到节点，不写 known_hosts）
 ./bin/agentflow host test node-a       # 完整 SSH 身份认证
 ./bin/agentflow host workspace node-a  # 解析远程 Home 与工作空间
 ./bin/agentflow host validate node-a   # 环境预检：SSH、Docker CLI 帮助、镜像元数据
@@ -1390,31 +1390,35 @@ false 都不得当作"任务已开始执行"。该命令不自动重试、不删
 
 主机密钥校验不可关闭，也不存在"跳过校验"的开关。
 
-- 校验时同时读取本机用户 OpenSSH 的 `known_hosts` 与 AgentFlow 自己的信任记录文件；
-  只读的 `known_hosts` 不会被修改，新记录只写入 AgentFlow 的记录文件。
-- 未知主机的连接**必须失败**，并展示算法与 SHA-256 指纹；只有在用户核验指纹并显式
-  确认后才会写入信任记录。
+- `known_hosts` 全程只读：程序不创建、不追加、不加锁、不写临时文件，因此并发校验不需要
+  任何互斥，也不会与用户自己编辑 `known_hosts` 的操作互相干扰。信任记录由用户在 AgentFlow
+  之外维护（例如用 OpenSSH 把已核验的密钥追加进 `known_hosts`）。
+- 未知主机的连接**必须失败**，并展示算法与 SHA-256 指纹；`host trust` 只有在用户核验指纹并
+  显式确认后才把该指纹记录到执行节点，同时给出用 OpenSSH 写入 `known_hosts` 的命令提示。
 - 已信任的主机提供不同密钥时立即拒绝连接，并同时展示当前指纹与已信任指纹，不会自动
   覆盖旧记录。
 - 服务端可能同时提供多种主机密钥（例如 ed25519 与 ECDSA），而 `known_hosts` 里可能只
   记录了其中一部分。程序按记录顺序逐个尝试：每次只用一种已记录的类型握手，校验通过并
   完成认证即成功；某个类型校验失败或服务端不再提供该类型时换下一个。全部已记录类型都不
   可用时，返回第一个失败类型对应的结论（未知主机或密钥已变化）。
-- 没有任何记录时不做额外限制，交给 `golang.org/x/crypto/ssh` 自身协商；首次信任后实际
-  使用的类型会被记录下来，后续连接优先复用它。
+- 没有任何记录时不做额外限制，交给 `golang.org/x/crypto/ssh` 自身协商。
 
 ```bash
 # 只探测主机密钥并展示指纹与信任状态（不执行身份认证）
 ./bin/agentflow host trust node-build-01
 
-# 核验指纹后显式写入信任记录（非交互执行必须显式给出 --yes）
+# 核验指纹后显式记录指纹到执行节点（非交互执行必须显式给出 --yes）
 ./bin/agentflow host trust node-build-01 \
   --fingerprint SHA256:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
   --yes
+
+# 再按命令提示用 OpenSSH 把服务端密钥写入 known_hosts（AgentFlow 不会代为写入）
+ssh-keyscan -p 22 10.0.0.11 >> ~/.ssh/known_hosts
 ```
 
 `--fingerprint` 必须与用户实际核验过的指纹一致；命令会重新探测服务端密钥并在指纹不符时
-拒绝写入。
+拒绝记录。记录指纹只是把核验结果写进执行节点，真正让后续连接通过主机密钥校验的是
+`known_hosts` 中的密钥记录，必须由用户自己追加。
 
 ### 测试 SSH 认证连接
 
@@ -1597,8 +1601,7 @@ false 都不得当作"任务已开始执行"。该命令不自动重试、不删
 | `workspace.worktree_root` | 任务工作区根目录，不能为空 |
 | `scheduler.max_concurrent_tasks` | 同时执行的任务上限，必须大于 0 |
 | `scheduler.max_retries_per_step` | 单个步骤最大重试次数，不得为负数 |
-| `ssh.known_hosts_path` | 额外的只读 `known_hosts` 文件；留空时复用本机用户 OpenSSH 的 `known_hosts` |
-| `ssh.known_hosts_store_path` | AgentFlow 自己写入主机密钥信任记录的文件；留空时放在数据库文件所在目录下的 `known_hosts` |
+| `ssh.known_hosts_path` | 只读 `known_hosts` 文件；留空时复用本机用户 OpenSSH 的 `known_hosts` 与 `known_hosts2`。程序不写该文件 |
 | `ssh.connect_timeout_seconds` | TCP 连接与 SSH 认证的超时秒数，`0` 表示使用默认值，不得为负数 |
 | `roles[].id` | 角色标识，不能为空且必须唯一 |
 | `roles[].name` | 角色名称，可自由命名，不能为空 |
@@ -1727,14 +1730,22 @@ go test -race -count=1 ./tests/integration/local/ssh/...            # 竞态检�
 
 每次测试入口启动时在系统临时目录下创建随机工作空间，数据库、Session、日志与生成文件
 全部落在其中，并把绝对路径输出为 `TEST_ARTIFACT_DIR`。测试结束只关闭运行时资源，
-**不删除测试产物**，便于检查失败现场。快速单元测试与本机集成测试不访问真实模型或远程
-网络；本机没有 `pi` 时真实 Pi 用例输出警告并跳过。
+**不删除测试产物**，便于检查失败现场。
+
+每个测试包通过 `testkit.Main` 作为唯一入口，把本次运行的完整输出（逐用例结论、
+`t.Logf`、`WARN [SKIP]` 跳过原因与应用日志）写入 `<TEST_ARTIFACT_DIR>/test.log`，并在
+`lingting-agent-flow-tests/latest-run.txt` 记录最新日志的绝对路径，因此复核结论与跳过
+原因不需要重跑测试。该入口同时默认打开 `-test.v`；命令行显式给出 `-test.v=false` 时以
+命令行为准。
+
+快速单元测试与本机集成测试不访问真实模型或远程网络；本机没有 `pi` 时真实 Pi 用例输出
+警告并跳过。
 
 SSH 连接层按三层覆盖：`tests/unit/ssh/`（主机密钥、认证配置、路径与结果状态，不启动
 服务端）、`tests/integration/local/ssh/`（进程内启动真实 SSH/SFTP 服务端，覆盖认证、
 命令执行、取消与超时、SFTP 传输、并发与资源释放）、`tests/integration/ssh/`（真实远程
 机器，需要在 `tests/config/ssh.yml` 中把 `ssh.enable` 设为 true 并填好目标，未启用或目标
-缺失时警告并跳过；`ssh.known_hosts` 留空时复用本机 `~/.ssh/known_hosts`）。
+缺失时警告并跳过；`ssh.known_hosts` 留空时复用本机 `~/.ssh/known_hosts`，并快照到用例工作空间只读校验）。
 
 测试分类、配置文件与编写约定见 [tests/README.md](tests/README.md)。
 

@@ -39,10 +39,9 @@ scheduler:
 # 私钥只在机器配置中保存本机文件路径。
 # 主机密钥校验不可关闭，未知主机必须核验指纹后显式信任。
 ssh:
-  # 额外的只读 known_hosts 文件；留空时复用本机用户 OpenSSH 的 known_hosts
+  # 只读 known_hosts 文件；留空时复用本机用户 OpenSSH 的 known_hosts。
+  # AgentFlow 不写 known_hosts：信任新主机需由用户用 OpenSSH 追加已核验的密钥。
   known_hosts_path: ""
-  # AgentFlow 自己写入主机密钥信任记录的文件；留空时放在数据库目录下的 known_hosts
-  known_hosts_store_path: ""
   # TCP 连接与 SSH 认证的超时秒数，0 表示使用默认值
   connect_timeout_seconds: 0
 

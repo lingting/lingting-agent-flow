@@ -1,8 +1,10 @@
 package sshclient_test
 
 import (
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -10,15 +12,21 @@ import (
 	"github.com/lingting/agentflow/internal/sshclient"
 	"github.com/lingting/agentflow/tests/internal/testkit"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
-// TestKnownHostsStoreTrustWritesRecord 验证信任记录写入后可以被校验通过。
-func TestKnownHostsStoreTrustWritesRecord(t *testing.T) {
+// TestKnownHostsStoreReadsExistingRecord 验证既有 known_hosts 记录可被校验通过。
+//
+// 主机密钥库只读：信任记录必须由用户在 AgentFlow 之外写入 known_hosts，
+// 因此这里直接构造文件，而不是调用主机密钥库写入。
+func TestKnownHostsStoreReadsExistingRecord(t *testing.T) {
 	t.Parallel()
 	server := newTestServer(t)
 	host, port := server.endpoint()
-	storePath := filepath.Join(testkit.Dir(t), "agentflow_known_hosts")
-	store, err := sshclient.NewKnownHostsStore(sshclient.KnownHostsOptions{StorePath: storePath})
+	existing := writeKnownHosts(t, host, port, server.hostKey.PublicKey())
+	store, err := sshclient.NewKnownHostsStore(sshclient.KnownHostsOptions{
+		TrustedPaths: []string{existing},
+	})
 	if err != nil {
 		t.Fatalf("构造主机密钥库失败: %v", err)
 	}
@@ -26,120 +34,117 @@ func TestKnownHostsStoreTrustWritesRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("校验主机密钥失败: %v", err)
 	}
-	if check.Verdict != sshclient.VerdictUnknown {
-		t.Fatalf("首次校验应为 unknown，实际: %s", check.Verdict)
-	}
-	if err := store.Trust(check.Presented); err != nil {
-		t.Fatalf("写入信任记录失败: %v", err)
-	}
-	recheck, err := store.Check(host, port, server.hostKey.PublicKey())
-	if err != nil {
-		t.Fatalf("重新校验主机密钥失败: %v", err)
-	}
-	if recheck.Verdict != sshclient.VerdictTrusted {
-		t.Fatalf("写入后应判定为 trusted，实际: %s", recheck.Verdict)
+	if check.Verdict != sshclient.VerdictTrusted {
+		t.Fatalf("既有记录应判定为 trusted，实际: %s", check.Verdict)
 	}
 }
 
-// TestKnownHostsStoreTrustIsIdempotent 验证重复写入同一条记录不会重复追加。
-func TestKnownHostsStoreTrustIsIdempotent(t *testing.T) {
+// TestKnownHostsStoreIgnoresDuplicateLines 验证重复的 known_hosts 记录不影响校验。
+func TestKnownHostsStoreIgnoresDuplicateLines(t *testing.T) {
 	t.Parallel()
 	server := newTestServer(t)
 	host, port := server.endpoint()
-	storePath := filepath.Join(testkit.Dir(t), "agentflow_known_hosts")
-	store, err := sshclient.NewKnownHostsStore(sshclient.KnownHostsOptions{StorePath: storePath})
+	existing := writeKnownHosts(t, host, port, server.hostKey.PublicKey())
+	// 重复写入同一行由用户或 ssh-keyscan 产生，校验必须仍然判定为 trusted。
+	content, err := os.ReadFile(existing)
+	if err != nil {
+		t.Fatalf("读取 known_hosts 失败: %v", err)
+	}
+	if err := os.WriteFile(existing, append(content, content...), 0o600); err != nil {
+		t.Fatalf("写入重复记录失败: %v", err)
+	}
+	store, err := sshclient.NewKnownHostsStore(sshclient.KnownHostsOptions{
+		TrustedPaths: []string{existing},
+	})
 	if err != nil {
 		t.Fatalf("构造主机密钥库失败: %v", err)
 	}
-	info := sshclient.HostKeyInfo{}
 	check, err := store.Check(host, port, server.hostKey.PublicKey())
 	if err != nil {
 		t.Fatalf("校验主机密钥失败: %v", err)
 	}
-	info = check.Presented
-	for attempt := 0; attempt < 3; attempt++ {
-		if err := store.Trust(info); err != nil {
-			t.Fatalf("第 %d 次写入信任记录失败: %v", attempt+1, err)
-		}
-	}
-	data, err := os.ReadFile(storePath)
-	if err != nil {
-		t.Fatalf("读取信任记录失败: %v", err)
-	}
-	lines := 0
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.TrimSpace(line) != "" {
-			lines++
-		}
-	}
-	if lines != 1 {
-		t.Fatalf("重复写入应只保留一条记录，实际: %d 行", lines)
+	if check.Verdict != sshclient.VerdictTrusted {
+		t.Fatalf("重复记录不应影响校验结论，实际: %s", check.Verdict)
 	}
 }
 
-// TestKnownHostsStoreRejectsEmptyStorePath 验证缺少写入路径时构造失败。
-func TestKnownHostsStoreRejectsEmptyStorePath(t *testing.T) {
+// TestKnownHostsStoreRequiresPath 验证缺少 known_hosts 路径时构造失败。
+func TestKnownHostsStoreRequiresPath(t *testing.T) {
 	t.Parallel()
 	if _, err := sshclient.NewKnownHostsStore(sshclient.KnownHostsOptions{}); err == nil {
-		t.Fatal("缺少记录文件路径时应当返回错误")
+		t.Fatal("缺少 known_hosts 路径时应当返回错误")
 	}
 }
 
-// TestKnownHostsStoreConcurrentTrust 验证并发写入不会破坏记录文件。
-func TestKnownHostsStoreConcurrentTrust(t *testing.T) {
+// TestKnownHostsStoreConcurrentCheckIsReadOnly 验证并发校验不会读写同一文件。
+//
+// 主机密钥库只读，因此并发校验既不加锁也不写文件：同一份 known_hosts 上的
+// 并发 Check 必须全部得到相同结论，且文件内容在并发前后完全一致。
+func TestKnownHostsStoreConcurrentCheckIsReadOnly(t *testing.T) {
 	t.Parallel()
-	storePath := filepath.Join(testkit.Dir(t), "agentflow_known_hosts")
-	store, err := sshclient.NewKnownHostsStore(sshclient.KnownHostsOptions{StorePath: storePath})
-	if err != nil {
-		t.Fatalf("构造主机密钥库失败: %v", err)
-	}
 	const count = 8
 	servers := make([]*testServer, 0, count)
-	infos := make([]sshclient.HostKeyInfo, 0, count)
+	content := ""
+	addresses := make([]string, 0, count)
 	for index := 0; index < count; index++ {
 		server := newTestServer(t)
 		host, port := server.endpoint()
 		servers = append(servers, server)
-		check, checkErr := store.Check(host, port, server.hostKey.PublicKey())
-		if checkErr != nil {
-			t.Fatalf("校验主机密钥失败: %v", checkErr)
-		}
-		infos = append(infos, check.Presented)
+		address := net.JoinHostPort(host, strconv.Itoa(port))
+		addresses = append(addresses, address)
+		content += knownhosts.Line([]string{knownhosts.Normalize(address)}, server.hostKey.PublicKey()) + "\n"
+	}
+	storePath := filepath.Join(testkit.Dir(t), "known_hosts")
+	if err := os.WriteFile(storePath, []byte(content), 0o600); err != nil {
+		t.Fatalf("写入 known_hosts 失败: %v", err)
+	}
+	before, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("读取 known_hosts 失败: %v", err)
+	}
+	store, err := sshclient.NewKnownHostsStore(sshclient.KnownHostsOptions{
+		TrustedPaths: []string{storePath},
+	})
+	if err != nil {
+		t.Fatalf("构造主机密钥库失败: %v", err)
 	}
 	var waitGroup sync.WaitGroup
+	verdicts := make([]sshclient.HostKeyVerdict, count)
 	errs := make([]error, count)
-	for index := range infos {
+	for index := range servers {
 		waitGroup.Add(1)
 		go func(index int) {
 			defer waitGroup.Done()
-			errs[index] = store.Trust(infos[index])
+			host, port, splitErr := net.SplitHostPort(addresses[index])
+			if splitErr != nil {
+				errs[index] = splitErr
+				return
+			}
+			parsedPort, convErr := strconv.Atoi(port)
+			if convErr != nil {
+				errs[index] = convErr
+				return
+			}
+			check, checkErr := store.Check(host, parsedPort, servers[index].hostKey.PublicKey())
+			errs[index] = checkErr
+			verdicts[index] = check.Verdict
 		}(index)
 	}
 	waitGroup.Wait()
-	for index, writeErr := range errs {
-		if writeErr != nil {
-			t.Fatalf("第 %d 个并发写入失败: %v", index, writeErr)
+	for index, checkErr := range errs {
+		if checkErr != nil {
+			t.Fatalf("第 %d 个并发校验失败: %v", index, checkErr)
+		}
+		if verdicts[index] != sshclient.VerdictTrusted {
+			t.Fatalf("第 %d 个并发校验结论应为 trusted，实际: %s", index, verdicts[index])
 		}
 	}
-	data, err := os.ReadFile(storePath)
+	after, err := os.ReadFile(storePath)
 	if err != nil {
-		t.Fatalf("读取信任记录失败: %v", err)
+		t.Fatalf("读取 known_hosts 失败: %v", err)
 	}
-	lines := 0
-	for _, line := range strings.Split(string(data), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		lines++
-		// 每一行都必须是完整的 known_hosts 记录，否则说明并发写入破坏了文件。
-		fields := strings.Fields(trimmed)
-		if len(fields) != 3 {
-			t.Fatalf("记录行被破坏: %q", trimmed)
-		}
-	}
-	if lines != count {
-		t.Fatalf("并发写入后应有 %d 条记录，实际: %d", count, lines)
+	if string(before) != string(after) {
+		t.Fatal("只读校验不应修改 known_hosts 文件")
 	}
 }
 
@@ -148,17 +153,12 @@ func TestKnownHostsStoreDetectsMismatch(t *testing.T) {
 	t.Parallel()
 	server := newTestServer(t)
 	host, port := server.endpoint()
-	storePath := filepath.Join(testkit.Dir(t), "agentflow_known_hosts")
-	store, err := sshclient.NewKnownHostsStore(sshclient.KnownHostsOptions{StorePath: storePath})
+	existing := writeKnownHosts(t, host, port, server.hostKey.PublicKey())
+	store, err := sshclient.NewKnownHostsStore(sshclient.KnownHostsOptions{
+		TrustedPaths: []string{existing},
+	})
 	if err != nil {
 		t.Fatalf("构造主机密钥库失败: %v", err)
-	}
-	check, err := store.Check(host, port, server.hostKey.PublicKey())
-	if err != nil {
-		t.Fatalf("校验主机密钥失败: %v", err)
-	}
-	if err := store.Trust(check.Presented); err != nil {
-		t.Fatalf("写入信任记录失败: %v", err)
 	}
 	other := newTestServer(t)
 	mismatch, err := store.Check(host, port, other.hostKey.PublicKey())
@@ -177,6 +177,8 @@ func TestKnownHostsStoreDetectsMismatch(t *testing.T) {
 }
 
 // TestKnownHostsStoreReadsTrustedPaths 验证复用既有 known_hosts 的信任信息。
+//
+// 用户既有文件必须保持只读：校验任意数量主机后文件内容都不能改变。
 func TestKnownHostsStoreReadsTrustedPaths(t *testing.T) {
 	t.Parallel()
 	server := newTestServer(t)
@@ -184,7 +186,6 @@ func TestKnownHostsStoreReadsTrustedPaths(t *testing.T) {
 	existing := writeKnownHosts(t, host, port, server.hostKey.PublicKey())
 	store, err := sshclient.NewKnownHostsStore(sshclient.KnownHostsOptions{
 		TrustedPaths: []string{existing},
-		StorePath:    filepath.Join(testkit.Dir(t), "agentflow_known_hosts"),
 	})
 	if err != nil {
 		t.Fatalf("构造主机密钥库失败: %v", err)
@@ -196,7 +197,6 @@ func TestKnownHostsStoreReadsTrustedPaths(t *testing.T) {
 	if check.Verdict != sshclient.VerdictTrusted {
 		t.Fatalf("既有 known_hosts 中的主机应判定为 trusted，实际: %s", check.Verdict)
 	}
-	// 用户既有文件必须保持只读：写入只发生在 AgentFlow 自己的记录文件上。
 	before, err := os.ReadFile(existing)
 	if err != nil {
 		t.Fatalf("读取既有 known_hosts 失败: %v", err)
@@ -207,8 +207,8 @@ func TestKnownHostsStoreReadsTrustedPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("校验主机密钥失败: %v", err)
 	}
-	if err := store.Trust(otherCheck.Presented); err != nil {
-		t.Fatalf("写入信任记录失败: %v", err)
+	if otherCheck.Verdict != sshclient.VerdictUnknown {
+		t.Fatalf("未记录的主机应判定为 unknown，实际: %s", otherCheck.Verdict)
 	}
 	after, err := os.ReadFile(existing)
 	if err != nil {

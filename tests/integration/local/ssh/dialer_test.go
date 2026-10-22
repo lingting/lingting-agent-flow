@@ -22,17 +22,32 @@ func testContext(t *testing.T) context.Context {
 	return ctx
 }
 
-// newStore 构造指向临时目录的主机密钥库。
+// newStore 构造指向测试工作空间 known_hosts 的主机密钥库。
+//
+// 主机密钥库只读：未给出 trustedPaths 时使用一个空文件，避免空路径集合。
 func newStore(t *testing.T, trustedPaths ...string) *sshclient.KnownHostsStore {
 	t.Helper()
+	paths := trustedPaths
+	if len(paths) == 0 {
+		paths = []string{writeEmptyKnownHostsFile(t)}
+	}
 	store, err := sshclient.NewKnownHostsStore(sshclient.KnownHostsOptions{
-		TrustedPaths: trustedPaths,
-		StorePath:    filepath.Join(testkit.Dir(t), "known_hosts"),
+		TrustedPaths: paths,
 	})
 	if err != nil {
 		t.Fatalf("构造主机密钥库失败: %v", err)
 	}
 	return store
+}
+
+// writeEmptyKnownHostsFile 在测试工作空间写入一个空 known_hosts 并返回路径。
+func writeEmptyKnownHostsFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(testkit.Dir(t), "known_hosts")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatalf("写入 known_hosts 失败: %v", err)
+	}
+	return path
 }
 
 // newDialer 构造使用给定主机密钥库的连接器。

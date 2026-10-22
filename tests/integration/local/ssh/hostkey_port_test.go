@@ -19,8 +19,15 @@ import (
 func TestKnownHostsStoreDefaultPortEntry(t *testing.T) {
 	t.Parallel()
 	server := newTestServer(t)
-	storePath := filepath.Join(testkit.Dir(t), "agentflow_known_hosts")
-	store, err := sshclient.NewKnownHostsStore(sshclient.KnownHostsOptions{StorePath: storePath})
+	storePath := filepath.Join(testkit.Dir(t), "known_hosts")
+	address := net.JoinHostPort("10.0.0.21", strconv.Itoa(22))
+	line := knownhosts.Line([]string{knownhosts.Normalize(address)}, server.hostKey.PublicKey()) + "\n"
+	if err := os.WriteFile(storePath, []byte(line), 0o600); err != nil {
+		t.Fatalf("写入 known_hosts 失败: %v", err)
+	}
+	store, err := sshclient.NewKnownHostsStore(sshclient.KnownHostsOptions{
+		TrustedPaths: []string{storePath},
+	})
 	if err != nil {
 		t.Fatalf("构造主机密钥库失败: %v", err)
 	}
@@ -28,20 +35,10 @@ func TestKnownHostsStoreDefaultPortEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("默认端口校验失败: %v", err)
 	}
-	if check.Verdict != sshclient.VerdictUnknown {
-		t.Fatalf("首次校验应为 unknown，实际: %s", check.Verdict)
+	if check.Verdict != sshclient.VerdictTrusted {
+		t.Fatalf("默认端口记录应判定为 trusted，实际: %s", check.Verdict)
 	}
-	if err := store.Trust(check.Presented); err != nil {
-		t.Fatalf("写入信任记录失败: %v", err)
-	}
-	recheck, err := store.Check("10.0.0.21", 22, server.hostKey.PublicKey())
-	if err != nil {
-		t.Fatalf("重新校验失败: %v", err)
-	}
-	if recheck.Verdict != sshclient.VerdictTrusted {
-		t.Fatalf("默认端口写入后应为 trusted，实际: %s", recheck.Verdict)
-	}
-	// 非默认端口写入的记录必须带端口，且不会与默认端口记录互相匹配。
+	// 非默认端口的记录必须带端口，因此不会与默认端口记录互相匹配。
 	other, err := store.Check("10.0.0.21", 2222, server.hostKey.PublicKey())
 	if err != nil {
 		t.Fatalf("非默认端口校验失败: %v", err)
@@ -67,7 +64,6 @@ func TestKnownHostsStoreReadsDefaultPortRecord(t *testing.T) {
 	}
 	store, err := sshclient.NewKnownHostsStore(sshclient.KnownHostsOptions{
 		TrustedPaths: []string{userKnownHosts},
-		StorePath:    filepath.Join(testkit.Dir(t), "known_hosts"),
 	})
 	if err != nil {
 		t.Fatalf("构造主机密钥库失败: %v", err)

@@ -25,7 +25,6 @@ import (
 	"fmt"
 	"os"
 	"path"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -132,7 +131,6 @@ func (t target) dial(t2 *testing.T, workspace *testkit.Workspace) sshclient.Clie
 	t2.Helper()
 	store, err := sshclient.NewKnownHostsStore(sshclient.KnownHostsOptions{
 		TrustedPaths: t.knownHostsPaths,
-		StorePath:    filepath.Join(workspace.Root(), "known_hosts"),
 	})
 	if err != nil {
 		t2.Fatalf("构造主机密钥库失败: %v", err)

@@ -8,6 +8,7 @@ import (
 
 	"github.com/lingting/agentflow/internal/agent/pi"
 	"github.com/lingting/agentflow/tests/internal/fakepi"
+	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
 // TestMain 让测试二进制同时充当假 Pi 子进程。
@@ -17,7 +18,7 @@ func TestMain(m *testing.M) {
 	if scenario := os.Getenv(fakepi.EnvScenario); scenario != "" {
 		os.Exit(fakepi.Run())
 	}
-	os.Exit(m.Run())
+	os.Exit(testkit.Main(m))
 }
 
 // checkOptions 返回让检查命令使用假 Pi 替身的选项。

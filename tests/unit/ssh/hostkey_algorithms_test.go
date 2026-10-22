@@ -25,9 +25,13 @@ func writeKnownHostsFile(t *testing.T, content string) string {
 // newAlgorithmStore 构造读取指定 known_hosts 的主机密钥库。
 func newAlgorithmStore(t *testing.T, trustedPaths ...string) *sshclient.KnownHostsStore {
 	t.Helper()
+	paths := trustedPaths
+	if len(paths) == 0 {
+		// 无记录场景使用空文件：主机密钥库要求至少一个 known_hosts 路径。
+		paths = []string{writeKnownHostsFile(t, "")}
+	}
 	store, err := sshclient.NewKnownHostsStore(sshclient.KnownHostsOptions{
-		TrustedPaths: trustedPaths,
-		StorePath:    filepath.Join(testkit.Dir(t), "agentflow_known_hosts"),
+		TrustedPaths: paths,
 	})
 	if err != nil {
 		t.Fatalf("构造主机密钥库失败: %v", err)

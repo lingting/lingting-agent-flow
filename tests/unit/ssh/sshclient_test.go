@@ -5,8 +5,10 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"github.com/lingting/agentflow/internal/sshclient"
 	"github.com/lingting/agentflow/tests/internal/testkit"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 // newSigner 生成一次性主机密钥签名器。
@@ -30,17 +33,39 @@ func newSigner(t *testing.T) ssh.Signer {
 	return signer
 }
 
-// newKnownHostsStore 在测试工作空间中构造主机密钥库。
+// newKnownHostsStore 用测试工作空间中的 known_hosts 文件构造主机密钥库。
+//
+// 主机密钥库只读，因此这里先写入内容再构造；未给出 trustedPaths 时使用一个空文件。
 func newKnownHostsStore(t *testing.T, trustedPaths ...string) *sshclient.KnownHostsStore {
 	t.Helper()
+	paths := trustedPaths
+	if len(paths) == 0 {
+		paths = []string{writeEmptyKnownHosts(t)}
+	}
 	store, err := sshclient.NewKnownHostsStore(sshclient.KnownHostsOptions{
-		TrustedPaths: trustedPaths,
-		StorePath:    filepath.Join(testkit.Dir(t), "known_hosts"),
+		TrustedPaths: paths,
 	})
 	if err != nil {
 		t.Fatalf("构造主机密钥库失败: %v", err)
 	}
 	return store
+}
+
+// writeEmptyKnownHosts 在工作空间中写入一个空 known_hosts 文件并返回其路径。
+func writeEmptyKnownHosts(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(testkit.Dir(t), "known_hosts")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatalf("写入 known_hosts 失败: %v", err)
+	}
+	return path
+}
+
+// writeKnownHostsKey 在工作空间中写入一条 known_hosts 记录并返回其路径。
+func writeKnownHostsKey(t *testing.T, host string, port int, key ssh.PublicKey) string {
+	t.Helper()
+	address := net.JoinHostPort(host, strconv.Itoa(port))
+	return writeKnownHostsFile(t, knownhosts.Line([]string{knownhosts.Normalize(address)}, key)+"\n")
 }
 
 // TestHostKeyFingerprintIsSHA256 验证主机密钥指纹按 SHA-256 计算并可复算。
@@ -76,18 +101,18 @@ func TestHostKeyUnknownThenTrustedThenMismatch(t *testing.T) {
 	if unknown.Verdict != sshclient.VerdictUnknown {
 		t.Fatalf("首次校验应为 unknown，实际: %s", unknown.Verdict)
 	}
-	if err := store.Trust(unknown.Presented); err != nil {
-		t.Fatalf("写入信任记录失败: %v", err)
-	}
-	trusted, err := store.Check("10.0.0.2", 2222, server.PublicKey())
+	// 信任记录由用户在 AgentFlow 之外写入 known_hosts，这里直接构造该文件。
+	trustedPath := writeKnownHostsKey(t, "10.0.0.2", 2222, server.PublicKey())
+	trustedStore := newKnownHostsStore(t, trustedPath)
+	trusted, err := trustedStore.Check("10.0.0.2", 2222, server.PublicKey())
 	if err != nil {
 		t.Fatalf("重新校验失败: %v", err)
 	}
 	if trusted.Verdict != sshclient.VerdictTrusted {
-		t.Fatalf("写入后应为 trusted，实际: %s", trusted.Verdict)
+		t.Fatalf("写入 known_hosts 后应为 trusted，实际: %s", trusted.Verdict)
 	}
 	other := newSigner(t)
-	mismatch, err := store.Check("10.0.0.2", 2222, other.PublicKey())
+	mismatch, err := trustedStore.Check("10.0.0.2", 2222, other.PublicKey())
 	if err != nil {
 		t.Fatalf("校验主机密钥失败: %v", err)
 	}
@@ -115,12 +140,11 @@ func TestHostKeyCheckRejectsNilKey(t *testing.T) {
 	}
 }
 
-// TestHostKeyTrustRequiresKey 验证没有公钥时拒绝写入信任记录。
-func TestHostKeyTrustRequiresKey(t *testing.T) {
+// TestKnownHostsStoreRequiresPath 验证缺少 known_hosts 路径时构造失败。
+func TestKnownHostsStoreRequiresPath(t *testing.T) {
 	t.Parallel()
-	store := newKnownHostsStore(t)
-	if err := store.Trust(sshclient.HostKeyInfo{Host: "10.0.0.4", Port: 22}); err == nil {
-		t.Fatal("缺少公钥时应拒绝写入信任记录")
+	if _, err := sshclient.NewKnownHostsStore(sshclient.KnownHostsOptions{}); err == nil {
+		t.Fatal("缺少 known_hosts 路径时应当返回错误")
 	}
 }
 

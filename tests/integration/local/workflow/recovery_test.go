@@ -41,7 +41,7 @@ func newRestartFixture(t *testing.T) *restartFixture {
 	t.Cleanup(cancel)
 	workspace := testkit.New(t)
 	path := filepath.Join(workspace.Root(), "agentflow.db")
-	logger, err := logging.New(discardWriter{}, logging.LevelError)
+	logger, err := testkit.Logger(logging.LevelError)
 	if err != nil {
 		t.Fatalf("构造日志器失败: %v", err)
 	}

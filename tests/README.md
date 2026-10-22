@@ -8,7 +8,7 @@
 ```text
 tests/
 ├── internal/
-│   ├── testkit/        # 测试工作空间、known_hosts 来源解析、通用辅助组件与工作流测试数据构造
+│   ├── testkit/        # 统一测试入口（testkit.Main）、日志落盘、工作空间、known_hosts 快照与测试数据构造
 │   └── fakepi/         # 以测试二进制充当 Pi CLI 的可控替身
 ├── unit/               # 快速单元测试，不依赖真实 Pi、SSH 或网络
 │   ├── agent/          # Agent 事件、结果类型与容器内 Pi Runner（使用替身）
@@ -55,7 +55,9 @@ tests/
 
 ## 测试入口
 
-每个目录都是独立的 Go 测试包，可直接用 `go test` 执行，无需额外脚本解析日志。
+每个目录都是独立的 Go 测试包，可直接用 `go test` 执行，无需额外脚本解析日志。所有入口
+统一经 `testkit.Main` 启动，因此即使不显式加 `-v`，本次运行的逐用例结论与跳过原因也会
+写入 `<TEST_ARTIFACT_DIR>/test.log`（见「运行日志」）。
 
 ```bash
 # 快速单元测试（日常反馈，不访问真实模型与远程网络）
@@ -119,6 +121,29 @@ TEST_ARTIFACT_DIR=<绝对路径>
 
 测试结束只关闭数据库连接、子进程与监听端口，**不删除任何测试产物**，便于检查失败
 现场。需要清理时由开发者手动删除 `lingting-agent-flow-tests` 下的历史目录。
+
+## 运行日志
+
+每个测试包通过 `testkit.Main` 作为唯一入口（`os.Exit(testkit.Main(m))`），它把本次运行
+的完整输出写入 `<TEST_ARTIFACT_DIR>/test.log`：
+
+- 逐用例结论（`=== RUN` / `--- PASS` / `--- FAIL` / `--- SKIP`）；
+- `t.Logf` 与 `fmt.Println` 等标准输出内容；
+- `WARN [SKIP]` 跳过原因（例如配置未启用、缺少配置项、本机没有 `pi`）；
+- 应用服务的 `slog` 日志：测试统一用 `testkit.Logger` / `testkit.Slog` 构造日志器。
+
+入口同时默认打开 `-test.v`，因为非 verbose 模式下 `go test` 会缓冲包输出、只在失败时
+打印，逐用例结论与跳过原因都会丢失；命令行显式给出 `-test.v=false` 时以命令行为准。
+
+基目录下的 `latest-run.txt` 记录最新一次运行 `test.log` 的绝对路径，复核结论与跳过原因
+时不需要重跑测试：
+
+```bash
+cat "$(os.TempDir)/lingting-agent-flow-tests/latest-run.txt"   # 具体路径按平台解析
+```
+
+已有 `TestMain` 的包（`tests/integration/pi`、`tests/unit/agent/pi`、`tests/unit/process`）
+在替身分支之后转调 `testkit.Main`，替身行为不受影响。
 
 ## SSH 测试分层
 
@@ -225,12 +250,16 @@ go test -count=1 -v ./tests/integration/ssh/...
 
 known_hosts 来源由 `tests/internal/testkit` 的 `KnownHostsSources` 统一解析：`ssh.known_hosts`
 显式配置时优先，文件不可读时直接让测试失败；未配置时复用本机用户 OpenSSH 的 known_hosts，
-与产品 `internal/app.SSHService` 的默认行为一致。新写入的信任记录只落在测试工作空间，
-不修改用户真实配置。配置中的取值支持 `${NAME}` 占位符，需要引用环境变量时写在 yml 里。
+与产品 `internal/app.SSHService` 的默认行为一致。解析结果会先快照复制进当前用例工作空间，
+校验只读快照，因此不会读取或修改用户真实配置。配置中的取值支持 `${NAME}` 占位符，
+需要引用环境变量时写在 yml 里。
+
+产品侧 known_hosts 全程只读（不创建、不追加、不加锁、不写临时文件），测试也遵守同一边界：
+需要信任某主机时直接构造 known_hosts 文件，而不是调用任何写入接口。
 
 每个真实 SSH 用例都会在日志中输出目标与 known_hosts 来源，便于区分"配置写错"与
-"连接层缺陷"。主机密钥未知时，失败信息会列出实际读取的 known_hosts 路径、可用的配置项
-以及需要写入信任记录的路径。
+"连接层缺陷"。主机密钥未知时，失败信息会列出实际读取的 known_hosts 路径与可用配置项，
+并提示用 OpenSSH 把已核验的密钥追加进 known_hosts。
 
 ### 真实远程 Docker
 
@@ -436,4 +465,5 @@ go test -race -count=1 ./tests/integration/local/database/
 
 每个测试入口输出 `TEST_ARTIFACT_DIR=<绝对路径>`，旧库样本、迁移后的数据库与 WAL 文件
 都保留在该目录内。测试结束只关闭连接，不删除任何产物，便于直接打开 SQLite 文件核对
-迁移结果。
+迁移结果。同一目录下的 `test.log` 记录本次运行的逐用例结论与日志（见「运行日志」），
+复核时不需要重跑测试。

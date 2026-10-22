@@ -32,12 +32,21 @@ var (
 // 首次创建时把绝对路径输出到标准输出，便于事后定位测试产物。
 func RunRoot(t *testing.T) string {
 	t.Helper()
-	rootOnce.Do(func() {
-		rootPath, rootErr = createRunRoot()
-	})
+	root := runRootInternal()
 	if rootErr != nil {
 		t.Fatalf("创建测试根目录失败: %v", rootErr)
 	}
+	return root
+}
+
+// runRootInternal 创建（或返回已创建的）运行根目录，不依赖 testing.T。
+//
+// 它同时供 RunRoot 与统一的测试入口 Main 使用：Main 在 m.Run 之前就需要根目录
+// 来打开日志文件，此时还没有可用的 *testing.T。
+func runRootInternal() string {
+	rootOnce.Do(func() {
+		rootPath, rootErr = createRunRoot()
+	})
 	return rootPath
 }
 

@@ -8,6 +8,7 @@ import (
 
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/config"
+	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/sshclient"
 	"github.com/spf13/cobra"
 )
@@ -66,16 +67,19 @@ func newHostTestCommand(a *app.App) *cobra.Command {
 // newHostTrustCommand 构建 host trust 子命令。
 //
 // 未知主机密钥必须先由用户核验指纹，再显式确认信任；
-// 该命令不会在未核验指纹的情况下写入信任记录。
+// 该命令不会在未核验指纹的情况下记录信任。记录只写执行节点，不写 known_hosts：
+// AgentFlow 全程只读 known_hosts，信任新主机需要用户用 OpenSSH 追加已核验的密钥。
 func newHostTrustCommand(a *app.App) *cobra.Command {
 	var fingerprint string
 	var assumeYes bool
 	command := &cobra.Command{
 		Use:   "trust <id>",
 		Short: "核验并信任执行节点的主机密钥",
-		Long: "先探测服务端主机密钥并展示算法与 SHA-256 指纹，再按用户确认写入信任记录。\n" +
+		Long: "先探测服务端主机密钥并展示算法与 SHA-256 指纹，再按用户确认把指纹记录到执行节点。\n" +
 			"必须用 --fingerprint 提供用户已经核验过的指纹，否则拒绝记录；\n" +
-			"非交互执行还必须显式给出 --yes。",
+			"非交互执行还必须显式给出 --yes。\n" +
+			"AgentFlow 只读 known_hosts，不写任何信任文件：确认指纹后请按提示用 OpenSSH\n" +
+			"把服务端密钥追加进 known_hosts，之后的连接才能通过主机密钥校验。",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return withSSHService(cmd.Context(), a, hostConfigPath(cmd), func(
@@ -98,13 +102,16 @@ func newHostTrustCommand(a *app.App) *cobra.Command {
 				}
 				_, err = fmt.Fprintf(
 					a.Stdout(),
-					"已记录主机密钥信任: %s\n算法: %s\n指纹: %s\n记录文件: %s\n",
+					"已记录主机密钥指纹: %s\n算法: %s\n指纹: %s\n只读 known_hosts: %s\n",
 					host.ID,
 					host.HostKeyAlgorithm,
 					host.HostKeyFingerprint,
-					service.KnownHostsStorePath(),
+					strings.Join(service.KnownHostsPaths(), "、"),
 				)
-				return err
+				if err != nil {
+					return err
+				}
+				return printKnownHostsAppendHint(a, host)
 			})
 		},
 	}
@@ -114,13 +121,28 @@ func newHostTrustCommand(a *app.App) *cobra.Command {
 		"",
 		"用户已核验的主机密钥 SHA-256 指纹，例如 SHA256:xxxx",
 	)
-	command.Flags().BoolVar(&assumeYes, "yes", false, "确认写入信任记录（非交互执行必须显式给出）")
+	command.Flags().BoolVar(&assumeYes, "yes", false, "确认记录指纹（非交互执行必须显式给出）")
 	return command
+}
+
+// printKnownHostsAppendHint 输出把服务端密钥追加进 known_hosts 的命令提示。
+//
+// AgentFlow 不写 known_hosts，因此这里只给出由用户自己执行的命令；
+// 命令只拼接主机与端口，不包含任何凭据。
+func printKnownHostsAppendHint(a *app.App, host domain.ExecutionHost) error {
+	_, err := fmt.Fprintf(
+		a.Stdout(),
+		"下一步: 用 OpenSSH 把服务端密钥写入只读 known_hosts（AgentFlow 不会代为写入）：\n"+
+			"  ssh-keyscan -p %d %s >> ~/.ssh/known_hosts\n",
+		host.Port,
+		host.Host,
+	)
+	return err
 }
 
 // requireTrustConfirmation 校验用户是否已经完成核验与确认。
 //
-// 返回 nil 表示可以写入信任记录；已受信任时通过错误短路命令，避免重复写入。
+// 返回 nil 表示可以记录指纹；已受信任时通过错误短路命令，避免重复记录。
 func requireTrustConfirmation(
 	probe app.HostKeyProbe,
 	fingerprint string,
@@ -128,11 +150,11 @@ func requireTrustConfirmation(
 ) error {
 	switch probe.Verdict {
 	case sshclient.VerdictTrusted:
-		return fmt.Errorf("该主机密钥已在信任记录中，无需重复写入")
+		return fmt.Errorf("该主机密钥已在 known_hosts 信任记录中，无需重复记录")
 	case sshclient.VerdictMismatch:
 		return fmt.Errorf(
 			"主机密钥与已信任记录不一致，已拒绝信任；如确认服务端密钥已合法更换，"+
-				"请先清理记录文件中的旧条目: %s",
+				"请先从 known_hosts 清理旧条目: %s",
 			probe.Host.ID,
 		)
 	case sshclient.VerdictRevoked:
@@ -154,7 +176,7 @@ func requireTrustConfirmation(
 	}
 	if !assumeYes {
 		return fmt.Errorf(
-			"非交互执行不会自动写入信任记录；确认指纹 %s 无误后请追加 --yes",
+			"非交互执行不会自动记录指纹；确认指纹 %s 无误后请追加 --yes",
 			expected,
 		)
 	}
@@ -413,8 +435,6 @@ func sshOptionsFrom(cfg *config.Config) app.SSHOptions {
 	}
 	return app.SSHOptions{
 		KnownHostsPath: cfg.SSH.KnownHostsPath,
-		StorePath:      cfg.SSH.KnownHostsStorePath,
-		DatabasePath:   cfg.Storage.DatabasePath,
 		ConnectTimeout: time.Duration(cfg.SSH.ConnectTimeoutSeconds) * time.Second,
 	}
 }

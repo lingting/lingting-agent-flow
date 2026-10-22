@@ -141,8 +141,9 @@ Planner 并把输出校验为结构化计划后一次写入数据库；计划固
 命令边界要分清：
 
 - `host probe` 只验证 TCP 可达性与 SSH 协议标识，**不执行身份认证**。
-- `host trust` 只探测主机密钥并展示指纹，写入信任记录必须显式给出已核验的 `--fingerprint`
-  与非交互场景的 `--yes`。
+- `host trust` 只探测主机密钥并展示指纹，把指纹记录到执行节点必须显式给出已核验的
+  `--fingerprint` 与非交互场景的 `--yes`；命令只写节点记录，不写 `known_hosts`，并会输出
+  用 OpenSSH 追加该密钥的命令提示。
 - `host test`、`host workspace`、`host transfer`、`host validate` 执行完整的主机密钥校验与
   身份认证，是唯一可以执行远程命令与文件传输的路径。认证只使用节点配置中的无口令私钥，
   命令层不收集任何凭据。
@@ -255,6 +256,10 @@ Planner 并把输出校验为结构化计划后一次写入数据库；计划固
 - 使用 `testkit.New(t)`、`testkit.Dir(t)`，不用 `t.TempDir()`；不用 `t.Setenv` 切换全局
   数据目录，路径通过结构体、构造参数或子进程独立环境变量传入。
 - 测试结束禁止删除工作空间与产物，只关闭数据库连接、子进程与监听端口。
+- 每个测试包用 `testkit.Main` 作为唯一入口（`os.Exit(testkit.Main(m))`，已有 `TestMain` 的
+  包在替身分支之后转调它）：它把本次运行的完整输出写入 `<TEST_ARTIFACT_DIR>/test.log`，
+  并把最新日志路径记录在 `lingting-agent-flow-tests/latest-run.txt`；同时默认打开 `-test.v`。
+  应用服务的日志统一用 `testkit.Logger` / `testkit.Slog`，不再各包自行丢弃日志。
 - 无共享状态的用例使用 `t.Parallel()`，不得依赖固定执行顺序或其他测试预先创建的数据；
   并发度通过 `-p` 与 `-parallel` 控制。
 - 测试不得读写用户真实配置、仓库或 `.agentflow/` 下的真实数据。
@@ -264,8 +269,9 @@ Planner 并把输出校验为结构化计划后一次写入数据库；计划固
   未开启或必需项缺失时输出 `WARN [SKIP]` 并跳过，配置完整但连接、认证或主机密钥校验失败时
   必须失败。
 - 真实 SSH 测试的 known_hosts 来源统一由 `testkit.KnownHostsSources` 解析：`ssh.known_hosts`
-  显式配置时读取该文件（不可读直接失败），未配置时复用本机 `~/.ssh/known_hosts` 与
-  `known_hosts2`。写入的信任记录只落在测试工作空间。
+  显式配置时使用该文件（不可读直接失败），未配置时复用本机 `~/.ssh/known_hosts` 与
+  `known_hosts2`。解析结果会先快照复制进当前用例工作空间，校验只读快照：产品与测试都不写
+  用户的真实 known_hosts。
 - SSH 连接层按三层覆盖：`tests/unit/ssh/` 放纯逻辑单元测试，`tests/integration/local/ssh/`
   在进程内启动真实 SSH/SFTP 服务端，`tests/integration/ssh/` 面向真实远程机器。本机集成测试
   不得要求用户预先启动服务，也不得用"配置解析正确"代替真实握手、认证与传输验证。

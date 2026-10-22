@@ -19,7 +19,7 @@ func TestMain(m *testing.M) {
 	if mode := os.Getenv(fakeModeEnv); mode != "" {
 		os.Exit(runFakeProcess(mode))
 	}
-	os.Exit(m.Run())
+	os.Exit(testkit.Main(m))
 }
 
 // fakeCommand 构造以测试二进制为可执行文件的启动描述。

@@ -18,12 +18,8 @@ import (
 
 // SSHOptions 是构造 SSH 服务的参数。
 type SSHOptions struct {
-	// KnownHostsPath 是额外的只读 known_hosts 文件路径，为空时使用用户默认 known_hosts。
+	// KnownHostsPath 是只读 known_hosts 文件路径，为空时使用用户默认 known_hosts。
 	KnownHostsPath string
-	// StorePath 是 AgentFlow 自己的主机密钥记录文件路径，为空时放在数据库目录下。
-	StorePath string
-	// DatabasePath 用于在 StorePath 为空时推导记录文件位置。
-	DatabasePath string
 	// ConnectTimeout 是 TCP 连接与认证的超时时间，零值使用默认值。
 	ConnectTimeout time.Duration
 }
@@ -31,7 +27,7 @@ type SSHOptions struct {
 // SSHService 提供已认证的 SSH 连接、远程命令执行与文件传输能力。
 //
 // 认证只使用节点配置中的无口令私钥：本服务不接收、不保存、不记录任何凭据内容，
-// 私钥文件只被读取。
+// 私钥文件只被读取。主机密钥校验只读取 known_hosts，本服务不会创建或修改它。
 type SSHService struct {
 	store    storage.Store
 	dialer   *sshclient.Dialer
@@ -50,7 +46,6 @@ func NewSSHService(
 	}
 	hostKeys, err := sshclient.NewKnownHostsStore(sshclient.KnownHostsOptions{
 		TrustedPaths: knownHostsSources(options.KnownHostsPath),
-		StorePath:    resolveStorePath(options),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("SSH 服务初始化失败: %w", err)
@@ -65,12 +60,14 @@ func NewSSHService(
 	return &SSHService{store: store, dialer: dialer, hostKeys: hostKeys, logger: logger}, nil
 }
 
-// KnownHostsStorePath 返回 AgentFlow 主机密钥记录的写入路径。
-func (s *SSHService) KnownHostsStorePath() string {
+// KnownHostsPaths 返回参与主机密钥校验的只读 known_hosts 文件路径。
+//
+// 这些文件只读：需要信任新主机时，由用户用 OpenSSH 把已核验的密钥追加进去。
+func (s *SSHService) KnownHostsPaths() []string {
 	if s == nil || s.hostKeys == nil {
-		return ""
+		return nil
 	}
-	return s.hostKeys.StorePath()
+	return s.hostKeys.TrustedPaths()
 }
 
 // knownHostsSources 返回参与校验的只读 known_hosts 文件列表。
@@ -90,18 +87,6 @@ func knownHostsSources(configured string) []string {
 		filepath.Join(home, ".ssh", "known_hosts"),
 		filepath.Join(home, ".ssh", "known_hosts2"),
 	}
-}
-
-// resolveStorePath 决定 AgentFlow 主机密钥记录文件的写入位置。
-func resolveStorePath(options SSHOptions) string {
-	if trimmed := strings.TrimSpace(options.StorePath); trimmed != "" {
-		return trimmed
-	}
-	directory := strings.TrimSpace(options.DatabasePath)
-	if directory == "" {
-		return filepath.Join(".agentflow", "known_hosts")
-	}
-	return filepath.Join(filepath.Dir(directory), "known_hosts")
 }
 
 // TestConnectionOptions 约束一次连接测试。
@@ -327,10 +312,13 @@ func (s *SSHService) ProbeHostKey(ctx context.Context, id string) (HostKeyProbe,
 	return probe, nil
 }
 
-// TrustHostKey 在用户确认后记录信任的主机密钥。
+// TrustHostKey 在用户确认后把已核验的主机密钥记录到执行节点。
 //
-// 该方法会重新探测服务端主机密钥，只有指纹与用户确认的指纹一致时才写入记录，
+// 该方法会重新探测服务端主机密钥，只有指纹与用户确认的指纹一致时才写入节点记录，
 // 避免信任一个与用户核验结果不同的密钥。
+//
+// 它只写数据库，不写 known_hosts：known_hosts 全程只读，信任新主机必须由用户用
+// OpenSSH 把已核验的密钥追加进 known_hosts，AgentFlow 不会代为写入。
 func (s *SSHService) TrustHostKey(
 	ctx context.Context,
 	id string,
@@ -350,9 +338,6 @@ func (s *SSHService) TrustHostKey(
 			probe.Info.Fingerprint,
 			expected,
 		)
-	}
-	if err := s.hostKeys.Trust(probe.Info); err != nil {
-		return domain.ExecutionHost{}, fmt.Errorf("记录主机密钥失败: %w", err)
 	}
 	host := probe.Host
 	if err := host.TrustHostKey(probe.Info.Algorithm, probe.Info.Fingerprint, time.Now()); err != nil {

@@ -104,8 +104,6 @@ func dial(t *testing.T, ws *testkit.Workspace, tg target) sshclient.Client {
 	t.Helper()
 	store, err := sshclient.NewKnownHostsStore(sshclient.KnownHostsOptions{
 		TrustedPaths: tg.knownHostsPaths,
-		// 信任记录写在测试工作空间中，不修改用户真实的 known_hosts。
-		StorePath: filepath.Join(ws.Root(), "known_hosts"),
 	})
 	if err != nil {
 		t.Fatalf("构造主机密钥库失败: %v", err)

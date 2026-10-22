@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
@@ -95,48 +94,32 @@ type HostKeyCheck struct {
 type HostKeyStore interface {
 	// Check 校验服务端提供的主机密钥。
 	Check(host string, port int, key ssh.PublicKey) (HostKeyCheck, error)
-	// Trust 持久化一条已确认信任的主机密钥记录。
-	Trust(info HostKeyInfo) error
 }
 
 // KnownHostsOptions 是构造 KnownHostsStore 的参数。
 type KnownHostsOptions struct {
 	// TrustedPaths 是只读的 known_hosts 文件列表，通常是用户 OpenSSH 的 known_hosts。
 	//
-	// 这些文件只读取不写入，避免破坏用户既有的信任配置。
+	// 这些文件只读取，不会被本包创建、追加或修改：信任记录由用户在 AgentFlow 之外
+	// 维护（例如用 OpenSSH 把已核验的密钥追加进 known_hosts）。
 	TrustedPaths []string
-	// StorePath 是 AgentFlow 自己的 known_hosts 文件路径，用于写入新的信任记录。
-	//
-	// 该文件同时参与校验，因此同一个主机既可以在用户 known_hosts 中信任，
-	// 也可以在 AgentFlow 的记录中信任。
-	StorePath string
-	// LockTimeout 是等待信任记录文件写锁的最长时间，零值使用 DefaultLockTimeout。
-	LockTimeout time.Duration
 }
-
-// DefaultLockTimeout 是等待信任记录文件写锁的默认时长。
-const DefaultLockTimeout = 5 * time.Second
 
 // KnownHostsStore 基于 OpenSSH known_hosts 格式实现 HostKeyStore。
 //
-// 读取时会合并用户既有的 known_hosts 与 AgentFlow 自己的记录文件；
-// 写入只发生在 AgentFlow 自己的记录文件上，并通过独占锁文件串行化，
-// 避免并发连接同时写文件破坏记录。
+// 本实现只读：不创建、不追加、不加锁、不写临时文件，因此并发校验不需要任何互斥，
+// 也不会与用户自己编辑 known_hosts 的操作互相干扰。
 type KnownHostsStore struct {
 	trustedPaths []string
-	storePath    string
-	lockTimeout  time.Duration
 }
 
 // NewKnownHostsStore 构造 known_hosts 主机密钥库。
+//
+// 至少需要一个 known_hosts 路径；路径在构造时统一转为绝对路径并去重。
 func NewKnownHostsStore(options KnownHostsOptions) (*KnownHostsStore, error) {
-	storePath := strings.TrimSpace(options.StorePath)
-	if storePath == "" {
-		return nil, fmt.Errorf("sshclient: 主机密钥记录文件路径不能为空")
-	}
-	trusted := make([]string, 0, len(options.TrustedPaths)+1)
-	seen := make(map[string]struct{}, len(options.TrustedPaths)+1)
-	for _, path := range append(append([]string{}, options.TrustedPaths...), storePath) {
+	trusted := make([]string, 0, len(options.TrustedPaths))
+	seen := make(map[string]struct{}, len(options.TrustedPaths))
+	for _, path := range options.TrustedPaths {
 		trimmed := strings.TrimSpace(path)
 		if trimmed == "" {
 			continue
@@ -151,20 +134,17 @@ func NewKnownHostsStore(options KnownHostsOptions) (*KnownHostsStore, error) {
 		seen[absolute] = struct{}{}
 		trusted = append(trusted, absolute)
 	}
-	lockTimeout := options.LockTimeout
-	if lockTimeout <= 0 {
-		lockTimeout = DefaultLockTimeout
+	if len(trusted) == 0 {
+		return nil, fmt.Errorf("sshclient: 至少需要一个 known_hosts 文件路径")
 	}
-	return &KnownHostsStore{
-		trustedPaths: trusted,
-		storePath:    trusted[len(trusted)-1],
-		lockTimeout:  lockTimeout,
-	}, nil
+	return &KnownHostsStore{trustedPaths: trusted}, nil
 }
 
-// StorePath 返回 AgentFlow 信任记录的写入路径。
-func (s *KnownHostsStore) StorePath() string {
-	return s.storePath
+// TrustedPaths 返回参与校验的 known_hosts 文件绝对路径列表。
+//
+// 返回副本，调用方修改不会影响主机密钥库。
+func (s *KnownHostsStore) TrustedPaths() []string {
+	return append([]string{}, s.trustedPaths...)
 }
 
 // Check 校验服务端提供的主机密钥。
@@ -186,7 +166,7 @@ func (s *KnownHostsStore) Check(host string, port int, key ssh.PublicKey) (HostK
 	}
 	// 校验回调要求 address 是 host:port 形式：knownhosts.Normalize 在端口为 22 时
 	// 会去掉端口，直接传入会导致其内部的 SplitHostPort 失败，因此这里传入未规范化
-	// 的地址；只有写入记录时才使用 Normalize 得到 known_hosts 的书写形式。
+	// 的地址。
 	address := presented.Address()
 	checkErr := callback(address, &knownHostsAddr{address: address}, key)
 	if checkErr == nil {
@@ -229,34 +209,6 @@ func (s *KnownHostsStore) classifyCheckError(
 	}, nil
 }
 
-// Trust 持久化一条已确认信任的主机密钥记录。
-//
-// 写入前会重新读取现有记录，已存在相同记录时直接返回，避免重复追加；
-// 写入使用独占锁文件串行化，并通过临时文件加原子重命名保证不会留下半行记录。
-func (s *KnownHostsStore) Trust(info HostKeyInfo) error {
-	if info.key == nil {
-		return fmt.Errorf("sshclient: 缺少主机公钥，无法记录信任")
-	}
-	if strings.TrimSpace(info.Host) == "" {
-		return fmt.Errorf("sshclient: 缺少主机地址，无法记录信任")
-	}
-	release, err := s.acquireLock()
-	if err != nil {
-		return err
-	}
-	defer release()
-	existing, err := os.ReadFile(s.storePath)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("sshclient: 读取主机密钥记录失败: %s: %w", s.storePath, err)
-	}
-	line := knownhosts.Line([]string{knownhosts.Normalize(info.Address())}, info.key)
-	if containsKnownHostsLine(string(existing), line) {
-		return nil
-	}
-	content := appendKnownHostsLine(existing, line)
-	return s.writeAtomically(content)
-}
-
 // existingPaths 返回当前存在的 known_hosts 文件列表。
 func (s *KnownHostsStore) existingPaths() []string {
 	paths := make([]string, 0, len(s.trustedPaths))
@@ -267,95 +219,6 @@ func (s *KnownHostsStore) existingPaths() []string {
 		paths = append(paths, path)
 	}
 	return paths
-}
-
-// acquireLock 取得信任记录文件的独占写锁，返回释放函数。
-//
-// 锁通过独占创建的锁文件实现，跨进程有效且不依赖平台相关的文件锁接口；
-// 持有者异常退出时残留的锁文件会在超时后被接管。
-func (s *KnownHostsStore) acquireLock() (func(), error) {
-	lockPath := s.storePath + ".lock"
-	if err := os.MkdirAll(filepath.Dir(s.storePath), 0o700); err != nil {
-		return nil, fmt.Errorf("sshclient: 创建主机密钥记录目录失败: %w", err)
-	}
-	deadline := time.Now().Add(s.lockTimeout)
-	for {
-		file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-		if err == nil {
-			_ = file.Close()
-			return func() {
-				_ = os.Remove(lockPath)
-			}, nil
-		}
-		if !errors.Is(err, os.ErrExist) {
-			return nil, fmt.Errorf("sshclient: 获取主机密钥记录写锁失败: %s: %w", lockPath, err)
-		}
-		if time.Now().After(deadline) {
-			// 超时后清理残留锁，避免持有者崩溃导致后续写入永久失败。
-			_ = os.Remove(lockPath)
-			return nil, fmt.Errorf(
-				"sshclient: 等待主机密钥记录写锁超时: %s（如无其他进程正在连接，可删除该锁文件）",
-				lockPath,
-			)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-}
-
-// writeAtomically 通过临时文件加原子重命名写入信任记录。
-func (s *KnownHostsStore) writeAtomically(content []byte) error {
-	directory := filepath.Dir(s.storePath)
-	temp, err := os.CreateTemp(directory, filepath.Base(s.storePath)+".tmp*")
-	if err != nil {
-		return fmt.Errorf("sshclient: 创建临时信任记录文件失败: %w", err)
-	}
-	tempPath := temp.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tempPath)
-		}
-	}()
-	if _, err := temp.Write(content); err != nil {
-		_ = temp.Close()
-		return fmt.Errorf("sshclient: 写入信任记录失败: %s: %w", s.storePath, err)
-	}
-	if err := temp.Sync(); err != nil {
-		_ = temp.Close()
-		return fmt.Errorf("sshclient: 同步信任记录失败: %s: %w", s.storePath, err)
-	}
-	if err := temp.Close(); err != nil {
-		return fmt.Errorf("sshclient: 关闭临时信任记录失败: %s: %w", s.storePath, err)
-	}
-	if err := os.Chmod(tempPath, 0o600); err != nil {
-		return fmt.Errorf("sshclient: 设置信任记录权限失败: %s: %w", tempPath, err)
-	}
-	if err := os.Rename(tempPath, s.storePath); err != nil {
-		return fmt.Errorf("sshclient: 替换信任记录失败: %s: %w", s.storePath, err)
-	}
-	cleanup = false
-	return nil
-}
-
-// containsKnownHostsLine 判断记录中是否已存在同一行。
-func containsKnownHostsLine(content, line string) bool {
-	for _, existing := range strings.Split(content, "\n") {
-		if strings.TrimSpace(existing) == strings.TrimSpace(line) {
-			return true
-		}
-	}
-	return false
-}
-
-// appendKnownHostsLine 在内容末尾追加一行，保证原有行不被破坏。
-func appendKnownHostsLine(content []byte, line string) []byte {
-	result := content
-	if len(result) > 0 && !strings.HasSuffix(string(result), "\n") {
-		result = append(result, '\n')
-	}
-	result = append(result, []byte(line)...)
-	result = append(result, '\n')
-	return result
 }
 
 // knownHostsAddr 是 knownhosts 校验回调所需的远端地址。

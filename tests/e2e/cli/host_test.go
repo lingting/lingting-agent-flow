@@ -541,10 +541,10 @@ func TestHostTrustRequiresVerifiedFingerprint(t *testing.T) {
 	); code != 0 {
 		t.Fatalf("新增节点应成功，错误: %s", stderr)
 	}
-	// 未给出 --fingerprint 与 --yes 时必须拒绝写入信任记录。
+	// 未给出 --fingerprint 与 --yes 时必须拒绝记录指纹。
 	code, _, stderr := run(t, "host", "trust", "node-trust", "--config", configPath)
 	if code == 0 {
-		t.Fatal("缺少核验指纹时不得写入信任记录")
+		t.Fatal("缺少核验指纹时不得记录指纹")
 	}
 	if !strings.Contains(stderr, "指纹") {
 		t.Fatalf("错误信息应说明缺少核验指纹，实际: %s", stderr)
@@ -558,7 +558,7 @@ func TestHostTrustRequiresVerifiedFingerprint(t *testing.T) {
 		"--yes",
 	)
 	if code == 0 {
-		t.Fatal("指纹不一致时不得写入信任记录")
+		t.Fatal("指纹不一致时不得记录指纹")
 	}
 	if !strings.Contains(stderr, "探测主机密钥失败") && !strings.Contains(stderr, "指纹") {
 		t.Fatalf("错误信息应说明探测或指纹问题，实际: %s", stderr)
@@ -656,7 +656,7 @@ func startSSHHandshakeServer(t *testing.T) (string, int) {
 	return address.IP.String(), address.Port
 }
 
-// TestHostTrustRecordsVerifiedFingerprint 校验核验指纹后可以写入信任记录。
+// TestHostTrustRecordsVerifiedFingerprint 校验核验指纹后可以记录指纹。
 func TestHostTrustRecordsVerifiedFingerprint(t *testing.T) {
 	t.Parallel()
 	configPath := hostConfig(t)
@@ -676,7 +676,7 @@ func TestHostTrustRecordsVerifiedFingerprint(t *testing.T) {
 	// 先探测取得服务端实际指纹。
 	code, stdout, stderr := run(t, "host", "trust", "node-trust-ok", "--config", configPath)
 	if code == 0 {
-		t.Fatal("未确认时不得写入信任记录")
+		t.Fatal("未确认时不得记录指纹")
 	}
 	if !strings.Contains(stdout, "SHA256:") {
 		t.Fatalf("探测输出应展示 SHA-256 指纹，实际 stdout: %q，stderr: %s", stdout, stderr)
@@ -691,12 +691,17 @@ func TestHostTrustRecordsVerifiedFingerprint(t *testing.T) {
 		"--yes",
 	)
 	if code != 0 {
-		t.Fatalf("核验指纹后应写入信任记录，实际退出码 %d，stdout: %s，stderr: %s", code, stdout, stderr)
+		t.Fatalf("核验指纹后应记录指纹，实际退出码 %d，stdout: %s，stderr: %s", code, stdout, stderr)
 	}
-	if !strings.Contains(stdout, "已记录主机密钥信任") {
-		t.Fatalf("输出应说明信任已记录，实际: %s", stdout)
+	if !strings.Contains(stdout, "已记录主机密钥指纹") {
+		t.Fatalf("输出应说明指纹已记录，实际: %s", stdout)
 	}
-	// 再次写入应提示已受信任而不是重复追加。
+	// AgentFlow 不写 known_hosts，必须提示用户自行用 OpenSSH 追加已核验的密钥。
+	if !strings.Contains(stdout, "ssh-keyscan") {
+		t.Fatalf("输出应提示用 OpenSSH 写入 known_hosts，实际: %s", stdout)
+	}
+	// 重复记录是幂等的：AgentFlow 不写 known_hosts，因此探测结论仍是未知，
+	// 再次确认指纹只会重写同一个节点指纹，不报错也不产生第二条记录。
 	code, _, stderr = run(
 		t,
 		"host", "trust", "node-trust-ok",
@@ -704,11 +709,8 @@ func TestHostTrustRecordsVerifiedFingerprint(t *testing.T) {
 		"--fingerprint", fingerprint,
 		"--yes",
 	)
-	if code == 0 {
-		t.Fatal("已受信任的主机密钥不应重复写入")
-	}
-	if !strings.Contains(stderr, "已在信任记录中") {
-		t.Fatalf("错误信息应说明已受信任，实际: %s", stderr)
+	if code != 0 {
+		t.Fatalf("重复记录指纹应幂等成功，实际退出码 %d，stderr: %s", code, stderr)
 	}
 }
 

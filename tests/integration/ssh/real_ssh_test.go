@@ -134,8 +134,13 @@ func TestRealSSHRejectsUntrustedHostKey(t *testing.T) {
 		t.Fatalf("关闭首个连接失败: %v", err)
 	}
 
+	// 使用一个空的 known_hosts 文件构造信任库：主机密钥必须被判为未知。
+	untrusted := path.Join(ws.Dir("untrusted"), "known_hosts")
+	if err := os.WriteFile(untrusted, nil, 0o600); err != nil {
+		t.Fatalf("写入空 known_hosts 失败: %v", err)
+	}
 	store, err := sshclient.NewKnownHostsStore(sshclient.KnownHostsOptions{
-		StorePath: path.Join(ws.Dir("untrusted"), "known_hosts"),
+		TrustedPaths: []string{untrusted},
 	})
 	if err != nil {
 		t.Fatalf("构造空主机密钥库失败: %v", err)

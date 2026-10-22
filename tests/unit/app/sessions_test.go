@@ -27,7 +27,7 @@ func newSessionService(t *testing.T) (*app.SessionService, domain.Role, domain.S
 			t.Errorf("关闭测试数据库失败: %v", closeErr)
 		}
 	})
-	logger, err := logging.New(nopWriter{}, logging.LevelError)
+	logger, err := testkit.Logger(logging.LevelError)
 	if err != nil {
 		t.Fatalf("构造日志器失败: %v", err)
 	}

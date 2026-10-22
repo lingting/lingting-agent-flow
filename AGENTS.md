@@ -122,6 +122,10 @@ cmd → cli / httpapi → app → agent / process / gitworktree / storage / even
 - 测试结束禁止删除工作空间与测试产物：不调用 `os.RemoveAll` 删除测试根目录，不使用会在
   结束时自动清理目录的临时目录 API，也不在 `t.Cleanup` 中删除目录。允许关闭数据库连接、
   终止测试启动的子进程、关闭监听端口等运行时资源。
+- 每个测试包必须用 `testkit.Main` 作为统一入口（`os.Exit(testkit.Main(m))`；已有 `TestMain`
+  的包在替身分支之后转调），由它把本次运行的完整输出写入 `<TEST_ARTIFACT_DIR>/test.log`
+  并在基目录记录 `latest-run.txt`，同时默认打开 `-test.v`。不得各包自行丢弃测试日志，
+  应用服务日志统一用 `testkit.Logger` / `testkit.Slog` 构造。
 
 ### 真实外部依赖
 
@@ -137,9 +141,11 @@ cmd → cli / httpapi → app → agent / process / gitworktree / storage / even
   与 `known_hosts2`，与产品默认行为一致；显式填写但文件不可读时直接让测试失败，不得静默
   回落到空信任库。来源解析统一由 `tests/internal/testkit` 的 `KnownHostsSources` 提供，
   各远程测试目录不得各自实现。
-- 真实 SSH 测试写入的信任记录只允许落在测试工作空间，不得修改用户真实 known_hosts。
-- 主机密钥未知的失败信息必须列出实际读取的 known_hosts 路径、可用的配置项与目标信任
-  记录路径，使"配置写错"与"连接层缺陷"可以区分。
+- 解析出的 known_hosts 来源必须先快照复制进当前用例工作空间，校验只读快照：产品与测试都
+  不得写入用户真实 known_hosts。需要信任某主机时直接构造 known_hosts 文件，不得调用任何
+  写入接口（产品侧已不再提供）。
+- 主机密钥未知的失败信息必须列出实际读取的 known_hosts 路径与可用配置项，并提示用 OpenSSH
+  追加已核验的密钥，使"配置写错"与"连接层缺陷"可以区分。
 - 禁止关闭 SSH 主机密钥验证来规避测试失败，禁止自动接受未知主机密钥。
 - 真实外部测试的远程操作只允许在随机生成的远程临时目录内进行。
 - SSH 连接层的单元测试放在 `tests/unit/ssh/`，本机协议集成测试放在
@@ -175,7 +181,9 @@ cmd → cli / httpapi → app → agent / process / gitworktree / storage / even
   超时、取消与认证失败必须立即返回，不得继续换类型掩盖真实原因。
 - 未知主机必须返回 `CodeHostKeyUnknown` 并给出算法与 SHA-256 指纹；密钥变化必须返回
   `CodeHostKeyMismatch` 并给出已信任记录，不得静默接受或自动覆盖。
-- 信任记录只写入 AgentFlow 自己的 known_hosts 文件，用户 OpenSSH 的 known_hosts 只读。
+- known_hosts 全程只读：`KnownHostsStore` 只实现 `Check`，不创建、不追加、不加锁、不写
+  临时文件；信任记录由用户在 AgentFlow 之外维护。`host trust` 只把已核验指纹写入执行节点，
+  并提示用户用 OpenSSH 追加密钥。
 - SSH 认证方式固定为无口令私钥：`domain.AuthMethod` 与 `sshclient.AuthMethod` 只有
   `private_key` 一个取值，节点配置必须给出 `private_key_path`。不得重新引入 SSH Agent、
   密码认证或私钥口令（passphrase）支持，也不得注册 `--password-stdin`、

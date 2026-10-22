@@ -132,8 +132,8 @@ cmd/agentflow → cli / httpapi / server → app → config / logging / storage 
 - `storage` 只定义接口与存储错误，不依赖具体驱动；`storage/sqlite` 实现连接、迁移与各实体仓储。
 - `sshprobe` 只做网络与协议标识探测，不进行身份认证，不依赖 `cli` 或 `storage`。
 - `sshclient` 提供 SSH 连接层，内部按职责分为：私钥认证（`AuthConfig` 与
-  `buildAuthMethods`）、主机密钥信任（`HostKeyStore` / `KnownHostsStore`，含按 known_hosts
-  记录提供的主机密钥类型 `HostKeyTypeProvider`）、连接管理（`Dialer` / `Client`）、
+  `buildAuthMethods`）、主机密钥校验（`HostKeyStore` / `KnownHostsStore`，只读解析
+  known_hosts，含按记录提供的主机密钥类型 `HostKeyTypeProvider`）、连接管理（`Dialer` / `Client`）、
   远程执行（`Run` 与 `CommandResult`）、SFTP 传输（`FileTransfer`）、远程工作空间
   （`ResolveHome` / `ResolveWorkspace` / `EnsureWorkspace`）与远端 Unix 套接字通道
   （`DialUnixSocket`）。它不依赖 `cli`、`storage` 或 `app`，业务代码通过接口注入依赖，
@@ -642,8 +642,10 @@ CodeSaver 缺失时编排器仍会按顺序执行并验证全部步骤，但收�
 - 探测结果中的 `Authenticated` 恒为 `false`，用于阻止调用方误判。
 - 主机密钥校验不得被关闭：`NewDialer` 未收到 `HostKeyStore` 时直接拒绝构造，不存在
   "跳过校验"的开关，也不允许用 `ssh.InsecureIgnoreHostKey()` 作为产品默认策略。
-- 主机密钥的读取来源（用户 `known_hosts`）与写入目标（AgentFlow 自己的记录文件）分离：
-  用户既有文件只读，新记录以独占锁 + 临时文件 + 原子重命名写入，避免并发写坏记录。
+- `known_hosts` 全程只读：`KnownHostsStore` 只实现 `Check`，不创建、不追加、不加锁、
+  不写临时文件，因此并发校验无需互斥，也不会与用户编辑 `known_hosts` 互相干扰。
+  信任记录由用户在 AgentFlow 之外维护（例如用 OpenSSH 追加已核验的密钥）；
+  `host trust` 只把核验过的指纹写进执行节点，并提示用户自行写入 `known_hosts`。
 - 凭据边界：只支持无口令私钥，连接过程不接收任何凭据输入。私钥文件只被读取，其路径
   可以进入节点记录，但私钥原文、密码与口令一律不得进入数据库、配置文件、命令行参数或日志。
 - 私钥边界：不得把私钥复制到工作空间或远程机器，也不得修改其权限或内容；遇到加密私钥

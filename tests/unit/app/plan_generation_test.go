@@ -103,7 +103,7 @@ func newPlanFixture(t *testing.T, options planOptions) *planFixture {
 			t.Errorf("关闭测试数据库失败: %v", closeErr)
 		}
 	})
-	logger, err := logging.New(nopWriter{}, logging.LevelError)
+	logger, err := testkit.Logger(logging.LevelError)
 	if err != nil {
 		t.Fatalf("构造日志器失败: %v", err)
 	}
@@ -610,7 +610,7 @@ func TestRecoverPlanGenerationConvergesPlanningTasks(t *testing.T) {
 				t.Fatalf("写入任务失败: %v", err)
 			}
 			// Start 内部会执行恢复：这里用第二个服务实例模拟服务重启。
-			logger, err := logging.New(nopWriter{}, logging.LevelError)
+			logger, err := testkit.Logger(logging.LevelError)
 			if err != nil {
 				t.Fatalf("构造日志器失败: %v", err)
 			}

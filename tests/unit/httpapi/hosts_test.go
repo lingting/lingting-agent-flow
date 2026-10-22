@@ -41,7 +41,7 @@ func newHostAPIFixture(t *testing.T) *hostAPIFixture {
 			t.Errorf("关闭测试数据库失败: %v", closeErr)
 		}
 	})
-	logger, err := logging.New(apiDiscard{}, logging.LevelError)
+	logger, err := testkit.Logger(logging.LevelError)
 	if err != nil {
 		t.Fatalf("构造日志器失败: %v", err)
 	}
@@ -51,7 +51,6 @@ func newHostAPIFixture(t *testing.T) *hostAPIFixture {
 	}
 	sshService, err := app.NewSSHService(db, logger, app.SSHOptions{
 		KnownHostsPath: filepath.Join(testkit.Dir(t), "known_hosts"),
-		StorePath:      filepath.Join(testkit.Dir(t), "agentflow_known_hosts"),
 	})
 	if err != nil {
 		t.Fatalf("构造 SSH 服务失败: %v", err)

@@ -17,6 +17,7 @@ import (
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/httpapi"
 	"github.com/lingting/agentflow/internal/logging"
+	"github.com/lingting/agentflow/internal/storage"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
 	"github.com/lingting/agentflow/tests/internal/testkit"
 )
@@ -68,25 +69,45 @@ func (r *taskWorkflowAPIRunner) ExecuteAndValidate(
 }
 
 // completeWorkflowAPIStep 按真实闭环的迁移路径把步骤收口为已完成。
+//
+// 收口写入必须带状态前置条件：编排器在同一任务上并发读取步骤，无条件写入会覆盖
+// 它刚写入的状态，使"步骤已完成"与"工作流未推进"同时出现。这里按当前读取到的状态
+// 作为前置条件逐次迁移，冲突时重新读取再判断，不静默丢弃。
 func completeWorkflowAPIStep(ctx context.Context, db *sqlite.DB, stepID domain.ID) {
-	step, err := db.GetStep(ctx, stepID)
-	if err != nil {
-		return
-	}
-	for _, next := range []domain.StepStatus{
-		domain.StepStatusRunning,
-		domain.StepStatusVerifying,
-		domain.StepStatusCompleted,
-	} {
-		if step.Status == next {
-			continue
-		}
-		if err := step.Transition(next, time.Now().UTC()); err != nil {
+	const attempts = 5
+	for attempt := 0; attempt < attempts; attempt++ {
+		step, err := db.GetStep(ctx, stepID)
+		if err != nil {
 			return
 		}
+		expected := step.Status
+		changed := false
+		for _, next := range []domain.StepStatus{
+			domain.StepStatusRunning,
+			domain.StepStatusVerifying,
+			domain.StepStatusCompleted,
+		} {
+			if step.Status == next {
+				continue
+			}
+			if err := step.Transition(next, time.Now().UTC()); err != nil {
+				return
+			}
+			changed = true
+		}
+		if !changed {
+			return
+		}
+		_ = step.SetCurrentAttempt(nil)
+		updateErr := db.UpdateStepIfStatus(ctx, *step, []domain.StepStatus{expected})
+		if updateErr == nil {
+			return
+		}
+		if !errors.Is(updateErr, storage.ErrConflict) {
+			return
+		}
+		// 状态已被其他写入推进：重新读取后按新的前置状态重试。
 	}
-	_ = step.SetCurrentAttempt(nil)
-	_ = db.UpdateStep(ctx, *step)
 }
 
 // taskWorkflowAPIContainer 是容器核验的受控替身。
@@ -167,7 +188,7 @@ func newTaskWorkflowAPIFixture(t *testing.T, stepCount int) *taskWorkflowAPIFixt
 			t.Errorf("关闭测试数据库失败: %v", closeErr)
 		}
 	})
-	logger, err := logging.New(stepAPILogDiscard{}, logging.LevelError)
+	logger, err := testkit.Logger(logging.LevelError)
 	if err != nil {
 		t.Fatalf("构造日志器失败: %v", err)
 	}
@@ -364,13 +385,19 @@ func (f *taskWorkflowAPIFixture) workflowStatus(t *testing.T) httpapi.WorkflowSt
 }
 
 // waitSettled 等待工作流停止推进或结束。
+//
+// 超时属于偶发失败的高发点，因此这里不只打印最后一次响应，还会把数据库中的真实
+// 执行记录、步骤状态与任务事件时间线一并输出：这些才是判断"编排卡住"与"轮询太快"
+// 的依据，缺失时只能重跑测试去猜。
 func (f *taskWorkflowAPIFixture) waitSettled(t *testing.T) httpapi.WorkflowStatusResponse {
 	t.Helper()
 	const timeout = 20 * time.Second
 	deadline := time.Now().Add(timeout)
 	var last httpapi.WorkflowStatusResponse
+	polls := 0
 	for time.Now().Before(deadline) {
 		last = f.workflowStatus(t)
+		polls++
 		if last.HasRun && last.Run != nil {
 			switch last.Run.Status {
 			case "completed", "cancelled", "failed", "blocked", "recovery_required":
@@ -379,8 +406,69 @@ func (f *taskWorkflowAPIFixture) waitSettled(t *testing.T) httpapi.WorkflowStatu
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("等待工作流停止超时，最后一次状态: %+v", last.Run)
+	f.dumpWorkflowState(t)
+	t.Fatalf("等待工作流停止超时（轮询 %d 次），最后一次状态: %+v", polls, last.Run)
 	return last
+}
+
+// dumpWorkflowState 输出数据库中的执行记录、步骤与事件时间线。
+func (f *taskWorkflowAPIFixture) dumpWorkflowState(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	runs, err := f.db.ListWorkflowRunsByTask(ctx, f.task.ID)
+	if err != nil {
+		t.Logf("读取执行记录失败: %v", err)
+	} else {
+		for _, run := range runs {
+			t.Logf(
+				"执行记录: id=%s status=%s stage=%s revision=%d completed=%d/%d "+
+					"current_step=%s last_completed_sequence=%d error_class=%s summary=%s",
+				run.ID,
+				run.Status,
+				run.Stage,
+				run.Revision,
+				run.CompletedSteps,
+				run.TotalSteps,
+				idText(run.CurrentStepID),
+				run.LastCompletedSequence,
+				run.ErrorClass,
+				run.ErrorSummary,
+			)
+		}
+	}
+	steps, err := f.db.ListStepsByTask(ctx, f.task.ID)
+	if err != nil {
+		t.Logf("读取步骤失败: %v", err)
+	} else {
+		for _, step := range steps {
+			t.Logf(
+				"步骤: id=%s sequence=%d status=%s current_attempt=%s failure_stage=%s summary=%s",
+				step.ID,
+				step.Sequence,
+				step.Status,
+				idText(step.CurrentAttemptID),
+				step.FailureStage,
+				step.FailureSummary,
+			)
+		}
+	}
+	events, err := f.db.ListEventsByTask(ctx, f.task.ID, storage.EventFilter{})
+	if err != nil {
+		t.Logf("读取事件失败: %v", err)
+		return
+	}
+	for _, event := range events {
+		t.Logf("事件: type=%s step=%s payload=%v", event.Type, idText(event.StepID), event.Payload)
+	}
+}
+
+// idText 返回标识的文本形式，空标识返回 "-"。
+func idText(id *domain.ID) string {
+	if id == nil {
+		return "-"
+	}
+	return id.String()
 }
 
 // TestWorkflowAPILifecycle 验证启动、查询与完成的完整流程。

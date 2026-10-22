@@ -20,6 +20,7 @@ import (
 	"github.com/lingting/agentflow/internal/httpapi"
 	"github.com/lingting/agentflow/internal/logging"
 	"github.com/lingting/agentflow/internal/storage"
+	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
 // startAPITaskStore 是启动接口路径上的存储替身。
@@ -185,7 +186,7 @@ func startAPITestTask(t *testing.T) domain.Task {
 // newStartAPIFixture 构造启动接口处理器。
 func newStartAPIFixture(t *testing.T, store *startAPITaskStore) *startAPIFixture {
 	t.Helper()
-	logger, err := logging.New(stepAPILogDiscard{}, logging.LevelError)
+	logger, err := testkit.Logger(logging.LevelError)
 	if err != nil {
 		t.Fatalf("构造日志器失败: %v", err)
 	}
@@ -327,7 +328,7 @@ func TestStartAPIRejectsNegativeTimeout(t *testing.T) {
 // TestStartAPIWithoutServiceReturns503 校验服务未初始化时返回 503。
 func TestStartAPIWithoutServiceReturns503(t *testing.T) {
 	t.Parallel()
-	logger, err := logging.New(stepAPILogDiscard{}, logging.LevelError)
+	logger, err := testkit.Logger(logging.LevelError)
 	if err != nil {
 		t.Fatalf("构造日志器失败: %v", err)
 	}
@@ -349,7 +350,7 @@ func TestStartAPIMapsPrerequisiteError(t *testing.T) {
 	t.Parallel()
 	task := startAPITestTask(t)
 	task.ContainerID = "container-existing"
-	logger, err := logging.New(stepAPILogDiscard{}, logging.LevelError)
+	logger, err := testkit.Logger(logging.LevelError)
 	if err != nil {
 		t.Fatalf("构造日志器失败: %v", err)
 	}

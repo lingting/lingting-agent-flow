@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/lingting/agentflow/internal/agent/pi"
+	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
 // TestRealPiCheck 校验真实 Pi 版本具备非交互执行所需的参数。
@@ -65,7 +66,9 @@ func TestRealPiModelRecognition(t *testing.T) {
 	}
 }
 
-// TestMain 保留统一测试入口。
+// TestMain 把本次运行的完整测试输出写入本次运行根目录下的 test.log。
+//
+// 统一入口保证 WARN [SKIP] 跳过原因与逐用例结论都能事后复核。
 func TestMain(m *testing.M) {
-	os.Exit(m.Run())
+	os.Exit(testkit.Main(m))
 }

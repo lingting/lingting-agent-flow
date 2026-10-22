@@ -38,7 +38,7 @@ func newService(t *testing.T) (*app.ExecutionHostService, storage.Store) {
 			t.Errorf("关闭测试数据库失败: %v", closeErr)
 		}
 	})
-	logger, err := logging.New(nopWriter{}, logging.LevelError)
+	logger, err := testkit.Logger(logging.LevelError)
 	if err != nil {
 		t.Fatalf("构造日志器失败: %v", err)
 	}
@@ -532,13 +532,12 @@ func newSSHService(t *testing.T) (*app.SSHService, storage.Store) {
 			t.Errorf("关闭测试数据库失败: %v", closeErr)
 		}
 	})
-	logger, err := logging.New(nopWriter{}, logging.LevelError)
+	logger, err := testkit.Logger(logging.LevelError)
 	if err != nil {
 		t.Fatalf("构造日志器失败: %v", err)
 	}
 	service, err := app.NewSSHService(db, logger, app.SSHOptions{
 		KnownHostsPath: filepath.Join(dir, "known_hosts"),
-		StorePath:      filepath.Join(dir, "agentflow_known_hosts"),
 	})
 	if err != nil {
 		t.Fatalf("构造 SSH 服务失败: %v", err)
@@ -586,12 +585,18 @@ func TestSSHServiceRejectsMissingStore(t *testing.T) {
 	}
 }
 
-// TestSSHServiceKnownHostsStorePath 验证主机密钥记录路径可被诊断输出。
-func TestSSHServiceKnownHostsStorePath(t *testing.T) {
+// TestSSHServiceKnownHostsPaths 验证只读 known_hosts 路径可被诊断输出。
+func TestSSHServiceKnownHostsPaths(t *testing.T) {
 	t.Parallel()
 	service, _ := newSSHService(t)
-	if service.KnownHostsStorePath() == "" {
-		t.Fatal("应当给出主机密钥记录路径")
+	paths := service.KnownHostsPaths()
+	if len(paths) == 0 {
+		t.Fatal("应当给出只读 known_hosts 路径")
+	}
+	for _, path := range paths {
+		if !filepath.IsAbs(path) {
+			t.Fatalf("known_hosts 路径应为绝对路径: %s", path)
+		}
 	}
 }
 
@@ -692,7 +697,7 @@ func TestEnsureWorkspaceMissingHost(t *testing.T) {
 	}
 }
 
-// TestTrustHostKeyRequiresFingerprint 验证未给出指纹时拒绝记录信任。
+// TestTrustHostKeyRequiresFingerprint 验证未给出指纹时拒绝记录指纹。
 func TestTrustHostKeyRequiresFingerprint(t *testing.T) {
 	t.Parallel()
 	service, store := newSSHService(t)
