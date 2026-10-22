@@ -16,14 +16,27 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import {
   ApiError,
   cancelTask,
+  cancelTaskWorkflow,
   deleteTask,
   fetchTask,
+  fetchTaskWorkflow,
   fetchTasks,
+  resumeTaskWorkflow,
+  startTaskWorkflow,
   type Task,
   type TaskStatus,
+  type WorkflowStatusResponse,
 } from "@/lib/api";
 import { CreateTaskModal } from "@/pages/tasks/CreateTaskModal";
-import { canCancelTask, canDeleteTask, TASK_STATUS_META } from "@/pages/tasks/status";
+import {
+  canCancelTask,
+  canCancelWorkflow,
+  canDeleteTask,
+  canResumeWorkflow,
+  canStartWorkflow,
+  TASK_STATUS_META,
+  WORKFLOW_RUN_STATUS_DICT,
+} from "@/pages/tasks/status";
 
 /** 默认页大小，与后端默认值一致 */
 const DEFAULT_PAGE_SIZE = 20;
@@ -91,6 +104,74 @@ function TaskDetail({ task }: { task: Task }) {
 }
 
 /**
+ * 工作流进度面板。
+ *
+ * 数据全部来自真实接口：没有执行记录时显示"尚未启动"，不伪造进度；
+ * `code_saver_available` 为 false 时明确说明任务不能判定为完整成功。
+ */
+function WorkflowPanel({ status }: { status: WorkflowStatusResponse }) {
+  const run = status.run;
+  return (
+    <Flex gap="small" vertical>
+      <Descriptions column={1} size="small">
+        <Descriptions.Item label="工作流状态">
+          {run ? (
+            <DictTag dict={WORKFLOW_RUN_STATUS_DICT} value={run.status} />
+          ) : (
+            <Typography.Text type="secondary">尚未启动工作流</Typography.Text>
+          )}
+        </Descriptions.Item>
+        {run && (
+          <>
+            <Descriptions.Item label="执行记录">
+              <Typography.Text code>{run.run_id}</Typography.Text>
+            </Descriptions.Item>
+            <Descriptions.Item label="进度">
+              {`已完成 ${run.completed_steps} / ${run.total_steps} 步`}
+            </Descriptions.Item>
+            <Descriptions.Item label="当前步骤">
+              {run.current_step_id ? (
+                <Typography.Text code>{run.current_step_id}</Typography.Text>
+              ) : (
+                <Typography.Text type="secondary">无</Typography.Text>
+              )}
+            </Descriptions.Item>
+            <Descriptions.Item label="更新时间">{formatTime(run.updated_at)}</Descriptions.Item>
+            {run.error_summary && (
+              <Descriptions.Item label="停止原因">
+                <Typography.Text type="danger">{run.error_summary}</Typography.Text>
+              </Descriptions.Item>
+            )}
+            {!run.code_saver_available && (
+              <Descriptions.Item label="代码保存">
+                <Typography.Text type="warning">
+                  当前服务未提供代码保存能力，任务不会因为步骤全部通过而被判定为完整成功。
+                </Typography.Text>
+              </Descriptions.Item>
+            )}
+          </>
+        )}
+      </Descriptions>
+      {status.steps.length > 0 && (
+        <Flex gap={4} vertical>
+          <Typography.Text strong>步骤进度</Typography.Text>
+          {status.steps.map((step) => (
+            <Flex align="center" gap="small" key={step.step_id}>
+              <Typography.Text type="secondary" style={{ width: 28 }}>
+                {step.sequence}
+              </Typography.Text>
+              <Typography.Text style={{ minWidth: 180 }}>{step.title}</Typography.Text>
+              <Typography.Text code>{step.status}</Typography.Text>
+              {step.error && <Typography.Text type="danger">{step.error}</Typography.Text>}
+            </Flex>
+          ))}
+        </Flex>
+      )}
+    </Flex>
+  );
+}
+
+/**
  * 任务页面：展示真实任务数据，支持创建、查看详情、取消与删除。
  *
  * 页面不做任何状态推断：状态一律按接口返回值展示，不会把尚未执行的任务显示为成功或失败；
@@ -104,23 +185,86 @@ export function TasksPage() {
   const [selected, setSelected] = useState<Task>();
   const [detailLoading, setDetailLoading] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
+  const [workflow, setWorkflow] = useState<WorkflowStatusResponse>();
+  const [workflowLoading, setWorkflowLoading] = useState(false);
 
   /** 重新拉取当前页真实数据 */
   const reload = useCallback(() => void actionRef.current?.reload(), []);
 
-  const openDetail = useCallback(async (taskID: string) => {
-    setDetailLoading(true);
-    setActionError(undefined);
+  const loadWorkflow = useCallback(async (taskID: string) => {
+    setWorkflowLoading(true);
     try {
-      const { data } = await fetchTask(taskID);
-      setSelected(data);
+      const { data } = await fetchTaskWorkflow(taskID);
+      setWorkflow(data);
     } catch (cause) {
-      setSelected(undefined);
+      // 工作流状态查询失败不影响任务详情展示，但必须如实提示，不伪造进度。
+      setWorkflow(undefined);
       setActionError(describeError(cause));
     } finally {
-      setDetailLoading(false);
+      setWorkflowLoading(false);
     }
   }, []);
+
+  const openDetail = useCallback(
+    async (taskID: string) => {
+      setDetailLoading(true);
+      setActionError(undefined);
+      try {
+        const { data } = await fetchTask(taskID);
+        setSelected(data);
+      } catch (cause) {
+        setSelected(undefined);
+        setActionError(describeError(cause));
+      } finally {
+        setDetailLoading(false);
+      }
+      await loadWorkflow(taskID);
+    },
+    [loadWorkflow],
+  );
+
+  /** 启动任务级工作流：服务端立即返回真实初始状态，进度通过刷新查询 */
+  const handleStartWorkflow = useCallback(
+    async (task: Task) => {
+      setActionError(undefined);
+      try {
+        await startTaskWorkflow(task.id);
+        reload();
+        await loadWorkflow(task.id);
+      } catch (cause) {
+        setActionError(describeError(cause));
+      }
+    },
+    [loadWorkflow, reload],
+  );
+
+  /** 请求取消当前工作流：取消请求先落盘，最终状态由真实收敛结果决定 */
+  const handleCancelWorkflow = useCallback(
+    async (taskID: string) => {
+      setActionError(undefined);
+      try {
+        await cancelTaskWorkflow(taskID);
+        await loadWorkflow(taskID);
+      } catch (cause) {
+        setActionError(describeError(cause));
+      }
+    },
+    [loadWorkflow],
+  );
+
+  /** 恢复已停止的工作流：只从已确认的进度继续 */
+  const handleResumeWorkflow = useCallback(
+    async (taskID: string, runID: string) => {
+      setActionError(undefined);
+      try {
+        await resumeTaskWorkflow(taskID, { run_id: runID });
+        await loadWorkflow(taskID);
+      } catch (cause) {
+        setActionError(describeError(cause));
+      }
+    },
+    [loadWorkflow],
+  );
 
   const handleCancel = useCallback(
     async (task: Task) => {
@@ -194,6 +338,11 @@ export function TasksPage() {
           <Space>
             <LinkButton onClick={() => void openDetail(record.id)} text="详情" />
             <LinkButton
+              disabled={!canStartWorkflow(record)}
+              onClick={() => void handleStartWorkflow(record)}
+              text="执行工作流"
+            />
+            <LinkButton
               disabled={!canCancelTask(record)}
               onClick={() => void handleCancel(record)}
               text="取消"
@@ -215,7 +364,7 @@ export function TasksPage() {
         valueType: "option",
       },
     ],
-    [handleCancel, handleDelete, openDetail],
+    [handleCancel, handleDelete, handleStartWorkflow, openDetail],
   );
 
   /**
@@ -270,6 +419,33 @@ export function TasksPage() {
             <Typography.Text type="secondary">正在加载详情…</Typography.Text>
           ) : (
             <TaskDetail task={selected} />
+          )}
+          <Flex align="center" gap="small">
+            <Typography.Text strong>工作流进度</Typography.Text>
+            <Button onClick={() => void loadWorkflow(selected.id)} size="small" text="刷新" />
+            <Button
+              disabled={!canCancelWorkflow(workflow?.run)}
+              onClick={() => void handleCancelWorkflow(selected.id)}
+              size="small"
+              text="取消工作流"
+            />
+            <Button
+              disabled={!canResumeWorkflow(workflow?.run)}
+              onClick={() => {
+                const runID = workflow?.run?.run_id;
+                if (runID) void handleResumeWorkflow(selected.id, runID);
+              }}
+              size="small"
+              text="恢复工作流"
+              type="primary"
+            />
+          </Flex>
+          {workflowLoading && !workflow ? (
+            <Typography.Text type="secondary">正在加载工作流进度…</Typography.Text>
+          ) : workflow ? (
+            <WorkflowPanel status={workflow} />
+          ) : (
+            <Typography.Text type="secondary">尚未启动工作流</Typography.Text>
           )}
         </Flex>
       )}

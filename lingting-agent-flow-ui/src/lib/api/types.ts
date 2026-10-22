@@ -252,3 +252,95 @@ export type UpdateHostRequest = {
   enabled?: boolean;
   default?: boolean;
 };
+
+/**
+ * 任务级工作流的执行状态。
+ *
+ * 取值与 Go 端 `domain.WorkflowRunStatus` 完全一致，不与 `TaskStatus` 混用：
+ * `TaskStatus` 描述任务的业务阶段，本类型描述"这一次编排执行是否在推进"。
+ * `blocked` 与 `recovery_required` 都不是终态，需要用户显式恢复。
+ */
+export type WorkflowRunStatus =
+  | "pending"
+  | "running"
+  | "blocked"
+  | "cancel_requested"
+  | "cancelled"
+  | "completed"
+  | "failed"
+  | "recovery_required";
+
+/** 工作流当前所处的执行阶段 */
+export type WorkflowStage = "waiting" | "step_execution" | "code_save" | "finalize" | "stopped";
+
+/** 一次工作流执行的对外表示，与 Go 端 `httpapi.WorkflowRunResponse` 一一对应 */
+export type WorkflowRun = {
+  run_id: string;
+  task_id: string;
+  status: WorkflowRunStatus;
+  /** 是否已结束（completed / cancelled / failed） */
+  status_terminal: boolean;
+  /** 是否正在推进 */
+  status_active: boolean;
+  stage: WorkflowStage;
+  current_step_id?: string;
+  current_attempt_id?: string;
+  last_completed_step_id?: string;
+  last_completed_sequence: number;
+  completed_steps: number;
+  total_steps: number;
+  cancel_requested: boolean;
+  error_class?: string;
+  error_summary?: string;
+  /**
+   * 服务端是否具备代码保存能力。
+   *
+   * 为 false 时任务不会因为步骤全部通过验证而被判定为完整成功，页面据此如实提示，
+   * 不把"步骤通过"显示为任务成功。
+   */
+  code_saver_available: boolean;
+  plan_digest: string;
+  started_at?: string;
+  finished_at?: string;
+  updated_at: string;
+  revision: number;
+};
+
+/** 单个步骤的工作流进度，字段全部来自数据库 */
+export type WorkflowStep = {
+  step_id: string;
+  sequence: number;
+  title: string;
+  step_type: string;
+  status: string;
+  result?: string;
+  error?: string;
+  attempt_id?: string;
+  started_at?: string;
+  finished_at?: string;
+};
+
+/** `GET /api/v1/tasks/{taskID}/workflow` 的响应 */
+export type WorkflowStatusResponse = {
+  task_id: string;
+  task_status: TaskStatus;
+  /** 是否存在执行记录；为 false 时 run 缺省 */
+  has_run: boolean;
+  run?: WorkflowRun;
+  steps: WorkflowStep[];
+};
+
+/** 启动工作流的请求体；步骤与顺序完全由服务端计划决定 */
+export type StartWorkflowRequest = {
+  prompt?: string;
+  timeout_seconds?: number;
+  validation_timeout_seconds?: number;
+};
+
+/** 恢复工作流的请求体 */
+export type ResumeWorkflowRequest = {
+  run_id: string;
+  prompt?: string;
+  timeout_seconds?: number;
+  validation_timeout_seconds?: number;
+};

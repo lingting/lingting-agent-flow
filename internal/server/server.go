@@ -82,6 +82,16 @@ type Options struct {
 		store storage.Store,
 		cfg *config.Config,
 	) (*app.CodeInitializeService, error)
+	// TaskWorkflowFactory 在数据库打开后构造任务级工作流编排器。
+	//
+	// 编排器需要单步骤闭环服务（依赖容器能力）与代码保存能力，因此不能在构造
+	// Server 时创建。工厂返回错误时启动失败；返回 nil 表示本次运行不提供工作流
+	// 接口，此时接口返回 503 而不是伪造编排能力。
+	TaskWorkflowFactory func(
+		store storage.Store,
+		cfg *config.Config,
+		steps *app.StepWorkflowService,
+	) (*app.TaskWorkflowService, error)
 	// StepExecutorFactory 在数据库打开后构造单步骤执行协调器。
 	//
 	// 协调器需要容器能力与容器内 Agent 执行能力（SSH、Docker），因此不能在构造
@@ -114,6 +124,12 @@ type Server struct {
 	agentRunnerFactory func(store storage.Store, cfg *config.Config) (*app.AgentRunnerService, error)
 	// stepExecutorFactory 在数据库打开后构造单步骤执行协调器。
 	stepExecutorFactory func(store storage.Store, cfg *config.Config) (*app.StepExecutor, error)
+	// taskWorkflowFactory 在数据库打开后构造任务级工作流编排器。
+	taskWorkflowFactory func(
+		store storage.Store,
+		cfg *config.Config,
+		steps *app.StepWorkflowService,
+	) (*app.TaskWorkflowService, error)
 	// validationFactory 在数据库打开后构造确定性验证引擎。
 	validationFactory func(store storage.Store, cfg *config.Config) (*app.ValidationService, error)
 	// codeInitializeFactory 在数据库打开后构造代码初始化协调器。
@@ -139,6 +155,8 @@ type Server struct {
 	validationEngine *app.ValidationService
 	// stepWorkflow 是单步骤开发—验证闭环协调器，为空时不提供闭环接口。
 	stepWorkflow *app.StepWorkflowService
+	// taskWorkflow 是任务级工作流编排器，为空时不提供工作流接口。
+	taskWorkflow *app.TaskWorkflowService
 	// codeInitialize 是代码初始化协调器，为空时不提供初始化接口。
 	codeInitialize *app.CodeInitializeService
 	requireWeb     bool
@@ -188,6 +206,7 @@ func New(options Options) (*Server, error) {
 		sshFactory:            options.SSHFactory,
 		agentRunnerFactory:    options.AgentRunnerFactory,
 		stepExecutorFactory:   options.StepExecutorFactory,
+		taskWorkflowFactory:   options.TaskWorkflowFactory,
 		validationFactory:     options.ValidationFactory,
 		codeInitializeFactory: options.CodeInitializeFactory,
 		systemInfo:            options.SystemInfo,
@@ -290,6 +309,15 @@ func (s *Server) openDatabase(ctx context.Context) error {
 		}
 		s.stepWorkflow = workflow
 	}
+	if s.taskWorkflowFactory != nil && s.stepWorkflow != nil {
+		// 任务级编排器复用同一份单步骤闭环服务：它不重复实现 Developer 与 Validator，
+		// 也不自行创建 Attempt 与 Session。
+		orchestrator, workflowErr := s.taskWorkflowFactory(store, s.cfg, s.stepWorkflow)
+		if workflowErr != nil {
+			return fmt.Errorf("初始化任务级工作流编排器失败: %w", workflowErr)
+		}
+		s.taskWorkflow = orchestrator
+	}
 	if s.codeInitializeFactory != nil {
 		initializer, initErr := s.codeInitializeFactory(store, s.cfg)
 		if initErr != nil {
@@ -348,9 +376,13 @@ func (s *Server) startServices(ctx context.Context) error {
 		services = append(services, s.validationEngine)
 	}
 	if s.stepWorkflow != nil {
-		// 闭环协调器注册在最后：它依赖步骤执行与验证引擎，停止顺序因此自动反过来，
-		// 先停止新请求入口，再让下层服务收敛在途工作。
+		// 闭环协调器依赖步骤执行与验证引擎，注册顺序因此在下层服务之后。
 		services = append(services, s.stepWorkflow)
+	}
+	if s.taskWorkflow != nil {
+		// 任务级编排器注册在最后：它依赖单步骤闭环，停止顺序因此自动反过来，
+		// 先停止新工作流请求，再让下层服务收敛在途工作。
+		services = append(services, s.taskWorkflow)
 	}
 	if len(services) == 0 {
 		return nil
@@ -470,6 +502,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		StepExecutor:     s.stepExecutor,
 		Validation:       s.validationEngine,
 		StepWorkflow:     s.stepWorkflow,
+		Workflow:         s.taskWorkflow,
 		CodeInitialize:   s.codeInitialize,
 		RequireWebUI:     s.requireWeb,
 		ShutdownTimeout:  s.shutdownTimeout,

@@ -197,6 +197,15 @@ var enumProbes = []enumProbe{
 			 'probe-run', 'needs_rework', '需要返工', 0, '[]', 1)`,
 	},
 	{
+		table:  "workflow_runs",
+		column: "status",
+		value:  "paused_v2",
+		statement: `INSERT INTO workflow_runs
+			(id, task_id, plan_digest, status, stage, created_at, updated_at)
+			VALUES ('probe-workflow-run', 'probe-task', 'digest', 'paused_v2',
+			 'step_execution', 1, 1)`,
+	},
+	{
 		table:  "roles",
 		column: "type",
 		value:  "auditor",
@@ -242,6 +251,12 @@ var requiredConstraints = []requiredConstraint{
 	{"code_fetches", "base_branch IS NULL OR base_branch <> task_branch"},
 	{"code_fetches", "length(commit_sha) IN (40, 64)"},
 	{"code_fetches", "status NOT IN ('succeeded', 'skipped') OR commit_sha IS NOT NULL"},
+	{"workflow_runs", "completed_steps <= total_steps"},
+	{"workflow_runs", "current_attempt_id IS NULL OR current_step_id IS NOT NULL"},
+	{"workflow_runs", "cancel_requested = 0 OR cancel_requested_at IS NOT NULL"},
+	{"workflow_runs", "worker_id IS NULL OR lease_expires_at IS NOT NULL"},
+	{"workflow_runs", "last_completed_sequence >= 0"},
+	{"workflow_runs", "revision >= 0"},
 }
 
 // expectedIndexes 是必须保留的索引名。
@@ -295,6 +310,10 @@ var expectedIndexes = []string{
 	"idx_validation_feedbacks_step",
 	"idx_validation_feedbacks_attempt",
 	"idx_validation_feedbacks_task",
+	"idx_workflow_runs_active_task",
+	"idx_workflow_runs_task",
+	"idx_workflow_runs_status",
+	"idx_workflow_runs_step",
 }
 
 // quoteIdentifier 校验表名并返回可直接拼接的标识符。

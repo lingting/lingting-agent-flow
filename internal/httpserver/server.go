@@ -46,6 +46,8 @@ type Options struct {
 	Validation *app.ValidationService
 	// StepWorkflow 是开发—验证闭环协调器，为空时闭环接口报告服务不可用。
 	StepWorkflow *app.StepWorkflowService
+	// Workflow 是任务级工作流编排器，为空时工作流接口报告服务不可用。
+	Workflow *app.TaskWorkflowService
 	// CodeInitialize 是代码初始化协调器，为空时初始化接口报告服务不可用。
 	CodeInitialize *app.CodeInitializeService
 	// Files 是前端静态资源文件系统，为空时使用嵌入资源。
@@ -94,6 +96,7 @@ func New(options Options) (*Server, error) {
 		StepExecutor:     options.StepExecutor,
 		Validation:       options.Validation,
 		StepWorkflow:     options.StepWorkflow,
+		Workflow:         options.Workflow,
 		CodeInitialize:   options.CodeInitialize,
 		Logger:           logger,
 	})

@@ -34,6 +34,8 @@ type Deps struct {
 	Validation *app.ValidationService
 	// StepWorkflow 是单步骤开发—验证闭环协调器，为空时闭环接口返回服务不可用。
 	StepWorkflow *app.StepWorkflowService
+	// Workflow 是任务级工作流编排器，为空时工作流接口返回服务不可用。
+	Workflow *app.TaskWorkflowService
 	// CodeInitialize 是代码初始化协调器，为空时初始化接口返回服务不可用。
 	CodeInitialize *app.CodeInitializeService
 	// Logger 是日志器，为空时使用 slog.Default。
@@ -56,6 +58,7 @@ func NewHandler(deps Deps) http.Handler {
 		hosts:      newHostHandler(deps.Hosts, logger),
 		executions: newExecutionHandler(deps.ExecutionRecords, logger),
 		stepExec:   newStepExecutionHandler(deps.StepExecutor, deps.StepWorkflow, logger),
+		workflow:   deps.Workflow,
 		validation: newValidationHandler(deps.Validation, logger),
 		codeInit:   newCodeInitializeHandler(deps.CodeInitialize, logger),
 		logger:     logger,
@@ -81,6 +84,7 @@ type router struct {
 	hosts      *hostHandler
 	executions *executionHandler
 	stepExec   *stepExecutionHandler
+	workflow   *app.TaskWorkflowService
 	validation *validationHandler
 	codeInit   *codeInitializeHandler
 	logger     *slog.Logger
@@ -132,6 +136,12 @@ func (rt *router) tasksHandler(w http.ResponseWriter, r *http.Request) {
 		rt.stepExec.serve(w, r, taskID, stepID)
 		return
 	}
+	// 任务级工作流的动作路径与状态查询同样挂在单任务路径之下，必须先于任务处理器判定，
+	// 否则它们会被当作未知子路径返回 404。
+	if isWorkflowPath(r.URL.Path) {
+		rt.serveWorkflow(w, r)
+		return
+	}
 	// 顺序执行挂在单任务路径之下，同样是写操作，必须先于只读查询与任务处理器判定。
 	if taskID, ok := parseExecuteStepsPath(r.URL.Path); ok {
 		rt.stepExec.serveSteps(w, r, taskID)
@@ -166,6 +176,19 @@ func (rt *router) tasksHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rt.tasks.serve(w, r)
+}
+
+// isWorkflowPath 判断路径是否指向任务级工作流接口。
+//
+// 判定按路径段形状进行：只有 {taskID}/{execute-workflow|cancel-workflow|
+// resume-workflow|workflow} 属于工作流接口，其余形状仍由任务处理器处理。
+func isWorkflowPath(path string) bool {
+	if matchActionPath(path, executeWorkflowSegment) ||
+		matchActionPath(path, cancelWorkflowSegment) ||
+		matchActionPath(path, resumeWorkflowSegment) {
+		return true
+	}
+	return matchStatusPath(path)
 }
 
 // isExecutionRecordPath 判断路径是否指向任务下的执行记录资源。

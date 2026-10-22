@@ -398,7 +398,92 @@ HTTP Handler（POST /api/v1/tasks/{taskID}/steps/{stepID}/execute-and-validate�
 - 闭环只覆盖单个 Step：不生成计划、不串联多个步骤、不自动重试、不自动修复代码。
 - 同一 Step 同一时刻只允许一条闭环：进程内以步骤为键拒绝重复请求，跨进程由步骤占用的事务
   条件更新拒绝。
-- 不实现任务级调度队列与多任务并发编排；下一步才是按计划推进多个 Step 并在验证失败时停下。
+- 任务级串联由"任务级工作流编排"负责，见下一节。
+
+## 任务级工作流编排边界
+
+编排器是"单步骤闭环"之上的一层薄协调：它决定**执行哪一个 Step、按什么顺序、何时停止**，
+但不重新实现任何下层能力。
+
+```text
+HTTP Handler（POST /api/v1/tasks/{taskID}/execute-workflow → 202 + 真实初始状态）
+  └── app.TaskWorkflowService.StartWorkflow
+        ├── domain.CheckWorkflowStart（任务状态 / 容器 / 计划 / 序号 / 必需检查 / 现场明确）
+        ├── 容器核验（受管理、未 detached、运行中）+ 执行节点预检（EnsureHostUsableForRemoteTask）
+        ├── domain.NewWorkflowRun（plan_digest + total_steps）→ workflow_runs 落盘（pending）
+        ├── beginRunRecord（pending → running，版本号条件写入）
+        └── 后台推进（受 internal/lifecycle 管理）
+              └── 循环：
+                    ├── domain.NextStepToExecute（稳定顺序 + 前置步骤校验 + 现场明确）
+                    ├── SetStage(step_execution, current_step_id) → 落盘
+                    ├── app.StepWorkflowService.ExecuteAndValidate（复用闭环）
+                    ├── 验证通过 → RecordStepCompleted（游标前进）→ 落盘
+                    └── 其它结论 → 停止推进（blocked / recovery_required）
+              └── 全部步骤完成 → finalize
+                    ├── app.ContainerService.SaveCode（复用 CodeSaver）
+                    ├── 会话归档核验
+                    └── domain.DecideWorkflowCloseout → 任务状态机 + workflow_runs 终态
+```
+
+### 状态分层
+
+| 层次 | 取值来源 | 说明 |
+|---|---|---|
+| 任务业务状态 | `tasks.status` | 任务当前处在哪个业务阶段 |
+| 工作流执行状态 | `workflow_runs.status` | 这一次编排执行是否在推进 |
+| 执行阶段 | `workflow_runs.stage` | 中断发生在哪一步（定位用，不参与成功判定） |
+| 执行游标 | `current_step_id` / `current_attempt_id` / `last_completed_step_id` / `last_completed_sequence` | 恢复的唯一依据 |
+| 执行权 | `worker_id` + `lease_expires_at` | 识别"进程已退出但记录仍在 running" |
+| 并发版本 | `workflow_runs.revision` | 迟到结果不得覆盖已确认终态 |
+
+`workflow_runs.status` 与 `tasks.status` 是不同层次的概念，**不得合并为同一个字段**，也不得用
+工作流状态推断任务业务状态。
+
+### 停止分类
+
+| 触发条件 | 工作流状态 | `error_class` |
+|---|---|---|
+| 开发阶段失败 | `blocked` | `developer_failed` |
+| 开发阶段超时 / 中断 | `recovery_required` | `developer_interrupted` |
+| 闭环协调器拒绝执行 | `blocked` | `step_not_executed` |
+| 验证未通过 | `blocked` | `verification_failed` |
+| 执行记录或验证证据未可靠写入 | `recovery_required` | `verification_unconfirmed` |
+| 存在 `recovery_required` / 被占用步骤 | `blocked` | `step_not_executable` |
+| 代码保存未成功 | `blocked` | `code_save_failed` |
+| 代码保存结果不确定 | `recovery_required` | `code_save_indeterminate` |
+| 本次运行无代码保存能力 | `blocked` | `code_saver_unavailable` |
+| 会话归档未完成 | `recovery_required` | `session_not_persisted` |
+| 服务重启发现残留 | `blocked` | `worker_interrupted` / `not_started` |
+
+规则只在 `domain.DecideWorkflowCloseout` 与编排器的停止分类中定义一次，不得在 Handler 或前端复制。
+
+### 恢复与取消
+
+- **恢复**：`plan_digest` 必须与当前计划一致；已完成的步骤不会重新执行；`recovery_required` 与
+  仍被占用的步骤必须先人工处理。恢复只从数据库已确认的进度继续。
+- **服务重启**：`running` 记录在租约过期后收敛为 `blocked`；租约仍有效时不得抢占；
+  `cancel_requested` 收敛为 `cancelled`；`pending` 记录在租约窗口后收敛为 `blocked`；
+  `blocked` 与 `recovery_required` 保持原状等待用户显式恢复。启动恢复**不重放 Pi 调用**。
+- **取消**：请求先写入 `cancel_requested`，再向在途执行传播取消信号，最终状态由真实收敛结果
+  决定；重复取消幂等。不得因 HTTP 请求成功就把仍在执行的工作流标记为已取消。
+
+### 与 CodeSaver 的关系
+
+CodeSaver 已真实实现（`internal/codesaver` + `app.ContainerService.SaveCode`），编排器通过
+`WorkflowCodeSaverPort` 调用它，不构造任何 Git 命令。判定门槛固定：
+
+- 只有任务分支**推送成功**才算"已安全保存到远程"；
+- `merge_after_push` 默认关闭，开启时合并成功才算完成；
+- 结果不确定时先核验远程分支，工作流进入 `recovery_required`。
+
+CodeSaver 缺失时编排器仍会按顺序执行并验证全部步骤，但收尾停留在 `blocked`
+（`code_saver_unavailable`），任务不会被标记为 `completed`：**步骤全部通过验证不等于任务成功**。
+
+### 当前能力边界
+
+- 只执行已经持久化并通过校验的计划：不生成计划、不补充步骤、不改变顺序。
+- 不自动重试、不自动修复代码、不自动删除容器；失败后等待用户显式决定。
+- 不实现多任务并发调度队列：`agentflow server` 中同一任务串行、不同任务之间相互独立。
 
 ## SSH 边界
 

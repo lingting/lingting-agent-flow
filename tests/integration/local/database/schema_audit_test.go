@@ -36,6 +36,7 @@ var businessTables = []string{
 	"validation_feedbacks",
 	"validation_runs",
 	"verification_results",
+	"workflow_runs",
 }
 
 // testContext 返回带超时的测试上下文。

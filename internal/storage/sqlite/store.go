@@ -29,6 +29,8 @@ type dbStore struct {
 	stepExecutionStore
 	// validationFeedbackStore 提供验证失败反馈的追加与查询。
 	validationFeedbackStore
+	// workflowRunStore 提供任务级工作流执行记录的追加与推进。
+	workflowRunStore
 }
 
 // txStore 把事务上的各实体仓储组合成 storage.Tx。
@@ -50,6 +52,8 @@ type txStore struct {
 	stepExecutionStore
 	// validationFeedbackStore 提供验证失败反馈的追加与查询。
 	validationFeedbackStore
+	// workflowRunStore 提供任务级工作流执行记录的追加与推进。
+	workflowRunStore
 }
 
 // newDBStore 构造连接池仓储。
@@ -72,6 +76,7 @@ func newDBStore(db *sql.DB) *dbStore {
 		codeFetchStore:          codeFetchStore{q: pool},
 		stepExecutionStore:      stepExecutionStore{q: pool},
 		validationFeedbackStore: validationFeedbackStore{q: pool},
+		workflowRunStore:        workflowRunStore{q: pool},
 	}
 }
 
@@ -94,6 +99,7 @@ func newTxStore(tx *sql.Tx) *txStore {
 		codeFetchStore:          codeFetchStore{q: tx},
 		stepExecutionStore:      stepExecutionStore{q: tx},
 		validationFeedbackStore: validationFeedbackStore{q: tx},
+		workflowRunStore:        workflowRunStore{q: tx},
 	}
 }
 

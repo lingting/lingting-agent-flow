@@ -618,6 +618,8 @@ type Tx interface {
 	CodeFetchStore
 	// StepExecutionStore 提供单步骤执行的原子占用，与其余实体共享同一事务边界。
 	StepExecutionStore
+	// WorkflowRunStore 提供任务级工作流执行记录的追加与推进。
+	WorkflowRunStore
 }
 
 // Store 是持久化的统一入口。

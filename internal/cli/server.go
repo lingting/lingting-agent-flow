@@ -153,6 +153,33 @@ func runServer(cmd *cobra.Command, a *app.App, configPath, address string, requi
 				Logger:     a.Logger().Slog(),
 			})
 		},
+		TaskWorkflowFactory: func(
+			store storage.Store,
+			cfg *config.Config,
+			steps *app.StepWorkflowService,
+		) (*app.TaskWorkflowService, error) {
+			sshService, sshErr := app.NewSSHService(store, a.Logger(), sshOptionsFrom(cfg))
+			if sshErr != nil {
+				return nil, sshErr
+			}
+			containers, containersErr := app.NewContainerService(app.DockerServiceOptions{
+				SSH:    sshService,
+				Store:  store,
+				Logger: a.Logger(),
+			})
+			if containersErr != nil {
+				return nil, containersErr
+			}
+			return app.NewTaskWorkflowService(app.TaskWorkflowOptions{
+				Store: store,
+				Steps: steps,
+				// 容器只被核验与使用：编排器不创建、启动、删除或接管容器。
+				Containers: containers,
+				// 代码保存复用已有实现：编排器不构造 Git 命令。
+				CodeSaver: containers,
+				Logger:    a.Logger().Slog(),
+			})
+		},
 		SystemInfo:   a.SystemInfo,
 		RequireWebUI: requireWebUI,
 		Logger:       a.Logger().Slog(),

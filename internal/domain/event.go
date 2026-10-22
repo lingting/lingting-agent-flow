@@ -39,6 +39,19 @@ const (
 	EventTypeVerificationSkipped  EventType = "verification.skipped"
 	EventTypeCodeSaved            EventType = "code.saved"
 	EventTypeAttemptInterrupted   EventType = "attempt.interrupted"
+	// 任务级工作流编排事件。
+	//
+	// 编排器只追加事件，不通过事件推进状态：事件用于事后定位"停在哪一步、为什么停"，
+	// 状态本身仍以 workflow_runs 与 tasks 的持久化字段为准。
+	EventTypeWorkflowStarted    EventType = "workflow.started"
+	EventTypeWorkflowResumed    EventType = "workflow.resumed"
+	EventTypeWorkflowStepPassed EventType = "workflow.step_passed"
+	EventTypeWorkflowBlocked    EventType = "workflow.blocked"
+	EventTypeWorkflowCanceled   EventType = "workflow.cancel_requested"
+	EventTypeWorkflowCompleted  EventType = "workflow.completed"
+	EventTypeWorkflowFailed     EventType = "workflow.failed"
+	EventTypeWorkflowRecovery   EventType = "workflow.recovery_required"
+	EventTypeWorkflowCodeSaved  EventType = "workflow.code_saved"
 )
 
 // knownEventTypes 是当前受支持的事件类型集合。
@@ -69,6 +82,15 @@ var knownEventTypes = []EventType{
 	EventTypeVerificationSkipped,
 	EventTypeCodeSaved,
 	EventTypeAttemptInterrupted,
+	EventTypeWorkflowStarted,
+	EventTypeWorkflowResumed,
+	EventTypeWorkflowStepPassed,
+	EventTypeWorkflowBlocked,
+	EventTypeWorkflowCanceled,
+	EventTypeWorkflowCompleted,
+	EventTypeWorkflowFailed,
+	EventTypeWorkflowRecovery,
+	EventTypeWorkflowCodeSaved,
 }
 
 // Validate 校验事件类型是否受支持。

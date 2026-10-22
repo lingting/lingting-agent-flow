@@ -9,6 +9,10 @@ import type { ApiErrorBody, ApiErrorResponse } from "./client";
 import type {
   CreateHostRequest,
   CreateTaskRequest,
+  ResumeWorkflowRequest,
+  StartWorkflowRequest,
+  WorkflowRun,
+  WorkflowStatusResponse,
   HealthResponse,
   Host,
   HostListResponse,
@@ -53,6 +57,72 @@ export function taskPath(taskID: string): string {
 /** 取消任务的路径 */
 export function taskCancelPath(taskID: string): string {
   return `${taskPath(taskID)}/cancel`;
+}
+
+/** 任务工作流状态查询路径 */
+export function taskWorkflowPath(taskID: string): string {
+  return `${taskPath(taskID)}/workflow`;
+}
+
+/** 启动任务级工作流的路径 */
+export function taskExecuteWorkflowPath(taskID: string): string {
+  return `${taskPath(taskID)}/execute-workflow`;
+}
+
+/** 取消任务级工作流的路径 */
+export function taskCancelWorkflowPath(taskID: string): string {
+  return `${taskPath(taskID)}/cancel-workflow`;
+}
+
+/** 恢复任务级工作流的路径 */
+export function taskResumeWorkflowPath(taskID: string): string {
+  return `${taskPath(taskID)}/resume-workflow`;
+}
+
+/** 查询任务当前的工作流进度；任务从未启动过工作流时 has_run 为 false */
+export function fetchTaskWorkflow(taskID: string, options: ApiRequestOptions = {}) {
+  return apiRequest<WorkflowStatusResponse>(taskWorkflowPath(taskID), options);
+}
+
+/**
+ * 启动任务级工作流。
+ *
+ * 服务端立即返回 202 与执行记录的真实初始状态，编排在后台推进；调用方通过
+ * `fetchTaskWorkflow` 轮询进度，不能把 202 当作"任务已完成"。
+ */
+export function startTaskWorkflow(
+  taskID: string,
+  body: StartWorkflowRequest = {},
+  options: ApiRequestOptions = {},
+) {
+  return apiRequest<WorkflowRun>(taskExecuteWorkflowPath(taskID), {
+    ...options,
+    body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json", ...options.headers },
+    method: "POST",
+  });
+}
+
+/** 请求取消任务级工作流；返回取消请求落盘后的真实状态 */
+export function cancelTaskWorkflow(taskID: string, options: ApiRequestOptions = {}) {
+  return apiRequest<WorkflowRun>(taskCancelWorkflowPath(taskID), {
+    ...options,
+    method: "POST",
+  });
+}
+
+/** 恢复已停止的任务级工作流 */
+export function resumeTaskWorkflow(
+  taskID: string,
+  body: ResumeWorkflowRequest,
+  options: ApiRequestOptions = {},
+) {
+  return apiRequest<WorkflowRun>(taskResumeWorkflowPath(taskID), {
+    ...options,
+    body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json", ...options.headers },
+    method: "POST",
+  });
 }
 
 /** 把查询参数拼接到任务列表路径上，空值不参与拼接 */

@@ -496,6 +496,57 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
 - 本阶段不实现 Planner 自动生成计划、自动修复重试循环与多任务并发调度；相关能力缺失时
   必须返回明确错误，不得伪装成已可用。
 
+### 任务级工作流编排约束
+
+- 编排入口固定为 `app.TaskWorkflowService`（`internal/app/task_workflow*.go`）：HTTP Handler、
+  CLI 与前端都不得自行串联多个步骤、自行判断"下一步该执行谁"，也不得跳过未完成的步骤。
+- 工作流只能执行已经持久化且经过校验的计划：`domain.CheckWorkflowStart` 是唯一启动校验入口，
+  计划缺失、序号重复、存在非开发步骤、缺少必需检查、全部步骤已完成或存在 `recovery_required` /
+  `running` / `developing` / `verifying` 的步骤时一律拒绝启动。
+- 每个开发步骤必须复用 `app.StepWorkflowService.ExecuteAndValidate`：编排器不得自行创建 Attempt、
+  不得自行拼接 Pi 命令、不得自行执行检查命令或计算验证结论。
+- 只有当前步骤验证通过（`Verified && StepStatus == completed`）才允许推进下一步；其余结论一律
+  停止自动推进，不自动重试、不自动修复代码、不自动删除容器。
+- 失败停止的分类固定：开发失败 → `blocked` / `developer_failed`；开发超时或中断 →
+  `recovery_required` / `developer_interrupted`；验证未通过 → `blocked` / `verification_failed`；
+  执行记录或验证证据未可靠写入 → `recovery_required` / `verification_unconfirmed`。
+- 编排进度只持久化在 `workflow_runs`（迁移 `0018_workflow_runs.sql`）：任务状态表达业务阶段，
+  工作流执行状态表达"这一次编排是否在推进"，两者不得合并为同一个字段。
+- 同一任务同一时刻最多一条未结束的执行记录：唯一性由 `idx_workflow_runs_active_task` 部分唯一
+  索引保证，进程内以任务为键串行化只是第一道防线，不是一致性保证。
+- 状态写入必须以版本号为前置条件（`UpdateWorkflowRun` 的 `revision` 条件）：迟到的结果不得覆盖
+  已确认的终态，冲突时读取数据库真实值而不是用本地对象覆盖。
+- 有副作用的阶段之前必须先持久化状态与游标：启动先写 `running`，每个步骤先写 `step_execution`
+  与 `current_step_id`，代码保存先写 `code_save`。阶段写入失败时不得执行远程操作。
+- 恢复必须核验现场：`plan_digest` 与当前计划不一致时拒绝沿用旧游标；已完成的步骤不会被重新
+  执行；`recovery_required` 与仍被占用的步骤必须先人工处理，禁止在未知现场上重放 Pi 调用。
+- 服务重启后的处理严格依据数据库事实：`running` 记录在租约过期后收敛为 `blocked`
+  （`worker_interrupted`），租约仍有效时不得抢占；`cancel_requested` 收敛为 `cancelled`；
+  `pending` 记录在租约窗口后收敛为 `blocked`；`blocked` 与 `recovery_required` 保持原状等待
+  用户显式恢复。启动恢复不得重放 Pi 调用。
+- 取消必须先落盘再传播：请求写入 `cancel_requested`，随后向在途执行传播取消信号，最终状态由
+  真实收敛结果决定；重复取消幂等，不改写 `cancel_requested_at`。不得因 HTTP 请求成功就把仍在
+  执行的工作流标记为已取消。
+- 任务收尾结论只能由 `domain.DecideWorkflowCloseout` 依据真实证据计算：步骤全部通过验证不等于
+  任务成功，代码保存与会话归档同样是必需条件。
+- CodeSaver 缺失（`TaskWorkflowOptions.CodeSaver` 为空）时，编排器仍按顺序执行并验证全部步骤，
+  但收尾必须停留在 `blocked` 并给出 `code_saver_unavailable`，不得把"步骤全部通过验证"当作
+  任务完整成功，也不得把任务标记为 `completed`。
+- 编排器不创建、启动、删除或接管容器，也不构造 Docker / Git 命令：容器只被核验与使用，代码
+  保存复用 `app.ContainerService.SaveCode`。
+- 启动与恢复前必须核验容器受管理且运行中、执行节点通过环境预检（复用
+  `app.EnsureHostUsableForRemoteTask`）；不满足时返回前置条件错误，不得绕过 SSHConfig 校验。
+- 编排器作为 `agentflow server` 的后台服务注册进 `internal/lifecycle`，注册顺序在步骤闭环之后，
+  停止顺序因此反过来：先停止新工作流请求，再让下层服务收敛在途工作。不得创建不受 Server 管理
+  的长期 goroutine。
+- 接口固定为 `POST /api/v1/tasks/{taskID}/execute-workflow`（202 + 真实初始状态）、
+  `GET /api/v1/tasks/{taskID}/workflow`、`POST /api/v1/tasks/{taskID}/cancel-workflow` 与
+  `POST /api/v1/tasks/{taskID}/resume-workflow`；只接受执行参数，不接受步骤列表、顺序覆盖、
+  Session 路径、工作目录或角色覆盖。错误映射：参数错误 400、目标不存在或归属不符 404、
+  状态冲突 409、前置条件缺失 412、服务已停止 503。
+- 本阶段不实现 Planner 自动生成计划、自动修复重试循环与多任务并发调度；相关能力缺失时必须
+  返回明确错误，不得伪装成已可用。
+
 ### 任务管理 API 约束
 
 - 任务状态只能由业务层状态机修改：`internal/domain` 的 `Transition`、`RequestCancel`、

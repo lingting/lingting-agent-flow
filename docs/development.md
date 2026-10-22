@@ -151,6 +151,26 @@ make build VERSION=0.1.0
 6. Timer/协程不得脱离 `lifecycle` 管理：执行协调器实现了 `Name/Start/Stop`，Server 关闭时
    会取消在途执行并等待收敛。
 
+### 修改任务级工作流编排时
+
+编排器只协调已有能力，改动时按下列清单自查：
+
+1. 启动校验只在 `domain.CheckWorkflowStart` 修改：任务状态、容器、计划序号、必需检查与现场
+   明确性都集中在那里；不得在 `app` 或 `httpapi` 复制第二份判断。
+2. 步骤执行必须继续复用 `app.StepWorkflowService.ExecuteAndValidate`：不要为了"少一层"在
+   编排器里直接创建 Attempt 或拼接 Pi 命令。
+3. 进度写入必须保持"先落盘、再执行有副作用的操作"：新增阶段同样要先写 `workflow_runs`，
+   再调用容器、Pi 或 Git。
+4. 新增工作流状态时同步更新 `workflowRunStatusMachine` 的合法迁移、`IsTerminal` / `CanStart`
+   与 HTTP 响应中的 `status_terminal` / `status_active`，避免同一状态在不同层表达不一致。
+5. 收尾结论只在 `domain.DecideWorkflowCloseout` 修改；不得因为"步骤都通过了"就跳过代码保存
+   与会话归档判定。
+6. 恢复逻辑必须继续依据数据库事实：新增恢复路径同样不得重放 Pi 调用，也不得抢占有效租约。
+7. 编排器实现了 `Name/Start/Stop` 并注册进 `internal/lifecycle`：新增后台协程必须挂在它下面，
+   Server 关闭时会先停止新请求，再等待在途工作收敛。
+8. 新增接口路径必须落在 `/api/v1/tasks/{taskID}/` 之下，并在 `router.go` 的 `isWorkflowPath`
+   中登记；否则会被任务处理器当作未知子路径返回 404。
+
 ## 新增角色类型或状态
 
 - 新增角色类型：在 `internal/domain/role.go` 增加 `RoleType` 常量与 `Validate` 分支，并在 `internal/config/config.go` 补充对应的工具策略模式映射与示例配置。
