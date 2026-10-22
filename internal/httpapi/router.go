@@ -38,6 +38,8 @@ type Deps struct {
 	Workflow *app.TaskWorkflowService
 	// CodeInitialize 是代码初始化协调器，为空时初始化接口返回服务不可用。
 	CodeInitialize *app.CodeInitializeService
+	// TaskLaunch 是统一任务启动服务，为空时启动接口返回服务不可用。
+	TaskLaunch *app.TaskLaunchService
 	// Logger 是日志器，为空时使用 slog.Default。
 	Logger *slog.Logger
 }
@@ -61,6 +63,7 @@ func NewHandler(deps Deps) http.Handler {
 		workflow:   deps.Workflow,
 		validation: newValidationHandler(deps.Validation, logger),
 		codeInit:   newCodeInitializeHandler(deps.CodeInitialize, logger),
+		taskLaunch: deps.TaskLaunch,
 		logger:     logger,
 	}
 	mux := http.NewServeMux()
@@ -87,6 +90,7 @@ type router struct {
 	workflow   *app.TaskWorkflowService
 	validation *validationHandler
 	codeInit   *codeInitializeHandler
+	taskLaunch *app.TaskLaunchService
 	logger     *slog.Logger
 }
 
@@ -94,6 +98,12 @@ type router struct {
 //
 // 任务服务未初始化时返回 503，而不是让请求落到 404 或前端页面上。
 func (rt *router) tasksHandler(w http.ResponseWriter, r *http.Request) {
+	// 统一任务启动先于任务服务的可用性判定：它有自己的服务依赖，任务管理服务
+	// 未初始化不应让启动接口返回"任务服务未初始化"这类误导性错误。
+	if isTaskLaunchPath(r.URL.Path) {
+		rt.serveTaskLaunch(w, r)
+		return
+	}
 	if rt.tasks == nil || rt.tasks.tasks == nil {
 		writeError(
 			w,
@@ -139,6 +149,7 @@ func (rt *router) tasksHandler(w http.ResponseWriter, r *http.Request) {
 	// 任务级工作流的动作路径与状态查询同样挂在单任务路径之下，必须先于任务处理器判定，
 	// 否则它们会被当作未知子路径返回 404。
 	// 计划生成与工作流动作同样挂在单任务路径之下，必须先于任务处理器判定。
+
 	if matchActionPath(r.URL.Path, planSegment) {
 		rt.servePlan(w, r)
 		return

@@ -96,6 +96,8 @@ type ExecutionEnvironmentTaskStore interface {
 		task domain.Task,
 		expected []domain.TaskStatus,
 	) error
+	// AppendEvent 追加任务事件，用于记录需要人工处置的现场。
+	AppendEvent(ctx context.Context, event domain.Event) (domain.Event, error)
 }
 
 // ExecutionEnvironmentOptions 是构造执行环境服务的输入。
@@ -258,6 +260,17 @@ func (p taskStorePort) UpdateTaskIfStatus(
 	expected []domain.TaskStatus,
 ) error {
 	return p.store.UpdateTaskIfStatus(ctx, task, expected)
+}
+
+// AppendEvent 追加任务事件。
+//
+// 执行环境只用它记录"容器已创建但未能写回任务"这类需要人工处置的现场，
+// 不通过事件推进任何状态。
+func (p taskStorePort) AppendEvent(
+	ctx context.Context,
+	event domain.Event,
+) (domain.Event, error) {
+	return p.store.AppendEvent(ctx, event)
 }
 
 // 编译期确认适配器满足执行环境契约。

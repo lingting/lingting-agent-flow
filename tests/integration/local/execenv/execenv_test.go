@@ -421,8 +421,12 @@ type fakeTaskStore struct {
 	attempt domain.Attempt
 	// updateErr 使任务写入失败。
 	updateErr error
+	// appendErr 使事件写入失败。
+	appendErr error
 	// updated 记录写入的任务。
 	updated []domain.Task
+	// events 记录写入的事件。
+	events []domain.Event
 }
 
 // GetTask 返回当前任务记录。
@@ -464,6 +468,23 @@ func (f *fakeTaskStore) UpdateTaskIfStatus(
 	f.task = task
 	f.updated = append(f.updated, task)
 	return nil
+}
+
+// AppendEvent 记录写入的事件。
+//
+// 执行环境用它记录"容器已创建但未写回任务"的现场，因此替身必须能收到该事件，
+// 使"是否留下可追溯记录"可以直接断言。
+func (f *fakeTaskStore) AppendEvent(
+	ctx context.Context,
+	event domain.Event,
+) (domain.Event, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.appendErr != nil {
+		return domain.Event{}, f.appendErr
+	}
+	f.events = append(f.events, event)
+	return event, nil
 }
 
 // prepareSpec 返回一个合法的准备请求。

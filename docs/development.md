@@ -104,14 +104,28 @@ make build VERSION=0.1.0
 任务执行命令（需要先启动 `agentflow server`）：
 
 ```bash
+# 推荐：一个入口完成「准备容器 → 生成计划 → 启动编排」
+./bin/agentflow task start <task-id>
+./bin/agentflow task start <task-id> --prompt "优先保证兼容性" --timeout 30m --wait=false
+
+# 分步排查时使用底层动作：
 # 1. 依据任务记录准备执行环境（容器 + 容器内代码工作区）
 ./bin/agentflow execenv prepare-task <task-id>
 
-# 2. 通过本地服务启动一次任务级工作流执行，并轮询真实进度
+# 2. 在容器内生成并持久化计划
+./bin/agentflow task plan <task-id>
+
+# 3. 通过本地服务启动一次任务级工作流执行，并轮询真实进度
 ./bin/agentflow task run <task-id>
 ./bin/agentflow task run <task-id> --address 127.0.0.1:26380 --timeout 30m --verify-timeout 10m
 ./bin/agentflow task run <task-id> --wait=false   # 只发起请求，立即返回初始状态
 ```
+
+`task start <task-id>` 调用 `POST /api/v1/tasks/{taskID}/start`，由服务端依据数据库事实决定
+从哪个阶段继续：已有受管理且运行中的容器时不会创建第二个容器，计划已持久化时不会重新生成。
+响应显式区分 `stage`、`task_status`、`container_prepared`、`plan_persisted` 与
+`workflow_started`，任一为 false 都不得当作任务已开始执行。它同样只是 HTTP 客户端，
+不装配 SSH、容器、Pi 或代码保存能力。
 
 `task plan <task-id>` 调用 `POST /api/v1/tasks/{taskID}/plan`，由服务在任务容器内调用
 Planner 并把输出校验为结构化计划后一次写入数据库；计划固定以 `plan` 阶段步骤开头，其后是
@@ -200,6 +214,28 @@ Planner 并把输出校验为结构化计划后一次写入数据库；计划固
     `app.TaskWorkflowService.GeneratePlan`（`POST /api/v1/tasks/{taskID}/plan`），计划固定以
     `plan` 阶段步骤开头、其后是 `develop` 步骤；新增计划来源也必须产出同样的结构。
 
+### 修改统一任务启动流程时
+
+启动入口只串联既有能力，改动时按下列清单自查：
+
+1. 阶段判定只在 `domain.DecideTaskLaunchNext` / `CheckTaskLaunchStart` 修改：要不要建容器、
+   要不要生成计划都集中在那里；不得在 `app`、`httpapi` 或 CLI 复制第二份判断。
+2. 三个有副作用的阶段必须继续复用 `PrepareForTask`、`GeneratePlan` 与 `StartWorkflow`：
+   不要在启动服务里直接创建容器、创建 Attempt 或拼接 Pi / Docker / Git 命令。
+3. 容器可用性必须来自真实核验，不得凭 `tasks.container_id` 推断；核验失败按前置条件缺失
+   返回 412，不得据此创建新容器。
+4. 已有受管理且运行中的容器时不得创建第二个容器：重复准备只会留下无法被任何链路使用的
+   孤儿容器，而孤儿容器不应被自动删除。
+5. 任一阶段失败必须立即停止并保留真实 `FailureStage`（下层给出的更具体阶段优先），不得
+   自动重试、不得删除容器、不得重放外部操作。
+6. 步骤占用恢复只在 `domain.DecideStepOccupancyRecovery` 修改，且必须保持「不重放 Agent、
+   不删除容器、所属任务仍有未结束执行时不抢占、写入带状态前置条件」。
+7. 启动服务实现 `Name/Start/Stop` 并注册进 `internal/lifecycle`，注册顺序在任务级编排器之后；
+   新增后台协程必须挂在它下面，Server 关闭时先停止新启动请求。
+8. 新增路径必须落在 `/api/v1/tasks/{taskID}/` 之下，并在 `router.go` 中先于任务处理器判定，
+   否则会被当作未知子路径返回 404；`isTaskLaunchPath` 的判定必须早于任务服务可用性检查。
+9. 不要在 CLI 里重新装配执行栈：`agentflow task start` 只是 HTTP 客户端，新增执行参数只能
+   通过 `POST .../start` 的请求体表达。
 ## 新增角色类型或状态
 
 - 新增角色类型：在 `internal/domain/role.go` 增加 `RoleType` 常量与 `Validate` 分支，并在 `internal/config/config.go` 补充对应的工具策略模式映射与示例配置。

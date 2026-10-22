@@ -212,6 +212,12 @@ type StepStore interface {
 	ListStepsByTask(ctx context.Context, taskID domain.ID) ([]domain.Step, error)
 	// ListStepPage 按序号稳定排序分页返回任务的步骤，并给出总数。
 	ListStepPage(ctx context.Context, filter StepFilter) (StepPage, error)
+	// ListTasksWithOccupiedSteps 返回存在执行占用步骤的任务标识。
+	//
+	// 占用指 running / developing / verifying：这些状态表示"曾经有一次执行拿到了
+	// 占用"。进程在 Agent 调用期间退出时，占用会永久留在数据库里并阻止该步骤再次
+	// 执行，因此启动恢复需要先找到这些任务。查询只读，不修改任何记录。
+	ListTasksWithOccupiedSteps(ctx context.Context) ([]domain.ID, error)
 }
 
 // StepFilter 约束步骤查询条件，零值表示不限制。

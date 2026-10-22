@@ -32,6 +32,7 @@ func newTaskCommand(a *app.App) *cobra.Command {
 		"配置文件路径（默认 "+config.DefaultPath+"）",
 	)
 	command.AddCommand(newTaskCreateCommand(a))
+	command.AddCommand(newTaskStartCommand(a))
 	command.AddCommand(newTaskPlanCommand(a))
 	command.AddCommand(newTaskRunCommand(a))
 	command.AddCommand(newTaskGetCommand(a))
@@ -342,6 +343,91 @@ func newTaskRunCommand(a *app.App) *cobra.Command {
 	command.Flags().StringVar(&timeout, "timeout", "", "单个步骤开发阶段的超时时间，例如 30m")
 	command.Flags().StringVar(&verifyTimeout, "verify-timeout", "", "单个步骤验证阶段的超时时间，例如 10m")
 	command.Flags().BoolVar(&wait, "wait", true, "轮询真实进度直到执行收敛")
+	command.Flags().DurationVar(&interval, "interval", 2*time.Second, "轮询间隔")
+	return command
+}
+
+// newTaskStartCommand 构建 task start 子命令。
+//
+// 它是任务执行的推荐入口：服务端会依据数据库事实决定是否建容器、是否生成计划，
+// 然后启动工作流。命令本身只是 HTTP 客户端，不装配 SSH、容器、Pi 或代码保存能力。
+func newTaskStartCommand(a *app.App) *cobra.Command {
+	var (
+		address       string
+		prompt        string
+		timeout       string
+		verifyTimeout string
+		planTimeout   string
+		wait          bool
+		interval      time.Duration
+	)
+	command := &cobra.Command{
+		Use:   "start <task-id>",
+		Short: "通过本地服务完成一次任务启动（准备环境 → 生成计划 → 启动工作流）",
+		Long: "向本地 API 发起 POST /api/v1/tasks/{taskID}/start，由服务端按数据库事实决定：\n" +
+			"  1. 任务已有受管理且运行中的容器时不会重复创建；\n" +
+			"  2. 任务还没有持久化计划时在容器内调用 Planner 并一次写入数据库；\n" +
+			"  3. 计划就绪后启动任务级工作流执行。\n" +
+			"任一阶段失败立即停止，不自动重试、不删除容器、不重放外部操作；\n" +
+			"失败与中断一律保留容器现场。服务地址默认取配置文件的 server 段。",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := a.ValidateConfig(cmd.Context(), hostConfigPath(cmd))
+			if err != nil {
+				return err
+			}
+			target := strings.TrimSpace(address)
+			if target == "" {
+				target = cfg.Server.Address()
+			}
+			devTimeout, err := parseOptionalDuration(timeout)
+			if err != nil {
+				return err
+			}
+			validationTimeout, err := parseOptionalDuration(verifyTimeout)
+			if err != nil {
+				return err
+			}
+			planCallTimeout, err := parseOptionalDuration(planTimeout)
+			if err != nil {
+				return err
+			}
+			if interval <= 0 {
+				return fmt.Errorf("轮询间隔必须大于 0: %s", interval)
+			}
+			client := newWorkflowAPIClient(target, a.Logger().Slog())
+			ctx := cmd.Context()
+			result, err := client.startTask(ctx, args[0], workflowAPIStartTaskRequest{
+				Prompt:                   strings.TrimSpace(prompt),
+				TimeoutSeconds:           int(devTimeout.Seconds()),
+				ValidationTimeoutSeconds: int(validationTimeout.Seconds()),
+				PlanTimeoutSeconds:       int(planCallTimeout.Seconds()),
+			})
+			if err != nil {
+				return err
+			}
+			if err := printStartTaskResult(a, result); err != nil {
+				return err
+			}
+			if !wait || result.Run == nil || workflowRunStopped(*result.Run) {
+				return nil
+			}
+			final, waitErr := client.wait(ctx, args[0], interval, a)
+			if final.RunID == "" {
+				return waitErr
+			}
+			if printErr := printWorkflowRun(a, final); printErr != nil {
+				return printErr
+			}
+			return waitErr
+		},
+	}
+	command.Flags().StringVar(&address, "address", "", "服务地址，省略时使用配置文件的 server 段")
+	command.Flags().StringVar(&prompt, "prompt", "", "追加在规划与每一步骤提示词之后的补充说明")
+	command.Flags().StringVar(&timeout, "timeout", "", "单个步骤开发阶段的超时时间，例如 30m")
+	command.Flags().StringVar(&verifyTimeout, "verify-timeout", "", "单个步骤验证阶段的超时时间，例如 10m")
+	command.Flags().StringVar(&planTimeout, "plan-timeout", "", "本次规划调用的超时时间，例如 10m")
+	command.Flags().BoolVar(&wait, "wait", true, "启动后轮询真实进度直到执行收敛")
 	command.Flags().DurationVar(&interval, "interval", 2*time.Second, "轮询间隔")
 	return command
 }

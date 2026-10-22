@@ -92,6 +92,17 @@ type Options struct {
 		cfg *config.Config,
 		steps *app.StepWorkflowService,
 	) (*app.TaskWorkflowService, error)
+	// TaskLaunchFactory 在数据库打开后构造统一任务启动服务。
+	//
+	// 启动服务复用已有的环境准备、计划生成与工作流编排能力，因此必须在它们之后
+	// 构造。工厂返回错误时启动失败；返回 nil 表示本次运行不提供统一启动接口，
+	// 此时接口返回 503 而不是伪造启动能力。
+	TaskLaunchFactory func(
+		store storage.Store,
+		cfg *config.Config,
+		workflow *app.TaskWorkflowService,
+		steps *app.StepWorkflowService,
+	) (*app.TaskLaunchService, error)
 	// StepExecutorFactory 在数据库打开后构造单步骤执行协调器。
 	//
 	// 协调器需要容器能力与容器内 Agent 执行能力（SSH、Docker），因此不能在构造
@@ -122,6 +133,13 @@ type Server struct {
 		cfg *config.Config,
 		steps *app.StepWorkflowService,
 	) (*app.TaskWorkflowService, error)
+	// taskLaunchFactory 在数据库打开后构造统一任务启动服务。
+	taskLaunchFactory func(
+		store storage.Store,
+		cfg *config.Config,
+		workflow *app.TaskWorkflowService,
+		steps *app.StepWorkflowService,
+	) (*app.TaskLaunchService, error)
 	// validationFactory 在数据库打开后构造确定性验证引擎。
 	validationFactory func(store storage.Store, cfg *config.Config) (*app.ValidationService, error)
 	// codeInitializeFactory 在数据库打开后构造代码初始化协调器。
@@ -147,6 +165,8 @@ type Server struct {
 	stepWorkflow *app.StepWorkflowService
 	// taskWorkflow 是任务级工作流编排器，为空时不提供工作流接口。
 	taskWorkflow *app.TaskWorkflowService
+	// taskLaunch 是统一任务启动服务，为空时不提供启动接口。
+	taskLaunch *app.TaskLaunchService
 	// codeInitialize 是代码初始化协调器，为空时不提供初始化接口。
 	codeInitialize *app.CodeInitializeService
 	requireWeb     bool
@@ -196,6 +216,7 @@ func New(options Options) (*Server, error) {
 		sshFactory:            options.SSHFactory,
 		stepExecutorFactory:   options.StepExecutorFactory,
 		taskWorkflowFactory:   options.TaskWorkflowFactory,
+		taskLaunchFactory:     options.TaskLaunchFactory,
 		validationFactory:     options.ValidationFactory,
 		codeInitializeFactory: options.CodeInitializeFactory,
 		systemInfo:            options.SystemInfo,
@@ -307,6 +328,20 @@ func (s *Server) openDatabase(ctx context.Context) error {
 		}
 		s.taskWorkflow = orchestrator
 	}
+	if s.taskLaunchFactory != nil && s.taskWorkflow != nil {
+		// 统一启动服务只串联既有能力：环境准备、计划生成与工作流编排都在它们
+		// 各自的服务里实现，启动服务不重复实现任何一步。
+		launcher, launchErr := s.taskLaunchFactory(
+			store,
+			s.cfg,
+			s.taskWorkflow,
+			s.stepWorkflow,
+		)
+		if launchErr != nil {
+			return fmt.Errorf("初始化任务启动服务失败: %w", launchErr)
+		}
+		s.taskLaunch = launcher
+	}
 	if s.codeInitializeFactory != nil {
 		initializer, initErr := s.codeInitializeFactory(store, s.cfg)
 		if initErr != nil {
@@ -360,6 +395,11 @@ func (s *Server) startServices(ctx context.Context) error {
 		// 任务级编排器注册在最后：它依赖单步骤闭环，停止顺序因此自动反过来，
 		// 先停止新工作流请求，再让下层服务收敛在途工作。
 		services = append(services, s.taskWorkflow)
+	}
+	if s.taskLaunch != nil {
+		// 统一启动服务注册在编排器之后：它依赖编排器，停止顺序因此反过来，
+		// 先停止新的启动请求，再让下层服务收敛在途工作。
+		services = append(services, s.taskLaunch)
 	}
 	if len(services) == 0 {
 		return nil
@@ -480,6 +520,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		Validation:       s.validationEngine,
 		StepWorkflow:     s.stepWorkflow,
 		Workflow:         s.taskWorkflow,
+		TaskLaunch:       s.taskLaunch,
 		CodeInitialize:   s.codeInitialize,
 		RequireWebUI:     s.requireWeb,
 		ShutdownTimeout:  s.shutdownTimeout,

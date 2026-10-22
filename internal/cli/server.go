@@ -173,6 +173,54 @@ func runServer(cmd *cobra.Command, a *app.App, configPath, address string, requi
 				Logger:   a.Logger().Slog(),
 			})
 		},
+		TaskLaunchFactory: func(
+			store storage.Store,
+			cfg *config.Config,
+			workflow *app.TaskWorkflowService,
+			steps *app.StepWorkflowService,
+		) (*app.TaskLaunchService, error) {
+			sshService, sshErr := app.NewSSHService(store, a.Logger(), sshOptionsFrom(cfg))
+			if sshErr != nil {
+				return nil, sshErr
+			}
+			containers, containersErr := app.NewContainerService(app.DockerServiceOptions{
+				SSH:    sshService,
+				Store:  store,
+				Logger: a.Logger(),
+			})
+			if containersErr != nil {
+				return nil, containersErr
+			}
+			environments, environmentsErr := app.NewEnvironmentService(app.DockerServiceOptions{
+				SSH:    sshService,
+				Store:  store,
+				Logger: a.Logger(),
+			})
+			if environmentsErr != nil {
+				return nil, environmentsErr
+			}
+			execution, executionErr := app.NewExecutionEnvironmentService(
+				app.ExecutionEnvironmentOptions{
+					Environments: environments,
+					Containers:   containers,
+					Logger:       a.Logger(),
+				},
+			)
+			if executionErr != nil {
+				return nil, executionErr
+			}
+			return app.NewTaskLaunchService(app.TaskLaunchOptions{
+				Store: store,
+				// 容器准备复用统一执行环境实现：启动服务不拼接 Docker 命令。
+				Environments: execution,
+				// 容器核验复用同一容器服务：只读观测，不创建也不删除。
+				Containers: containers,
+				// 计划生成与工作流编排复用编排器：启动服务不重复实现它们。
+				Planner:  workflow,
+				Workflow: workflow,
+				Logger:   a.Logger().Slog(),
+			})
+		},
 		SystemInfo:   a.SystemInfo,
 		RequireWebUI: requireWebUI,
 		Logger:       a.Logger().Slog(),

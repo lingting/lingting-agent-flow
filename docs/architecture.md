@@ -561,16 +561,78 @@ CodeSaver 缺失时编排器仍会按顺序执行并验证全部步骤，但收�
 
 - 只执行已经持久化并通过校验的计划：不生成计划、不补充步骤、不改变顺序。任务没有已持久化
   的步骤时 `domain.CheckWorkflowStart` 直接拒绝启动，接口返回状态冲突。
-- 不创建、启动、删除或接管容器：启动前要求任务已有受管理且运行中的容器，容器由
-  `agentflow execenv prepare-task`（`app.ExecutionEnvironmentService.PrepareForTask`）单独
-  准备；缺少容器时返回 412 前置条件错误。
+- 不创建、启动、删除或接管容器：`StartWorkflow` 启动前要求任务已有受管理且运行中的容器，
+  缺少时返回 412 前置条件错误。容器由 `agentflow execenv prepare-task`
+  （`app.ExecutionEnvironmentService.PrepareForTask`）单独准备，或由统一启动入口
+  `agentflow task start` 在需要时自动准备。
 - 不自动重试、不自动修复代码、不自动删除容器；失败后等待用户显式决定。
 - 不实现多任务并发调度队列：`agentflow server` 中同一任务串行、不同任务之间相互独立。
-- CLI 的执行入口只是 HTTP 客户端：`agentflow task run` 发起请求并轮询进度，不装配 SSH、
-  容器、Pi 或代码保存能力，也不会在服务不可达时退回本机执行。
-- 因此当前完整执行链路需要人工串联两步：先 `agentflow execenv prepare-task <task-id>`
-  准备容器与代码工作区，再 `agentflow task run <task-id>`；缺少计划步骤时链路仍会中断。
+- CLI 的执行入口只是 HTTP 客户端：`agentflow task start` 与 `agentflow task run` 发起请求并
+  轮询进度，不装配 SSH、容器、Pi 或代码保存能力，也不会在服务不可达时退回本机执行。
+- 完整执行链路有两个入口：`agentflow task start <task-id>` 一个入口完成「准备容器 → 生成
+  计划 → 启动编排」；需要分步排查时仍可依次执行 `execenv prepare-task`、`task plan`、
+  `task run`。代码初始化（`initialize-code`）仍未接入自动启动链路。
 
+## 统一任务启动边界
+
+启动入口固定为 `app.TaskLaunchService`（`internal/app/task_launch*.go`）：HTTP Handler、CLI 与
+前端都不得自行串联「准备容器 → 生成计划 → 启动编排」，也不得自行判断某一阶段是否已完成。
+
+### 阶段判定
+
+阶段顺序固定为 `validate` → `container` → `plan` → `workflow`，是否需要执行某一阶段只由
+`domain.DecideTaskLaunchNext` 依据持久化事实计算：
+
+- 任务已删除、已记录取消请求、状态不在可启动集合、存在未结束执行记录、存在
+  `recovery_required` 步骤、缺少执行节点、语言环境或角色时一律拒绝启动；
+- 任务容器不可用（未登记、已删除、已 detached、未运行）→ 准备容器；
+- 容器可用但没有已持久化计划步骤 → 生成计划；
+- 其余情况 → 启动任务级工作流。
+
+容器可用性必须来自真实核验（`InspectContainer`），不得凭 `tasks.container_id` 推断：容器可能
+已被删除、停止或脱离管理。核验失败按前置条件缺失报告，不得据此创建新容器。
+
+### 复用而非重写
+
+三个有副作用的阶段全部复用既有服务：容器准备用
+`app.ExecutionEnvironmentService.PrepareForTask`，计划生成用
+`app.TaskWorkflowService.GeneratePlan`，编排启动用 `app.TaskWorkflowService.StartWorkflow`。
+启动服务不拼接 Pi 命令、不构造 Docker / Git 命令，也不创建 Attempt 与 Session。
+
+### 已存在容器时不重复创建
+
+已有受管理且运行中的容器时不会创建第二个容器：重复准备只会留下既无法被任何执行链路使用、
+也不应被自动删除的孤儿容器。需要重建容器时走显式的容器处置路径，不由启动入口隐式完成。
+
+### 步骤占用启动恢复
+
+进程在 Pi 调用期间退出会留下 `running` / `developing` / `verifying` 的步骤。占用本身会阻止
+该步骤再次执行（`domain.NextStepToExecute` 一律拒绝），使任务既无法推进也无法自动收敛。
+`app.TaskLaunchService.RecoverStepOccupancy` 在服务启动时按
+`domain.DecideStepOccupancyRecovery` 把这类步骤收敛为 `recovery_required`，释放
+`current_attempt_id` 并写入事件。该恢复不重放任何 Agent 调用、不删除容器，所属任务仍有未结束
+执行记录时不抢占；写入带状态前置条件，冲突按「同一次收敛已完成」处理。
+
+### 不确定现场的处理
+
+- 容器已启动但远程登记清单同步失败时，`Prepare` 仍返回可用的执行环境，把清单同步失败降级为
+  阶段说明，避免调用方误判失败后创建第二个容器。
+- 容器已创建但未能写回任务关联时，写入 `task.recovery_required` 事件（`stage=attach_container`
+  与 `container_id`），使孤儿容器可被查询与人工处置；容器一律保留，不自动删除。
+
+### 接口
+
+`POST /api/v1/tasks/{taskID}/start` 只接受执行参数（补充提示词与三类超时），不接受容器、步骤
+列表、Session 路径、工作目录或角色覆盖。响应显式区分 `stage`、`task_status`、
+`container_prepared`、`plan_persisted` 与 `workflow_started`。错误映射：参数错误 400、目标不
+存在 404、状态冲突 409、前置条件缺失 412、启动已执行但未成功 500、服务已停止 503。
+
+### 当前能力边界
+
+- 不自动执行代码初始化（`initialize-code`）：首次启动链路仍需另行初始化代码工作区。
+- 不自动重试任一阶段，也不在失败后自动删除容器或重放外部操作。
+- 不实现多任务并发调度：同一任务进程内以任务为键串行，跨进程仍由各阶段自身的条件更新与
+  `workflow_runs` 的部分唯一索引拒绝。
 ## SSH 边界
 
 - SSH 探测（`sshprobe`）只验证 TCP 可达性与 SSH 协议标识，属于网络层检查。

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/execenv"
@@ -175,6 +176,9 @@ func (s *ExecutionEnvironmentService) attachContainerToTask(
 		updated,
 		[]domain.TaskStatus{task.Status},
 	); err != nil {
+		// 容器已经创建并登记，只是没有关联到任务：留下可追溯的现场记录，
+		// 否则这个容器既不会被任何执行链路使用，也不会出现在任务时间线上。
+		s.recordOrphanContainer(ctx, task, containerID, err)
 		if errors.Is(err, storage.ErrConflict) {
 			return fmt.Errorf(
 				"%w: 任务 %s 状态已变更，容器 %s 未写入任务记录",
@@ -192,4 +196,48 @@ func (s *ExecutionEnvironmentService) attachContainerToTask(
 		slog.String("container", containerID),
 	)
 	return nil
+}
+
+// recordOrphanContainer 记录"容器已创建但未写回任务"的现场。
+//
+// 事件写入失败只记录日志：它不能替代已经发生的事实，也不应把一次关联失败
+// 变成两个错误。容器本身保留，由用户按容器记录核验或处置，绝不自动删除。
+func (s *ExecutionEnvironmentService) recordOrphanContainer(
+	ctx context.Context,
+	task domain.Task,
+	containerID string,
+	cause error,
+) {
+	event, err := domain.NewEvent(
+		task.ID,
+		nil,
+		nil,
+		nil,
+		domain.EventTypeTaskRecoveryRequired,
+		marshalStepExecutionPayload(map[string]any{
+			"stage":        "attach_container",
+			"container_id": containerID,
+			"task_status":  string(task.Status),
+			"summary":      errorSummary(cause),
+		}),
+		time.Now().UTC(),
+	)
+	if err != nil {
+		s.debug(
+			ctx,
+			"构造容器关联失败事件失败",
+			slog.String("task_id", task.ID.String()),
+			slog.String("error", errorSummary(err)),
+		)
+		return
+	}
+	if _, appendErr := s.tasks.AppendEvent(ctx, event); appendErr != nil {
+		s.debug(
+			ctx,
+			"写入容器关联失败事件失败",
+			slog.String("task_id", task.ID.String()),
+			slog.String("container", containerID),
+			slog.String("error", errorSummary(appendErr)),
+		)
+	}
 }

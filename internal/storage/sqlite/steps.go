@@ -199,6 +199,45 @@ func (s stepStore) ListStepsByTask(ctx context.Context, taskID domain.ID) ([]dom
 	return steps, nil
 }
 
+// ListTasksWithOccupiedSteps 返回存在执行占用步骤的任务标识。
+//
+// 占用指 running / developing / verifying：进程退出后这些状态不会自行收敛，而它们
+// 会阻止对应步骤再次执行，因此启动恢复需要先按任务聚合定位。查询只读，结果按任务
+// 标识稳定排序，使重复执行得到一致顺序。
+func (s stepStore) ListTasksWithOccupiedSteps(ctx context.Context) ([]domain.ID, error) {
+	const statement = `SELECT DISTINCT task_id FROM steps
+		WHERE status IN (?, ?, ?)
+		ORDER BY task_id`
+	rows, err := s.q.QueryContext(
+		ctx,
+		statement,
+		string(domain.StepStatusRunning),
+		string(domain.StepStatusDeveloping),
+		string(domain.StepStatusVerifying),
+	)
+	if err != nil {
+		return nil, wrapError("查询执行占用步骤", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+	taskIDs := make([]domain.ID, 0, 8)
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, wrapError("读取执行占用步骤", err)
+		}
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		taskIDs = append(taskIDs, domain.ID(raw))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, wrapError("查询执行占用步骤", err)
+	}
+	return taskIDs, nil
+}
+
 // ListStepPage 按序号稳定排序分页返回任务的步骤。
 //
 // 排序键是 (sequence, id)：sequence 在同一任务内唯一，附加 id 只是为了让排序在

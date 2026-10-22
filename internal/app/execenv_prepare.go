@@ -284,7 +284,10 @@ func (s *ExecutionEnvironmentService) prepareContainer(
 		WorkDir:              workspace.Project,
 		SkipRunContractCheck: spec.SkipRunContractCheck,
 	})
-	if err != nil {
+	// 创建失败仍可能已经留下一个真实运行的容器：容器已启动但远程登记清单写入
+	// 失败时，CreateContainer 会同时返回记录与错误。丢弃记录会让任务永远拿不到
+	// 容器关联，容器则成为无法被任何链路定位的孤儿，因此这里先按记录状态分流。
+	if err != nil && detail.Container.State != domain.ContainerStateRunning {
 		return "", fmt.Errorf("创建任务容器失败: %w", err)
 	}
 	if detail.Container.State != domain.ContainerStateRunning {
@@ -308,13 +311,19 @@ func (s *ExecutionEnvironmentService) prepareContainer(
 		return "", err
 	}
 	prepared.Environment = environment
-	return fmt.Sprintf(
+	detailText := fmt.Sprintf(
 		"容器 %s（记录 %s，Docker %s）镜像 %s",
 		detail.Container.Name,
 		detail.Container.ID,
 		detail.Container.DockerID,
 		detail.Container.ImageID,
-	), nil
+	)
+	if err != nil {
+		// 容器已经运行且记录可用，失败只发生在远程登记清单同步：把错误降级为
+		// 阶段说明，使调用方仍能拿到可用环境，而不是重新创建第二个容器。
+		return detailText + "；远程登记清单同步失败: " + errorSummary(err), nil
+	}
+	return detailText, nil
 }
 
 // imageVersionLabel 返回已准备镜像对应的环境版本标签。
