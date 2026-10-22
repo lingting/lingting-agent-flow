@@ -309,8 +309,68 @@ func TestDecideCodeSaveRecoveryWithoutPendingStage(t *testing.T) {
 	if decision.Status != domain.RecoveryStatusUnverified {
 		t.Fatalf("没有待确认阶段时应保持未核验，实际 %s", decision.Status)
 	}
+}
+
+// TestRecoveryConverged 校验只有确定的恢复结论才算收敛。
+//
+// unverified 与 unverifiable 都不收敛：前者还没核验，后者核验过但拿不到可信事实，
+// 两者都必须继续等待人工处理，不得被当作恢复闭环完成。
+func TestRecoveryConverged(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		status   domain.RecoveryStatus
+		expected bool
+	}{
+		{name: "空值尚未核验", status: "", expected: false},
+		{name: "尚未核验", status: domain.RecoveryStatusUnverified, expected: false},
+		{name: "无法核验", status: domain.RecoveryStatusUnverifiable, expected: false},
+		{name: "确认已发生", status: domain.RecoveryStatusConfirmedApplied, expected: true},
+		{name: "确认未发生", status: domain.RecoveryStatusConfirmedNotApplied, expected: true},
+	}
+	for _, testCase := range cases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			record := domain.CodeSaveRecord{RecoveryStatus: testCase.status}
+			if got := record.RecoveryConverged(); got != testCase.expected {
+				t.Fatalf("期望收敛判定 %v，实际 %v", testCase.expected, got)
+			}
+		})
+	}
+}
+
+// TestDecideCodeSaveRecoveryMergeParentMismatch 校验父关系不匹配时不得判定合并已发生。
+//
+// 判定依据必须是提交关系而不是分支是否变化：候选合并提交的第一父或第二父不匹配时，
+// 说明基础分支的变化来自其他来源。
+func TestDecideCodeSaveRecoveryMergeParentMismatch(t *testing.T) {
+	t.Parallel()
+	record := domain.CodeSaveRecord{
+		TaskID:                "task-1",
+		TaskBranch:            "agent/task-1",
+		BaseBranch:            "main",
+		CommitStatus:          domain.CommitStatusSucceeded,
+		CommitSHA:             recoveryHead,
+		PushStatus:            domain.PushStatusSucceeded,
+		RemoteCommitSHA:       recoveryHead,
+		MergeEnabled:          true,
+		MergeStatus:           domain.MergeStatusPending,
+		BaselineBaseCommitSHA: recoveryBaselineBase,
+	}
+	// 基础分支确实前进了，但推算不出与本次合并一致的父子关系。
+	decision := domain.DecideCodeSaveRecovery(record, domain.CodeSaveObservation{
+		RemoteBaseCommit:      recoveryDivergedBase,
+		MergeCommitResolvable: false,
+	})
+	if decision.Status != domain.RecoveryStatusUnverifiable {
+		t.Fatalf("父关系无法匹配时必须转人工核验，实际 %s", decision.Status)
+	}
+	if decision.MergeSHA != "" {
+		t.Fatalf("不确定时不得给出合并提交，实际 %q", decision.MergeSHA)
+	}
 	if decision.SafeToRetry {
-		t.Fatal("没有待确认阶段时不应提示重试")
+		t.Fatal("父关系无法匹配时不得提示可以重试")
 	}
 }
 

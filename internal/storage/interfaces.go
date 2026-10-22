@@ -571,6 +571,19 @@ type CodeSaveStore interface {
 	CreateCodeSaveRecord(ctx context.Context, record domain.CodeSaveRecord) error
 	// UpdateCodeSaveRecord 按主键更新记录，不存在时返回 storage.ErrNotFound。
 	UpdateCodeSaveRecord(ctx context.Context, record domain.CodeSaveRecord) error
+	// UpdateCodeSaveRecovery 以读取时的恢复结论为条件写入一次只读核验结论。
+	//
+	// 只写 recovery_status 与 updated_at 两列：核验是只读流程，不得借一次更新把
+	// 提交、推送、合并状态一并覆盖回读取时的旧值。expected 是读取记录时的
+	// RecoveryStatus（空值表示尚未核验），数据库中的取值已变化时返回
+	// storage.ErrConflict，调用方必须重新读取真实记录而不是覆盖新事实。
+	UpdateCodeSaveRecovery(
+		ctx context.Context,
+		id domain.ID,
+		expected domain.RecoveryStatus,
+		status domain.RecoveryStatus,
+		at time.Time,
+	) error
 	GetCodeSaveRecord(ctx context.Context, id domain.ID) (*domain.CodeSaveRecord, error)
 	// ListCodeSaveRecordsByTask 按任务列出记录，最新的在前。
 	ListCodeSaveRecordsByTask(ctx context.Context, taskID string) ([]domain.CodeSaveRecord, error)

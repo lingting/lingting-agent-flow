@@ -3,9 +3,12 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
+	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
+	"github.com/lingting/agentflow/internal/storage"
 )
 
 // codeSaveColumns 是代码保存表的完整列顺序。
@@ -96,6 +99,65 @@ WHERE id = ?`
 		return wrapError("更新代码保存记录", err)
 	}
 	return ensureAffected(result, "代码保存记录", record.ID)
+}
+
+// UpdateCodeSaveRecovery 以读取时的恢复结论为条件写入一次只读核验结论。
+//
+// 只更新 recovery_status 与 updated_at：核验流程不产生 Git 副作用，因此不得用一条
+// 携带全部字段的 UPDATE 把读取之后被其他执行推进的提交、推送、合并状态覆盖回旧值。
+//
+// expected 是调用方读取记录时的取值（空值表示尚未核验）。条件不匹配时返回
+// storage.ErrConflict，由调用方重新读取真实记录后再决定是否重新核验，而不是覆盖。
+func (s codeSaveStore) UpdateCodeSaveRecovery(
+	ctx context.Context,
+	id domain.ID,
+	expected domain.RecoveryStatus,
+	status domain.RecoveryStatus,
+	at time.Time,
+) error {
+	if err := id.Validate(); err != nil {
+		return err
+	}
+	if err := status.Validate(); err != nil {
+		return err
+	}
+	const statement = `
+UPDATE code_saves SET recovery_status = ?, updated_at = ?
+WHERE id = ? AND COALESCE(recovery_status, '') = ?`
+	result, err := s.q.ExecContext(
+		ctx,
+		statement,
+		nullIfBlank(status.String()),
+		toMillis(at),
+		toIDParam(id),
+		strings.TrimSpace(expected.String()),
+	)
+	if err != nil {
+		return wrapError("写入代码保存核验结论", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return wrapError("写入代码保存核验结论", err)
+	}
+	if affected > 0 {
+		return nil
+	}
+	// 影响行数为 0 有两种可能：记录不存在，或恢复结论已被其他操作改写。
+	// 两者都必须让调用方重新读取，不能当作写入成功。
+	current, readErr := s.GetCodeSaveRecord(ctx, id)
+	if readErr != nil {
+		if errors.Is(readErr, storage.ErrNotFound) {
+			return readErr
+		}
+		return wrapError("写入代码保存核验结论", readErr)
+	}
+	return wrapError(
+		"写入代码保存核验结论",
+		errors.Join(
+			storage.ErrConflict,
+			errors.New("恢复结论已被其他操作改写，当前值为 "+current.RecoveryStatus.String()),
+		),
+	)
 }
 
 // codeSaveArgs 构造写入代码保存记录时的参数列表。

@@ -963,6 +963,18 @@ Content-Type: application/json
 不切换分支、不删除或接管容器，也不改动记录的 Git 状态字段；核验结论写回 `recovery_status`。
 `agentflow code status --task <task-id>` 同时展示基线、写入状态、写入失败摘要与恢复结论。
 
+核验结论的写回是条件写入：`storage.CodeSaveStore.UpdateCodeSaveRecovery` 只更新
+`recovery_status` 与 `updated_at`，并以读取时的恢复结论作为条件。核验期间记录若被其他执行
+推进（提交、推送或合并状态变化导致恢复结论被改写），写入返回 `storage.ErrConflict`，接口的
+`Persisted` 保持 `false`，`Updated` 回落到数据库中的真实记录。因此：
+
+- 核验不会用读取时的整条记录覆盖更新后的事实；
+- SQLite 写入失败或冲突时不得报告恢复已经闭环；
+- 重复执行同一只读核验在同一现场下收敛到同一结论。
+
+只有 `confirmed_applied` 与 `confirmed_not_applied` 是收敛结论（`CodeSaveRecord.RecoveryConverged()`）；
+`unverified` 与 `unverifiable` 仍需人工继续处理。
+
 本轮不引入自动重试、后台恢复调度与新的工作流功能：恢复语义先由人工核验确立。
 
 ### 尚未实现的接口

@@ -434,3 +434,145 @@ func TestCodeSaveRecordAcceptsUnknownRecoveryValues(t *testing.T) {
 		t.Fatalf("未知恢复结论未原样保存: %s", loaded.RecoveryStatus)
 	}
 }
+
+// TestCodeSaveRecoveryWriteIsConditional 校验核验结论的写入以读取时的取值为条件。
+//
+// 只读核验与"记录是否已被其他执行推进"是两个独立事实：核验期间记录被推进时，
+// 用读取时的恢复结论做条件必须失败，而不是把新事实改回旧值。
+func TestCodeSaveRecoveryWriteIsConditional(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ctx := testContext(t)
+	record := newCodeSaveRecord(t, "task-conditional")
+	if err := db.CreateCodeSaveRecord(ctx, record); err != nil {
+		t.Fatalf("写入代码保存记录失败: %v", err)
+	}
+	// 另一次核验先写入结论，模拟并发推进。
+	if err := db.UpdateCodeSaveRecovery(
+		ctx,
+		record.ID,
+		"",
+		domain.RecoveryStatusUnverifiable,
+		time.Now().UTC(),
+	); err != nil {
+		t.Fatalf("首次写入核验结论失败: %v", err)
+	}
+	// 持有旧取值的调用方必须冲突，不得覆盖已经写入的结论。
+	err := db.UpdateCodeSaveRecovery(
+		ctx,
+		record.ID,
+		"",
+		domain.RecoveryStatusConfirmedApplied,
+		time.Now().UTC(),
+	)
+	if !isConflict(err) {
+		t.Fatalf("恢复结论已被改写时必须返回冲突，实际 %v", err)
+	}
+	stored, readErr := db.GetCodeSaveRecord(ctx, record.ID)
+	if readErr != nil {
+		t.Fatalf("读取代码保存记录失败: %v", readErr)
+	}
+	if stored.RecoveryStatus != domain.RecoveryStatusUnverifiable {
+		t.Fatalf("冲突写入不得覆盖已写入的结论，实际 %s", stored.RecoveryStatus)
+	}
+	// 用最新取值重试才可以成功：重复核验在同一现场下收敛到同一结论。
+	if retryErr := db.UpdateCodeSaveRecovery(
+		ctx,
+		record.ID,
+		stored.RecoveryStatus,
+		domain.RecoveryStatusConfirmedApplied,
+		time.Now().UTC(),
+	); retryErr != nil {
+		t.Fatalf("按最新取值重试应成功: %v", retryErr)
+	}
+	confirmed, readErr := db.GetCodeSaveRecord(ctx, record.ID)
+	if readErr != nil {
+		t.Fatalf("再次读取记录失败: %v", readErr)
+	}
+	if confirmed.RecoveryStatus != domain.RecoveryStatusConfirmedApplied {
+		t.Fatalf("恢复结论应为 confirmed_applied，实际 %s", confirmed.RecoveryStatus)
+	}
+}
+
+// TestCodeSaveRecoveryWriteKeepsExecutionStates 校验核验写入不覆盖其它状态列。
+//
+// 只读核验不得把记录的提交、推送、合并状态一并写回旧值：核验期间被推进的执行事实
+// 必须保留，否则一次核验就会让数据库退回旧现场。
+func TestCodeSaveRecoveryWriteKeepsExecutionStates(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ctx := testContext(t)
+	record := newCodeSaveRecord(t, "task-narrow-update")
+	if err := db.CreateCodeSaveRecord(ctx, record); err != nil {
+		t.Fatalf("写入代码保存记录失败: %v", err)
+	}
+	// 记录在被读取之后被真正的执行推进：提交与推送都已成功。
+	progressed := record
+	commitSHA := "1111111111111111111111111111111111111111"
+	if err := progressed.MarkCommit(
+		domain.CommitStatusSucceeded,
+		commitSHA,
+		"执行提交",
+		time.Now().UTC(),
+	); err != nil {
+		t.Fatalf("推进提交状态失败: %v", err)
+	}
+	if err := progressed.MarkPush(
+		domain.PushStatusSucceeded,
+		commitSHA,
+		time.Now().UTC(),
+	); err != nil {
+		t.Fatalf("推进推送状态失败: %v", err)
+	}
+	if err := db.UpdateCodeSaveRecord(ctx, progressed); err != nil {
+		t.Fatalf("写入推进后的记录失败: %v", err)
+	}
+	// 核验结论只写 recovery_status，读取时的旧执行状态不得被写回。
+	if err := db.UpdateCodeSaveRecovery(
+		ctx,
+		record.ID,
+		record.RecoveryStatus,
+		domain.RecoveryStatusConfirmedApplied,
+		time.Now().UTC(),
+	); err != nil {
+		t.Fatalf("写入核验结论失败: %v", err)
+	}
+	stored, readErr := db.GetCodeSaveRecord(ctx, record.ID)
+	if readErr != nil {
+		t.Fatalf("读取代码保存记录失败: %v", readErr)
+	}
+	if stored.RecoveryStatus != domain.RecoveryStatusConfirmedApplied {
+		t.Fatalf("恢复结论应为 confirmed_applied，实际 %s", stored.RecoveryStatus)
+	}
+	if stored.CommitStatus != domain.CommitStatusSucceeded {
+		t.Fatalf("核验不得覆盖提交状态，实际 %s", stored.CommitStatus)
+	}
+	if stored.PushStatus != domain.PushStatusSucceeded {
+		t.Fatalf("核验不得覆盖推送状态，实际 %s", stored.PushStatus)
+	}
+	if stored.CommitSHA != commitSHA {
+		t.Fatalf("核验不得覆盖提交 SHA，实际 %q", stored.CommitSHA)
+	}
+}
+
+// TestCodeSaveRecoveryWriteMissingRecord 校验记录不存在时返回未找到而不是冲突。
+func TestCodeSaveRecoveryWriteMissingRecord(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ctx := testContext(t)
+	err := db.UpdateCodeSaveRecovery(
+		ctx,
+		domain.NewID(),
+		"",
+		domain.RecoveryStatusConfirmedNotApplied,
+		time.Now().UTC(),
+	)
+	if !isNotFound(err) {
+		t.Fatalf("记录不存在时必须返回 storage.ErrNotFound，实际 %v", err)
+	}
+}
+
+// isConflict 判断错误是否为存储层冲突。
+func isConflict(err error) bool {
+	return err != nil && errors.Is(err, storage.ErrConflict)
+}

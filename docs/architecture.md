@@ -514,6 +514,13 @@ CodeSaver 缺失时编排器仍会按顺序执行并验证全部步骤，但收�
 **只读核验。** `Saver.Observe` 只执行 `rev-parse`、`ls-remote` 与 `rev-list --first-parent`，
 不提交、不推送、不切换分支、不写 `code_saves`；失败时返回 `ReadFailed` 而不是错误，让判定收敛为
 `unverifiable`。人工入口是 `agentflow code verify --record <id>`，结论写回 `recovery_status`。
+
+**结论写回。** 核验只更新 `recovery_status`，并且是条件写入：
+`storage.CodeSaveStore.UpdateCodeSaveRecovery` 以读取时的恢复结论为条件、只写
+`recovery_status` 与 `updated_at`。核验期间记录被其他执行推进时返回 `storage.ErrConflict`，
+`VerifyCodeSave` 的 `Persisted` 保持 `false`、`Updated` 回落到数据库中的真实记录——一次只读核验
+不得用旧值覆盖新事实，也不得在 SQLite 写入失败时报告恢复闭环完成。收敛判定统一由
+`CodeSaveRecord.RecoveryConverged()`（仅 `confirmed_applied` / `confirmed_not_applied`）给出。
 本轮不引入自动重试、后台恢复调度与新的工作流功能。
 
 ### 当前能力边界

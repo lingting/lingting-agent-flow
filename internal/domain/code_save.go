@@ -822,6 +822,14 @@ func (r *CodeSaveRecord) MarkRecovery(status RecoveryStatus, at time.Time) error
 	return nil
 }
 
+// RecoveryConverged 判断恢复是否已经收敛为可终止的结论。
+//
+// 只有 confirmed_applied 与 confirmed_not_applied 是收敛结论：unverified 表示还没
+// 核验，unverifiable 表示核验过了但拿不到可信事实，两者都必须继续等待人工处理。
+func (r CodeSaveRecord) RecoveryConverged() bool {
+	return !r.RecoveryStatus.NeedsVerification()
+}
+
 // persistErrorLimit 限制写入失败摘要的长度。
 //
 // 摘要会写入数据库并被 CLI 展示，必须与其余失败摘要保持同样的上限与脱敏规则。

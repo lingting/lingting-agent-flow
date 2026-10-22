@@ -31,7 +31,7 @@ type CodeSaveVerifyResult struct {
 	Observation domain.CodeSaveObservation
 	// Decision 是依据记录与现场得出的恢复结论。
 	Decision domain.CodeSaveRecoveryDecision
-	// Updated 是写入核验结论之后的记录；写入失败时仍是原始记录。
+	// Updated 是写入核验结论之后的记录；写入失败或冲突时是数据库中的真实记录。
 	Updated domain.CodeSaveRecord
 	// Persisted 表示核验结论是否已写回数据库。
 	Persisted bool
@@ -42,6 +42,8 @@ type CodeSaveVerifyResult struct {
 // 它不提交、不推送、不合并、不删除容器：核验的职责只是把"记录里是 pending"与
 // "Git 到底做了什么"分开，为人工决策提供依据。核验结论会写回记录的
 // recovery_status，除此之外不改动任何状态字段——尤其不会把 pending 改成 succeeded。
+// 写回以读取时的恢复结论为条件：核验期间记录若被其他执行推进，写入按冲突处理，
+// 不会用旧值覆盖新事实。
 //
 // 核验失败（容器不可访问、远程不可达）不会返回错误，而是返回 unverifiable 的
 // 结论：无法确认时必须保留不确定性，不能伪造成"操作没有发生"。
@@ -102,14 +104,56 @@ func (s *ContainerService) VerifyCodeSave(
 	if verifyErr != nil {
 		return result, verifyErr
 	}
-	if err := result.Updated.MarkRecovery(result.Decision.Status, time.Now()); err != nil {
-		// 结论无法写入状态机时仍然返回判定结果：现场事实比记录更重要。
+	return s.persistCodeSaveRecovery(ctx, result, *record)
+}
+
+// persistCodeSaveRecovery 把核验结论写回记录。
+//
+// 写入是"只读核验的最后一公里"，必须同时满足三点：
+//  1. 状态迁移先经领域状态机校验，已确认的事实不会因为一次查询失败被改写；
+//  2. 只写 recovery_status，不用整条记录覆盖读取之后可能已被推进的提交/推送/合并状态；
+//  3. 以读取时的恢复结论为条件写入，冲突时重新读取真实记录，绝不覆盖新事实。
+//
+// 写入失败不会被伪造成成功：Persisted 保持 false，Updated 回落到数据库中的真实值。
+func (s *ContainerService) persistCodeSaveRecovery(
+	ctx context.Context,
+	result CodeSaveVerifyResult,
+	record domain.CodeSaveRecord,
+) (CodeSaveVerifyResult, error) {
+	expected := record.RecoveryStatus
+	candidate := record
+	if err := candidate.MarkRecovery(result.Decision.Status, time.Now()); err != nil {
+		// 结论无法通过状态机时仍然返回判定结果：现场事实比记录更重要，
+		// 但不得据此认为恢复已经闭环。
 		return result, nil
 	}
-	if err := s.store.UpdateCodeSaveRecord(ctx, result.Updated); err != nil {
-		result.Updated = *record
+	err := s.store.UpdateCodeSaveRecovery(
+		ctx,
+		candidate.ID,
+		expected,
+		candidate.RecoveryStatus,
+		candidate.UpdatedAt,
+	)
+	if err != nil {
+		result.Updated = *s.reloadCodeSaveRecord(ctx, record)
 		return result, nil
 	}
+	result.Updated = candidate
 	result.Persisted = true
 	return result, nil
+}
+
+// reloadCodeSaveRecord 在写入冲突时重新读取记录。
+//
+// 读取失败时退回调用方手里的旧记录：返回旧值虽然过时，但不会被误认为最新事实，
+// 因为 Persisted 仍然是 false。
+func (s *ContainerService) reloadCodeSaveRecord(
+	ctx context.Context,
+	fallback domain.CodeSaveRecord,
+) *domain.CodeSaveRecord {
+	current, err := s.store.GetCodeSaveRecord(ctx, fallback.ID)
+	if err != nil || current == nil {
+		return &fallback
+	}
+	return current
 }
