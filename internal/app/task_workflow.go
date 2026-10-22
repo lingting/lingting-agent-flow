@@ -290,6 +290,10 @@ func (s *TaskWorkflowService) Name() string {
 // 恢复只处理"进程已退出留下的残留"：停留在 running 的记录会按数据库事实核验，
 // 无法确认现场时收敛为 recovery_required，不会盲目重放 Pi 调用。blocked 与
 // pending 记录保持原状，等待用户显式恢复。
+//
+// 三类残留按顺序收敛：未结束的执行记录 → 计划生成现场 → 取消现场。任一条记录
+// 收敛失败都让启动失败，不使用"尽力而为"的语义：恢复结论没有落库时服务继续启动，
+// 会让未经处理的在途执行被当作已恢复。
 func (s *TaskWorkflowService) Start(ctx context.Context) error {
 	state := &s.lifecycle
 	state.mu.Lock()
@@ -308,7 +312,12 @@ func (s *TaskWorkflowService) Start(ctx context.Context) error {
 	}
 	// 计划生成的现场同样在启动时收敛：停留在 planning 的任务不能仅凭状态就再次
 	// 调用 Planner，必须先按持久化事实判断上一轮到底走到哪一步。
-	return s.recoverPlanGeneration(ctx)
+	if err := s.recoverPlanGeneration(ctx); err != nil {
+		return err
+	}
+	// 取消现场的收敛放在最后：它依赖执行记录已经收敛完毕，"是否还有未结束的执行"
+	// 才是可靠证据。
+	return s.recoverCancelling(ctx)
 }
 
 // Stop 取消在途工作流并等待其收敛。

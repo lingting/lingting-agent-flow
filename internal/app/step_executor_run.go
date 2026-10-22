@@ -752,11 +752,15 @@ func marshalStepExecutionPayload(payload map[string]any) []byte {
 }
 
 // isServiceStop 判断取消是否由后台服务停止引起。
+//
+// 两类来源都必须识别：步骤执行协调器停止（步骤执行与验证）与工作流编排器停止
+// （计划生成）。只识别前者会把服务关闭导致的中断误判为用户取消，进而把任务
+// 收敛为 cancelled，掩盖"现场无法确认"的事实。
 func isServiceStop(ctx context.Context) bool {
 	if ctx == nil {
 		return false
 	}
 	cause := context.Cause(ctx)
-	// 本版本只支持远程容器执行，因此服务停止只有步骤执行协调器一个来源。
-	return errors.Is(cause, ErrStepExecutorStopped)
+	return errors.Is(cause, ErrStepExecutorStopped) ||
+		errors.Is(cause, ErrWorkflowStopped)
 }

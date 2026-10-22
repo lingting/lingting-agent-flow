@@ -424,3 +424,47 @@ func TestDecidePlanGenerationRecovery(t *testing.T) {
 		t.Fatalf("没有步骤时应收敛为 recovery_required，实际 %s", actual)
 	}
 }
+
+// TestDecideCancellationRecovery 校验残留 cancelling 任务的收敛结论。
+//
+// 三条规则顺序固定：未结束的执行记录优先（不覆盖在途现场），其次是缺少取消请求
+// （无法确认流程真的走过），最后才判定取消已生效。
+func TestDecideCancellationRecovery(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		input    domain.CancellationRecoveryInput
+		expected domain.TaskStatus
+	}{
+		{
+			name:     "已记录取消请求且没有未结束执行时收敛为已取消",
+			input:    domain.CancellationRecoveryInput{CancelRequested: true},
+			expected: domain.TaskStatusCancelled,
+		},
+		{
+			name:     "缺少取消请求时收敛为需要核验",
+			input:    domain.CancellationRecoveryInput{},
+			expected: domain.TaskStatusRecoveryRequired,
+		},
+		{
+			name: "存在未结束执行记录时收敛为需要核验",
+			input: domain.CancellationRecoveryInput{
+				CancelRequested: true,
+				ActiveRunID:     "run-1",
+			},
+			expected: domain.TaskStatusRecoveryRequired,
+		},
+		{
+			name: "未结束执行记录优先于取消请求",
+			input: domain.CancellationRecoveryInput{
+				ActiveRunID: "run-1",
+			},
+			expected: domain.TaskStatusRecoveryRequired,
+		},
+	}
+	for _, testCase := range cases {
+		if actual := domain.DecideCancellationRecovery(testCase.input); actual != testCase.expected {
+			t.Fatalf("%s: 期望 %s，实际 %s", testCase.name, testCase.expected, actual)
+		}
+	}
+}

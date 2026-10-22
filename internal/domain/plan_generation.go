@@ -298,9 +298,44 @@ func DecidePlanGenerationFailure(outcome StepExecutionOutcome) TaskStatus {
 // 调用 Planner：必须先核验现场。
 //   - 已存在步骤：上一轮事务已经提交，只是状态推进未完成，收敛为 planned；
 //   - 没有任何步骤：无法判断调用是否真的发生，收敛为 recovery_required。
+//
+// 该函数只读持久化事实，不读数据库、不启动进程，调用方不得用其他证据覆盖结论。
 func DecidePlanGenerationRecovery(hasSteps bool) TaskStatus {
 	if hasSteps {
 		return TaskStatusPlanned
 	}
 	return TaskStatusRecoveryRequired
+}
+
+// CancellationRecoveryInput 是一次残留 cancelling 任务收敛所需的持久化事实。
+type CancellationRecoveryInput struct {
+	// CancelRequested 表示任务上确实记录过取消请求。
+	//
+	// 取消请求先落盘再传播：没有记录说明上一次进程不是被取消流程推进到
+	// cancelling 的，现场无法判断。
+	CancelRequested bool
+	// ActiveRunID 是任务当前未结束的工作流执行记录标识，为空表示没有。
+	//
+	// 记录未结束说明执行者可能仍在推进（或留下了无法确认的现场）：此时改写任务
+	// 状态会覆盖在途执行的结论。
+	ActiveRunID string
+}
+
+// DecideCancellationRecovery 依据持久化事实计算残留 cancelling 任务的收敛状态。
+//
+// cancelling 只表达"取消请求已记录、等待执行者确认停止"。进程在收敛过程中退出时
+// 任务会停留在该状态，启动恢复必须按证据区分，不能一律当作已取消：
+//   - 存在未结束的执行记录 → recovery_required，不覆盖在途执行现场；
+//   - 没有取消请求 → recovery_required，无法确认取消流程真的走过；
+//   - 已记录取消请求且没有未结束的执行记录 → cancelled，执行者已随进程退出。
+//
+// 收敛为 cancelled 时调用方必须先写入取消结论（Task.Finish），再推进状态。
+func DecideCancellationRecovery(input CancellationRecoveryInput) TaskStatus {
+	if strings.TrimSpace(input.ActiveRunID) != "" {
+		return TaskStatusRecoveryRequired
+	}
+	if !input.CancelRequested {
+		return TaskStatusRecoveryRequired
+	}
+	return TaskStatusCancelled
 }

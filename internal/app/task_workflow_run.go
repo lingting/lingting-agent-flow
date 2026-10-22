@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
+
 	"strings"
 	"time"
 
@@ -578,11 +578,24 @@ func (s *TaskWorkflowService) verifyPlanUnchanged(
 	return nil
 }
 
+// 启动恢复写入任务状态时使用的固定摘要。
+//
+// 摘要必须说明"是恢复收敛得出的结论"，否则用户无法区分自动收敛与真实执行结果。
+const (
+	// planRecoverySummary 说明计划生成现场无法自动确认。
+	planRecoverySummary = "计划生成在服务退出时中断，无法确认是否真的调用过 Planner，需要人工核验"
+	// cancellingRecoverySummary 说明取消现场已由启动恢复收敛。
+	cancellingRecoverySummary = "取消请求在上一次运行中已记录，执行者随进程退出后由启动恢复确认停止"
+)
+
 // recoverPlanGeneration 在服务启动时处理停留在 planning 的任务。
 //
 // 进程在 Planner 调用期间退出会留下 planning 任务。这里只依据持久化事实收敛，
 // 绝不重放 Planner 调用：存在步骤说明上一轮事务已提交，收敛为 planned；没有任何
 // 步骤说明无法判断调用是否真的发生，收敛为 recovery_required 等待人工核验。
+//
+// 任一条记录读取或写入失败都必须让启动失败：恢复结论没有落库时服务继续启动，
+// 会让残留现场被当作"已收敛"而无人处理。
 func (s *TaskWorkflowService) recoverPlanGeneration(ctx context.Context) error {
 	tasks, err := s.store.ListTasks(ctx, storage.TaskFilter{
 		Statuses: []domain.TaskStatus{domain.TaskStatusPlanning},
@@ -593,43 +606,43 @@ func (s *TaskWorkflowService) recoverPlanGeneration(ctx context.Context) error {
 	for _, task := range tasks {
 		steps, stepsErr := s.store.ListStepsByTask(ctx, task.ID)
 		if stepsErr != nil {
-			s.logger.WarnContext(
-				ctx,
-				"读取计划步骤失败",
-				slog.String("task_id", task.ID.String()),
-				slog.String("error", errorSummary(stepsErr)),
+			return fmt.Errorf(
+				"恢复任务 %s 的计划生成现场失败: 读取计划步骤失败: %w",
+				task.ID,
+				stepsErr,
 			)
-			continue
 		}
 		next := domain.DecidePlanGenerationRecovery(len(steps) > 0)
 		recovered := task
 		previous := recovered.Status
 		if err := recovered.Transition(next, s.now()); err != nil {
-			s.logger.WarnContext(
-				ctx,
-				"收敛计划生成现场失败",
-				slog.String("task_id", task.ID.String()),
-				slog.String("target", string(next)),
-				slog.String("error", errorSummary(err)),
+			return fmt.Errorf(
+				"恢复任务 %s 的计划生成现场失败: 收敛到 %s 被拒绝: %w",
+				task.ID,
+				next,
+				err,
 			)
-			continue
 		}
 		if next == domain.TaskStatusRecoveryRequired {
-			recovered.FailureSummary = "计划生成在服务退出时中断，无法确认是否真的调用过 Planner，需要人工核验"
+			recovered.FailureSummary = planRecoverySummary
 		}
-		if err := s.store.UpdateTaskIfStatus(
+		updated, updateErr := s.writeRecoveredTask(
 			context.WithoutCancel(ctx),
 			recovered,
-			[]domain.TaskStatus{previous},
-		); err != nil {
-			s.logger.WarnContext(
-				ctx,
-				"写入计划生成恢复状态失败",
-				slog.String("task_id", task.ID.String()),
-				slog.String("error", errorSummary(err)),
+			previous,
+		)
+		if updateErr != nil {
+			return fmt.Errorf(
+				"恢复任务 %s 的计划生成现场失败: 写入任务状态失败: %w",
+				task.ID,
+				updateErr,
 			)
+		}
+		if !updated {
+			// 另一个进程已经完成同一次收敛：这不是失败，本次恢复不再写入事件。
 			continue
 		}
+
 		eventType := domain.EventTypePlanCreated
 		if next == domain.TaskStatusRecoveryRequired {
 			eventType = domain.EventTypeTaskRecoveryRequired
@@ -643,6 +656,166 @@ func (s *TaskWorkflowService) recoverPlanGeneration(ctx context.Context) error {
 	return nil
 }
 
+// recoverCancelling 在服务启动时处理停留在 cancelling 的任务。
+//
+// 取消请求先落盘再传播，进程可能在传播过程中退出，留下 cancelling 任务。这里同样
+// 只依据持久化事实收敛，不重放任何取消传播：
+//   - 存在未结束的执行记录：执行者现场无法确认，收敛为 recovery_required；
+//   - 没有记录取消请求：无法确认取消流程真的走过，收敛为 recovery_required；
+//   - 已记录取消请求且没有未结束的执行记录：执行者已随进程退出，收敛为 cancelled。
+//
+// 结论由 domain.DecideCancellationRecovery 计算，本方法不复制第二套规则。
+func (s *TaskWorkflowService) recoverCancelling(ctx context.Context) error {
+	tasks, err := s.store.ListTasks(ctx, storage.TaskFilter{
+		Statuses: []domain.TaskStatus{domain.TaskStatusCancelling},
+	})
+	if err != nil {
+		return fmt.Errorf("恢复取消现场失败: %w", err)
+	}
+	for _, task := range tasks {
+		activeRunID, runErr := s.activeRunID(ctx, task.ID)
+		if runErr != nil {
+			return fmt.Errorf(
+				"恢复任务 %s 的取消现场失败: %w",
+				task.ID,
+				runErr,
+			)
+		}
+		next := domain.DecideCancellationRecovery(domain.CancellationRecoveryInput{
+			CancelRequested: task.CancelRequested,
+			ActiveRunID:     activeRunID,
+		})
+		recovered, convergeErr := convergeCancellingTask(task, next, s.now())
+		if convergeErr != nil {
+			return fmt.Errorf(
+				"恢复任务 %s 的取消现场失败: 收敛到 %s 被拒绝: %w",
+				task.ID,
+				next,
+				convergeErr,
+			)
+		}
+		updated, updateErr := s.writeRecoveredTask(
+			context.WithoutCancel(ctx),
+			recovered,
+			domain.TaskStatusCancelling,
+		)
+		if updateErr != nil {
+			return fmt.Errorf(
+				"恢复任务 %s 的取消现场失败: 写入任务状态失败: %w",
+				task.ID,
+				updateErr,
+			)
+		}
+		if !updated {
+			// 另一个进程已经完成同一次收敛：这不是失败，本次恢复不再写入事件。
+			continue
+		}
+		eventType := domain.EventTypeTaskCancelled
+		if next == domain.TaskStatusRecoveryRequired {
+			eventType = domain.EventTypeTaskRecoveryRequired
+		}
+		s.appendEvent(ctx, task.ID, nil, nil, eventType, map[string]any{
+			"stage":             "recover_cancel",
+			"status":            string(next),
+			"cancel_requested":  task.CancelRequested,
+			"active_workflow":   activeRunID != "",
+			"cancelling_before": true,
+		})
+	}
+	return nil
+}
+
+// writeRecoveredTask 以状态为前置条件写入恢复结论。
+//
+// 返回 false 表示另一个进程已经完成了同一次收敛：恢复是幂等的收敛操作，竞争结果
+// 由数据库状态决定，因此这种情况不算失败，调用方也不应重复写入恢复事件。写入错误
+// 仍然必须向上返回，否则"恢复结论没有落库"会被当作已完成。
+func (s *TaskWorkflowService) writeRecoveredTask(
+	ctx context.Context,
+	task domain.Task,
+	expected domain.TaskStatus,
+) (bool, error) {
+	err := s.store.UpdateTaskIfStatus(ctx, task, []domain.TaskStatus{expected})
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, storage.ErrConflict) {
+		current, readErr := s.store.GetTask(ctx, task.ID)
+		if readErr != nil {
+			return false, fmt.Errorf(
+				"%w: 任务状态已被其他操作推进，且重新读取失败: %v",
+				ErrWorkflowConflict,
+				readErr,
+			)
+		}
+		if current.Status == task.Status {
+			// 状态已经等于目标值：同一次收敛已由其他进程写入。
+			return false, nil
+		}
+		return false, fmt.Errorf(
+			"%w: 任务 %s 的状态已被推进到 %s，恢复结论未写入",
+			ErrWorkflowConflict,
+			task.ID,
+			current.Status,
+		)
+	}
+	return false, err
+}
+
+// activeRunID 返回任务当前未结束的执行记录标识，没有时返回空字符串。
+//
+// 读取失败不能被当作"没有未结束记录"：那会让恢复在没有证据的情况下判定取消生效。
+func (s *TaskWorkflowService) activeRunID(ctx context.Context, taskID domain.ID) (string, error) {
+	run, err := s.store.GetActiveWorkflowRun(ctx, taskID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return "", nil
+		}
+		return "", fmt.Errorf("读取未结束的执行记录失败: %w", err)
+	}
+	return run.ID.String(), nil
+}
+
+// convergeCancellingTask 按状态机把残留 cancelling 任务收敛到目标状态。
+//
+// 收敛为 cancelled 时先写入取消结论再推进状态：状态进入终态却没有结论会让任务在
+// 管理接口里显示为"已取消但没有原因"。
+func convergeCancellingTask(
+	task domain.Task,
+	target domain.TaskStatus,
+	at time.Time,
+) (domain.Task, error) {
+	recovered := task
+	switch target {
+	case domain.TaskStatusCancelled:
+		if !recovered.CancelRequested {
+			return task, fmt.Errorf("%w: 任务没有取消请求记录", domain.ErrInvalidState)
+		}
+		if err := recovered.Finish(
+			domain.TaskResultCancelled,
+			cancellingRecoverySummary,
+			at,
+		); err != nil {
+			return task, err
+		}
+		if err := recovered.Transition(domain.TaskStatusCancelled, at); err != nil {
+			return task, err
+		}
+	case domain.TaskStatusRecoveryRequired:
+		if err := recovered.Transition(domain.TaskStatusRecoveryRequired, at); err != nil {
+			return task, err
+		}
+		recovered.FailureSummary = cancellingRecoverySummary
+	default:
+		return task, fmt.Errorf(
+			"%w: 取消现场只能收敛为 cancelled 或 recovery_required，收到 %s",
+			domain.ErrInvalidState,
+			target,
+		)
+	}
+	return recovered, nil
+}
+
 // recoverUnfinished 在服务启动时处理未结束的执行记录。
 //
 // 处理方式严格依据数据库事实：
@@ -650,6 +823,9 @@ func (s *TaskWorkflowService) recoverPlanGeneration(ctx context.Context) error {
 //     收敛为 blocked（可恢复）并记录原因，不自动重放 Pi 调用；
 //   - pending / blocked / recovery_required 的记录保持原状，等待用户显式恢复；
 //   - 已记录取消请求的记录收敛为 cancelled，因为执行者已经不存在。
+//
+// 单条记录收敛失败必须让启动失败：记录停留在 running 或 cancel_requested 时服务
+// 继续启动，会让"未经处理的在途执行"被当作已恢复。
 func (s *TaskWorkflowService) recoverUnfinished(ctx context.Context) error {
 	runs, err := s.store.ListUnfinishedWorkflowRuns(ctx)
 	if err != nil {
@@ -658,13 +834,11 @@ func (s *TaskWorkflowService) recoverUnfinished(ctx context.Context) error {
 	now := s.now()
 	for _, run := range runs {
 		if err := s.recoverRun(ctx, run, now); err != nil {
-			// 单条记录恢复失败不影响服务启动：记录保持原状，用户仍可通过接口查询与处理。
-			s.logger.WarnContext(
-				ctx,
-				"恢复工作流执行记录失败",
-				slog.String("run_id", run.ID.String()),
-				slog.String("task_id", run.TaskID.String()),
-				slog.String("error", errorSummary(err)),
+			return fmt.Errorf(
+				"恢复执行记录 %s（任务 %s）失败: %w",
+				run.ID,
+				run.TaskID,
+				err,
 			)
 		}
 	}

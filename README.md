@@ -384,6 +384,10 @@ POST /api/v1/tasks/{taskID}/cancel
   最终结论，也不写 `finished_at`。
 - 已处于 `cancelling` 时重复请求幂等，返回当前状态且不改写请求时间。
 - 已结束任务返回 409 `state_conflict`。
+- 进程在取消传播过程中退出会留下 `cancelling` 任务。服务启动时按持久化事实收敛：已记录
+  取消请求且没有未结束的执行记录 → `cancelled`（执行者已随进程退出）；存在未结束的执行记录
+  或没有取消请求记录 → `recovery_required`。判定只在
+  `domain.DecideCancellationRecovery` 中定义一次，收敛为 `cancelled` 前先写入取消结论。
 
 #### 删除任务
 
@@ -858,7 +862,8 @@ Planner 调用成功不等于计划成功：输出无法解析、校验失败或
 
 服务重启时，停留在 `planning` 的任务按持久化事实收敛：已有步骤 → `planned`（上一轮事务
 已提交），没有任何步骤 → `recovery_required`（无法确认调用是否真的发生）。**恢复不会重放
-Planner 调用。**
+Planner 调用。** 服务停止导致在途 Planner 调用中断时按 `recovery_required` 收敛
+（`planner_interrupted`），与用户取消区分：后者才收敛为 `cancelled`。
 
 #### 错误语义
 
@@ -981,6 +986,28 @@ Content-Type: application/json
 - 不在执行路径上创建、启动或接管容器。
 - 不发起 Validator Agent 调用：验证结论只来自确定性检查命令。
 - 不自动重试、不自动修复代码、不提供多任务并发调度队列。
+
+### 启动恢复
+
+`agentflow server` 启动时由 `app.TaskWorkflowService.Start` 按固定顺序收敛上一次进程留下的
+残留，全部依据数据库事实，**不重放任何 Agent 调用**：
+
+| 顺序 | 残留 | 收敛结论 |
+|---|---|---|
+| 1 | `workflow_runs` 停留在 `running` | 租约仍有效 → 不动（可能有其他进程在推进）；租约过期 → `blocked` / `worker_interrupted` |
+| 1 | `workflow_runs` 停留在 `cancel_requested` | `cancelled`（执行者已随进程退出） |
+| 1 | `workflow_runs` 停留在 `pending` | 超过租约窗口 → `blocked` / `not_started`；窗口内保持原状 |
+| 1 | `workflow_runs` 停留在 `blocked` / `recovery_required` | 保持原状，等待用户显式恢复 |
+| 2 | 任务停留在 `planning` | 已有步骤 → `planned`；没有任何步骤 → `recovery_required` |
+| 3 | 任务停留在 `cancelling` | 已记录取消请求且无未结束执行 → `cancelled`；否则 → `recovery_required` |
+
+顺序 3 放在最后，因为"是否还有未结束的执行"只有在顺序 1 收敛完毕后才可靠。
+
+收敛结论必须真正落库，因此**任一条记录读取或写入失败都会让 `agentflow server` 启动失败**，
+而不是只记一条告警继续启动。恢复是幂等的：另一个进程已完成同一次收敛时视为成功（不重复写
+入恢复事件），其余状态冲突仍然报错。恢复结论会追加 `task.recovery_required`、
+`task.cancelled` 或 `plan.created` 事件，并在负载中带 `stage=recover_plan` /
+`recover_cancel`，因此"自动收敛"与"真实执行结果"可以区分。
 
 ### 代码保存的状态写入失败与恢复边界
 

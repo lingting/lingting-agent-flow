@@ -38,6 +38,7 @@ tests/
 │   │   ├── session/    # Session 提取与持久化边界（真实文件系统）
 │   │   ├── codesaver/  # 真实 Git 提交、推送与合并（本机 bare 仓库）
 │   │   ├── source/     # 容器内 Git Clone 与任务分支（真实 Git）
+│   │   ├── workflow/   # 应用层编排的启动恢复与重启一致性（真实 SQLite）
 │   │   ├── ssh/        # 本地模拟 SSH/SFTP 服务端
 │   │   └── sshprobe/   # 本机 TCP 探测
 │   ├── pi/             # 需要本机真实 Pi CLI
@@ -97,7 +98,7 @@ go test -race -count=1 ./tests/unit/source/codesaver/ ./tests/unit/store/
 # 竞态检测（数据库迁移与并发访问）
 go test -race -count=1 ./tests/integration/local/database/
 # 竞态检测（任务级工作流编排与并发隔离）
-go test -race -count=1 ./tests/unit/app/ ./tests/unit/httpapi/
+go test -race -count=1 ./tests/unit/app/ ./tests/unit/httpapi/ ./tests/integration/local/workflow/
 # 竞态检测（SSH 连接管理与并发操作，需要真实协议交互）
 go test -race -count=1 ./tests/integration/local/ssh/...
 ```
@@ -368,6 +369,34 @@ Docker 或模型：
   伪造"验证通过"。
 - 验证失败反馈用例会检查输出摘要已脱敏（例如 `password=` 的内容被隐藏）且长度受限。
 - 服务停止用例会确认在途闭环收敛，且停止后不再接受新请求。
+
+## 启动恢复测试分层
+
+启动恢复（`app.TaskWorkflowService.Start`）的测试分两层，纯函数与链路分开覆盖：
+
+| 目录 | 覆盖内容 |
+|---|---|
+| `tests/unit/domain/` | 收敛决策纯函数：`DecidePlanGenerationRecovery`、`DecideCancellationRecovery`（含"未结束执行优先于取消请求"的规则顺序） |
+| `tests/unit/app/` | 计划生成的失败与恢复路径：非法输出、非零退出、超时、用户取消、服务停止中断、计划事务回滚、并发占用、`planning` 残留收敛 |
+| `tests/integration/local/workflow/` | 真实 SQLite 上的重启一致性：关闭连接后用同一路径重新打开，构造新的编排器实例并 `Start`，随后只查库断言 |
+
+集成用例的约束：
+
+- 使用真实数据库文件与真实 `app.TaskWorkflowService`，只有 Agent 执行、容器核验与单步骤闭环
+  是替身；恢复链路、事务边界、状态机与写入全部走产品代码。
+- 重启通过"关闭连接 → 同一路径重新打开"模拟，不使用同一个 `*sqlite.DB` 句柄冒充重启。
+- 断言对象是数据库事实：任务状态与 `failure_summary`、步骤集合、`workflow_runs`、`sessions`、
+  `events`，不以方法返回值代替持久化断言。
+- 替身记录调用次数，用于断言"恢复不重放 Planner、不执行步骤"。
+- 恢复写入失败用 `failingStore`（包装真实存储、只让指定方法返回错误）注入，验证启动失败且
+  现场保持原状。
+- 并发恢复用例用同一启动信号同时放行两个实例，断言持久化事实（最终状态唯一、恢复事件不重复），
+  不断言启动返回值——恢复是幂等收敛，竞争结果由数据库状态前置条件决定。
+
+```bash
+go test -count=1 -v ./tests/integration/local/workflow/
+go test -race -count=1 ./tests/integration/local/workflow/
+```
 
 ## 数据库约束与迁移测试
 

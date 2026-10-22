@@ -90,6 +90,10 @@ cmd → cli / httpapi → app → agent / process / gitworktree / storage / even
 - 所有测试代码与测试入口必须放在根目录 `tests/` 下，按 `unit/`、`integration/local/`、
   `integration/pi/`、`integration/ssh/`、`integration/remote/`、`e2e/` 分层。
 - 禁止在生产源码目录（`internal/`、`cmd/`）新增或保留测试文件。
+- `tests/integration/local/workflow/` 是应用层编排的集成测试目录：使用真实 SQLite 文件与真实
+  `app.TaskWorkflowService`，只把外部依赖（Agent 执行、容器核验、单步骤闭环）替换为受控替身。
+  恢复类用例必须"关闭连接后用同一路径重新打开"来模拟进程退出，并只断言数据库里的持久化事实
+  （任务状态、步骤、执行记录、会话、事件），不得以方法返回值代替持久化断言。
 - `tests/internal/testkit/` 只存放通用测试辅助代码，不存放产品实现，也不存放需要额外执行的验证脚本。
 
 ### 独立入口与并发
@@ -518,10 +522,22 @@ cmd → cli / httpapi → app → agent / process / gitworktree / storage / even
   与 `current_step_id`，代码保存先写 `code_save`。阶段写入失败时不得执行远程操作。
 - 恢复必须核验现场：`plan_digest` 与当前计划不一致时拒绝沿用旧游标；已完成的步骤不会被重新
   执行；`recovery_required` 与仍被占用的步骤必须先人工处理，禁止在未知现场上重放 Pi 调用。
-- 服务重启后的处理严格依据数据库事实：`running` 记录在租约过期后收敛为 `blocked`
-  （`worker_interrupted`），租约仍有效时不得抢占；`cancel_requested` 收敛为 `cancelled`；
-  `pending` 记录在租约窗口后收敛为 `blocked`；`blocked` 与 `recovery_required` 保持原状等待
-  用户显式恢复。启动恢复不得重放 Pi 调用。
+- 服务重启后的处理严格依据数据库事实，顺序固定为：未结束的执行记录 → 计划生成现场 →
+  取消现场。`running` 记录在租约过期后收敛为 `blocked`（`worker_interrupted`），租约仍有效时
+  不得抢占；`cancel_requested` 收敛为 `cancelled`；`pending` 记录在租约窗口后收敛为 `blocked`；
+  `blocked` 与 `recovery_required` 保持原状等待用户显式恢复。启动恢复不得重放 Pi 调用。
+- 停留在 `planning` 的任务按 `domain.DecidePlanGenerationRecovery` 收敛：已有步骤 → `planned`，
+  没有任何步骤 → `recovery_required`。
+- 停留在 `cancelling` 的任务按 `domain.DecideCancellationRecovery` 收敛：存在未结束的执行记录 →
+  `recovery_required`；没有取消请求记录 → `recovery_required`；已记录取消请求且没有未结束执行 →
+  `cancelled`（收敛前先写入 `TaskResultCancelled` 结论）。取消现场最后收敛，因为"是否还有未结束
+  执行"只有在执行记录收敛完毕后才可靠。
+- 启动恢复不使用"尽力而为"语义：任一记录读取、状态迁移或写入失败都必须让 `Start` 返回错误，
+  由 `internal/lifecycle` 逆序清理已启动服务；不得只记日志后继续启动，让未经处理的在途执行被
+  当作已恢复。恢复是幂等的：`UpdateTaskIfStatus` 返回冲突且数据库状态已等于目标值时视为其他
+  进程已完成同一次收敛，不重复写入恢复事件；其余冲突仍然报错。
+- 服务停止导致的中断必须与用户取消区分：`isServiceStop` 必须同时识别 `ErrStepExecutorStopped`
+  与 `ErrWorkflowStopped`，否则计划生成被服务关闭中断会被误判为用户取消并收敛为 `cancelled`。
 - 取消必须先落盘再传播：请求写入 `cancel_requested`，随后向在途执行传播取消信号，最终状态由
   真实收敛结果决定；重复取消幂等，不改写 `cancel_requested_at`。不得因 HTTP 请求成功就把仍在
   执行的工作流标记为已取消。
