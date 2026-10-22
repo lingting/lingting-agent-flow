@@ -75,6 +75,20 @@ cmd → cli / httpapi → app → agent / process / gitworktree / storage / even
 - 同一方法在调用链中连续出现两次及以上时，从第一次重复调用开始逐段换行。
 - 完成修改后对改动的 Go 文件执行 `gofmt`，并确认 `go vet ./...` 无新增问题。
 
+### 换行符
+
+- 仓库内所有文本文件（`.go`、`.sql`、`.md`、`.ts`、`.tsx`、`.json`、`.yml`、`.yaml`、`.css`、
+  `.html`、`.svg`、`.gitignore`、`Makefile`、`go.mod`、`go.sum`、`pnpm-lock.yaml` 等）一律使用
+  LF（`\n`），不得写入 CRLF（`\r\n`）或孤立 CR（`\r`）。
+- 换行符由仓库根目录 `.gitattributes` 的 `* text=auto eol=lf` 统一强制，不得依赖本机
+  `core.autocrlf` / `core.eol` 配置；新增文本文件同样受该规则约束。
+- 禁止同一文件混用 LF 与 CRLF：发现混合行尾必须整体转换为 LF，不得只改部分行，也不得只
+  修改少数行掩盖混合状态。
+- 新增或修改文件后必须确认行尾为 LF；Windows 下的编辑器、脚本与重定向写入都不得引入
+  CRLF，也不得通过 `unix2dos`、PowerShell 重定向等方式回写。
+- 二进制文件、编译产物与生成目录（`bin/`、`node_modules/`、`lingting-agent-flow-ui/dist/`、
+  `internal/webui/dist/`、`.idea/`、`.plan/`）不在本规则范围内，也不得提交进版本库。
+
 ## 验证与测试
 
 - 默认只做非测试验证：阅读代码、检查 `git diff`、`gofmt`、`go vet`、类型与引用检查。
