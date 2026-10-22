@@ -568,7 +568,14 @@ func (r CodeSaveRecord) SavedToRemote() bool {
 }
 
 // RequiresManualRecovery 判断是否需要人工介入。
+//
+// 提交、推送与合并三个阶段的结果未知都必须先核验真实仓库状态：unknown 既不代表
+// 成功也不代表失败，自动重试可能在结果未知时产生重复提交或覆盖远程历史。
 func (r CodeSaveRecord) RequiresManualRecovery() bool {
+	switch r.CommitStatus {
+	case CommitStatusUnknown:
+		return true
+	}
 	switch r.PushStatus {
 	case PushStatusConflict, PushStatusUnknown, PushStatusFailed:
 		return true

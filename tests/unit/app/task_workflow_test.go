@@ -254,6 +254,8 @@ type taskWorkflowStore struct {
 	app.TaskWorkflowStore
 	updateRunErr error
 	createRunErr error
+	// sessions 非空时用它替代真实会话查询结果，用于覆盖数据库无法表达的归档状态。
+	sessions []domain.Session
 }
 
 // UpdateWorkflowRun 在配置了错误时返回该错误。
@@ -278,6 +280,20 @@ func (s *taskWorkflowStore) CreateWorkflowRun(
 	return s.TaskWorkflowStore.CreateWorkflowRun(ctx, run)
 }
 
+// ListSessionsByTask 在配置了替身时返回替身结果。
+//
+// 数据库的 archive_path 约束不允许"归档成功但位置为空"，而读取层必须能承受这类
+// 历史数据，因此收尾判定的边界场景通过这里注入。
+func (s *taskWorkflowStore) ListSessionsByTask(
+	ctx context.Context,
+	taskID domain.ID,
+) ([]domain.Session, error) {
+	if s.sessions != nil {
+		return append([]domain.Session(nil), s.sessions...), nil
+	}
+	return s.TaskWorkflowStore.ListSessionsByTask(ctx, taskID)
+}
+
 // taskWorkflowFixture 是一套可直接启动任务级工作流的测试数据。
 type taskWorkflowFixture struct {
 	db         *sqlite.DB
@@ -290,6 +306,8 @@ type taskWorkflowFixture struct {
 	steps      []domain.Step
 	ctx        context.Context
 	workspace  *testkit.Workspace
+	// now 是构造测试数据时使用的时间。
+	now time.Time
 }
 
 // taskWorkflowOptions 允许用例调整测试数据的构造方式。
@@ -320,8 +338,10 @@ type taskWorkflowOptions struct {
 	createRunErr error
 	// existingRun 预先写入一条执行记录，用于验证并发与恢复。
 	existingRun func(t *testing.T, task domain.Task, steps []domain.Step) domain.WorkflowRun
-	// sessions 为 true 时预先写入一条完整会话。
+	// sessions 为 true 时预先写入一条完整且已归档的会话。
 	sessions bool
+	// session 非空时按给定取值调整预置会话的完整性与归档字段。
+	session func(session domain.Session) domain.Session
 	// hostStatus 覆盖执行节点校验状态，空值表示 normal。
 	hostStatus domain.ValidationStatus
 }
@@ -417,7 +437,7 @@ func newTaskWorkflowFixture(t *testing.T, options taskWorkflowOptions) *taskWork
 		}
 	}
 	if options.sessions {
-		writeTaskWorkflowSession(t, db, ctx, task, now)
+		writeTaskWorkflowSession(t, db, ctx, task, now, options.session)
 	}
 	if options.existingRun != nil {
 		run := options.existingRun(t, task, steps)
@@ -463,6 +483,7 @@ func newTaskWorkflowFixture(t *testing.T, options taskWorkflowOptions) *taskWork
 		steps:      steps,
 		ctx:        ctx,
 		workspace:  workspace,
+		now:        now,
 	}
 }
 
@@ -491,13 +512,40 @@ func markHostAbnormalForWorkflow(
 	return *stored
 }
 
-// writeTaskWorkflowSession 写入一条完整性为 complete 的会话记录。
+// writeTaskWorkflowSession 写入一条完整且已归档的会话记录。
+//
+// adjust 非空时在写入前调整完整性与归档字段，使用例可以表达 HTML 导出失败与归档
+// 失败等真实状态；无论怎样调整，写入前都要求字段自洽。
+//
+// 数据库的 archive_path 有"非空"约束，因此"归档成功但位置为空"这类历史数据由
+// baseSession 构造后直接交给收尾判定，不经过写入路径。
 func writeTaskWorkflowSession(
 	t *testing.T,
 	db *sqlite.DB,
 	ctx context.Context,
 	task domain.Task,
 	now time.Time,
+	adjust func(session domain.Session) domain.Session,
+) domain.Session {
+	t.Helper()
+	session := baseSession(t, db, ctx, task, now, adjust)
+	if err := session.Complete(now); err != nil {
+		t.Fatalf("完成会话失败: %v", err)
+	}
+	if err := db.CreateSession(ctx, session); err != nil {
+		t.Fatalf("写入会话失败: %v", err)
+	}
+	return session
+}
+
+// baseSession 构造一条完整且已归档的会话记录，不写入数据库。
+func baseSession(
+	t *testing.T,
+	db *sqlite.DB,
+	ctx context.Context,
+	task domain.Task,
+	now time.Time,
+	adjust func(session domain.Session) domain.Session,
 ) domain.Session {
 	t.Helper()
 	role, err := db.GetRole(ctx, task.Config.DeveloperRoleID)
@@ -523,11 +571,8 @@ func writeTaskWorkflowSession(
 	session.ArchiveStatus = domain.SessionArchiveSucceeded
 	session.ArchivePath = "sessions/archive.jsonl"
 	session.RunStatus = domain.SessionRunCompleted
-	if err := session.Complete(now); err != nil {
-		t.Fatalf("完成会话失败: %v", err)
-	}
-	if err := db.CreateSession(ctx, session); err != nil {
-		t.Fatalf("写入会话失败: %v", err)
+	if adjust != nil {
+		session = adjust(session)
 	}
 	return session
 }
@@ -1296,5 +1341,176 @@ func TestWorkflowRecordsEvents(t *testing.T) {
 		if !seen[expected] {
 			t.Fatalf("缺少事件 %s，实际事件: %v", expected, seen)
 		}
+	}
+}
+
+// TestWorkflowCloseoutRequiresSessionArchive 验证收尾对会话归档的判定。
+//
+// 只有原始会话完整且归档成功、归档位置非空时才算归档完成：HTML 导出失败不影响
+// 判定，完整性不足、归档失败、未归档与归档位置缺失都必须收敛为需要人工核验。
+func TestWorkflowCloseoutRequiresSessionArchive(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		adjust      func(session domain.Session) domain.Session
+		expected    domain.WorkflowRunStatus
+		errorClass  string
+		description string
+	}{
+		{
+			name: "HTML 导出失败但原始归档成功",
+			adjust: func(session domain.Session) domain.Session {
+				session.Completeness = domain.SessionCompletenessExportFailed
+				session.ExportStatus = domain.SessionExportFailed
+				session.HTMLPath = ""
+				return session
+			},
+			expected:    domain.WorkflowRunCompleted,
+			description: "原始 JSONL 已保存并归档，HTML 导出失败不应阻止收尾",
+		},
+		{
+			name: "归档失败",
+			adjust: func(session domain.Session) domain.Session {
+				session.ArchiveStatus = domain.SessionArchiveFailed
+				session.ArchivePath = ""
+				return session
+			},
+			expected:    domain.WorkflowRunRecoveryRequired,
+			errorClass:  "session_not_persisted",
+			description: "归档失败时原始会话可能只在容器内，必须人工核验",
+		},
+		{
+			name: "未尝试归档",
+			adjust: func(session domain.Session) domain.Session {
+				session.ArchiveStatus = domain.SessionArchiveNotAttempted
+				session.ArchivePath = ""
+				return session
+			},
+			expected:    domain.WorkflowRunRecoveryRequired,
+			errorClass:  "session_not_persisted",
+			description: "未归档不能当作归档完成",
+		},
+		{
+			name: "归档位置缺失",
+			adjust: func(session domain.Session) domain.Session {
+				session.ArchivePath = ""
+				return session
+			},
+			expected:    domain.WorkflowRunRecoveryRequired,
+			errorClass:  "session_not_persisted",
+			description: "声称归档成功却没有归档位置时无法定位原始会话",
+		},
+		{
+			name: "完整性为部分",
+			adjust: func(session domain.Session) domain.Session {
+				session.Completeness = domain.SessionCompletenessPartial
+				return session
+			},
+			expected:    domain.WorkflowRunRecoveryRequired,
+			errorClass:  "session_not_persisted",
+			description: "只保存了部分会话内容时不算归档完成",
+		},
+		{
+			name: "完整性为缺失",
+			adjust: func(session domain.Session) domain.Session {
+				session.Completeness = domain.SessionCompletenessMissing
+				session.JSONLPath = ""
+				session.ArchiveStatus = domain.SessionArchiveFailed
+				session.ArchivePath = ""
+				return session
+			},
+			expected:    domain.WorkflowRunRecoveryRequired,
+			errorClass:  "session_not_persisted",
+			description: "没有可用原始会话文件时不得判定归档完成",
+		},
+	}
+	for _, testCase := range cases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := newTaskWorkflowFixture(t, taskWorkflowOptions{
+				stepCount:      1,
+				codeSaver:      true,
+				codeSaveRecord: succeededCodeSaveRecord(),
+			})
+			// 会话只交给收尾判定，不经过数据库写入：archive_path 的"非空"约束
+			// 无法表达"归档成功但位置为空"这类需要被识别出的历史数据。
+			session := baseSession(t, fixture.db, fixture.ctx, fixture.task, fixture.now, testCase.adjust)
+			fixture.store.sessions = []domain.Session{session}
+			if _, err := fixture.service.StartWorkflow(fixture.ctx, app.StartWorkflowRequest{
+				TaskID: fixture.task.ID.String(),
+			}); err != nil {
+				t.Fatalf("启动工作流失败: %v", err)
+			}
+			result := waitTaskRunStatus(t, fixture.service, fixture.task.ID, workflowSettled)
+			if result.Run.Status != testCase.expected {
+				t.Fatalf(
+					"%s: 期望状态 %s，实际 %s（原因 %s）",
+					testCase.description,
+					testCase.expected,
+					result.Run.Status,
+					result.Run.ErrorSummary,
+				)
+			}
+			if result.Run.ErrorClass != testCase.errorClass {
+				t.Fatalf(
+					"%s: 期望错误分类 %q，实际 %q",
+					testCase.description,
+					testCase.errorClass,
+					result.Run.ErrorClass,
+				)
+			}
+			task, err := fixture.db.GetTask(fixture.ctx, fixture.task.ID)
+			if err != nil {
+				t.Fatalf("读取任务失败: %v", err)
+			}
+			if testCase.expected == domain.WorkflowRunCompleted {
+				if task.Status != domain.TaskStatusCompleted {
+					t.Fatalf("%s: 归档完成时任务应完成，实际 %s", testCase.description, task.Status)
+				}
+				return
+			}
+			if task.Status == domain.TaskStatusCompleted {
+				t.Fatalf("%s: 会话归档未完成时任务不得标记为完成", testCase.description)
+			}
+		})
+	}
+}
+
+// TestWorkflowCloseoutRequiresRecoveryOnUnknownCommit 验证提交结果未知时需要人工核验。
+//
+// 推送尚未成功且提交结果无法确认时，不能判定任务完整成功，也不能退化为普通阻塞：
+// 必须先核验仓库真实状态。
+func TestWorkflowCloseoutRequiresRecoveryOnUnknownCommit(t *testing.T) {
+	t.Parallel()
+	record := succeededCodeSaveRecord()
+	record.CommitStatus = domain.CommitStatusUnknown
+	record.CommitSHA = ""
+	// 真实场景中提交结果未知时不会继续推送，推送停留在 pending。
+	record.PushStatus = domain.PushStatusPending
+	fixture := newTaskWorkflowFixture(t, taskWorkflowOptions{
+		stepCount:      1,
+		codeSaver:      true,
+		sessions:       true,
+		codeSaveRecord: record,
+	})
+	if _, err := fixture.service.StartWorkflow(fixture.ctx, app.StartWorkflowRequest{
+		TaskID: fixture.task.ID.String(),
+	}); err != nil {
+		t.Fatalf("启动工作流失败: %v", err)
+	}
+	result := waitTaskRunStatus(t, fixture.service, fixture.task.ID, workflowSettled)
+	if result.Run.Status != domain.WorkflowRunRecoveryRequired {
+		t.Fatalf("提交结果未知时应需要人工核验，实际 %s", result.Run.Status)
+	}
+	if result.Run.ErrorClass != "code_save_indeterminate" {
+		t.Fatalf("错误分类不正确: %s", result.Run.ErrorClass)
+	}
+	task, err := fixture.db.GetTask(fixture.ctx, fixture.task.ID)
+	if err != nil {
+		t.Fatalf("读取任务失败: %v", err)
+	}
+	if task.Status == domain.TaskStatusCompleted {
+		t.Fatal("提交结果未知时任务不得标记为完成")
 	}
 }

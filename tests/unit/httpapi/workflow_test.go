@@ -244,6 +244,13 @@ func newTaskWorkflowAPIFixture(t *testing.T, stepCount int) *taskWorkflowAPIFixt
 	if err := session.MarkRunning("pi-session-1"); err != nil {
 		t.Fatalf("标记会话运行失败: %v", err)
 	}
+	// 收尾要求原始会话已保存并归档：没有归档结论的会话不算归档完成。
+	session.Completeness = domain.SessionCompletenessComplete
+	session.ExportStatus = domain.SessionExportNotAttempted
+	session.JSONLPath = "sessions/session.jsonl"
+	session.ArchiveStatus = domain.SessionArchiveSucceeded
+	session.ArchivePath = "sessions/archive.jsonl"
+	session.RunStatus = domain.SessionRunCompleted
 	if err := session.Complete(now); err != nil {
 		t.Fatalf("完成会话失败: %v", err)
 	}

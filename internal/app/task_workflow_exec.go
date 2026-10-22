@@ -718,7 +718,10 @@ func (s *TaskWorkflowService) saveCode(
 
 // sessionsPersisted 核验会话文件是否已可靠保存。
 //
-// 判定只看真实归档状态：没有会话记录、缺少原始文件或只保存了部分内容都不算完成。
+// 判定同时要求原始会话与归档都成立：完整性必须保留可用的原始 JSONL，归档状态必须
+// 是 succeeded 且给出归档位置。export_failed 只代表 HTML 导出失败，原始 JSONL 已保存
+// 并归档时不算失败；没有会话记录、只保存了部分内容、归档失败、未尝试归档、归档位置
+// 缺失或查询失败一律不算完成。
 func (s *TaskWorkflowService) sessionsPersisted(
 	ctx context.Context,
 	task domain.Task,
@@ -737,13 +740,25 @@ func (s *TaskWorkflowService) sessionsPersisted(
 		return false
 	}
 	for _, session := range sessions {
-		switch session.Completeness {
-		case domain.SessionCompletenessMissing, domain.SessionCompletenessPartial,
-			domain.SessionCompletenessExportFailed:
+		if !sessionArchived(session) {
 			return false
 		}
 	}
 	return true
+}
+
+// sessionArchived 判断单条会话的原始文件是否已可靠归档。
+func sessionArchived(session domain.Session) bool {
+	switch session.Completeness {
+	case domain.SessionCompletenessComplete, domain.SessionCompletenessExportFailed:
+	default:
+		// partial 与 missing 都表示原始会话不完整或不存在，不能算归档完成。
+		return false
+	}
+	if session.ArchiveStatus != domain.SessionArchiveSucceeded {
+		return false
+	}
+	return strings.TrimSpace(session.ArchivePath) != ""
 }
 
 // allDevelopStepsCompleted 判断全部开发步骤是否都已确认完成。
