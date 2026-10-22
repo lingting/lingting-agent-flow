@@ -239,6 +239,24 @@ func (s *AgentRunnerService) Run(
 	return outcome, nil
 }
 
+// archiveOf 把执行结果转换为会话归档结论。
+//
+// 归档结论完全来自真实文件状态：只有 Runner 拿到可用原始文件时才记为成功，
+// 其余情况按"尝试过但失败"如实记录，不得把不存在的文件标记为已归档。
+func archiveOf(result agent.RunResult) ArchiveOutcome {
+	path := strings.TrimSpace(result.Session.JSONLPath)
+	if path == "" {
+		return ArchiveOutcome{
+			Status: domain.SessionArchiveFailed,
+			Error:  "没有可归档的原始 Session 文件",
+		}
+	}
+	return ArchiveOutcome{
+		Status: domain.SessionArchiveSucceeded,
+		Path:   path,
+	}
+}
+
 // begin 登记一次在途调用，服务已停止时拒绝。
 func (s *AgentRunnerService) begin(ctx context.Context) error {
 	s.mu.Lock()

@@ -10,30 +10,23 @@ import (
 
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage"
-	"github.com/lingting/agentflow/internal/workflow"
 )
 
 // TaskService 是任务管理的应用服务入口。
 //
-// CLI 与后续 HTTP 接口都通过本服务创建、查询、取消、重试与恢复任务；
-// 执行决策仍由 workflow 包负责，本层只做参数校验与状态编排。
+// CLI 与 HTTP 接口都通过本服务创建、查询、取消与删除任务；任务执行由
+// app.TaskWorkflowService 负责，本层只做参数校验与状态编排。
 type TaskService struct {
 	store  storage.Store
 	logger *slog.Logger
-	// engine 是工作流引擎，可为空：为空时只能查询任务，不能推进执行。
-	engine *workflow.Engine
-	// recovery 是恢复核验器，可为空。
-	recovery *workflow.Recovery
-	now      func() time.Time
+	now    func() time.Time
 }
 
 // TaskServiceOptions 是构造任务服务的输入。
 type TaskServiceOptions struct {
-	Store    storage.Store
-	Logger   *slog.Logger
-	Engine   *workflow.Engine
-	Recovery *workflow.Recovery
-	Now      func() time.Time
+	Store  storage.Store
+	Logger *slog.Logger
+	Now    func() time.Time
 }
 
 // NewTaskService 构造任务服务。
@@ -50,11 +43,9 @@ func NewTaskService(options TaskServiceOptions) (*TaskService, error) {
 		now = func() time.Time { return time.Now().UTC() }
 	}
 	return &TaskService{
-		store:    options.Store,
-		logger:   logger,
-		engine:   options.Engine,
-		recovery: options.Recovery,
-		now:      now,
+		store:  options.Store,
+		logger: logger,
+		now:    now,
 	}, nil
 }
 
@@ -430,18 +421,6 @@ func (s *TaskService) Detail(ctx context.Context, taskID string) (TaskDetail, er
 	return detail, nil
 }
 
-// RunTask 推进一个任务直到稳定状态。
-func (s *TaskService) RunTask(ctx context.Context, taskID string) error {
-	if s.engine == nil {
-		return fmt.Errorf("推进任务失败: 未配置工作流引擎")
-	}
-	id := domain.ID(strings.TrimSpace(taskID))
-	if err := id.Validate(); err != nil {
-		return fmt.Errorf("推进任务失败: %w", err)
-	}
-	return s.engine.RunTask(ctx, id)
-}
-
 // CancelTask 记录取消请求并把任务收敛为取消状态。
 //
 // 取消请求先落盘：即使当前没有执行者，后续推进也会看到取消请求并停止。
@@ -484,75 +463,6 @@ func (s *TaskService) CancelTask(ctx context.Context, taskID string) (domain.Tas
 		return domain.Task{}, fmt.Errorf("取消任务失败: %w", err)
 	}
 	return task, nil
-}
-
-// RetryTaskRequest 是重试失败任务的输入。
-type RetryTaskRequest struct {
-	// TaskID 是目标任务。
-	TaskID string
-	// PreviousDisposition 是旧容器的处置方式：delete 或 detach。
-	//
-	// 非交互执行必须显式给出；为空时拒绝重试，不会静默删除或脱离现场。
-	PreviousDisposition domain.RestartDisposition
-}
-
-// RetryTask 按既定策略为失败任务准备新的执行。
-//
-// 失败任务重新开始必须使用新容器：本方法先核验并处置旧容器，清空任务容器关联，
-// 再把任务推进到 preparing，由工作流引擎创建新容器并重新获取代码。
-func (s *TaskService) RetryTask(
-	ctx context.Context,
-	request RetryTaskRequest,
-) (domain.Task, error) {
-	task, err := s.GetTask(ctx, request.TaskID)
-	if err != nil {
-		return domain.Task{}, err
-	}
-	switch task.Status {
-	case domain.TaskStatusFailed, domain.TaskStatusRecoveryRequired,
-		domain.TaskStatusPaused, domain.TaskStatusQueued:
-	default:
-		return domain.Task{}, fmt.Errorf(
-			"重试任务失败: 任务状态 %s 不允许重试",
-			task.Status,
-		)
-	}
-	if err := request.PreviousDisposition.Validate(); err != nil {
-		return domain.Task{}, fmt.Errorf(
-			"重试任务失败: 必须显式选择旧容器处置方式（delete 或 detach）: %w",
-			err,
-		)
-	}
-	if s.recovery == nil {
-		return domain.Task{}, fmt.Errorf("重试任务失败: 未配置恢复核验器")
-	}
-	if err := s.recovery.PrepareRestart(
-		ctx,
-		task.ID,
-		request.PreviousDisposition,
-	); err != nil {
-		return domain.Task{}, err
-	}
-	updated, err := s.store.GetTask(ctx, task.ID)
-	if err != nil {
-		return domain.Task{}, fmt.Errorf("重试任务失败: %w", err)
-	}
-	return *updated, nil
-}
-
-// RecoverTask 核验不确定状态并尝试安全恢复。
-func (s *TaskService) RecoverTask(
-	ctx context.Context,
-	taskID string,
-) (workflow.RecoveryReport, error) {
-	if s.recovery == nil {
-		return workflow.RecoveryReport{}, fmt.Errorf("恢复任务失败: 未配置恢复核验器")
-	}
-	task, err := s.GetTask(ctx, taskID)
-	if err != nil {
-		return workflow.RecoveryReport{}, err
-	}
-	return s.recovery.Recover(ctx, task.ID)
 }
 
 // ListUnfinishedTasks 返回尚未结束的任务，用于进程重启后的恢复识别。

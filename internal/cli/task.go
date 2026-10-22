@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/config"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage"
-	"github.com/lingting/agentflow/internal/workflow"
 	"github.com/spf13/cobra"
 )
 
@@ -17,8 +17,8 @@ import (
 func newTaskCommand(a *app.App) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "task",
-		Short: "创建、执行、查询、取消、重试与恢复任务",
-		Long: "任务状态、重试策略、验证规则与资源清理全部由 Go 工作流引擎控制。\n" +
+		Short: "创建、执行、查询与取消任务",
+		Long: "任务执行由 agentflow server 内的任务级工作流编排器负责，CLI 只做管理与查询。\n" +
 			"每次 Planner、Developer、Validator 调用都使用独立的 Invocation 与独立 Session。\n" +
 			"必需确定性验证命令先执行，Agent 的 passed 结论不能覆盖必需检查的失败。",
 		Args: cobra.NoArgs,
@@ -36,19 +36,18 @@ func newTaskCommand(a *app.App) *cobra.Command {
 	command.AddCommand(newTaskGetCommand(a))
 	command.AddCommand(newTaskListCommand(a))
 	command.AddCommand(newTaskCancelCommand(a))
-	command.AddCommand(newTaskRetryCommand(a))
-	command.AddCommand(newTaskRecoverCommand(a))
 	return command
 }
 
 // taskServices 是一次任务命令执行所需的依赖。
+//
+// 命令层只持有任务管理服务：任务执行由 agentflow server 内的任务级工作流编排器
+// 负责，CLI 不装配 SSH、容器、Pi 与代码保存能力。
 type taskServices struct {
-	tasks    *app.TaskService
-	engine   *workflow.Engine
-	recovery *workflow.Recovery
+	tasks *app.TaskService
 }
 
-// withTaskServices 加载配置并构造任务服务与工作流引擎。
+// withTaskServices 加载配置并构造任务管理服务。
 func withTaskServices(
 	ctx context.Context,
 	a *app.App,
@@ -61,53 +60,14 @@ func withTaskServices(
 		ctx context.Context,
 		services dockerServices,
 	) error {
-		// 认证方式固定为无口令私钥，任务执行不需要额外收集凭据；
-		// 节点是否可用由执行节点准入校验在执行阶段统一确认。
-		sessions, err := app.NewSessionService(
-			services.store,
-			app.SessionRoot(services.config),
-			a.Logger().Slog(),
-		)
-		if err != nil {
-			return err
-		}
-		workflowService, err := app.NewWorkflowService(app.WorkflowOptions{
-			Containers: services.containers,
-			Sessions:   sessions,
-			Store:      services.store,
-			Logger:     a.Logger().Slog(),
-		})
-		if err != nil {
-			return err
-		}
-		maxParallel, _ := app.WorkflowOptionsFromConfig(services.config)
-		engine, err := workflow.NewEngine(workflow.Options{
-			Store:       services.store,
-			Ports:       workflowService.Ports(),
-			Logger:      a.Logger().Slog(),
-			MaxParallel: maxParallel,
-		})
-		if err != nil {
-			return err
-		}
-		recovery, err := workflow.NewRecovery(workflow.RecoveryOptions{
+		tasks, err := app.NewTaskService(app.TaskServiceOptions{
 			Store:  services.store,
-			Ports:  workflowService.Ports(),
 			Logger: a.Logger().Slog(),
 		})
 		if err != nil {
 			return err
 		}
-		tasks, err := app.NewTaskService(app.TaskServiceOptions{
-			Store:    services.store,
-			Logger:   a.Logger().Slog(),
-			Engine:   engine,
-			Recovery: recovery,
-		})
-		if err != nil {
-			return err
-		}
-		return run(ctx, taskServices{tasks: tasks, engine: engine, recovery: recovery})
+		return run(ctx, taskServices{tasks: tasks})
 	})
 }
 
@@ -310,42 +270,78 @@ func buildRetryConfig(
 }
 
 // newTaskRunCommand 构建 task run 子命令。
+//
+// 任务执行由 agentflow server 内的任务级工作流编排器负责：本命令只发起一次执行
+// 请求，并按需轮询真实进度，不再自行装配 SSH、容器、Pi 与代码保存能力。
 func newTaskRunCommand(a *app.App) *cobra.Command {
-	var flags credentialFlags
-	var hostID string
+	var (
+		address       string
+		prompt        string
+		timeout       string
+		verifyTimeout string
+		wait          bool
+		interval      time.Duration
+	)
 	command := &cobra.Command{
 		Use:   "run <task-id>",
-		Short: "开始或继续推进一个任务",
-		Long: "按阶段推进任务：准备容器 → 获取代码 → 规划 → 开发 → 确定性验证 →\n" +
-			"辅助评估 → 代码保存 → 成功清理。\n" +
-			"已结束或正在被推进的任务不会被重复执行。",
+		Short: "通过本地服务启动一次任务级工作流执行",
+		Long: "向本地 API 发起 POST /api/v1/tasks/{taskID}/execute-workflow，由服务内的\n" +
+			"任务级工作流编排器按已持久化的计划顺序执行开发与验证步骤。\n" +
+			"该命令不生成计划、不自动重试、不自动删除容器；失败或阻塞时停止并保留现场。\n" +
+			"服务地址默认取配置文件的 server 段，可用 --address 覆盖。",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var task domain.Task
-			err := withTaskServices(
-				cmd.Context(),
-				a,
-				hostConfigPath(cmd),
-				flags,
-				hostID,
-				func(ctx context.Context, services taskServices) error {
-					runErr := services.tasks.RunTask(ctx, args[0])
-					current, getErr := services.tasks.GetTask(ctx, args[0])
-					if getErr != nil {
-						return runErr
-					}
-					task = current
-					return runErr
-				},
-			)
-			if printErr := printTaskSummary(a, task); printErr != nil {
+			cfg, err := a.ValidateConfig(cmd.Context(), hostConfigPath(cmd))
+			if err != nil {
+				return err
+			}
+			target := strings.TrimSpace(address)
+			if target == "" {
+				target = cfg.Server.Address()
+			}
+			devTimeout, err := parseOptionalDuration(timeout)
+			if err != nil {
+				return err
+			}
+			validationTimeout, err := parseOptionalDuration(verifyTimeout)
+			if err != nil {
+				return err
+			}
+			if interval <= 0 {
+				return fmt.Errorf("轮询间隔必须大于 0: %s", interval)
+			}
+			client := newWorkflowAPIClient(target, a.Logger().Slog())
+			ctx := cmd.Context()
+			run, err := client.start(ctx, args[0], workflowAPIStartRequest{
+				Prompt:                   strings.TrimSpace(prompt),
+				TimeoutSeconds:           int(devTimeout.Seconds()),
+				ValidationTimeoutSeconds: int(validationTimeout.Seconds()),
+			})
+			if err != nil {
+				return err
+			}
+			if err := printWorkflowRun(a, run); err != nil {
+				return err
+			}
+			if !wait || workflowRunStopped(run) {
+				return nil
+			}
+			final, waitErr := client.wait(ctx, args[0], interval, a)
+			if final.RunID == "" {
+				return waitErr
+			}
+			if printErr := printWorkflowRun(a, final); printErr != nil {
 				return printErr
 			}
-			return err
+			return waitErr
 		},
 	}
-	addCredentialFlags(&flags, command)
-	command.Flags().StringVar(&hostID, "host", "", "执行节点标识，用于收集 SSH 凭据")
+	command.Flags().StringVar(&address, "address", "", "服务地址，省略时使用配置文件的 server 段")
+	command.Flags().StringVar(&prompt, "prompt", "", "追加在每一步骤提示词之后的补充说明")
+	command.Flags().StringVar(&timeout, "timeout", "", "单个步骤开发阶段的超时时间，例如 30m")
+	command.Flags().StringVar(&verifyTimeout, "verify-timeout", "", "单个步骤验证阶段的超时时间，例如 10m")
+	command.Flags().BoolVar(&wait, "wait", true, "轮询真实进度直到执行收敛")
+	command.Flags().DurationVar(&interval, "interval", 2*time.Second, "轮询间隔")
 	return command
 }
 
@@ -457,109 +453,6 @@ func newTaskCancelCommand(a *app.App) *cobra.Command {
 			return printTaskSummary(a, task)
 		},
 	}
-	return command
-}
-
-// newTaskRetryCommand 构建 task retry 子命令。
-func newTaskRetryCommand(a *app.App) *cobra.Command {
-	var flags credentialFlags
-	var (
-		hostID      string
-		disposition string
-		runAfter    bool
-	)
-	command := &cobra.Command{
-		Use:   "retry <task-id>",
-		Short: "按既定策略重新开始失败任务",
-		Long: "重新开始一定使用新容器：先按 --previous 处置旧容器，再创建新容器并重新获取代码。\n" +
-			"--previous delete 删除旧容器；--previous detach 保留现场并脱离 AgentFlow 管理。\n" +
-			"缺少 --previous 时直接拒绝：不会在未授权的情况下删除或脱离现场。",
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			parsed, err := domain.ParseRestartDisposition(disposition)
-			if err != nil {
-				return fmt.Errorf("重试任务失败: %w", err)
-			}
-			var task domain.Task
-			err = withTaskServices(
-				cmd.Context(),
-				a,
-				hostConfigPath(cmd),
-				flags,
-				hostID,
-				func(ctx context.Context, services taskServices) error {
-					updated, retryErr := services.tasks.RetryTask(ctx, app.RetryTaskRequest{
-						TaskID:              args[0],
-						PreviousDisposition: parsed,
-					})
-					task = updated
-					if retryErr != nil {
-						return retryErr
-					}
-					if !runAfter {
-						return nil
-					}
-					runErr := services.tasks.RunTask(ctx, args[0])
-					latest, getErr := services.tasks.GetTask(ctx, args[0])
-					if getErr == nil {
-						task = latest
-					}
-					return runErr
-				},
-			)
-			if printErr := printTaskSummary(a, task); printErr != nil {
-				return printErr
-			}
-			return err
-		},
-	}
-	addCredentialFlags(&flags, command)
-	command.Flags().StringVar(&hostID, "host", "", "执行节点标识，用于收集 SSH 凭据")
-	command.Flags().StringVar(
-		&disposition,
-		"previous",
-		"",
-		"旧容器处置方式：delete 或 detach（必填）",
-	)
-	command.Flags().BoolVar(&runAfter, "run", false, "处置旧容器后立即推进新执行")
-	if err := command.MarkFlagRequired("previous"); err != nil {
-		panic(fmt.Sprintf("cli: 标记必需参数失败: %v", err))
-	}
-	return command
-}
-
-// newTaskRecoverCommand 构建 task recover 子命令。
-func newTaskRecoverCommand(a *app.App) *cobra.Command {
-	var flags credentialFlags
-	var hostID string
-	command := &cobra.Command{
-		Use:   "recover <task-id>",
-		Short: "核验不确定状态并给出恢复建议",
-		Long: "逐项核验容器、步骤、尝试、Session 与代码保存结果，不会盲目重放整个工作流。\n" +
-			"无法确认的状态会保留为 recovery_required 并输出诊断信息。",
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			var report workflow.RecoveryReport
-			err := withTaskServices(
-				cmd.Context(),
-				a,
-				hostConfigPath(cmd),
-				flags,
-				hostID,
-				func(ctx context.Context, services taskServices) error {
-					loaded, recoverErr := services.tasks.RecoverTask(ctx, args[0])
-					report = loaded
-					return recoverErr
-				},
-			)
-			if printErr := printRecoveryReport(a, report); printErr != nil {
-				return printErr
-			}
-			return err
-		},
-	}
-	addCredentialFlags(&flags, command)
-	command.Flags().StringVar(&hostID, "host", "", "执行节点标识，用于收集 SSH 凭据")
 	return command
 }
 
@@ -709,26 +602,6 @@ func printTaskList(a *app.App, tasks []domain.Task) error {
 		))
 	}
 	_, err := fmt.Fprintln(a.Stdout(), strings.Join(rows, "\n"))
-	return err
-}
-
-// printRecoveryReport 输出恢复核验结论。
-func printRecoveryReport(a *app.App, report workflow.RecoveryReport) error {
-	if report.Task.ID.IsEmpty() {
-		return nil
-	}
-	lines := []string{
-		fmt.Sprintf("任务: %s", report.Task.ID),
-		fmt.Sprintf("状态: %s", report.Task.Status),
-		fmt.Sprintf("容器: %s", report.ContainerState),
-		fmt.Sprintf("代码保存: %s", report.CodeSaveState),
-		fmt.Sprintf("未完成步骤: %d", len(report.UnfinishedSteps)),
-		fmt.Sprintf("结果未知尝试: %d", len(report.UncertainAttempts)),
-		fmt.Sprintf("缺失 Session: %d", len(report.MissingSessions)),
-		fmt.Sprintf("需要人工处理: %s", flagMark(report.RecoveryRequired)),
-		fmt.Sprintf("建议: %s", report.Recommendation),
-	}
-	_, err := fmt.Fprintln(a.Stdout(), strings.Join(lines, "\n"))
 	return err
 }
 

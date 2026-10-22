@@ -306,8 +306,10 @@ func TestTaskCancelMarksRequest(t *testing.T) {
 	}
 }
 
-// TestTaskRetryRequiresPreviousDisposition 校验重试必须显式选择旧容器处置方式。
-func TestTaskRetryRequiresPreviousDisposition(t *testing.T) {
+// TestTaskRunRequiresServer 校验 task run 通过本地服务执行，服务不可达时如实失败。
+//
+// 该用例不启动服务：它确认命令不会在没有服务的情况下退回本机执行，也不会伪造进度。
+func TestTaskRunRequiresServer(t *testing.T) {
 	t.Parallel()
 	ws := testkit.New(t)
 	configPath := taskConfig(t, ws)
@@ -328,26 +330,18 @@ func TestTaskRetryRequiresPreviousDisposition(t *testing.T) {
 		t.Fatalf("创建任务失败: %d %s", code, stderr)
 	}
 	taskID := extractTaskID(t, stdout)
-	// 缺少 --previous 时 cobra 会拒绝执行，命令不应静默处置旧容器。
-	code, _, retryErr := run(t, "task", "retry", taskID, "--config", configPath)
-	if code == 0 {
-		t.Fatal("缺少 --previous 时重试必须失败")
-	}
-	if !strings.Contains(retryErr, "previous") {
-		t.Fatalf("错误信息应指出缺少 --previous: %s", retryErr)
-	}
-	// 非法处置方式同样必须被拒绝。
-	code, _, invalidErr := run(
+	// 指向一个不可达的回环端口：命令必须失败并指出服务不可达。
+	code, runOut, runErr := run(
 		t,
-		"task", "retry", taskID,
+		"task", "run", taskID,
 		"--config", configPath,
-		"--previous", "keep",
+		"--address", "127.0.0.1:1",
 	)
 	if code == 0 {
-		t.Fatal("非法处置方式必须被拒绝")
+		t.Fatalf("服务不可达时 task run 必须失败: %s", runOut)
 	}
-	if !strings.Contains(invalidErr, "delete") && !strings.Contains(invalidErr, "detach") {
-		t.Fatalf("错误信息应说明允许的处置方式: %s", invalidErr)
+	if !strings.Contains(runErr, "agentflow server") {
+		t.Fatalf("错误信息应提示启动服务: %s", runErr)
 	}
 }
 

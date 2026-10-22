@@ -14,8 +14,15 @@ API 兼容性、Docker CLI 帮助信息、基础 Dockerfile 的外部 `FROM` 镜
 
 单步骤执行已打通 `HTTP API → Task Service → Step Execution Service → Pi Runner` 的闭环：
 可以通过接口对**明确指定的 Step** 发起一次真实 Pi 调用，并把 Attempt、Session 与状态变化
-持久化。**多步骤自动编排、自动重试、远程容器创建与 Git 操作仍未实现**。文档只会在对应
-能力落地后才声明其可用。
+持久化。在它之上还有单步骤开发—验证闭环与**任务级工作流编排器**：按数据库中已持久化的计划
+顺序推进开发与验证步骤，并在收尾阶段复用 CodeSaver。
+
+任务执行只存在于 `agentflow server` 进程内：旧的全能引擎包（`internal/workflow`）与
+`agentflow task retry` / `task recover` 命令已移除，`agentflow task run` 改为调用
+`POST /api/v1/tasks/{taskID}/execute-workflow` 并轮询真实进度。编排器不生成计划、不创建
+容器：启动前要求任务已有受管理且运行中的容器与已持久化的计划步骤，否则返回前置条件错误或
+状态冲突。**计划自动生成、自动重试、多任务并发调度仍未实现**。文档只会在对应能力落地后
+才声明其可用。
 
 ## 第一版功能范围
 
@@ -70,14 +77,20 @@ API 兼容性、Docker CLI 帮助信息、基础 Dockerfile 的外部 `FROM` 镜
 第一版目标（尚未实现）：
 
 - 持久化任务队列，并限制同时执行的任务数量。
-- 结构化、分步骤的开发计划的自动生成。
-- 多步骤自动编排与 Planner → Developer → Validator 串联。
+- 结构化、分步骤的开发计划的自动生成：当前没有任何入口生成并持久化计划步骤，任务级编排器
+  只执行已经落库的 `steps`，缺少计划时 `domain.CheckWorkflowStart` 直接拒绝启动。
+- 容器准备工作与执行请求的自动串联：当前需要先执行 `agentflow execenv prepare-task <task-id>`
+  准备容器，再执行 `agentflow task run <task-id>`；编排器不会自动创建容器。
+- Planner → Developer → Validator 的自动串联中的 Validator Agent 环节：当前只执行确定性
+  检查，编排器不发起 Validator Session 调用。
 - 自动重试与退避策略。
 - 以验证结果驱动的修复循环（确定性验证与 Validator 阶段）。
 - 相互隔离的 Git Worktree。
-- 远程 Docker 容器创建、启动与销毁。
+- 远程 Docker 容器创建、启动与销毁的自动编排（容器能力与 `execenv` 已提供，但不由工作流
+  自动创建）。
 - Commit、Push 与 Merge 的自动编排（代码获取与任务分支管理已提供接口与命令）。
-- 可恢复的任务状态。
+- 可恢复的任务状态：旧的 `task retry` / `task recover` 命令已随 `internal/workflow` 引擎包
+  一并移除，当前恢复只通过 `POST /api/v1/tasks/{taskID}/resume-workflow` 执行。
 - 业务 Web 页面（当前只有 Web 外壳与连接状态）。
 
 ## 技术栈
@@ -215,6 +228,15 @@ make web-dev            # 等价于 cd lingting-agent-flow-ui && pnpm dev
 | GET    | `/api/v1/tasks/{taskID}/steps/{stepID}/attempts` | 步骤的尝试列表（分页、按序号）    |
 | GET    | `/api/v1/tasks/{taskID}/steps/{stepID}/attempts/{attemptID}/sessions` | 尝试的会话列表 |
 | GET    | `/api/v1/tasks/{taskID}/sessions/{sessionID}` | 会话详情（归档与导出状态分列）      |
+| POST   | `/api/v1/tasks/{taskID}/steps/{stepID}/execute` | 单步骤执行（真实 Pi 调用）             |
+| POST   | `/api/v1/tasks/{taskID}/steps/{stepID}/execute-and-validate` | 单步骤开发—验证闭环 |
+| POST   | `/api/v1/tasks/{taskID}/execute-steps` | 按序号显式顺序执行多个开发步骤        |
+| POST   | `/api/v1/tasks/{taskID}/execute-workflow` | 启动任务级工作流执行，返回 202 与真实初始状态 |
+| GET    | `/api/v1/tasks/{taskID}/workflow` | 查询工作流执行进度（任务级编排）      |
+| POST   | `/api/v1/tasks/{taskID}/cancel-workflow` | 请求取消工作流执行            |
+| POST   | `/api/v1/tasks/{taskID}/resume-workflow` | 恢复一次已停止的工作流执行    |
+| POST   | `/api/v1/tasks/{taskID}/steps/{stepID}/attempts/{attemptID}/validate` | 执行确定性验证 |
+| POST   | `/api/v1/tasks/{taskID}/steps/{stepID}/attempts/{attemptID}/initialize-code` | 容器内初始化代码 |
 | GET    | `/api/v1/hosts`                 | 执行节点列表（含校验状态与详情）                       |
 | POST   | `/api/v1/hosts`                 | 新增执行节点，返回 201 与真实初始状态 `checking`       |
 | GET    | `/api/v1/hosts/{hostID}`        | 执行节点详情                                          |
@@ -415,12 +437,13 @@ GET /api/v1/tasks/{taskID}/sessions/{sessionID}
 
 #### 当前能力边界
 
-任务管理接口**只负责管理数据**，执行只能通过下一节的单步骤执行接口发起：
+任务管理接口**只负责管理数据**，执行通过单步骤执行、单步骤闭环与任务级工作流编排接口发起：
 
 - 任务管理接口不会调用 Pi CLI、不会创建 Docker 容器、不会连接 SSH、不会克隆 Git 仓库。
-- 没有任务级工作流协调器：任务不会被自动推进到执行阶段，也不会自动生成 Step。
-- 执行记录接口**只提供查询**；唯一写入口是
-  `POST /api/v1/tasks/{taskID}/steps/{stepID}/execute`，它执行一个已经存在的 Step。
+- 任务级编排器已提供（见"任务级工作流编排"一节），但它**只执行已持久化的计划步骤**，
+  不生成 Step、不创建容器：缺少容器返回 412，缺少计划步骤返回 409。
+- 执行记录接口**只提供查询**；写入口是单步骤执行、单步骤闭环、顺序执行与任务级编排接口。
+- 单步骤执行接口 `POST /api/v1/tasks/{taskID}/steps/{stepID}/execute` 执行一个已存在的 Step。
 - 未经真实执行器创建时不会存在 Step / Attempt / Session 记录；查询返回空列表是正确结果，
   不会用虚构数据填充。
 - 角色没有查询接口，创建任务时需要手工填写其标识；执行节点已提供 `/api/v1/hosts` 接口。
@@ -771,6 +794,106 @@ GET /api/v1/tasks/{taskID}/steps/{stepID}/validations
 - 不创建、启动、删除或接管容器；容器缺失时返回 412。
 - 不执行 Commit / Push / Merge，也不提供任务级调度队列。
 
+### 任务级工作流编排
+
+编排器按数据库中**已持久化的计划**顺序推进多个开发步骤，是 CLI 与 Web 之上的唯一执行入口。
+它只协调既有能力：不生成计划、不创建容器、不重写验证结论。
+
+```http
+POST /api/v1/tasks/{taskID}/execute-workflow
+Content-Type: application/json
+
+{
+  "prompt": "可选补充说明",
+  "timeout_seconds": 1800,
+  "validation_timeout_seconds": 600
+}
+```
+
+三个字段都是可选的，请求体可以为空。成功返回 202 与这次执行的真实初始状态（不会返回
+"已受理但仍在后台"的模糊语义）：
+
+```json
+{
+  "run_id": "<执行记录标识>",
+  "task_id": "<任务标识>",
+  "status": "running",
+  "status_terminal": false,
+  "status_active": true,
+  "stage": "step_execution",
+  "current_step_id": "<步骤标识>",
+  "completed_steps": 0,
+  "total_steps": 2,
+  "cancel_requested": false,
+  "code_saver_available": true,
+  "plan_digest": "<计划内容摘要>",
+  "updated_at": "2025-01-01T00:00:00Z",
+  "revision": 1
+}
+```
+
+配套接口：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/v1/tasks/{taskID}/workflow` | 查询当前或最近一次执行进度，含逐步骤快照 |
+| POST | `/api/v1/tasks/{taskID}/cancel-workflow` | 请求取消：先落盘再传播，重复请求幂等 |
+| POST | `/api/v1/tasks/{taskID}/resume-workflow` | 恢复一次已停止的执行，请求体必须给出 `run_id` |
+
+#### 执行前条件
+
+编排器不创建容器、不生成计划，因此启动前必须同时满足：
+
+1. 任务未被删除、未记录取消请求，且状态允许执行（`AllowsStepExecution`）。
+2. 任务已有受管理的容器标识，且该容器未被 detached、未被删除、核验为运行中。
+3. 执行节点 `validation_status` 为 `normal`。
+4. 任务已有持久化的计划步骤：序号唯一且大于 0、类型为开发步骤、配置了执行角色、包含启用的
+   必需检查；不存在 `recovery_required` 或被占用（`running` / `developing` / `verifying`）
+   的步骤；且至少有一个步骤尚未完成。
+
+条件 1 不满足返回 409，条件 2 / 3 不满足返回 412，条件 4 不满足返回 409。判断只在
+`domain.CheckWorkflowStart` 中定义一次，Handler 与前端不复制第二份规则。
+
+因此完整链路需要人工串联：
+
+```bash
+# 1. 准备容器与容器内代码工作区（一次执行一个全新容器）
+./bin/agentflow execenv prepare-task <task-id>
+
+# 2. 通过服务启动任务级工作流并等待收敛
+./bin/agentflow task run <task-id>
+```
+
+#### 执行与收口
+
+- 每一步都先写入 `workflow_runs` 的阶段与游标，再调用单步骤闭环
+  （`app.StepWorkflowService.ExecuteAndValidate`）；有副作用的操作不会先于状态落盘。
+- 只有当前步骤验证通过（`Verified` 且步骤为 `completed`）才推进下一步骤。
+- 收尾复用 `app.ContainerService.SaveCode`，并核对会话归档；结论只由
+  `domain.DecideWorkflowCloseout` 计算——步骤全部通过验证不等于任务成功。
+- 停止分类固定：开发失败 `blocked` / `developer_failed`；开发超时或中断
+  `recovery_required` / `developer_interrupted`；验证未通过 `blocked` /
+  `verification_failed`；证据未可靠写入 `recovery_required` / `verification_unconfirmed`；
+  无代码保存能力 `blocked` / `code_saver_unavailable`。
+- 不自动重试、不自动修复代码、不自动删除容器；停止后等待用户显式决定。
+
+#### 错误语义
+
+| 状态码 | code | 含义 |
+|---|---|---|
+| 400 | `invalid_request` | 超时秒数越界（0–21600）或 `run_id` 缺失 |
+| 404 | `not_found` | 任务或工作流执行记录不存在 |
+| 409 | `state_conflict` | 状态不允许启动、计划不满足条件，或同一任务已有未结束执行 |
+| 412 | `precondition_failed` | 缺少受管理的运行中容器，或执行节点未通过环境预检 |
+| 503 | `internal_error` | 编排器已停止，不再接受新请求 |
+
+#### 本阶段不提供的编排能力
+
+- 不自动生成或补充计划步骤：任务没有已持久化步骤时直接拒绝启动。
+- 不在执行路径上创建、启动或接管容器。
+- 不发起 Validator Agent 调用：验证结论只来自确定性检查命令。
+- 不自动重试、不自动修复代码、不提供多任务并发调度队列。
+
 ### 尚未实现的接口
 
 项目、环境、容器、代码保存与 Agent 调度均**没有** HTTP 接口。Web 页面中的对应入口仍为
@@ -778,10 +901,10 @@ GET /api/v1/tasks/{taskID}/steps/{stepID}/validations
 任务页面已接入真实接口，但只能创建、查看、取消与删除任务记录，尚未接入步骤执行入口。
 机器页面已接入执行节点接口与环境预检结果展示。
 
-后台服务目前注册了执行节点环境预检、统一 Pi Runner、单步骤执行协调器、确定性验证引擎与
-开发—验证闭环协调器：任务调度器、自动 Plan / Retry 编排与 Docker 运维尚未接入，
-`agentflow server` 启动后提供 API、页面、环境预检、单步骤执行、显式顺序执行与单步骤
-开发—验证闭环能力。
+后台服务目前注册了执行节点环境预检、统一 Pi Runner、单步骤执行协调器、确定性验证引擎、
+开发—验证闭环协调器与任务级工作流编排器：任务调度器、计划自动生成与自动 Retry 编排尚未
+接入，`agentflow server` 启动后提供 API、页面、环境预检、单步骤执行、显式顺序执行、单步骤
+开发—验证闭环与任务级工作流编排能力。
 
 ## 统一 Pi Runner 与 Session 生命周期
 
@@ -843,8 +966,10 @@ Runner 不会自动追加 `--no-extensions`、`--no-skills` 等参数。
 - 调用入口有三个：`agent test`（本机连通性检查）、`agent run <container>`（容器内单次调用）、
   以及任务下的 `POST /api/v1/tasks/{taskID}/steps/{stepID}/execute`（单步骤执行，见上文）。
   三者的共同点是每次调用都走同一条 Runner 与独立的 Session 文件路径。
-- 单步骤执行要求任务已经拥有受管理的运行中容器；本阶段没有"准备容器 + 获取代码 + 生成
-  Step"的入口，因此仅通过 HTTP 无法把 `queued` 任务推进到可执行状态。
+- 单步骤执行与任务级编排都要求任务已经拥有受管理的运行中容器：容器由
+  `agentflow execenv prepare-task` 单独准备，执行接口不会创建容器。
+- 仍然没有"生成并持久化计划步骤"的入口，因此仅通过 HTTP 无法把 `queued` 任务推进到可
+  执行状态：任务级编排器只执行已经落库的 `steps`，缺少计划时返回状态冲突。
 - 没有提供 HTML 会话查看器，也没有自动上传会话内容到外部存储。
 
 ## 前端工程
@@ -905,6 +1030,24 @@ go run ./cmd/agentflow --help
 - 需要认证的私有仓库返回 `repository_auth_required`；第一版不提供凭据存储，凭据需由
   环境镜像自行注入。
 - 容器必须由环境准备阶段登记本次 Attempt（`attempt_id`），否则返回前置条件错误。
+
+任务执行的完整链路（需要先启动 `agentflow server`）：
+
+```bash
+# 1. 依据任务记录准备执行环境：校验配置、准备镜像、创建全新容器并写回任务关联
+./bin/agentflow execenv prepare-task <task-id>
+
+# 2. 启动任务级工作流执行并轮询真实进度
+./bin/agentflow task run <task-id>
+./bin/agentflow task run <task-id> --address 127.0.0.1:26380 --timeout 30m --verify-timeout 10m
+./bin/agentflow task run <task-id> --wait=false   # 只发起请求，立即返回真实初始状态
+```
+
+`task run` 是纯 HTTP 客户端：调用 `POST /api/v1/tasks/{taskID}/execute-workflow`，随后轮询
+`GET /api/v1/tasks/{taskID}/workflow` 直到执行收敛。它不在 CLI 进程内装配 SSH、容器、Pi 与
+代码保存能力，服务不可达时直接失败并提示启动服务，不会退回本机执行。`task retry` 与
+`task recover` 已移除：恢复走 `POST /api/v1/tasks/{taskID}/resume-workflow`，旧容器处置走容器
+管理命令。
 
 配置路径规则：
 
@@ -1361,11 +1504,13 @@ SSH 连接层按三层覆盖：`tests/unit/ssh/`（主机密钥、认证配置�
 
 - 需求队列、Worker 与并发调度（`internal/scheduler`）。
 - 持久化任务队列与任务自动领取。
-- 任务级工作流在 HTTP 服务中的接入：`agentflow server` 构造的任务服务不含工作流引擎，
-  Web 侧不会自动推进任务。
+- 计划的自动生成与持久化：没有任何入口生成计划步骤，任务级编排器只执行已经落库的 `steps`。
+- 容器准备与执行请求的自动串联：需要先 `agentflow execenv prepare-task`，再 `agentflow task run`。
+- Validator Agent 调用接入：验证结论当前只来自确定性检查命令。
+- 旧容器的显式处置命令：`task retry` / `task recover` 已随 `internal/workflow` 引擎包移除，
+  重新开始需要先通过容器管理命令处置旧容器。
 - 多步骤自动编排与 Planner → Developer → Validator 自动串联。
 - 自动重试、退避策略与验证失败回退。
-- 确定性验证命令的编排与 Validator 判定接入（当前只有单步骤 Agent 调用）。
 - Git Worktree 创建与清理（每个任务目前使用远程容器内的工作区）。
 - Git 之外的代码获取方式（HTTP 下载、wget、curl、SCP）：`source.Fetcher` 抽象已就位，
   但只注册了 Git Clone 实现。

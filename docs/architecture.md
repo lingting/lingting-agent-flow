@@ -6,8 +6,9 @@
 > 日志封装、SQLite 数据层、执行节点管理与环境预检、SSH 服务探测与 SSH 连接层（主机密钥校验、
 > 私钥认证、远程命令执行、SFTP 传输与远端 Unix 套接字通道）、统一 Pi Runner（本机与容器内）、
 > **单步骤执行协调器与开发步骤顺序执行**、**确定性验证引擎**、**统一执行环境（远程 Linux +
-> Docker）**、**代码获取（CodeFetcher）与代码初始化协调器**与任务管理 HTTP 接口。
-> 图中调度、多步骤工作流编排与 UI 的完整形态尚未实现。
+> Docker）**、**代码获取（CodeFetcher）与代码初始化协调器**、**单步骤开发—验证闭环**、
+> **任务级工作流编排器**与任务管理 HTTP 接口。
+> 图中调度、计划自动生成与 UI 的完整形态尚未实现。
 
 ## 目标架构
 
@@ -26,9 +27,9 @@ SQLite
 ```
 
 - **CLI / Web UI**：只负责发起操作与展示结果。
-- **Application Services**：CLI 与 HTTP 的共同入口，编排各领域能力。
-- **Scheduler / Workflow Engine**：任务领取、并发控制与 Plan / Develop / Verify / Retry 状态迁移；
-  当前只接入单步骤执行与显式顺序执行，自动 Plan / Verify / Retry 编排仍未接入 HTTP。
+- **Application Services**：CLI 与 HTTP 的共同入口，编排各领域能力；执行与多步骤编排分别由
+  `app.StepExecutor` / `app.StepWorkflowService` / `app.TaskWorkflowService` 承担，任务领取与
+  并发调度（`internal/scheduler`）尚未实现。
 - **Agent Runner / Process Manager**：以独立子进程方式驱动 Pi，并管理进程生命周期。
 - **Pi CLI / 任务容器**：非交互 `pi --print --session` 调用与任务工作区隔离。
 - **SQLite**：唯一真相来源。
@@ -38,7 +39,8 @@ SQLite
 ```text
 cmd/agentflow/            CLI 入口，只做构建信息注入与启动
 internal/app/             应用服务，CLI 与 HTTP 的共同调用入口；
-                          含单步骤执行协调器 step_executor*.go（校验、占用、调用与终态写入）
+                          含单步骤执行协调器 step_executor*.go（校验、占用、调用与终态写入）、
+                          单步骤闭环 step_workflow*.go、任务级编排器 task_workflow*.go
                           与执行环境实现 execenv*.go（准备、状态、执行、释放）
 internal/cli/             Cobra 命令实现
 internal/config/          配置结构与 YAML 加载、校验
@@ -49,7 +51,6 @@ internal/source/          代码获取抽象（Fetcher）与 Git Clone 实现：
 internal/execenv/         统一执行环境契约：Kind、Workspace、Environment、ExecSpec/Result、
                           PrepareSpec/Prepared、ReleaseRequest/Result、Provider 与 ExecPort
 internal/scheduler/       任务领取、并发控制、Worker 与恢复（未实现）
-internal/workflow/        Plan / Develop / Verify / Retry 状态迁移（引擎已实现，未接入 HTTP）
 internal/agent/           统一 Agent 接口：Runner、RunRequest、RunResult、Event
 internal/agent/pi/        Pi CLI 适配器：本机 Runner、容器 Runner、Session 路径与日志落盘
 internal/process/         外部进程生命周期管理：启动、输出读取、超时、取消与回收
@@ -91,8 +92,6 @@ tests/internal/fakepi/    以测试二进制充当 Pi CLI 的可控替身
 cmd
  └── cli / httpapi
       └── app
-           ├── scheduler
-           ├── workflow
            ├── storage
            └── events
                 └── agent / process / gitworktree / config
@@ -107,7 +106,8 @@ cmd
 - `domain` 不得感知数据库、HTTP、JSONL RPC、子进程与文件系统。
 - `config` 可以把角色类型映射到 `domain.RoleType` 以复用取值校验，但配置结构自身保持独立，不把 YAML 细节泄漏进 `domain`。
 - `app` 之上的层不得直接访问 SQLite；所有持久化经由仓储接口。
-- `scheduler` 与 `workflow` 不得直接创建 Pi 进程，只能通过 `agent` 接口。
+- `app.TaskWorkflowService` 与 `app.StepWorkflowService` 不得直接创建 Pi 进程，只能通过
+  `app.AgentRunnerService` / 容器执行端口，且不得构造 Docker 或 Git 命令。
 - `httpapi` 与 `cli` 不得包含状态迁移逻辑，只调用 `app`。
 - `httpapi` 不得自行拼接 Pi 命令、创建 Attempt 或直接赋值执行状态；单步骤执行只能调用
   `app.StepExecutor`。
@@ -118,7 +118,7 @@ cmd
 
 ```text
 cmd/agentflow → cli / httpapi / server → app → config / logging / storage / sshclient / docker
-                                              ↘ workflow / lifecycle
+                                              ↘ lifecycle
                                                    ↘ domain
 ```
 
@@ -154,8 +154,9 @@ cmd/agentflow → cli / httpapi / server → app → config / logging / storage 
   `codesaver.Inspector` 的只读核验：不提交、不推送、不合并，也不写入 `code_saves`。
 - `httpapi` 只做协议转换：解析执行参数、把错误类别映射为状态码、序列化结果。它不判断任务
   是否可执行，也不读数据库。
-- `workflow` 引擎（多步骤编排）已经存在并可在 CLI 下使用，但 `agentflow server` 构造的任务
-  服务不含工作流引擎，因此 HTTP 侧不会自动推进任务。
+- `app.TaskWorkflowService`（`internal/app/task_workflow*.go`）是唯一的多步骤编排实现，作为
+  后台服务注册在 `agentflow server` 中，只通过 HTTP 接口驱动。CLI 不再在进程内装配执行栈：
+  `agentflow task run` 走 `POST /api/v1/tasks/{taskID}/execute-workflow` 并轮询真实进度。
 
 ## 领域模型边界
 
@@ -167,15 +168,15 @@ cmd/agentflow → cli / httpapi / server → app → config / logging / storage 
 | Step | 计划中的业务步骤 | domain |
 | Attempt | 某个 Step 的一次执行尝试 | domain |
 | Session | 一次具体的 Pi 会话 | domain |
-| VerificationResult | 工作流引擎一次验证的结构化结果（含 Agent 辅助评估） | domain |
+| VerificationResult | 单步骤执行的一次验证快照（含 Agent 辅助评估） | domain |
 | ValidationRun | 确定性验证引擎的一次运行记录（状态与结论分离） | domain |
 | ValidationCheckResult | 一项确定性检查的真实执行结果 | domain |
 | ExecutionHost | 通过 SSH 管理的远程执行节点（连接目标与工作空间） | domain |
 
 - Step / Attempt / Session 是三个不同层次，不得合并为一个对象。
 - `ValidationRun` 与 `VerificationResult` 是两个不同模型：前者是确定性验证引擎的运行记录
-  （状态、结论、逐项检查结果分别持久化），后者是工作流引擎的验证快照（含 Agent 辅助评估，
-  结果整体以 JSON 保存）。两者不得合并，也不得互相替代。
+  （状态、结论、逐项检查结果分别持久化），后者是单步骤执行写入的验证快照（含 Agent 辅助
+  评估，结果整体以 JSON 保存）。两者不得合并，也不得互相替代。
 - 重试必须产生新的 Attempt 与新的 Session，历史记录只追加不覆盖。
 - 状态只能通过 `Transition`（或实体自身的结束方法）变更，不允许直接赋值绕过校验。
 - 角色名称由用户自由命名，工作流只依据角色类型识别职责。
@@ -481,9 +482,17 @@ CodeSaver 缺失时编排器仍会按顺序执行并验证全部步骤，但收�
 
 ### 当前能力边界
 
-- 只执行已经持久化并通过校验的计划：不生成计划、不补充步骤、不改变顺序。
+- 只执行已经持久化并通过校验的计划：不生成计划、不补充步骤、不改变顺序。任务没有已持久化
+  的步骤时 `domain.CheckWorkflowStart` 直接拒绝启动，接口返回状态冲突。
+- 不创建、启动、删除或接管容器：启动前要求任务已有受管理且运行中的容器，容器由
+  `agentflow execenv prepare-task`（`app.ExecutionEnvironmentService.PrepareForTask`）单独
+  准备；缺少容器时返回 412 前置条件错误。
 - 不自动重试、不自动修复代码、不自动删除容器；失败后等待用户显式决定。
 - 不实现多任务并发调度队列：`agentflow server` 中同一任务串行、不同任务之间相互独立。
+- CLI 的执行入口只是 HTTP 客户端：`agentflow task run` 发起请求并轮询进度，不装配 SSH、
+  容器、Pi 或代码保存能力，也不会在服务不可达时退回本机执行。
+- 因此当前完整执行链路需要人工串联两步：先 `agentflow execenv prepare-task <task-id>`
+  准备容器与代码工作区，再 `agentflow task run <task-id>`；缺少计划步骤时链路仍会中断。
 
 ## SSH 边界
 

@@ -100,6 +100,23 @@ make build VERSION=0.1.0
 ./bin/agentflow host remove node-a
 ```
 
+任务执行命令（需要先启动 `agentflow server`）：
+
+```bash
+# 1. 依据任务记录准备执行环境（容器 + 容器内代码工作区）
+./bin/agentflow execenv prepare-task <task-id>
+
+# 2. 通过本地服务启动一次任务级工作流执行，并轮询真实进度
+./bin/agentflow task run <task-id>
+./bin/agentflow task run <task-id> --address 127.0.0.1:26380 --timeout 30m --verify-timeout 10m
+./bin/agentflow task run <task-id> --wait=false   # 只发起请求，立即返回初始状态
+```
+
+`task run` 是 HTTP 客户端：它调用 `POST /api/v1/tasks/{taskID}/execute-workflow`，再轮询
+`GET /api/v1/tasks/{taskID}/workflow` 直到执行收敛。它不在 CLI 进程内装配 SSH、容器、Pi
+或代码保存能力，服务不可达时直接失败并提示启动服务，不会退回本机执行。它也不生成计划：
+任务没有已持久化的步骤时接口返回状态冲突。
+
 `host` 命令组同样接受 `--config`，未指定时读取 `configs/agentflow.yaml`。
 
 命令边界要分清：
@@ -170,6 +187,11 @@ make build VERSION=0.1.0
    Server 关闭时会先停止新请求，再等待在途工作收敛。
 8. 新增接口路径必须落在 `/api/v1/tasks/{taskID}/` 之下，并在 `router.go` 的 `isWorkflowPath`
    中登记；否则会被任务处理器当作未知子路径返回 404。
+9. 不要在 CLI 里重新装配执行栈：`internal/workflow` 引擎包已移除，任务执行只存在于
+   `agentflow server` 的 `app.TaskWorkflowService` 中；`agentflow task run` 是 HTTP 客户端，
+   新增执行参数同样只能通过 `POST .../execute-workflow` 的请求体表达。
+10. 新增"生成并持久化计划"的能力时必须落库到 `steps`（含 `sequence` 与角色快照），
+    不得在编排器或 Handler 里临时拼装步骤：`domain.CheckWorkflowStart` 只接受已持久化计划。
 
 ## 新增角色类型或状态
 

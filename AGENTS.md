@@ -11,13 +11,13 @@ AgentFlow 是本地优先的 AI Coding Workflow Orchestrator。编排器由 Go �
 依赖只能自上向下，不得反向：
 
 ```text
-cmd → cli / httpapi → app → scheduler / workflow → agent / process / gitworktree / storage / events
-                                                                    ↘ domain
+cmd → cli / httpapi → app → agent / process / gitworktree / storage / events
+                                            ↘ domain
 ```
 
 - `internal/domain/` 是业务语义的唯一来源，只定义实体、状态与业务规则，禁止依赖数据库、HTTP、Agent 运行时、外部进程或任何第三方包。
 - `internal/app/` 是应用服务层，是 CLI 与 HTTP 的共同入口。CLI 与 Web UI 不得各自实现工作流或状态迁移。
-- `internal/workflow/` 负责 Plan / Develop / Verify / Retry 的状态迁移；`internal/scheduler/` 负责任务领取、并发控制与恢复。
+- 任务级工作流编排固定为 `internal/app/TaskWorkflowService`（`task_workflow*.go`），单步骤闭环固定为 `internal/app.StepWorkflowService`；不存在独立的 `internal/workflow` 引擎包。
 - `internal/httpapi/` 只做协议转换与 SSE 推送，不承载业务规则。
 - `web/ui/` 只负责展示与发起操作，不实现独立工作流逻辑。
 
@@ -91,8 +91,6 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
   `integration/pi/`、`integration/ssh/`、`integration/remote/`、`e2e/` 分层。
 - 禁止在生产源码目录（`internal/`、`cmd/`）新增或保留测试文件。
 - `tests/internal/testkit/` 只存放通用测试辅助代码，不存放产品实现，也不存放需要额外执行的验证脚本。
-- `tests/internal/workflowfake/` 只提供工作流下层组件（容器、代码获取、Agent、命令、代码保存）
-  的受控替身，不得在其中复制工作流决策逻辑；重试、判定与资源处置必须由真实工作流引擎执行。
 
 ### 独立入口与并发
 
@@ -316,11 +314,11 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
 - 所有 Docker 命令与参数仍必须遵守既定兼容性基线（CLI 29.0.0、Engine 29.0.0、
   API 1.52）；新增 `docker exec` 参数（例如 `--env`）必须同步更新
   `docker.RequiredCLICommands`，否则环境预检会漏检。
-### 工作流引擎约束
+### 任务级工作流编排约束
 
 - Task、Step、Attempt 的状态迁移只能通过 `domain` 的状态机方法完成；禁止在业务层直接
   赋值状态字段绕过校验，条件更新必须使用 `UpdateTaskIfStatus` 等带状态前置条件的方法。
-- 只有 `internal/workflow/` 可以依据持久化状态、验证结果与代码保存结果把 Task 推进到最终
+- 只有 `app.TaskWorkflowService` 可以依据持久化状态、验证结果与代码保存结果把 Task 推进到最终
   状态；Pi 不更新任务状态，也不决定是否重试。
 - 每次 Planner、Developer、Validator 调用必须创建新的 Attempt（开发步骤）与独立的
   Invocation / Session；重试不得复用旧记录。
@@ -546,6 +544,15 @@ cmd → cli / httpapi → app → scheduler / workflow → agent / process / git
   状态冲突 409、前置条件缺失 412、服务已停止 503。
 - 本阶段不实现 Planner 自动生成计划、自动修复重试循环与多任务并发调度；相关能力缺失时必须
   返回明确错误，不得伪装成已可用。
+- 任务执行入口唯一：`agentflow server` 内的编排器。CLI 的 `agentflow task run` 只调用
+  `POST /api/v1/tasks/{taskID}/execute-workflow` 并轮询 `GET /api/v1/tasks/{taskID}/workflow`，
+  不得在 CLI 进程内装配 SSH、容器、Pi 或代码保存能力，也不得退回本机执行；服务不可达时必须
+  直接失败并提示启动服务。
+- 编排器不创建容器：启动前要求任务已有受管理且运行中的容器，容器由
+  `app.ExecutionEnvironmentService.PrepareForTask`（CLI：`agentflow execenv prepare-task`）
+  单独准备；缺少容器时返回前置条件错误，不得在执行路径上创建、启动或接管容器。
+- 计划步骤必须已经持久化：编排器不生成计划，`domain.CheckWorkflowStart` 在缺少步骤时拒绝
+  启动。新增任何"生成并持久化计划"的能力都必须落库到 `steps`，不得在执行时临时拼装步骤。
 
 ### 任务管理 API 约束
 
