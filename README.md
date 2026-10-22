@@ -6,7 +6,7 @@ AgentFlow 是一个使用 Go 编写的本地优先 AI 编码工作流编排器�
 
 ## 当前开发阶段
 
-AgentFlow 处于**单步骤执行阶段**。当前仓库包含工程骨架、可运行的 CLI、配置加载与校验、结构化日志封装、SQLite 数据模型与版本化迁移、执行节点管理与完整的 SSH 连接层、统一 Pi Runner，以及**单步骤执行协调器**。
+AgentFlow 处于**单步骤执行阶段**。当前仓库包含工程骨架、可运行的 CLI、配置加载与校验、结构化日志封装、SQLite 数据模型与版本化迁移、执行节点管理与完整的 SSH 连接层、容器内 Pi Runner，以及**单步骤执行协调器**。
 
 执行节点已支持本机私钥认证、严格的主机密钥校验、带超时与取消的远程命令执行、SFTP
 文件传输、远程 Home 与工作空间解析，以及**执行节点环境预检**（SSH 连接、Docker 版本与
@@ -19,10 +19,10 @@ API 兼容性、Docker CLI 帮助信息、基础 Dockerfile 的外部 `FROM` 镜
 
 任务执行只存在于 `agentflow server` 进程内：旧的全能引擎包（`internal/workflow`）与
 `agentflow task retry` / `task recover` 命令已移除，`agentflow task run` 改为调用
-`POST /api/v1/tasks/{taskID}/execute-workflow` 并轮询真实进度。编排器不生成计划、不创建
-容器：启动前要求任务已有受管理且运行中的容器与已持久化的计划步骤，否则返回前置条件错误或
-状态冲突。**计划自动生成、自动重试、多任务并发调度仍未实现**。文档只会在对应能力落地后
-才声明其可用。
+`POST /api/v1/tasks/{taskID}/execute-workflow` 并轮询真实进度。计划生成已提供独立入口
+（`POST /api/v1/tasks/{taskID}/plan`），编排器本身仍只消费已持久化的计划、不创建容器：
+启动前要求任务已有受管理且运行中的容器与已持久化的计划步骤，否则返回前置条件错误或状态
+冲突。**自动重试、多任务并发调度仍未实现**。文档只会在对应能力落地后才声明其可用。
 
 ## 第一版功能范围
 
@@ -77,10 +77,10 @@ API 兼容性、Docker CLI 帮助信息、基础 Dockerfile 的外部 `FROM` 镜
 第一版目标（尚未实现）：
 
 - 持久化任务队列，并限制同时执行的任务数量。
-- 结构化、分步骤的开发计划的自动生成：当前没有任何入口生成并持久化计划步骤，任务级编排器
-  只执行已经落库的 `steps`，缺少计划时 `domain.CheckWorkflowStart` 直接拒绝启动。
+- 计划版本化与重新规划：计划生成入口拒绝覆盖已有计划，重新规划尚未设计。
 - 容器准备工作与执行请求的自动串联：当前需要先执行 `agentflow execenv prepare-task <task-id>`
-  准备容器，再执行 `agentflow task run <task-id>`；编排器不会自动创建容器。
+  准备容器，再执行 `agentflow task plan <task-id>` 与 `agentflow task run <task-id>`；
+  计划生成与编排器都不会自动创建容器。
 - Planner → Developer → Validator 的自动串联中的 Validator Agent 环节：当前只执行确定性
   检查，编排器不发起 Validator Session 调用。
 - 自动重试与退避策略。
@@ -115,10 +115,9 @@ Pi RPC、Git Worktree、React 与 TypeScript 属于后续阶段的技术选型�
 - Git（`make build` 用它注入提交号）
 - Make（可选，也可直接使用 `go` 命令）
 
-只有 `agent check` 与 `agent test` 需要 Pi：前者检查 PATH 中的 `pi` 及其非交互式参数，
-后者还会用角色配置的模型发起一次真实调用，因此需要对应 Provider 的凭据。
-`agent run <container>` 在任务容器内部调用 Pi，要求该容器内已安装可用版本的 `pi`。
-`agentflow server` 启动时不会调用 Pi，但会把统一 Pi Runner 注册为后台服务。
+只有 `agent check` 需要本机 Pi：它检查 PATH 中的 `pi` 及其非交互式参数，不发起模型调用。
+所有真实 Agent 调用都在远程任务容器内执行，因此 `agent run <container>` 要求该容器内已安装
+可用版本的 `pi`，并需要对应 Provider 的凭据。`agentflow server` 启动时不会调用 Pi。
 其余命令（`config`、`version`、`host`）不依赖 Pi，也不需要模型凭据。
 
 ## 安装与运行
@@ -440,7 +439,7 @@ GET /api/v1/tasks/{taskID}/sessions/{sessionID}
 任务管理接口**只负责管理数据**，执行通过单步骤执行、单步骤闭环与任务级工作流编排接口发起：
 
 - 任务管理接口不会调用 Pi CLI、不会创建 Docker 容器、不会连接 SSH、不会克隆 Git 仓库。
-- 任务级编排器已提供（见"任务级工作流编排"一节），但它**只执行已持久化的计划步骤**，
+- 计划生成已提供独立入口（见"计划生成"一节）；任务级编排器**只执行已持久化的计划步骤**，
   不生成 Step、不创建容器：缺少容器返回 412，缺少计划步骤返回 409。
 - 执行记录接口**只提供查询**；写入口是单步骤执行、单步骤闭环、顺序执行与任务级编排接口。
 - 单步骤执行接口 `POST /api/v1/tasks/{taskID}/steps/{stepID}/execute` 执行一个已存在的 Step。
@@ -794,10 +793,93 @@ GET /api/v1/tasks/{taskID}/steps/{stepID}/validations
 - 不创建、启动、删除或接管容器；容器缺失时返回 412。
 - 不执行 Commit / Push / Merge，也不提供任务级调度队列。
 
+### 计划生成
+
+计划生成是独立流程，入口固定为 `POST /api/v1/tasks/{taskID}/plan`（CLI：
+`agentflow task plan <task-id>`）。它在任务容器内调用 Planner，把输出校验为结构化计划后
+**一次写入数据库**。
+
+```http
+POST /api/v1/tasks/{taskID}/plan
+Content-Type: application/json
+
+{
+  "prompt": "可选补充说明",
+  "timeout_seconds": 900
+}
+```
+
+成功返回 200 与真实的计划内容：
+
+```json
+{
+  "task_id": "<任务标识>",
+  "task_status": "planned",
+  "persisted": true,
+  "summary": "一句话计划摘要",
+  "steps": [
+    {
+      "step_id": "<步骤标识>",
+      "sequence": 1,
+      "title": "生成开发计划",
+      "step_type": "plan",
+      "status": "pending",
+      "role_id": "<规划角色标识>",
+      "required_checks": ["build"]
+    }
+  ],
+  "session_id": "<规划会话标识>"
+}
+```
+
+#### 计划结构
+
+- 序号 1 固定是 `plan` 阶段步骤，绑定任务配置的规划角色；其后是 Planner 生成的 `develop`
+  步骤，绑定任务配置的开发角色。
+- 任务级必需验证命令与验收条件会合并进每个步骤：Planner 不能通过省略命令取消任务级的
+  必需检查。
+- 步骤数量受 `task.config.max_plan_steps`（默认 20，硬上限 50）约束。
+- 计划摘要只写入 `plan.created` 事件负载，步骤本身才是计划的持久化单元。
+
+#### 生成流程与约束
+
+1. 校验任务存在、未删除、未请求取消、状态允许规划（`CanStartPlanning`）、已有受管理容器、
+   **没有任何已落库步骤**，且没有未结束的工作流执行。
+2. 以状态条件更新把任务推进到 `planning`——这是跨进程的并发闸门。
+3. 创建独立 Planner Session 并在任务容器内调用 Pi；会话记录先于进程启动写入。
+4. 把输出解析为结构化计划并做确定性校验：字段、步骤数、标识唯一、验收条件、验证命令。
+5. 在**同一个事务**内写入全部步骤、把任务推进到 `planned`、追加 `plan.created` 事件。
+6. 失败按阶段收敛：调用失败 / 超时 / 输出非法 / 校验失败 / 持久化失败 → `failed`；
+   用户取消 → `cancelling` 并继续收敛为 `cancelled`；服务停止导致的中断 →
+   `recovery_required`。
+
+Planner 调用成功不等于计划成功：输出无法解析、校验失败或持久化失败都不会让任务进入
+`planned`，也不会留下可执行的半成品计划。
+
+服务重启时，停留在 `planning` 的任务按持久化事实收敛：已有步骤 → `planned`（上一轮事务
+已提交），没有任何步骤 → `recovery_required`（无法确认调用是否真的发生）。**恢复不会重放
+Planner 调用。**
+
+#### 错误语义
+
+| 状态码 | code | 含义 |
+|---|---|---|
+| 400 | `invalid_request` | 超时秒数越界，或 Planner 输出不是合法计划 |
+| 404 | `not_found` | 任务不存在或已删除 |
+| 409 | `state_conflict` | 状态不允许规划、已有计划、已有未结束工作流，或并发占用 |
+| 412 | `precondition_failed` | 缺少受管理的运行中容器、执行节点未通过预检、角色缺失或类型不符 |
+| 500 | `internal_error` | 持久化等内部失败 |
+
+#### 本阶段不提供的计划能力
+
+- 不覆盖已有计划：重新规划与计划版本化尚未设计。
+- 不创建容器：容器仍由 `agentflow execenv prepare-task` 单独准备。
+- 不自动重试 Planner 调用。
+
 ### 任务级工作流编排
 
-编排器按数据库中**已持久化的计划**顺序推进多个开发步骤，是 CLI 与 Web 之上的唯一执行入口。
-它只协调既有能力：不生成计划、不创建容器、不重写验证结论。
+编排器按数据库中**已持久化的计划**顺序推进多个可自动执行的步骤，是 CLI 与 Web 之上的唯一
+执行入口。它只协调既有能力：不生成计划、不创建容器、不重写验证结论。
 
 ```http
 POST /api/v1/tasks/{taskID}/execute-workflow
@@ -847,9 +929,9 @@ Content-Type: application/json
 1. 任务未被删除、未记录取消请求，且状态允许执行（`AllowsStepExecution`）。
 2. 任务已有受管理的容器标识，且该容器未被 detached、未被删除、核验为运行中。
 3. 执行节点 `validation_status` 为 `normal`。
-4. 任务已有持久化的计划步骤：序号唯一且大于 0、类型为开发步骤、配置了执行角色、包含启用的
-   必需检查；不存在 `recovery_required` 或被占用（`running` / `developing` / `verifying`）
-   的步骤；且至少有一个步骤尚未完成。
+4. 任务已有持久化的计划步骤：序号唯一且大于 0、类型为 `plan` 或 `develop`、配置了执行角色、
+   包含启用的必需检查；不存在 `recovery_required` 或被占用（`running` / `developing` /
+   `verifying`）的步骤；且至少有一个步骤尚未完成。
 
 条件 1 不满足返回 409，条件 2 / 3 不满足返回 412，条件 4 不满足返回 409。判断只在
 `domain.CheckWorkflowStart` 中定义一次，Handler 与前端不复制第二份规则。
@@ -860,7 +942,10 @@ Content-Type: application/json
 # 1. 准备容器与容器内代码工作区（一次执行一个全新容器）
 ./bin/agentflow execenv prepare-task <task-id>
 
-# 2. 通过服务启动任务级工作流并等待收敛
+# 2. 在容器内调用 Planner 生成并持久化计划
+./bin/agentflow task plan <task-id>
+
+# 3. 通过服务启动任务级工作流并等待收敛
 ./bin/agentflow task run <task-id>
 ```
 
@@ -891,7 +976,8 @@ Content-Type: application/json
 
 #### 本阶段不提供的编排能力
 
-- 不自动生成或补充计划步骤：任务没有已持久化步骤时直接拒绝启动。
+- 不自动生成或补充计划步骤：计划由独立入口 `POST /api/v1/tasks/{taskID}/plan` 生成，
+  编排器只消费已落库的步骤。
 - 不在执行路径上创建、启动或接管容器。
 - 不发起 Validator Agent 调用：验证结论只来自确定性检查命令。
 - 不自动重试、不自动修复代码、不提供多任务并发调度队列。
@@ -984,15 +1070,16 @@ Content-Type: application/json
 任务页面已接入真实接口，但只能创建、查看、取消与删除任务记录，尚未接入步骤执行入口。
 机器页面已接入执行节点接口与环境预检结果展示。
 
-后台服务目前注册了执行节点环境预检、统一 Pi Runner、单步骤执行协调器、确定性验证引擎、
-开发—验证闭环协调器与任务级工作流编排器：任务调度器、计划自动生成与自动 Retry 编排尚未
-接入，`agentflow server` 启动后提供 API、页面、环境预检、单步骤执行、显式顺序执行、单步骤
-开发—验证闭环与任务级工作流编排能力。
+后台服务目前注册了执行节点环境预检、单步骤执行协调器、确定性验证引擎、开发—验证闭环
+协调器与任务级工作流编排器：任务调度器与自动 Retry 编排尚未接入，`agentflow server` 启动后
+提供 API、页面、环境预检、单步骤执行、显式顺序执行、单步骤开发—验证闭环、计划生成与
+任务级工作流编排能力。
 
-## 统一 Pi Runner 与 Session 生命周期
+## 容器内 Pi Runner 与 Session 生命周期
 
-Planner、Developer 与 Validator 的每一次调用都经由同一个执行入口，由 Go 侧管理完整进程
-生命周期，而不是在业务代码里各自拼接 Pi 命令。
+Planner、Developer 与 Validator 的每一次调用都经由同一个容器内执行入口
+（`app.ContainerService.RunAgent`），由 Go 侧管理完整进程生命周期，而不是在业务代码里各自
+拼接 Pi 命令。本版本只支持远程 SSH + Docker 容器执行，不存在本机 Pi 调用路径。
 
 ### Pi CLI 依赖与版本检查
 
@@ -1039,20 +1126,23 @@ Runner 不会自动追加 `--no-extensions`、`--no-skills` 等参数。
 
 - 单次调用必须有超时边界，默认 30 分钟；超时后结束实际进程再读取退出状态。
 - 取消与超时都会尽力保存已经写入的 Session 文件，并分别记录为 `cancelled` 与 `timed_out`。
-- `agentflow server` 关闭时取消在途调用并等待其收敛，不会在退出后残留子进程。
+- `agentflow server` 关闭时取消在途调用并等待其收敛，不会在退出后残留不受管理的远程命令。
 - 容器内执行时，Session 与两个输出流都会回传到本机持久化目录，容器删除后仍可读取。
 
 ### 当前实施边界
 
-- 统一 Runner 只负责单次 Agent 调用，不实现任务调度、步骤排序、自动重试、Docker 生命周期
+- 容器内 Runner 只负责单次 Agent 调用，不实现任务调度、步骤排序、自动重试、Docker 生命周期
   或 Git 工作流。是否执行、执行哪个 Step、是否重试由 Go 业务层决定。
-- 调用入口有三个：`agent test`（本机连通性检查）、`agent run <container>`（容器内单次调用）、
-  以及任务下的 `POST /api/v1/tasks/{taskID}/steps/{stepID}/execute`（单步骤执行，见上文）。
-  三者的共同点是每次调用都走同一条 Runner 与独立的 Session 文件路径。
+- 本版本只支持远程容器内执行，不存在"本机 Pi 调用"路径：`app.AgentRunnerService` 与
+  `agent test` 已移除，任何调用都不会回退到本机执行。
+- 调用入口有两个：`agent run <container>`（容器内单次调用），以及任务下的
+  `POST /api/v1/tasks/{taskID}/steps/{stepID}/execute`（单步骤执行，见上文）。
+  两者的共同点是每次调用都走同一条容器 Runner 与独立的 Session 文件路径。
 - 单步骤执行与任务级编排都要求任务已经拥有受管理的运行中容器：容器由
   `agentflow execenv prepare-task` 单独准备，执行接口不会创建容器。
-- 仍然没有"生成并持久化计划步骤"的入口，因此仅通过 HTTP 无法把 `queued` 任务推进到可
-  执行状态：任务级编排器只执行已经落库的 `steps`，缺少计划时返回状态冲突。
+- 计划生成入口为 `POST /api/v1/tasks/{taskID}/plan`（CLI：`agentflow task plan <task-id>`）：
+  它在任务容器内调用 Planner，把输出校验为结构化计划后一次写入数据库，计划固定以
+  `plan` 阶段步骤开头，其后是 `develop` 步骤。
 - 没有提供 HTML 会话查看器，也没有自动上传会话内容到外部存储。
 
 ## 前端工程
@@ -1120,11 +1210,19 @@ go run ./cmd/agentflow --help
 # 1. 依据任务记录准备执行环境：校验配置、准备镜像、创建全新容器并写回任务关联
 ./bin/agentflow execenv prepare-task <task-id>
 
-# 2. 启动任务级工作流执行并轮询真实进度
+# 2. 在容器内调用 Planner 生成并持久化计划
+./bin/agentflow task plan <task-id>
+./bin/agentflow task plan <task-id> --prompt "优先保证兼容性" --timeout 15m
+
+# 3. 启动任务级工作流执行并轮询真实进度
 ./bin/agentflow task run <task-id>
 ./bin/agentflow task run <task-id> --address 127.0.0.1:26380 --timeout 30m --verify-timeout 10m
 ./bin/agentflow task run <task-id> --wait=false   # 只发起请求，立即返回真实初始状态
 ```
+
+`task plan` 调用 `POST /api/v1/tasks/{taskID}/plan`：它在任务容器内调用 Planner，把输出校验
+为结构化计划后一次写入数据库，计划固定以 `plan` 阶段步骤开头、其后是 `develop` 步骤。
+该命令不创建容器、不自动重试、不覆盖已有计划。
 
 `task run` 是纯 HTTP 客户端：调用 `POST /api/v1/tasks/{taskID}/execute-workflow`，随后轮询
 `GET /api/v1/tasks/{taskID}/workflow` 直到执行收敛。它不在 CLI 进程内装配 SSH、容器、Pi 与

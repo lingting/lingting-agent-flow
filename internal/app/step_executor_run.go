@@ -757,6 +757,6 @@ func isServiceStop(ctx context.Context) bool {
 		return false
 	}
 	cause := context.Cause(ctx)
-	return errors.Is(cause, ErrAgentRunnerStopped) ||
-		errors.Is(cause, ErrStepExecutorStopped)
+	// 本版本只支持远程容器执行，因此服务停止只有步骤执行协调器一个来源。
+	return errors.Is(cause, ErrStepExecutorStopped)
 }

@@ -125,11 +125,12 @@ func CheckStepPrerequisites(steps []Step, step Step) error {
 	return nil
 }
 
-// NextStepToExecute 返回按计划顺序下一个允许执行的开发步骤。
+// NextStepToExecute 返回按计划顺序下一个允许自动推进的步骤。
 //
 // 判定顺序固定为：先排除"结果不确定"的步骤（recovery_required 必须先核验现场），
-// 再按 sequence 取第一个未完成的开发步骤。非开发步骤（prepare / source / plan /
-// verify / review / save / cleanup）不由 Developer 执行，因此直接跳过。
+// 再按 sequence 取第一个未完成的步骤。可自动推进的阶段只有规划阶段（plan，由
+// Planner 执行）与开发步骤（develop，由 Developer 执行），其余阶段（prepare /
+// source / verify / review / save / cleanup）不由编排器顺序执行，因此直接跳过。
 //
 // 返回 error 表示存在需要人工核验的现场；返回 ok=false 表示计划中已经没有可执行
 // 的开发步骤。
@@ -143,7 +144,7 @@ func NextStepToExecute(steps []Step) (Step, bool, error) {
 		}
 	}
 	for _, step := range steps {
-		if step.Type != StepTypeDevelop {
+		if step.Type != StepTypePlan && step.Type != StepTypeDevelop {
 			continue
 		}
 		switch step.Status {

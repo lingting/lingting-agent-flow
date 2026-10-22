@@ -225,35 +225,50 @@ func TestAgentHelp(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("agent --help 应成功，实际退出码 %d，错误: %s", code, stderr)
 	}
-	for _, expected := range []string{"check", "test"} {
+	for _, expected := range []string{"check", "run"} {
 		if !strings.Contains(stdout, expected) {
 			t.Fatalf("帮助输出缺少 %s，实际: %s", expected, stdout)
 		}
 	}
 }
 
-// TestAgentTestRequiresPrompt 校验测试命令要求显式指定提示词。
-func TestAgentTestRequiresPrompt(t *testing.T) {
+// TestAgentRunRequiresModelAndPrompt 校验容器内调用要求显式指定模型与提示词。
+//
+// 本版本只支持在远程容器内执行 Agent 调用，因此 `agent run` 是唯一的执行入口，
+// 两个参数都必须显式给出。
+func TestAgentRunRequiresModelAndPrompt(t *testing.T) {
 	t.Parallel()
-	code, _, stderr := run(t, "agent", "test")
+	code, _, stderr := run(t, "agent", "run", "container-1")
 	if code == 0 {
 		t.Fatal("缺少必需参数时应返回非零退出码")
 	}
-	if !strings.Contains(stderr, "prompt") {
-		t.Fatalf("错误信息应指出缺少 prompt，实际: %s", stderr)
+	for _, expected := range []string{"model", "prompt"} {
+		if !strings.Contains(stderr, expected) {
+			t.Fatalf("错误信息应指出缺少 %s，实际: %s", expected, stderr)
+		}
 	}
 }
 
-// TestAgentTestMissingConfig 校验缺少配置文件时返回明确错误。
-func TestAgentTestMissingConfig(t *testing.T) {
+// TestAgentRunRejectsUnknownContainer 校验容器不存在时如实返回错误。
+//
+// 该命令只在受管理的容器内执行：容器记录不存在时直接失败，不会回退到本机执行。
+func TestAgentRunRejectsUnknownContainer(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(testkit.Dir(t), "absent.yaml")
-	code, _, stderr := run(t, "agent", "test", "--config", path, "--prompt", "只回答 READY")
+	code, _, stderr := run(
+		t,
+		"agent",
+		"run",
+		"container-not-exists",
+		"--model",
+		"group/free",
+		"--prompt",
+		"只回答 READY",
+	)
 	if code == 0 {
-		t.Fatal("缺少配置文件时应返回非零退出码")
+		t.Fatal("容器不存在时应返回非零退出码")
 	}
-	if !strings.Contains(stderr, "配置文件不存在") {
-		t.Fatalf("错误信息应说明配置文件不存在，实际: %s", stderr)
+	if strings.TrimSpace(stderr) == "" {
+		t.Fatal("错误信息不能为空")
 	}
 }
 

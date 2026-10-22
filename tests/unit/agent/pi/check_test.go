@@ -2,17 +2,44 @@ package pi_test
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/lingting/agentflow/internal/agent/pi"
+	"github.com/lingting/agentflow/tests/internal/fakepi"
 )
+
+// TestMain 让测试二进制同时充当假 Pi 子进程。
+//
+// 检查命令仍然通过本机子进程探测 Pi 的版本与帮助信息，因此需要可控的替身。
+func TestMain(m *testing.M) {
+	if scenario := os.Getenv(fakepi.EnvScenario); scenario != "" {
+		os.Exit(fakepi.Run())
+	}
+	os.Exit(m.Run())
+}
+
+// checkOptions 返回让检查命令使用假 Pi 替身的选项。
+func checkOptions(t *testing.T, scenario string) pi.Options {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("获取测试可执行文件失败: %v", err)
+	}
+	return pi.Options{
+		Executable: executable,
+		Env: append(
+			os.Environ(),
+			fakepi.EnvScenario+"="+scenario,
+		),
+	}
+}
 
 // TestCheckReportsCapabilities 验证检查命令识别非交互式执行所需的参数。
 func TestCheckReportsCapabilities(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, "normal", pi.Options{})
-	report, err := pi.Check(context.Background(), pi.Options{Executable: h.executable, Env: h.env}, "")
+	report, err := pi.Check(context.Background(), checkOptions(t, "normal"), "")
 	if err != nil {
 		t.Fatalf("检查失败: %v", err)
 	}
@@ -36,8 +63,7 @@ func TestCheckReportsCapabilities(t *testing.T) {
 // TestCheckRejectsOldVersion 验证缺少必需参数时返回明确错误。
 func TestCheckRejectsOldVersion(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, "old_version", pi.Options{})
-	report, err := pi.Check(context.Background(), pi.Options{Executable: h.executable, Env: h.env}, "")
+	report, err := pi.Check(context.Background(), checkOptions(t, "old_version"), "")
 	if err == nil {
 		t.Fatal("缺少必需参数时应当返回错误")
 	}
@@ -52,10 +78,9 @@ func TestCheckRejectsOldVersion(t *testing.T) {
 // TestCheckModelRecognition 验证模型识别与凭据状态查询。
 func TestCheckModelRecognition(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, "normal", pi.Options{})
 	report, err := pi.Check(
 		context.Background(),
-		pi.Options{Executable: h.executable, Env: h.env},
+		checkOptions(t, "normal"),
 		"fake/model-1",
 	)
 	if err != nil {
@@ -72,10 +97,9 @@ func TestCheckModelRecognition(t *testing.T) {
 // TestCheckUnknownModel 验证未知模型不会被误判为可用。
 func TestCheckUnknownModel(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, "normal", pi.Options{})
 	report, err := pi.Check(
 		context.Background(),
-		pi.Options{Executable: h.executable, Env: h.env},
+		checkOptions(t, "normal"),
 		"fake/absent-model",
 	)
 	if err != nil {

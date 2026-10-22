@@ -261,7 +261,7 @@ func TestCheckWorkflowStartRejectsInvalidPlans(t *testing.T) {
 			t.Fatalf("构造步骤失败: %v", err)
 		}
 		startErr := domain.CheckWorkflowStart(task, []domain.Step{step})
-		if startErr == nil || !strings.Contains(startErr.Error(), "不是开发步骤") {
+		if startErr == nil || !strings.Contains(startErr.Error(), "不属于可自动推进的阶段") {
 			t.Fatalf("非开发步骤时应当拒绝启动: %v", startErr)
 		}
 	})

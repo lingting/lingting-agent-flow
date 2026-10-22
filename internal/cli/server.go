@@ -57,23 +57,6 @@ func runServer(cmd *cobra.Command, a *app.App, configPath, address string, requi
 		SSHFactory: func(store storage.Store, cfg *config.Config) (*app.SSHService, error) {
 			return app.NewSSHService(store, a.Logger(), sshOptionsFrom(cfg))
 		},
-		AgentRunnerFactory: func(
-			store storage.Store,
-			cfg *config.Config,
-		) (*app.AgentRunnerService, error) {
-			sessions, sessionsErr := app.NewSessionService(
-				store,
-				app.SessionRoot(cfg),
-				a.Logger().Slog(),
-			)
-			if sessionsErr != nil {
-				return nil, sessionsErr
-			}
-			return app.NewAgentRunnerService(app.AgentRunnerOptions{
-				Sessions: sessions,
-				Logger:   a.Logger().Slog(),
-			})
-		},
 		StepExecutorFactory: func(
 			store storage.Store,
 			cfg *config.Config,

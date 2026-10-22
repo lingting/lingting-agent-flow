@@ -8,8 +8,9 @@
 - Git：用于工作区隔离与版本管理，Makefile 会用 `git rev-parse` 注入提交号。
 - Node.js 22 + pnpm 11：仅在构建或开发 Web UI 时需要；`make release` 会用它完成前端生产构建，
   产物随后由 Go 通过 `//go:embed` 嵌入可执行文件。
-- Pi CLI：`agent check` 与 `agent test` 需要 PATH 中存在 `pi`；`agent test` 还会使用角色
-  配置中的模型，因此需要完成对应 Provider 的凭据配置。其他命令不依赖 Pi。
+- Pi CLI：只有 `agent check` 需要 PATH 中存在 `pi`，它不发起模型调用。所有真实 Agent 调用
+  都在远程任务容器内执行，因此容器镜像内必须安装可用版本的 `pi`，并完成对应 Provider 的
+  凭据配置。
 
 SQLite 驱动为 `modernc.org/sqlite`，纯 Go 实现，无需安装 CGO 工具链或系统 SQLite。
 
@@ -112,6 +113,10 @@ make build VERSION=0.1.0
 ./bin/agentflow task run <task-id> --wait=false   # 只发起请求，立即返回初始状态
 ```
 
+`task plan <task-id>` 调用 `POST /api/v1/tasks/{taskID}/plan`，由服务在任务容器内调用
+Planner 并把输出校验为结构化计划后一次写入数据库；计划固定以 `plan` 阶段步骤开头，其后是
+`develop` 步骤。它不创建容器、不自动重试、不覆盖已有计划。
+
 `task run` 是 HTTP 客户端：它调用 `POST /api/v1/tasks/{taskID}/execute-workflow`，再轮询
 `GET /api/v1/tasks/{taskID}/workflow` 直到执行收敛。它不在 CLI 进程内装配 SSH、容器、Pi
 或代码保存能力，服务不可达时直接失败并提示启动服务，不会退回本机执行。它也不生成计划：
@@ -190,8 +195,10 @@ make build VERSION=0.1.0
 9. 不要在 CLI 里重新装配执行栈：`internal/workflow` 引擎包已移除，任务执行只存在于
    `agentflow server` 的 `app.TaskWorkflowService` 中；`agentflow task run` 是 HTTP 客户端，
    新增执行参数同样只能通过 `POST .../execute-workflow` 的请求体表达。
-10. 新增"生成并持久化计划"的能力时必须落库到 `steps`（含 `sequence` 与角色快照），
-    不得在编排器或 Handler 里临时拼装步骤：`domain.CheckWorkflowStart` 只接受已持久化计划。
+10. 计划必须落库到 `steps`（含 `sequence` 与角色快照），不得在编排器或 Handler 里临时
+    拼装步骤：`domain.CheckWorkflowStart` 只接受已持久化计划。当前唯一入口是
+    `app.TaskWorkflowService.GeneratePlan`（`POST /api/v1/tasks/{taskID}/plan`），计划固定以
+    `plan` 阶段步骤开头、其后是 `develop` 步骤；新增计划来源也必须产出同样的结构。
 
 ## 新增角色类型或状态
 
@@ -238,8 +245,9 @@ make build VERSION=0.1.0
 - Pi 作为外部进程运行，任何交互都必须假设对方可能异常退出。
 - 协议字段以官方文档与当前安装版本为准，不凭记忆猜测。
 - 新增交互路径时同时实现成功路径、失败路径与取消路径。
-- 业务代码不得自行拼接 Pi 命令：本机走 `app.AgentRunnerService`，容器内走
-  `app.ContainerService.RunAgent`，两者都通过 `agent.Runner` 接口。
+- 业务代码不得自行拼接 Pi 命令：所有调用都走 `app.ContainerService.RunAgent`，
+  它通过 `agent.Runner` 接口驱动容器内的 Pi 进程。本版本只支持远程 SSH + Docker 容器执行，
+  不存在本机 Pi 调用路径（`app.AgentRunnerService` 已移除）。
 - 单步骤执行的执行结论必须由真实结果决定：`completed` 要求可核验的运行痕迹（完整 Session
   或进程标识），没有运行痕迹的"成功"要按失败处理。
 - 用户取消与服务关闭都会终止进程，但必须区分记录：前者 `cancelled`，后者 `interrupted`。

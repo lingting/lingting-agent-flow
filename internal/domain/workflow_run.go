@@ -234,7 +234,7 @@ func NewWorkflowRun(
 		PlanDigest:     digest,
 		Status:         WorkflowRunPending,
 		Stage:          WorkflowStageWaiting,
-		TotalSteps:     len(developSteps(steps)),
+		TotalSteps:     len(executableSteps(steps)),
 		CreatedAt:      now,
 		UpdatedAt:      now,
 		Revision:       0,
@@ -499,15 +499,19 @@ func (r WorkflowRun) LeaseActive(at time.Time) bool {
 	return r.LeaseExpiresAt.After(normalizeTime(at))
 }
 
-// developSteps 返回计划中的开发步骤，按序号升序排列。
-func developSteps(steps []Step) []Step {
-	develop := make([]Step, 0, len(steps))
+// executableSteps 返回计划中可自动推进的步骤（规划阶段与开发步骤），按序号升序。
+//
+// 进度计数与收尾判定都基于该集合：规划阶段步骤同样是一次真实的 Agent 调用，
+// 必须计入执行进度，否则"从 plan 启动"的执行记录会缺少首步。
+func executableSteps(steps []Step) []Step {
+	executable := make([]Step, 0, len(steps))
 	for _, step := range steps {
-		if step.Type == StepTypeDevelop {
-			develop = append(develop, step)
+		switch step.Type {
+		case StepTypePlan, StepTypeDevelop:
+			executable = append(executable, step)
 		}
 	}
-	return develop
+	return executable
 }
 
 // WorkflowPlanDigest 计算计划内容摘要。
@@ -580,9 +584,13 @@ func CheckWorkflowStart(task Task, steps []Step) error {
 			continue
 		}
 		pending++
-		if step.Type != StepTypeDevelop {
+		// 计划以规划阶段步骤开头，其后才是开发步骤：只有这两类步骤可以自动推进，
+		// 其余阶段（环境准备、代码获取、验证、代码保存、清理）不由编排器顺序执行。
+		switch step.Type {
+		case StepTypePlan, StepTypeDevelop:
+		default:
 			return fmt.Errorf(
-				"%w: 步骤 %s 的类型 %s 不是开发步骤，第一版工作流只按顺序执行开发步骤",
+				"%w: 步骤 %s 的类型 %s 不属于可自动推进的阶段",
 				ErrInvalidState,
 				step.ID,
 				step.Type,

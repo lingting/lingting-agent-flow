@@ -35,6 +35,7 @@ type planFixture struct {
 	service    *app.TaskWorkflowService
 	task       domain.Task
 	planner    domain.Role
+	developer  domain.Role
 	ctx        context.Context
 	workspace  *testkit.Workspace
 	now        time.Time
@@ -112,6 +113,7 @@ func newPlanFixture(t *testing.T, options planOptions) *planFixture {
 		roleType = options.roleType
 	}
 	planner := createManagementRole(t, db, ctx, roleType, "规划角色", now)
+	developer := createManagementRole(t, db, ctx, domain.RoleTypeDeveloper, "开发角色", now)
 	if options.roleDisabled {
 		planner.Enabled = false
 		planner.UpdatedAt = now
@@ -137,9 +139,10 @@ func newPlanFixture(t *testing.T, options planOptions) *planFixture {
 		task.ContainerID = "container-1"
 	}
 	task.Config = domain.TaskConfig{
-		Goal:          "完成本次需求",
-		Environment:   domain.EnvironmentRef{Type: domain.EnvironmentTypeLanguage, Name: "go"},
-		PlannerRoleID: planner.ID,
+		Goal:            "完成本次需求",
+		Environment:     domain.EnvironmentRef{Type: domain.EnvironmentTypeLanguage, Name: "go"},
+		PlannerRoleID:   planner.ID,
+		DeveloperRoleID: developer.ID,
 		Verification: domain.VerificationSpec{
 			AcceptanceCriteria: []string{"任务级验收条件"},
 			Commands: []domain.VerificationCommand{
@@ -174,7 +177,7 @@ func newPlanFixture(t *testing.T, options planOptions) *planFixture {
 			"已存在的步骤",
 			"按需求实现",
 			"",
-			planner,
+			developer,
 			task.Config.Verification,
 			domain.RetryConfig{MaxAttempts: 1},
 			now,
@@ -196,7 +199,7 @@ func newPlanFixture(t *testing.T, options planOptions) *planFixture {
 					"工作流步骤",
 					"按需求实现",
 					"",
-					planner,
+					developer,
 					task.Config.Verification,
 					domain.RetryConfig{MaxAttempts: 1},
 					now,
@@ -220,7 +223,6 @@ func newPlanFixture(t *testing.T, options planOptions) *planFixture {
 	}
 	containers := &taskWorkflowContainer{
 		running:      true,
-		sessions:     db,
 		agentReplies: []fakeAgentReply{planReply(options)},
 	}
 	serviceOptions := app.TaskWorkflowOptions{
@@ -248,6 +250,7 @@ func newPlanFixture(t *testing.T, options planOptions) *planFixture {
 		service:    service,
 		task:       task,
 		planner:    planner,
+		developer:  developer,
 		ctx:        ctx,
 		workspace:  workspace,
 		now:        now,
@@ -310,12 +313,19 @@ func TestGeneratePlanPersistsPlan(t *testing.T) {
 		t.Fatalf("必须记录规划会话标识")
 	}
 	steps := fixture.steps(t)
-	if len(steps) != 2 {
+	// 计划固定以规划阶段步骤开头，其后是 Planner 生成的开发步骤。
+	if len(steps) != 3 {
 		t.Fatalf("步骤数量不符: %d", len(steps))
+	}
+	if steps[0].Type != domain.StepTypePlan {
+		t.Fatalf("首个步骤必须是规划阶段: %s", steps[0].Type)
 	}
 	for index, step := range steps {
 		if step.Sequence != index+1 {
 			t.Fatalf("步骤序号不连续: %d", step.Sequence)
+		}
+		if index == 0 {
+			continue
 		}
 		if step.Type != domain.StepTypeDevelop {
 			t.Fatalf("步骤类型必须是开发步骤: %s", step.Type)

@@ -192,8 +192,6 @@ type taskWorkflowContainer struct {
 	agentRequests []app.ContainerAgentRequest
 	// agentCalls 统计 Agent 调用次数。
 	agentCalls int
-	// sessions 非空时把会话记录写入数据库，模拟真实容器执行的持久化行为。
-	sessions storage.SessionStore
 }
 
 // InspectContainer 返回受控的容器状态。
@@ -239,7 +237,6 @@ func (p *taskWorkflowContainer) RunAgent(
 	if index < len(p.agentReplies) {
 		reply = p.agentReplies[index]
 	}
-	sessions := p.sessions
 	p.mu.Unlock()
 	now := time.Now().UTC()
 	sessionID := domain.ID(strings.TrimSpace(request.SessionID))
@@ -268,11 +265,8 @@ func (p *taskWorkflowContainer) RunAgent(
 			result.Session.Completeness = agent.SessionPartial
 		}
 	}
-	if sessions != nil {
-		if err := sessions.CreateSession(ctx, fakeStepSession(request, result, now)); err != nil {
-			return app.ContainerAgentResult{Result: result}, err
-		}
-	}
+	// 会话记录由调用方的会话服务写入（SessionService.Start），替身不重复写入：
+	// 重复写入会与真实记录冲突，也会掩盖"谁负责持久化会话"的职责边界。
 	return app.ContainerAgentResult{Result: result}, reply.err
 }
 

@@ -8,6 +8,9 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
+
+	"github.com/lingting/agentflow/internal/agent"
 )
 
 // sessionHeaderType 是 Session 文件首行的记录类型。
@@ -69,4 +72,21 @@ func validateSessionFile(path string) error {
 		return errors.New("Session 文件为空或缺少会话头部")
 	}
 	return nil
+}
+
+// emitEvent 编码并发出内部事件，回调为空或编码失败时忽略。
+func emitEvent(
+	sessionID string,
+	emit func(agent.Event),
+	eventType agent.EventType,
+	payload any,
+) {
+	if emit == nil {
+		return
+	}
+	event, err := agent.NewEvent(sessionID, eventType, payload, time.Now())
+	if err != nil {
+		return
+	}
+	emit(event)
 }

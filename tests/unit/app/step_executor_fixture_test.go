@@ -211,13 +211,22 @@ func fakeStepSession(
 	}
 	roleType := domain.RoleType(request.RoleType)
 	roleID := domain.ID(request.RoleType + "-role")
-	stepID := domain.ID(request.StepID)
-	attemptID := domain.ID(request.AttemptID)
+	// 任务级调用（例如 Planner）没有步骤与尝试归属：此时必须留空，
+	// 否则会伪造出一条指向不存在步骤的会话记录。
+	var stepID, attemptID *domain.ID
+	if request.StepID != "" {
+		value := domain.ID(request.StepID)
+		stepID = &value
+	}
+	if request.AttemptID != "" {
+		value := domain.ID(request.AttemptID)
+		attemptID = &value
+	}
 	session := domain.Session{
 		ID:        domain.ID(result.SessionID),
 		TaskID:    domain.ID(request.TaskID),
-		StepID:    &stepID,
-		AttemptID: &attemptID,
+		StepID:    stepID,
+		AttemptID: attemptID,
 		RoleID:    roleID,
 		RoleSnapshot: domain.RoleSnapshot{
 			RoleID:       roleID,

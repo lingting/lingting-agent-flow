@@ -3,11 +3,9 @@ package cli
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/lingting/agentflow/internal/agent"
 	"github.com/lingting/agentflow/internal/app"
-	"github.com/lingting/agentflow/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -24,7 +22,6 @@ func newAgentCommand(a *app.App) *cobra.Command {
 		},
 	}
 	command.AddCommand(newAgentCheckCommand(a))
-	command.AddCommand(newAgentTestCommand(a))
 	command.AddCommand(newAgentRunCommand(a))
 	return command
 }
@@ -65,76 +62,6 @@ func newAgentCheckCommand(a *app.App) *cobra.Command {
 	}
 	command.Flags().StringVar(&model, "model", "", "同时检查的模型标识，例如 provider/model-id")
 	return command
-}
-
-// newAgentTestCommand 构建 agent test 子命令。
-func newAgentTestCommand(a *app.App) *cobra.Command {
-	var request app.AgentTestRequest
-	var timeout time.Duration
-	command := &cobra.Command{
-		Use:   "test",
-		Short: "使用指定角色执行一次真实的 Agent 调用",
-		Long: "以角色配置的模型与提示词启动一次独立的 Pi 非交互式调用。\n" +
-			"每次调用使用独立 Session 文件，保存到配置数据目录的 sessions 下，\n" +
-			"并在成功后尝试导出 HTML。事件写入日志，不污染标准输出。\n" +
-			"该命令用于验证执行链路，不代表工作流或验证阶段已实现。",
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			request.Timeout = timeout
-			result, runErr := a.AgentTest(cmd.Context(), request)
-			printErr := printAgentTestResult(a, result)
-			if printErr != nil {
-				return printErr
-			}
-			return runErr
-		},
-	}
-	command.Flags().StringVar(
-		&request.ConfigPath,
-		"config",
-		"",
-		"配置文件路径（默认 "+config.DefaultPath+"）",
-	)
-	command.Flags().StringVar(&request.RoleID, "role", "", "使用的角色标识，省略时使用配置中第一个角色")
-	command.Flags().StringVar(&request.Model, "model", "", "覆盖角色配置中的模型")
-	command.Flags().StringVar(&request.Dir, "dir", "", "Agent 执行时的工作目录，省略时继承当前目录")
-	command.Flags().StringVar(&request.Prompt, "prompt", "", "发送给 Agent 的提示词（必填）")
-	command.Flags().DurationVar(&timeout, "timeout", 0, "本次调用的超时时间，省略时使用默认值")
-	if err := command.MarkFlagRequired("prompt"); err != nil {
-		panic(fmt.Sprintf("cli: 标记必需参数失败: %v", err))
-	}
-	return command
-}
-
-// printAgentTestResult 输出测试命令的结果摘要。
-//
-// 失败时只输出错误摘要，不把全部原始日志写入终端。
-func printAgentTestResult(a *app.App, result app.AgentTestResult) error {
-	run := result.Result
-	lines := []string{
-		fmt.Sprintf("会话标识: %s", result.SessionID),
-		fmt.Sprintf("角色: %s (%s)", result.Role.Name, result.Role.Type),
-		fmt.Sprintf("模型: %s", result.Role.Model),
-		fmt.Sprintf("状态: %s", run.Status),
-		fmt.Sprintf("退出码: %d", run.ExitCode),
-		fmt.Sprintf("Session 完整性: %s", emptyAsUnknown(string(run.Session.Completeness))),
-		fmt.Sprintf("Session 文件: %s", emptyAsUnknown(run.Session.JSONLPath)),
-		fmt.Sprintf("HTML 导出: %s", exportSummary(run.Session)),
-		fmt.Sprintf("开始时间: %s", run.StartedAt.Format(timeFormat)),
-		fmt.Sprintf("结束时间: %s", run.FinishedAt.Format(timeFormat)),
-		fmt.Sprintf("事件: %s", result.EventSummary()),
-	}
-	if run.Failure != "" {
-		lines = append(lines, fmt.Sprintf("错误摘要: %s", run.Failure))
-	}
-	if run.Session.Error != "" && run.Session.Error != run.Failure {
-		lines = append(lines, fmt.Sprintf("Session 说明: %s", run.Session.Error))
-	}
-	if run.FinalText != "" {
-		lines = append(lines, "最终文本:", run.FinalText)
-	}
-	_, err := fmt.Fprintln(a.Stdout(), strings.Join(lines, "\n"))
-	return err
 }
 
 // exportSummary 生成 HTML 导出的可读摘要。

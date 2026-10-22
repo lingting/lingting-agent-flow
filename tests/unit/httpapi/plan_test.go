@@ -131,6 +131,20 @@ func newPlanAPIFixture(t *testing.T, finalText string) *planAPIFixture {
 	if createErr := db.CreateRole(ctx, planner); createErr != nil {
 		t.Fatalf("写入规划角色失败: %v", createErr)
 	}
+	developer, err := domain.NewRole(
+		"开发角色",
+		domain.RoleTypeDeveloper,
+		"provider/model",
+		"提示词",
+		domain.DefaultToolsPolicy(domain.RoleTypeDeveloper),
+		now,
+	)
+	if err != nil {
+		t.Fatalf("构造开发角色失败: %v", err)
+	}
+	if createErr := db.CreateRole(ctx, developer); createErr != nil {
+		t.Fatalf("写入开发角色失败: %v", createErr)
+	}
 	host := apiHost(t, db, ctx, now)
 	host = markAPIHostNormal(t, db, ctx, host)
 	requirement, err := domain.NewRequirement("需求标题", "需求正文", domain.PriorityNormal, now)
@@ -147,9 +161,10 @@ func newPlanAPIFixture(t *testing.T, finalText string) *planAPIFixture {
 	task.HostID = &host.ID
 	task.ContainerID = "container-1"
 	task.Config = domain.TaskConfig{
-		Goal:          "完成本次需求",
-		Environment:   domain.EnvironmentRef{Type: domain.EnvironmentTypeLanguage, Name: "go"},
-		PlannerRoleID: planner.ID,
+		Goal:            "完成本次需求",
+		Environment:     domain.EnvironmentRef{Type: domain.EnvironmentTypeLanguage, Name: "go"},
+		PlannerRoleID:   planner.ID,
+		DeveloperRoleID: developer.ID,
 		Verification: domain.VerificationSpec{
 			Commands: []domain.VerificationCommand{
 				{Name: "build", Command: "go", Args: []string{"build", "./..."}, Required: true},
@@ -248,18 +263,26 @@ func TestPlanAPIPersistsPlan(t *testing.T) {
 	if response.TaskStatus != string(domain.TaskStatusPlanned) {
 		t.Fatalf("任务状态应为 planned，实际 %s", response.TaskStatus)
 	}
-	if len(response.Steps) != 2 {
+	// 计划固定以规划阶段步骤开头，其后是 Planner 生成的开发步骤。
+	if len(response.Steps) != 3 {
 		t.Fatalf("步骤数量不符: %d", len(response.Steps))
+	}
+	if response.Steps[0].Type != string(domain.StepTypePlan) {
+		t.Fatalf("首个步骤必须是规划阶段: %s", response.Steps[0].Type)
 	}
 	if response.SessionID == "" {
 		t.Fatalf("必须返回规划会话标识")
 	}
-	for _, step := range response.Steps {
+	for index, step := range response.Steps {
 		if len(step.RequiredChecks) == 0 {
 			t.Fatalf("步骤 %d 缺少生效的必需检查", step.Sequence)
 		}
-		if step.Type != string(domain.StepTypeDevelop) {
-			t.Fatalf("步骤类型不符: %s", step.Type)
+		expectedType := domain.StepTypeDevelop
+		if index == 0 {
+			expectedType = domain.StepTypePlan
+		}
+		if step.Type != string(expectedType) {
+			t.Fatalf("步骤 %d 类型不符: %s", step.Sequence, step.Type)
 		}
 	}
 }

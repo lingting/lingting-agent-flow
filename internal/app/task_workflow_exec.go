@@ -367,7 +367,7 @@ func (s *TaskWorkflowService) finalize(
 	if err != nil {
 		return s.stopRun(writeCtx, run, domain.WorkflowRunRecoveryRequired, "task_unreadable", err)
 	}
-	stepsCompleted := allDevelopStepsCompleted(steps)
+	stepsCompleted := allExecutableStepsCompleted(steps)
 	codeSave, codeSaveErr := s.saveCode(writeCtx, task, &run)
 	sessionPersisted := s.sessionsPersisted(writeCtx, task)
 
@@ -768,11 +768,16 @@ func sessionArchived(session domain.Session) bool {
 	return strings.TrimSpace(session.ArchivePath) != ""
 }
 
-// allDevelopStepsCompleted 判断全部开发步骤是否都已确认完成。
-func allDevelopStepsCompleted(steps []domain.Step) bool {
+// allExecutableStepsCompleted 判断全部可自动推进的步骤是否都已确认完成。
+//
+// 规划阶段步骤与开发步骤都参与判定：只统计开发步骤会让"计划以 plan 开头"的执行
+// 在规划阶段未收敛时被误判为可以收尾。
+func allExecutableStepsCompleted(steps []domain.Step) bool {
 	found := false
 	for _, step := range steps {
-		if step.Type != domain.StepTypeDevelop {
+		switch step.Type {
+		case domain.StepTypePlan, domain.StepTypeDevelop:
+		default:
 			continue
 		}
 		found = true

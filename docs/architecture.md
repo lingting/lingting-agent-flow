@@ -19,9 +19,9 @@ Application Services
       |
 Scheduler / Workflow Engine
       |
-Agent Runner / Process Manager
+Container Agent Runner / Docker Exec
       |
-Pi RPC / Git Worktree
+Pi CLI（容器内）/ Git Worktree
       |
 SQLite
 ```
@@ -30,7 +30,8 @@ SQLite
 - **Application Services**：CLI 与 HTTP 的共同入口，编排各领域能力；执行与多步骤编排分别由
   `app.StepExecutor` / `app.StepWorkflowService` / `app.TaskWorkflowService` 承担，任务领取与
   并发调度（`internal/scheduler`）尚未实现。
-- **Agent Runner / Process Manager**：以独立子进程方式驱动 Pi，并管理进程生命周期。
+- **Container Agent Runner / Docker Exec**：在受管理的任务容器内以独立子进程方式驱动 Pi，
+  并管理远程命令的生命周期。本版本只支持远程 SSH + Docker 容器执行，不存在本机 Pi 调用路径。
 - **Pi CLI / 任务容器**：非交互 `pi --print --session` 调用与任务工作区隔离。
 - **SQLite**：唯一真相来源。
 
@@ -52,7 +53,7 @@ internal/execenv/         统一执行环境契约：Kind、Workspace、Environm
                           PrepareSpec/Prepared、ReleaseRequest/Result、Provider 与 ExecPort
 internal/scheduler/       任务领取、并发控制、Worker 与恢复（未实现）
 internal/agent/           统一 Agent 接口：Runner、RunRequest、RunResult、Event
-internal/agent/pi/        Pi CLI 适配器：本机 Runner、容器 Runner、Session 路径与日志落盘
+internal/agent/pi/        Pi CLI 适配器：容器 Runner、CLI 能力检查、Session 路径与日志落盘
 internal/process/         外部进程生命周期管理：启动、输出读取、超时、取消与回收
 internal/gitworktree/     任务工作区创建、检查与清理（未实现）
 internal/storage/         存储接口与统一存储错误（含步骤占用的原子事务接口）
@@ -107,7 +108,7 @@ cmd
 - `config` 可以把角色类型映射到 `domain.RoleType` 以复用取值校验，但配置结构自身保持独立，不把 YAML 细节泄漏进 `domain`。
 - `app` 之上的层不得直接访问 SQLite；所有持久化经由仓储接口。
 - `app.TaskWorkflowService` 与 `app.StepWorkflowService` 不得直接创建 Pi 进程，只能通过
-  `app.AgentRunnerService` / 容器执行端口，且不得构造 Docker 或 Git 命令。
+  容器执行端口（`app.ContainerService.RunAgent`），且不得构造 Docker 或 Git 命令。
 - `httpapi` 与 `cli` 不得包含状态迁移逻辑，只调用 `app`。
 - `httpapi` 不得自行拼接 Pi 命令、创建 Attempt 或直接赋值执行状态；单步骤执行只能调用
   `app.StepExecutor`。
@@ -250,7 +251,7 @@ HTTP Handler（POST /api/v1/tasks/{taskID}/execute-steps）
   └── app.StepExecutor.ExecuteSteps
         ├── 任务状态准入（domain.TaskStatus.AllowsStepExecution）
         ├── storage.StepStore.ListStepsByTask（按 sequence 排序）
-        ├── domain.NextStepToExecute（跳过非开发步骤、拒绝不确定与已占用步骤）
+        ├── domain.NextStepToExecute（跳过不可自动推进的阶段、拒绝不确定与已占用步骤）
         ├── domain.CheckStepPrerequisites（前序步骤必须 completed / skipped）
         └── app.StepExecutor.Execute（复用单步骤执行，每次新建 Attempt 与 Session）
 ```
@@ -401,6 +402,39 @@ HTTP Handler（POST /api/v1/tasks/{taskID}/steps/{stepID}/execute-and-validate�
   条件更新拒绝。
 - 任务级串联由"任务级工作流编排"负责，见下一节。
 
+## 计划生成边界
+
+计划生成是任务级编排器的一个独立入口，它负责"把需求变成可持久化的计划"，不负责执行。
+
+```text
+HTTP Handler（POST /api/v1/tasks/{taskID}/plan → 200 + 真实结果）
+  └── app.TaskWorkflowService.GeneratePlan
+        ├── domain.CheckPlanGenerationStart（状态 / 容器 / 无已落库步骤 / 已配置规划角色）
+        ├── 未结束工作流检查 + 容器核验 + 执行节点预检
+        ├── 规划角色与开发角色加载（类型必须匹配且启用）
+        ├── domain.TaskStatus.CanStartPlanning → planning（状态条件更新，跨进程闸门）
+        ├── app.SessionService.Start（任务级会话，无步骤与尝试归属）
+        ├── app.ContainerService.RunAgent（容器内 Planner 调用）
+        ├── app.SessionService.Finish（写入产出与归档）
+        ├── app.ParsePlanOutput（结构化解析，未知字段拒绝）
+        ├── domain.BuildPlan（确定性校验 + 角色绑定 + 任务级必需检查合并）
+        └── persistPlan（同一事务）
+              ├── CreateSteps（plan 阶段步骤 + develop 步骤）
+              ├── UpdateTaskIfStatus（planning → planned）
+              └── AppendEvent（plan.created，含摘要）
+```
+
+- **计划结构**：序号 1 固定是 `plan` 阶段步骤（绑定规划角色），其后是 `develop` 步骤
+  （绑定开发角色）。计划以规划阶段开头，因此任务级编排器可以"从 plan 启动"。
+- **Planner 调用成功不等于计划成功**：解析失败、校验失败或持久化失败都不会让任务进入
+  `planned`，也不会留下半成品计划。
+- **并发**：`planning` 的状态条件更新是跨进程闸门；进程内另有任务级互斥锁作为第一道防线。
+- **失败收敛**：调用失败 / 超时 / 输出非法 / 校验失败 / 持久化失败 → `failed`；用户取消 →
+  `cancelling` → `cancelled`；服务停止导致的中断 → `recovery_required`。
+- **启动恢复**：停留在 `planning` 的任务按持久化事实收敛——已有步骤 → `planned`，
+  没有步骤 → `recovery_required`。恢复**不重放 Planner 调用**。
+- **不覆盖已有计划**：已有步骤时直接拒绝；重新规划与计划版本化尚未设计。
+
 ## 任务级工作流编排边界
 
 编排器是"单步骤闭环"之上的一层薄协调：它决定**执行哪一个 Step、按什么顺序、何时停止**，
@@ -409,7 +443,7 @@ HTTP Handler（POST /api/v1/tasks/{taskID}/steps/{stepID}/execute-and-validate�
 ```text
 HTTP Handler（POST /api/v1/tasks/{taskID}/execute-workflow → 202 + 真实初始状态）
   └── app.TaskWorkflowService.StartWorkflow
-        ├── domain.CheckWorkflowStart（任务状态 / 容器 / 计划 / 序号 / 必需检查 / 现场明确）
+        ├── domain.CheckWorkflowStart（任务状态 / 容器 / 计划 / 序号 / 阶段类型 / 必需检查 / 现场明确）
         ├── 容器核验（受管理、未 detached、运行中）+ 执行节点预检（EnsureHostUsableForRemoteTask）
         ├── domain.NewWorkflowRun（plan_digest + total_steps）→ workflow_runs 落盘（pending）
         ├── beginRunRecord（pending → running，版本号条件写入）

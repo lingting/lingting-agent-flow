@@ -13,6 +13,7 @@ import (
 type planFixture struct {
 	task         domain.Task
 	planner      domain.Role
+	developer    domain.Role
 	verification domain.VerificationSpec
 	now          time.Time
 }
@@ -32,15 +33,27 @@ func newPlanFixture(t *testing.T) planFixture {
 	if err != nil {
 		t.Fatalf("构造规划角色失败: %v", err)
 	}
+	developer, err := domain.NewRole(
+		"开发者",
+		domain.RoleTypeDeveloper,
+		"provider/developer",
+		"你是开发角色",
+		domain.DefaultToolsPolicy(domain.RoleTypeDeveloper),
+		now,
+	)
+	if err != nil {
+		t.Fatalf("构造开发角色失败: %v", err)
+	}
 	task, err := domain.NewTask("requirement-1", "/repo", "main", "", now)
 	if err != nil {
 		t.Fatalf("构造任务失败: %v", err)
 	}
 	task.ContainerID = "container-1"
 	task.Config = domain.TaskConfig{
-		Goal:          "完成本次需求",
-		Environment:   domain.EnvironmentRef{Type: domain.EnvironmentTypeLanguage, Name: "go"},
-		PlannerRoleID: planner.ID,
+		Goal:            "完成本次需求",
+		Environment:     domain.EnvironmentRef{Type: domain.EnvironmentTypeLanguage, Name: "go"},
+		PlannerRoleID:   planner.ID,
+		DeveloperRoleID: developer.ID,
 		Verification: domain.VerificationSpec{
 			AcceptanceCriteria: []string{"任务级验收条件"},
 			Commands: []domain.VerificationCommand{
@@ -54,6 +67,7 @@ func newPlanFixture(t *testing.T) planFixture {
 	return planFixture{
 		task:         task,
 		planner:      planner,
+		developer:    developer,
 		verification: task.Config.Verification,
 		now:          now,
 	}
@@ -83,24 +97,35 @@ func TestBuildPlanAcceptsValidDraft(t *testing.T) {
 		fixture.task,
 		fixture.draft(3),
 		fixture.planner,
+		fixture.developer,
 		fixture.verification,
 		fixture.now,
 	)
 	if err != nil {
 		t.Fatalf("构造计划失败: %v", err)
 	}
-	if len(plan.Steps) != 3 {
+	// 序号 1 是规划阶段步骤，其后是 3 个开发步骤。
+	if len(plan.Steps) != 4 {
 		t.Fatalf("步骤数量不符: %d", len(plan.Steps))
+	}
+	if plan.Steps[0].Type != domain.StepTypePlan {
+		t.Fatalf("首个步骤必须是规划阶段: %s", plan.Steps[0].Type)
+	}
+	if plan.Steps[0].RoleID != fixture.planner.ID {
+		t.Fatalf("规划阶段步骤必须绑定规划角色: %s", plan.Steps[0].RoleID)
 	}
 	for index, step := range plan.Steps {
 		if step.Sequence != index+1 {
 			t.Fatalf("步骤序号不连续: %d", step.Sequence)
 		}
+		if index == 0 {
+			continue
+		}
 		if step.Type != domain.StepTypeDevelop {
 			t.Fatalf("步骤类型必须是开发步骤: %s", step.Type)
 		}
-		if step.RoleID != fixture.planner.ID {
-			t.Fatalf("步骤角色不是规划阶段锁定的角色: %s", step.RoleID)
+		if step.RoleID != fixture.developer.ID {
+			t.Fatalf("开发步骤必须绑定开发角色: %s", step.RoleID)
 		}
 		if step.Status != domain.StepStatusPending {
 			t.Fatalf("步骤初始状态不符: %s", step.Status)
@@ -201,6 +226,7 @@ func TestBuildPlanRejectsInvalidDrafts(t *testing.T) {
 				fixture.task,
 				testCase.draft(),
 				fixture.planner,
+				fixture.developer,
 				fixture.verification,
 				fixture.now,
 			); err == nil {
@@ -231,10 +257,21 @@ func TestBuildPlanRejectsWrongRoleType(t *testing.T) {
 		fixture.task,
 		fixture.draft(1),
 		developer,
+		fixture.developer,
 		fixture.verification,
 		fixture.now,
 	); !errors.Is(err, domain.ErrPlanInvalid) {
-		t.Fatalf("角色类型不符时错误类别不符: %v", err)
+		t.Fatalf("规划角色类型不符时错误类别不符: %v", err)
+	}
+	if _, err := domain.BuildPlan(
+		fixture.task,
+		fixture.draft(1),
+		fixture.planner,
+		fixture.planner,
+		fixture.verification,
+		fixture.now,
+	); !errors.Is(err, domain.ErrPlanInvalid) {
+		t.Fatalf("开发角色类型不符时错误类别不符: %v", err)
 	}
 }
 

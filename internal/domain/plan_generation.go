@@ -117,26 +117,24 @@ func CheckPlanGenerationStart(task Task, steps []Step) error {
 //   - 每步的标识、标题、目标与验收条件都必须非空且有长度上限；
 //   - 任务级必需验证命令与验收条件合并进每个步骤：Planner 不能通过省略命令
 //     来取消任务级的必需检查；
-//   - 产出序号从 1 开始连续递增的开发步骤，步骤类型固定为 develop，
-//     因为任务级编排器只按顺序执行开发步骤。
+//   - 序号 1 是规划阶段步骤（plan），其余为开发步骤（develop）：计划以规划阶段
+//     开头，任务级编排器据此支持"从 plan 启动"。
 func BuildPlan(
 	task Task,
 	draft PlanDraft,
-	role Role,
+	plannerRole Role,
+	developerRole Role,
 	taskVerification VerificationSpec,
 	at time.Time,
 ) (Plan, error) {
 	if err := task.ID.Validate(); err != nil {
 		return Plan{}, err
 	}
-	if role.Type != RoleTypePlanner {
-		return Plan{}, fmt.Errorf(
-			"%w: 角色 %s 的类型是 %s，计划生成需要 %s",
-			ErrPlanInvalid,
-			role.ID,
-			role.Type,
-			RoleTypePlanner,
-		)
+	if err := requireRoleType(plannerRole, RoleTypePlanner); err != nil {
+		return Plan{}, err
+	}
+	if err := requireRoleType(developerRole, RoleTypeDeveloper); err != nil {
+		return Plan{}, err
 	}
 	limit := task.Config.PlanStepLimit()
 	if len(draft.Steps) == 0 {
@@ -151,10 +149,28 @@ func BuildPlan(
 		)
 	}
 	retry := task.Config.Retry
-	steps := make([]Step, 0, len(draft.Steps))
+	// 计划固定以规划阶段步骤开头：任务级编排器据此支持"从 plan 启动"，
+	// 且规划阶段本身可追溯（角色快照、执行结论）。
+	planStep, err := NewAgentStep(
+		task.ID,
+		1,
+		StepTypePlan,
+		"生成开发计划",
+		"依据任务目标与仓库上下文生成结构化开发计划",
+		draft.Summary,
+		plannerRole,
+		taskVerification,
+		retry,
+		at,
+	)
+	if err != nil {
+		return Plan{}, fmt.Errorf("%w: 规划阶段步骤非法: %w", ErrPlanInvalid, err)
+	}
+	steps := make([]Step, 0, len(draft.Steps)+1)
+	steps = append(steps, planStep)
 	seen := make(map[string]struct{}, len(draft.Steps))
 	for index, item := range draft.Steps {
-		position := index + 1
+		position := index + 2
 		if err := validatePlanStepDraft(item, position, seen); err != nil {
 			return Plan{}, err
 		}
@@ -170,20 +186,25 @@ func BuildPlan(
 				err,
 			)
 		}
-		step, err := NewAgentStep(
+		step, stepErr := NewAgentStep(
 			task.ID,
 			position,
 			StepTypeDevelop,
 			item.Title,
 			item.Objective,
 			item.Instructions,
-			role,
+			developerRole,
 			merged,
 			retry,
 			at,
 		)
-		if err != nil {
-			return Plan{}, fmt.Errorf("%w: 第 %d 个步骤非法: %w", ErrPlanInvalid, position, err)
+		if stepErr != nil {
+			return Plan{}, fmt.Errorf(
+				"%w: 第 %d 个步骤非法: %w",
+				ErrPlanInvalid,
+				position,
+				stepErr,
+			)
 		}
 		steps = append(steps, step)
 	}
@@ -192,6 +213,23 @@ func BuildPlan(
 		return Plan{}, fmt.Errorf("%w: %w", ErrPlanInvalid, err)
 	}
 	return plan, nil
+}
+
+// requireRoleType 校验角色类型与阶段匹配。
+//
+// 规划阶段必须使用规划角色、开发步骤必须使用开发角色：类型不符会让 Agent 以错误的
+// 权限与提示词运行，因此在这里直接拒绝，而不是在步骤校验时报错。
+func requireRoleType(role Role, expected RoleType) error {
+	if role.Type == expected {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: 角色 %s 的类型是 %s，期望 %s",
+		ErrPlanInvalid,
+		role.ID,
+		role.Type,
+		expected,
+	)
 }
 
 // validatePlanStepDraft 校验单个计划步骤草稿的结构与长度边界。

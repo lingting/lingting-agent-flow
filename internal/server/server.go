@@ -98,12 +98,6 @@ type Options struct {
 	// Server 时创建。工厂返回错误时启动失败；返回 nil 表示本次运行不提供执行接口，
 	// 此时接口返回 503 而不是伪造执行。
 	StepExecutorFactory func(store storage.Store, cfg *config.Config) (*app.StepExecutor, error)
-	// AgentRunnerFactory 在数据库打开后构造统一 Pi Runner 服务。
-	//
-	// Pi Runner 依赖已打开的数据库（写 Session 记录）与 Session 持久化目录，因此
-	// 不能在构造 Server 时创建。工厂返回错误时启动失败；返回的服务由 Server 注册
-	// 进统一生命周期，Server 停止时取消在途调用。
-	AgentRunnerFactory func(store storage.Store, cfg *config.Config) (*app.AgentRunnerService, error)
 	// RequireWebUI 为 true 时缺少前端构建产物将导致启动失败。
 	//
 	// 正式发布构建应当置为 true；开发时先启动后端再构建前端属于正常流程，
@@ -120,8 +114,6 @@ type Server struct {
 	address    string
 	openStore  StoreOpener
 	sshFactory func(store storage.Store, cfg *config.Config) (*app.SSHService, error)
-	// agentRunnerFactory 在数据库打开后构造统一 Pi Runner 服务。
-	agentRunnerFactory func(store storage.Store, cfg *config.Config) (*app.AgentRunnerService, error)
 	// stepExecutorFactory 在数据库打开后构造单步骤执行协调器。
 	stepExecutorFactory func(store storage.Store, cfg *config.Config) (*app.StepExecutor, error)
 	// taskWorkflowFactory 在数据库打开后构造任务级工作流编排器。
@@ -145,8 +137,6 @@ type Server struct {
 	validation *app.HostValidationService
 	// sessions 是所有 Agent 调用共享的会话服务。
 	sessions *app.SessionService
-	// agentRunner 是统一 Pi Runner 后台服务，Server 停止时取消在途调用。
-	agentRunner *app.AgentRunnerService
 	// executionRecords 是执行记录只读查询服务，由已打开的数据库构造。
 	executionRecords *app.ExecutionRecordService
 	// stepExecutor 是单步骤执行协调器，为空时不提供执行接口。
@@ -204,7 +194,6 @@ func New(options Options) (*Server, error) {
 		address:               options.Address,
 		openStore:             options.OpenStore,
 		sshFactory:            options.SSHFactory,
-		agentRunnerFactory:    options.AgentRunnerFactory,
 		stepExecutorFactory:   options.StepExecutorFactory,
 		taskWorkflowFactory:   options.TaskWorkflowFactory,
 		validationFactory:     options.ValidationFactory,
@@ -325,13 +314,6 @@ func (s *Server) openDatabase(ctx context.Context) error {
 		}
 		s.codeInitialize = initializer
 	}
-	if s.agentRunner == nil && s.agentRunnerFactory != nil {
-		runner, err := s.agentRunnerFactory(store, s.cfg)
-		if err != nil {
-			return fmt.Errorf("初始化 Agent Runner 失败: %w", err)
-		}
-		s.agentRunner = runner
-	}
 	s.logger.DebugContext(ctx, "数据库已就绪", slog.String("path", s.cfg.Storage.DatabasePath))
 	return nil
 }
@@ -359,11 +341,6 @@ func (s *Server) startServices(ctx context.Context) error {
 		if validation != nil {
 			services = append(services, validation)
 		}
-	}
-	if s.agentRunner != nil {
-		// Agent Runner 注册在后台服务里：Server 停止时会取消在途调用并等待收敛，
-		// 不会在退出后残留不受管理的本地子进程。
-		services = append(services, s.agentRunner)
 	}
 	if s.stepExecutor != nil {
 		// 步骤执行协调器同样注册进统一生命周期：Server 停止时取消在途执行并等待

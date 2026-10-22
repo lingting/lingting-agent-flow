@@ -125,6 +125,12 @@ func (s *TaskWorkflowService) GeneratePlan(
 	if err != nil {
 		return PlanGenerationResult{}, err
 	}
+	// 开发步骤必须绑定开发角色：计划里的每个 develop 步骤都会由该角色执行，
+	// 因此角色在计划生成阶段就确定下来，之后不再变化。
+	developerRole, err := s.loadDeveloperRole(ctx, task)
+	if err != nil {
+		return PlanGenerationResult{}, err
+	}
 	// 进程内以任务为键拒绝重复请求；跨进程并发仍由下面的状态条件更新拒绝。
 	unlock, acquired := s.taskLocks.tryLock(task.ID.String())
 	if !acquired {
@@ -163,18 +169,28 @@ func (s *TaskWorkflowService) GeneratePlan(
 	if outcome.session.ID.IsEmpty() {
 		result.SessionID = domain.ID(outcome.result.SessionID)
 	}
-	if callErr != nil {
+	// 结论以执行结果为准而不是以 error 为准：取消与超时可能不返回 error，
+	// 但它们同样没有产出可用计划，绝不能继续解析输出。
+	if callErr != nil || outcome.outcome != domain.StepExecutionCompleted {
 		stage := "planner_call"
-		if outcome.outcome == domain.StepExecutionCancelled ||
-			outcome.outcome == domain.StepExecutionInterrupted {
+		switch outcome.outcome {
+		case domain.StepExecutionCancelled:
+			stage = "planner_cancelled"
+		case domain.StepExecutionInterrupted:
 			stage = "planner_interrupted"
+		case domain.StepExecutionTimedOut:
+			stage = "planner_timeout"
+		}
+		cause := callErr
+		if cause == nil {
+			cause = fmt.Errorf("Planner 调用未正常结束: %s", outcome.outcome)
 		}
 		return s.failPlanGeneration(
 			context.WithoutCancel(ctx),
 			planning,
 			result,
 			stage,
-			callErr,
+			cause,
 		)
 	}
 	draft, err := ParsePlanOutput(outcome.result.FinalText)
@@ -191,6 +207,7 @@ func (s *TaskWorkflowService) GeneratePlan(
 		planning,
 		draft,
 		role,
+		developerRole,
 		planning.Config.Verification,
 		s.now(),
 	)
@@ -306,6 +323,53 @@ func (s *TaskWorkflowService) loadPlannerRole(
 	if strings.TrimSpace(role.Model) == "" {
 		return domain.Role{}, fmt.Errorf(
 			"%w: 规划角色 %s 未配置模型",
+			ErrWorkflowPrerequisite,
+			role.ID,
+		)
+	}
+	return *role, nil
+}
+
+// loadDeveloperRole 读取并校验任务配置的开发角色。
+//
+// 计划中的每个开发步骤都会绑定该角色：角色缺失、类型不符或已禁用时，计划即使生成
+// 成功也无法执行，因此在规划阶段就拒绝。
+func (s *TaskWorkflowService) loadDeveloperRole(
+	ctx context.Context,
+	task domain.Task,
+) (domain.Role, error) {
+	roleID := task.Config.DeveloperRoleID
+	if roleID.IsEmpty() {
+		return domain.Role{}, fmt.Errorf(
+			"%w: 任务 %s 未配置开发角色",
+			ErrWorkflowPrerequisite,
+			task.ID,
+		)
+	}
+	role, err := s.store.GetRole(ctx, roleID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return domain.Role{}, fmt.Errorf(
+				"%w: 任务 %s 关联的开发角色 %s 不存在",
+				ErrWorkflowPrerequisite,
+				task.ID,
+				roleID,
+			)
+		}
+		return domain.Role{}, fmt.Errorf("读取开发角色失败: %w", err)
+	}
+	if role.Type != domain.RoleTypeDeveloper {
+		return domain.Role{}, fmt.Errorf(
+			"%w: 角色 %s 的类型是 %s，开发步骤需要 %s",
+			ErrWorkflowPrerequisite,
+			role.ID,
+			role.Type,
+			domain.RoleTypeDeveloper,
+		)
+	}
+	if !role.Enabled {
+		return domain.Role{}, fmt.Errorf(
+			"%w: 开发角色 %s 已被禁用",
 			ErrWorkflowPrerequisite,
 			role.ID,
 		)
@@ -552,10 +616,13 @@ func (s *TaskWorkflowService) failPlanGeneration(
 
 // planOutcomeOfStage 把失败阶段映射为执行结论。
 //
-// 只有中断阶段对应"服务停止导致的中断"：解析与校验失败说明 Planner 输出了不可用
+// 只有取消与中断阶段对应"调用被外部终止"：解析与校验失败说明 Planner 输出了不可用
 // 的内容，持久化失败说明计划没有落库，两者都是确定性失败。
 func planOutcomeOfStage(stage string) domain.StepExecutionOutcome {
-	if stage == "planner_interrupted" {
+	switch stage {
+	case "planner_cancelled":
+		return domain.StepExecutionCancelled
+	case "planner_interrupted":
 		return domain.StepExecutionInterrupted
 	}
 	return domain.StepExecutionFailed
