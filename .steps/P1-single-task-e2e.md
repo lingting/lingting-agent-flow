@@ -1,6 +1,7 @@
 # P1 —— 单任务完整开发闭环
 
-> 状态与证据撰写依据：commit `330e7c4`（2026-10-23）工作区的实际代码与测试状态。
+> 状态与证据撰写依据：commit `330e7c4`（2026-10-23）的代码状态；P1-M1 部分已按
+> commit `a0ee19b`（2026-10-23）之后的实际核实与改动更新。
 
 ## 阶段目标
 
@@ -110,14 +111,16 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
 
 | ID | 名称 | 状态 | 依赖 |
 |---|---|---|---|
-| P1-M1 | 核实并打通任务启动至计划生成的前置流程 | `pending` | 无 |
-| P1-M2 | 打通 Developer、确定性验证与 Validator Agent 的完整验证决策链 | `pending` | P1-M1 |
+| P1-M1 | 核实并打通任务启动至计划生成的前置流程 | `completed` | 无 |
+| P1-M2 | 打通 Developer、确定性验证与 Validator Agent 的完整验证决策链 | `pending` | P1-M1 ✅ |
 | P1-M3 | 实现有上限、可停止的验证失败修复与重新验证闭环 | `pending` | P1-M2 |
 | P1-M4 | 将修复闭环与代码保存、会话归档、任务收尾串联 | `pending` | P1-M3 |
 | P1-M5 | 完成单任务端到端验收（成功/验证失败/修复失败/无法确认） | `pending` | P1-M4 |
 
-> 状态当前均为 `pending`：M1/M2/M4 的底层能力大多已存在，但尚未按"端到端闭环"的退出
-> 条件完成核验与串联，故不标 `completed`。每个里程碑的"当前证据"里会说明哪些部分已就绪。
+> P1-M1 已完成（证据见该里程碑"完成记录"）：启动链路已核实并修补，成功/幂等/失败/
+> uncertain 四类路径均有真实数据库上的测试证据。M2–M5 仍为 `pending`：M2/M4 的底层
+> 能力大多已存在，但尚未按"端到端闭环"的退出条件完成核验与串联。
+> 当前里程碑为 **P1-M2**。
 
 ## 阶段退出条件（可验证的客观标准）
 
@@ -151,9 +154,8 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
 
 在 P1 内部按"解除最多下游依赖"原则选择：
 
-1. 先完成 **P1-M1**：它核实主链路最前端是否真的可用，是后续所有工作的前置，且已有
-   代码证据表明大部分已实现，成本最低。
-2. 再完成 **P1-M2**：Validator 是 P1 决策链的唯一结构性缺口，M3 修复循环依赖"验证能给出
+1. **P1-M1 已完成**（启动→计划前置流程已核实并修补）。
+2. 当前应推进 **P1-M2**：Validator 是 P1 决策链的唯一结构性缺口，M3 修复循环依赖"验证能给出
    可修复的结构化结论"。
 3. 再完成 **P1-M3**：修复闭环依赖 M2 的验证结论。
 4. 再完成 **P1-M4**：串联收尾依赖 M3。
@@ -167,7 +169,7 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
 
 - **ID**：`P1-M1`
 - **名称**：核实并打通任务启动至计划生成的前置流程
-- **状态**：`pending`
+- **状态**：`completed`（2026-10-23 核实并修补，证据见下方"完成记录"）
 - **必要性**：P1 的入口是"从需求到可执行计划"。启动链路（容器→工作区→计划）若存在
   隐蔽断点（如任务启动阶段判定、工作区初始化结果不确定、计划持久化失败），后续所有
   里程碑都建立在不可靠的地基上。该里程碑以"核实 + 修补最小缺口"为主，不重复建设已
@@ -180,9 +182,14 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
   - 已实现：计划生成（`internal/app/task_workflow_plan.go`、`internal/domain/plan_generation.go`）。
   - 测试：`tests/integration/local/workflow/launch_test.go`（跨阶段持久化、不重复建容器、
     工作区 uncertain 停止、重启后恢复）；`tests/unit/app/plan_generation_test.go`。
-  - 缺口：尚无**真实远程环境**下"创建任务 → `task start` → 得到已持久化计划"的端到端
-    验收证据；`tests/integration/remote/workflow/` 目前只有前置条件测试
-    （`TestRemoteWorkflowPreconditions` 等），未覆盖真实启动到计划生成。
+  - 测试：`tests/integration/local/workflow/launch_chain_test.go`（真实 SQLite + 真实
+    `TaskLaunchService`/`TaskWorkspaceService`/`TaskWorkflowService`，只把容器内 Git 与
+    Pi 调用替换为受控替身：启动到 `planned`、重复启动幂等、工作区失败停止、uncertain
+    不重放）；`tests/integration/local/workflow/launch_test.go`；`tests/unit/app/
+    plan_generation_test.go`（含事务内步骤写入失败的整体回滚）。
+  - 剩余缺口（不阻塞 M1）：`tests/integration/remote/workflow/` 仍只有前置条件测试。
+    该目录的真实远程启动用例需要在容器内运行真实 Planner，属于 M5 端到端验收范围；
+    M1 的完成定义允许使用"测试边界内受控替身"覆盖，因此不阻塞本里程碑。
 - **前置依赖**：无。
 - **目标结果**：用户执行统一启动入口后，能可靠地到达"任务为 `planned` 且计划步骤已落库"
   的状态；启动各阶段的失败能被区分定位（容器 / 工作区 / 计划），工作区结果不确定时按
@@ -212,7 +219,57 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
 - **非目标**：不新增容器自动修复、不重做计划生成逻辑、不引入任务调度。
 - **风险与待决问题**：真实远程环境的测试依赖 SSH/Docker/Pi 配置，可能在 CI 中跳过；需
   区分"未配置导致跳过"与"配置完整但失败"。
-- **完成记录**：（待完成时填写实际改动、测试结果、未解决问题与证据）
+- **完成记录**（2026-10-23，分支 `master`，改动前 HEAD `a0ee19b`）：
+
+  核实结论：主链路（创建任务 → 准备容器 → 初始化工作区 → Planner 生成计划 → 持久化 →
+  `planned`）在代码中成立，`DecideTaskLaunchNext` 与 `Launch` 的阶段判定一致，容器/工作区
+  /计划各自具备幂等边界与 uncertain 停止语义。核实中发现 2 处证据缺口，均已最小修补。
+
+  实际改动（2 项，均为必要修补）：
+
+  1. `internal/app/task_launch_run.go`（+4 行）：修复报告缺陷。计划早已持久化时启动跳过
+     plan 阶段，旧实现只在 plan 分支内赋值 `PlanPersisted`，导致重复启动返回
+     `plan_persisted=false` 却同时 `task_status=planned` 的自相矛盾结论，违反该字段
+     "计划是否已完整写入数据库"的契约（HTTP 与 CLI 都据此展示）。改为先按
+     `len(input.Steps)==0` 给出持久化事实，只在真正执行计划生成时用生成结果覆盖。
+     判定规则仍在 `domain`，本改动不新增第二套业务语义。
+  2. `tests/unit/app/plan_generation_test.go`（改 1 个用例 + 注入点）：原
+     `TestGeneratePlanRollsBackOnPersistFailure` 通过 `planStore.updateTaskErr` 注入失败，
+     但该失败发生在 `beginPlanning` 阶段——即事务之前，用例实际只覆盖"事务外被拒绝"，
+     未覆盖回滚。新增 `planStore.WithTx` + `failingStepTx`，把失败注入真实事务内的
+     `CreateSteps`，并断言 Planner 已真实调用、步骤零落库、任务未进入 `planned`。
+     已用变异测试确认：让 `failingStepTx` 先真实写入步骤再返回错误，用例仍通过，
+     证明事务回滚确实撤销了写入。
+
+  新增测试：`tests/integration/local/workflow/launch_chain_test.go`（4 个用例）
+  - `TestLaunchChainReachesPlannedWithPersistedPlan`：成功路径。1 次启动经工作区初始化与
+    Planner 生成到达 `planned`，断言 3 个步骤（序号 1 为 `plan`、其余 `develop`）、任务级
+    必需命令已合并、工作区成功记录带 `commit_sha` 且关联当前容器、代码获取 1 次、
+    Planner 1 次、编排启动 1 次。
+  - `TestLaunchChainIsIdempotentOnRepeat`：幂等路径。重复启动不重复 Clone、不重复调用
+    Planner、不覆盖已有计划（逐步骤比对步骤 ID），且如实报告计划已持久化。
+  - `TestLaunchChainStopsOnWorkspaceFailure`：工作区阶段失败（`repository_access_failed`）
+    后不调用 Planner、不启动编排、不留步骤、任务不进入 `planned`。
+  - `TestLaunchChainRejectsUncertainWorkspaceWithoutReplay`：工作区 `uncertain` 时返回
+    `ErrTaskLaunchConflict`，不重放代码获取，记录原样保留。
+
+  测试结果（如实区分）：
+  - 通过：`go test -count=1 -p 1 ./tests/...` → 45 个包全部通过（1528 个用例，含新增 4 个）。
+  - 通过（真实远程）：`go test -count=1 ./tests/integration/remote/...` → 8 个用例全部真实
+    执行并通过（SSH 到 `192.168.91.20`，Docker CLI/Engine 29.9.1、API 1.56 落在 1.52 基线
+    区间内），无跳过。
+  - 未执行：`tests/integration/remote/workflow/` 的真实"启动到计划"用例——M1 尚未新增该
+    用例（原因见上"剩余缺口"），因此**没有**也未声称该路径的真实远程证据。
+  - 已知既有问题（非本次改动引入）：`tests/integration/local/workflow` 的
+    `TestPlanGenerationInterruptedByShutdown` 在**未改动的干净工作区**上以约 40% 概率失败
+    （`恢复测试` 中 `duringCall` 在 goroutine 内触发 Stop，与实际取消传播存在竞态）。已用
+    `git stash` 回到改动前状态复现 8 次，失败 4 次，与本里程碑改动无关；按"不修改 M1 范围
+    外代码"的要求未修改，记录为待后续处理。
+
+  检查：`gofmt -l internal cmd tests` 无输出；`go vet ./...` 无输出。
+
+  未解决问题：上述 `TestPlanGenerationInterruptedByShutdown` 的既有竞态；真实远程
+  "启动到计划"验收用例留待 M5。
 
 ---
 

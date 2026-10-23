@@ -1,7 +1,8 @@
 # AgentFlow 项目路线图
 
 > 本文件是路线图总览。具体里程碑的工作项、依赖与验收见各阶段文档。
-> 撰写依据：commit `330e7c4`（2026-10-23）工作区的实际代码与测试状态，非旧对话或 README 推断。
+> 撰写依据：commit `330e7c4`（2026-10-23）工作区的实际代码与测试状态，非旧对话或 README 推断；
+> P1-M1 已在 commit `a0ee19b` 之后按实际核实与改动更新。
 
 ## 项目最终业务目标
 
@@ -29,6 +30,15 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 
 ## 当前实现状态摘要（基于代码证据）
 
+> **当前里程碑：P1-M2**（P1-M1 已于 2026-10-23 完成，证据见
+> `P1-single-task-e2e.md` 的 P1-M1"完成记录"）。
+>
+> **待调查事项（不影响 M1 已完成结论）**：
+> - `TestPlanGenerationInterruptedByShutdown` 在干净工作区上以约 40% 概率失败（测试内
+>   `duringCall` 用 goroutine 触发 Stop，与取消传播存在竞态）。属既有测试缺陷，
+>   待 P2（可靠性与恢复）阶段处理。
+> - `tests/integration/remote/workflow/` 尚未覆盖真实远程"启动到计划"，留待 P1-M5 端到端验收。
+
 **已实现且有代码证据（可直接复用）**：
 
 - 任务管理、逻辑删除、取消/删除语义与分页列表（`internal/app/task_management.go`、
@@ -40,10 +50,12 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - 代码获取与任务分支初始化（`internal/app/code_initialize.go`、`internal/source/`）。
 - 统一任务启动：容器准备 → 工作区初始化 → 计划生成 → 工作流启动
   （`internal/app/task_launch_run.go`、`internal/domain/task_launch.go` 的
-  `DecideTaskLaunchNext`）。
+  `DecideTaskLaunchNext`）。**P1-M1 已核验**：阶段判定与 `Launch` 一致，容器/工作区/
+  计划均有幂等边界与 `uncertain` 停止语义；重复启动不重复建容器、不重复 Clone、不覆盖
+  已持久化计划（`tests/integration/local/workflow/launch_chain_test.go`）。
 - 计划生成（Planner 调用 + 结构化校验 + 单事务持久化；`domain.BuildPlan` 产出
   序号 1 的 `plan` 步骤 + 后续 `develop` 步骤）（`internal/app/task_workflow_plan.go`、
-  `internal/domain/plan_generation.go`）。
+  `internal/domain/plan_generation.go`）。事务内步骤写入失败时整体回滚（含测试证据）。
 - 单步骤执行、顺序执行、单步骤开发—验证闭环（`internal/app/step_executor*.go`、
   `internal/app/step_sequence.go`、`internal/app/step_workflow*.go`）。
 - 确定性验证引擎（`internal/app/validation.go`、`internal/domain/validation_decision.go`
