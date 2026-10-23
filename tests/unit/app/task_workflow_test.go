@@ -40,6 +40,8 @@ const (
 	taskReplyError
 	// taskReplyBlocked 表示闭环阻塞直到上下文取消。
 	taskReplyBlocked
+	// taskReplyRepairStop 表示修复循环以结构化类别停止。
+	taskReplyRepairStop
 )
 
 // taskWorkflowReply 是一次受控的步骤闭环结果。
@@ -48,6 +50,10 @@ type taskWorkflowReply struct {
 	err  error
 	// completes 表示闭环是否把步骤在数据库中收口为 completed。
 	completes bool
+	// repairClass / repairResult 只在 taskReplyRepairStop 时使用：
+	// 前者是修复循环给出的停止类别，后者是期望的步骤终态。
+	repairClass  domain.RepairFailureClass
+	repairResult domain.StepStatus
 }
 
 // taskWorkflowRunner 是单步骤闭环服务的替身。
@@ -123,6 +129,29 @@ func (r *taskWorkflowRunner) ExecuteAndValidate(
 		result.Verified = false
 	case taskReplyError:
 		return app.ExecuteAndValidateResult{}, reply.err
+	case taskReplyRepairStop:
+		// 修复循环停止：步骤终态与停止类别都来自领域判定，替身只做投影。
+		result.Verification = domain.StepVerificationFailed
+		result.StepStatus = reply.repairResult
+		result.Verified = false
+		result.Attempts = 2
+		result.Round = 2
+		result.ValidationFailureSummary = "必需检查 build 未通过"
+		result.Repair = domain.RepairDecision{
+			Kind:    domain.RepairDecisionStop,
+			Class:   reply.repairClass,
+			Summary: "修复循环因 " + string(reply.repairClass) + " 停止",
+		}
+		if reply.repairClass != domain.RepairClassDeveloperFailed &&
+			reply.repairClass != domain.RepairClassDeveloperTimedOut &&
+			reply.repairClass != domain.RepairClassDeveloperInterrupted {
+			result.FeedbackPersisted = true
+		}
+		if reply.repairClass == domain.RepairClassInfrastructure ||
+			reply.repairClass == domain.RepairClassNotPersisted ||
+			reply.repairClass == domain.RepairClassVerificationNotRun {
+			result.InfrastructureError = true
+		}
 	case taskReplyBlocked:
 		<-ctx.Done()
 		return app.ExecuteAndValidateResult{}, ctx.Err()

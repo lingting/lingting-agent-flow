@@ -26,14 +26,16 @@
 ## 当前阶段与当前里程碑
 
 - **当前阶段**：P1 —— 单任务完整开发闭环。
-- **上一个里程碑**：`P1-M2` —— 打通 Developer、确定性验证与 Validator Agent 的完整
-  验证决策链，状态 `completed`（2026-10-23）。Validator 已接入真实生产调用链：必需
-  确定性检查全部通过后创建独立 Session 调用 Validator，结构化评估写入
-  `validation_runs`，最终结论统一由 `domain.DecideValidation` 计算，见
-  `P1-single-task-e2e.md` 的 P1-M2"完成记录"。
-- **更早里程碑**：`P1-M1` —— 核实并打通任务启动至计划生成的前置流程，状态
-  `completed`（2026-10-23）。
-- **当前里程碑**：`P1-M3` —— 实现有上限、可停止的验证失败修复与重新验证闭环
+- **上一个里程碑**：`P1-M3` —— 实现有上限、可停止的验证失败修复与重新验证闭环，状态
+  `completed`（2026-10-24）。修复闭环已接入真实生产调用链：`ExecuteAndValidate` 驱动
+  `runRepairLoop`，每轮新建 Attempt / Session / Validation Run 并保留历史；是否继续修复由
+  `domain.DecideRepairLoop` 依据持久化事实判定，终态由 `domain.DecideRepairCloseout` 计算，
+  编排器通过 `repairStopMapping` 消费停止类别，见 `P1-single-task-e2e.md` 的 P1-M3
+  "完成记录"。
+- **更早里程碑**：`P1-M2` —— 打通 Developer、确定性验证与 Validator Agent 的完整验证
+  决策链，状态 `completed`（2026-10-23）；`P1-M1` —— 核实并打通任务启动至计划生成的
+  前置流程，状态 `completed`（2026-10-23）。
+- **当前里程碑**：`P1-M4` —— 将修复闭环与代码保存、会话归档、任务收尾串联
   （详见 `P1-single-task-e2e.md`）。
 
 > 阶段与里程碑的状态可能随开发推进而变化，以上仅为撰写本路线图时的快照；最新状态

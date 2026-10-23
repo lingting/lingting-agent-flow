@@ -52,6 +52,11 @@ const (
 	EventTypeWorkflowFailed     EventType = "workflow.failed"
 	EventTypeWorkflowRecovery   EventType = "workflow.recovery_required"
 	EventTypeWorkflowCodeSaved  EventType = "workflow.code_saved"
+	// 修复循环事件。
+	//
+	// 每一轮修复都会追加一条事件，记录轮次、尝试上限、对应的 Attempt 与 Validation
+	// Run、以及"为什么继续或停止"。它只用于追溯，不参与状态推进。
+	EventTypeRepairRound EventType = "repair.round"
 )
 
 // knownEventTypes 是当前受支持的事件类型集合。
@@ -91,6 +96,7 @@ var knownEventTypes = []EventType{
 	EventTypeWorkflowFailed,
 	EventTypeWorkflowRecovery,
 	EventTypeWorkflowCodeSaved,
+	EventTypeRepairRound,
 }
 
 // Validate 校验事件类型是否受支持。

@@ -3,7 +3,8 @@
 > 本文件是路线图总览。具体里程碑的工作项、依赖与验收见各阶段文档。
 > 撰写依据：commit `330e7c4`（2026-10-23）工作区的实际代码与测试状态，非旧对话或 README 推断；
 > P1-M1 已在 commit `a0ee19b` 之后按实际核实与改动更新；
-> P1-M2 已在 HEAD `3219591` 之后按实际接入与改动更新。
+> P1-M2 已在 HEAD `3219591` 之后按实际接入与改动更新；
+> P1-M3 已在 HEAD `2545e74` 之后按实际接入与改动更新。
 
 ## 项目最终业务目标
 
@@ -31,8 +32,8 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 
 ## 当前实现状态摘要（基于代码证据）
 
-> **当前里程碑：P1-M3**（P1-M1、P1-M2 已于 2026-10-23 完成，证据见
-> `P1-single-task-e2e.md` 的对应"完成记录"）。
+> **当前里程碑：P1-M4**（P1-M1、P1-M2 已于 2026-10-23 完成，P1-M3 已于 2026-10-24
+> 完成，证据见 `P1-single-task-e2e.md` 的对应"完成记录"）。
 >
 > **待调查事项（不影响 M1/M2 已完成结论）**：
 > - `TestPlanGenerationInterruptedByShutdown` 在干净工作区上以约 40% 概率失败（测试内
@@ -82,16 +83,21 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
   `internal/app/task_workflow_run.go`、`internal/app/task_launch_recovery.go`）。
 - Web 任务页：创建/查看/取消/删除、启动/取消/恢复工作流与进度面板
   （`lingting-agent-flow-ui/src/pages/tasks/TasksPage.tsx`）。
-
-**已有部分实现、尚未端到端集成**：
-
-- 验证失败修复依据：`validation_feedbacks` 已持久化，且下次显式执行时被注入提示词
-  （`internal/app/step_workflow_prompt.go`），但**没有自动修复循环**。
+- **验证失败修复与重新验证闭环**（P1-M3）：`app.StepWorkflowService.ExecuteAndValidate`
+  驱动 `runRepairLoop`（`internal/app/step_workflow_repair.go`），每轮复用
+  `StepExecutor.Execute(DeferCompletion)` + `ValidationService.Validate`，每轮新建
+  Attempt / Session / Validation Run 并保留历史。是否继续修复只由
+  `domain.DecideRepairLoop`（`internal/domain/retry.go`）依据持久化事实判定，终态只由
+  `domain.DecideRepairCloseout`（`internal/domain/step_verification.go`）计算；达到
+  `Step.MaxAttempts`、结论不确定、基础设施异常、记录未可靠落库、反馈不可用、取消与开发失败
+  一律停止。每轮写入 `repair.round` 事件，编排器通过 `repairStopMapping`
+  （`internal/app/task_workflow_exec.go`）消费停止类别映射工作流状态。
+- 验证失败修复依据：`validation_feedbacks` 已持久化并按 `ValidationRunID` 精确引用
+  （`internal/app/step_workflow_prompt.go`、`step_workflow_repair.go` 的 `repairPrompt`），
+  读取失败或归属不符时停止循环而不是静默降级。
 
 **尚未实现**：
 
-- 自动验证失败修复与重新验证闭环（当前验证失败即停止为 `blocked`，等待用户显式
-  `resume-workflow` 或重新执行）。
 - 多任务调度队列、有界并发与任务领取。
 - 真实端到端全路径验收测试（成功 / 验证失败 / 修复失败 / 无法确认结果）。
 
@@ -103,8 +109,12 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - `verification_results` 表与 `domain.NewVerificationResult`（`internal/domain/
   verification.go` 的 `decideVerdict`）是历史遗留的第二套判定模型，生产链路已不再使用
   （唯一生产结论来源是 `DecideValidation`）。清理属 P2 范围。
-- `validation_feedbacks` 是否应收录 Validator 的 `findings`：当前审查发现只进入
-  `assessment_json`，是否纳入修复提示词由 M3 决定。
+- `validation_feedbacks` 是否应收录 Validator 的 `findings`：P1-M3 调查后的结论是
+  **当前不是自动修复的必需信息**。进入修复的前提是必需确定性检查失败，而
+  `DecideValidation` 在确定性检查未通过时不会采用审查结论，`reviewSemantics` 也因此不发起
+  审查调用，此时不存在可用 `findings`。审查发现仍完整保存在 `assessment_json` 与
+  `review_summary`；是否并入反馈结构（用于"审查判定未通过后继续修复"这类未来场景）留待
+  真实需求出现时决定。
 
 ## 四阶段总览
 

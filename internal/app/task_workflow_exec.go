@@ -316,6 +316,11 @@ func (s *TaskWorkflowService) stopForStepResult(
 		"infrastructure":   result.InfrastructureError,
 		"finalized":        result.Finalized,
 		"validation_error": result.ValidationFailureSummary,
+		// 修复循环的追溯字段：轮次、上限、判定与原因。
+		"round":          result.Round,
+		"attempts":       result.Attempts,
+		"repair_class":   string(result.Repair.Class),
+		"repair_summary": result.Repair.Summary,
 	}
 	switch {
 	case ctx.Err() != nil || run.CancelRequested ||
@@ -323,6 +328,11 @@ func (s *TaskWorkflowService) stopForStepResult(
 		s.appendEvent(writeCtx, run.TaskID, &stepID, idPtr(result.AttemptID),
 			domain.EventTypeWorkflowCanceled, payload)
 		return s.stopForCancel(writeCtx, run, ctx)
+	case result.Repair.Class != "":
+		// 修复循环已经给出结构化停止类别：直接消费领域判定，不在这里重新推导。
+		class, status, eventType := repairStopMapping(result.Repair.Class)
+		return s.stopWithEvent(writeCtx, run, status, class,
+			repairStopSummary(result), eventType, payload)
 	case result.Outcome != domain.StepExecutionCompleted:
 		// 开发阶段未成功：失败与中断都停止自动推进，不自动重试。
 		class := "developer_failed"
@@ -343,6 +353,49 @@ func (s *TaskWorkflowService) stopForStepResult(
 			"verification_failed", verificationStopSummary(result),
 			domain.EventTypeWorkflowBlocked, payload)
 	}
+}
+
+// repairStopMapping 把修复循环的停止类别映射为工作流停止状态与错误分类。
+//
+// 规则只在这里表达一次：需要人工核验的类别进入 recovery_required，其余真实失败
+// 进入可恢复的 blocked。取消由调用方先行处理，不会走到这里。
+func repairStopMapping(
+	class domain.RepairFailureClass,
+) (string, domain.WorkflowRunStatus, domain.EventType) {
+	switch class {
+	case domain.RepairClassDeveloperFailed:
+		return "developer_failed", domain.WorkflowRunBlocked, domain.EventTypeWorkflowBlocked
+	case domain.RepairClassDeveloperTimedOut, domain.RepairClassDeveloperInterrupted:
+		return "developer_interrupted", domain.WorkflowRunRecoveryRequired,
+			domain.EventTypeWorkflowBlocked
+	case domain.RepairClassVerificationNotRun,
+		domain.RepairClassInfrastructure,
+		domain.RepairClassNotPersisted,
+		domain.RepairClassFeedbackUnavailable:
+		return "verification_unconfirmed", domain.WorkflowRunRecoveryRequired,
+			domain.EventTypeWorkflowRecovery
+	case domain.RepairClassVerificationInconclusive:
+		return "verification_inconclusive", domain.WorkflowRunRecoveryRequired,
+			domain.EventTypeWorkflowRecovery
+	case domain.RepairClassAttemptsExhausted:
+		return "attempts_exhausted", domain.WorkflowRunBlocked, domain.EventTypeWorkflowBlocked
+	case domain.RepairClassRepairDisabled:
+		return "verification_failed", domain.WorkflowRunBlocked, domain.EventTypeWorkflowBlocked
+	case domain.RepairClassUnsupportedStep:
+		return "step_not_repairable", domain.WorkflowRunBlocked, domain.EventTypeWorkflowBlocked
+	default:
+		return "verification_failed", domain.WorkflowRunBlocked, domain.EventTypeWorkflowBlocked
+	}
+}
+
+// repairStopSummary 生成修复循环停止的说明。
+func repairStopSummary(result ExecuteAndValidateResult) string {
+	detail := strings.TrimSpace(result.Repair.Summary)
+	if detail == "" {
+		detail = verificationStopSummary(result)
+	}
+	return "修复循环停止（" + string(result.Repair.Class) + "，共 " +
+		itoaForPrompt(result.Attempts) + " 次开发尝试）: " + detail
 }
 
 // finalize 在全部开发步骤完成后执行任务收尾。

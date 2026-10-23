@@ -54,12 +54,16 @@ type workflowContainerPort struct {
 	agentCalls int
 	// checkReplies 按命令名返回受控的检查结果。
 	checkReplies map[string]workflowCheckReply
+	// checkSequence 按调用顺序返回检查结果，用于构造多轮验证结果不同的场景。
+	checkSequence func(index int) workflowCheckReply
 	// execRequests 记录收到的检查命令执行请求。
 	execRequests []app.ExecRequest
 	// sessions 非空时把会话记录写入数据库。
 	sessions storage.SessionStore
 	// onAgent 在返回 Agent 结果前执行，用于注入副作用。
 	onAgent func(request app.ContainerAgentRequest)
+	// onExec 在返回检查结果前执行，用于在验证阶段注入副作用（例如取消）。
+	onExec func(request app.ExecRequest)
 }
 
 // InspectContainer 返回受控的容器状态。
@@ -147,7 +151,16 @@ func (f *workflowContainerPort) Exec(
 		name = request.Command[0]
 	}
 	reply := f.checkReplies[name]
+	if f.checkSequence != nil {
+		// checkSequence 按调用顺序返回检查结果，用于构造"第一轮失败、第二轮通过"的
+		// 真实场景；未配置时使用按命令名的固定结果。
+		reply = f.checkSequence(len(f.execRequests) - 1)
+	}
+	checkExec := f.onExec
 	f.mu.Unlock()
+	if checkExec != nil {
+		checkExec(request)
+	}
 	execErr := reply.err
 	status := sshclient.CommandStatusSucceeded
 	switch {
@@ -204,7 +217,7 @@ func (f *workflowContainerPort) execCount() int {
 type workflowFixture struct {
 	db         *sqlite.DB
 	containers *workflowContainerPort
-	store      *stepExecutorStore
+	store      app.StepWorkflowStore
 	executor   *app.StepExecutor
 	validation *app.ValidationService
 	service    *app.StepWorkflowService
@@ -222,12 +235,20 @@ type workflowOptions struct {
 	agentReplies []fakeAgentReply
 	// checkReplies 是验证阶段的检查结果。
 	checkReplies map[string]workflowCheckReply
+	// checkSequence 按调用顺序返回检查结果，用于多轮验证结果不同的场景。
+	checkSequence func(index int) workflowCheckReply
 	// inspectErr 使容器核验失败。
 	inspectErr error
 	// running 表示容器是否在运行，默认 true。
 	stopped bool
 	// updateAttemptErr 使开发阶段的尝试终态写入失败。
 	updateAttemptErr error
+	// retry 是步骤生效的重试策略，零值使用默认上限。
+	retry domain.RetryConfig
+	// createFeedbackErr 使验证失败反馈写入失败，用于验证"没有修复依据就不重放调用"。
+	createFeedbackErr error
+	// stepType 覆盖步骤类型，默认 develop。
+	stepType domain.StepType
 }
 
 // newWorkflowFixture 在工作空间中准备一套可执行闭环的测试数据。
@@ -254,7 +275,8 @@ func newWorkflowFixture(t *testing.T, options workflowOptions) *workflowFixture 
 		t.Fatalf("构造会话服务失败: %v", err)
 	}
 	now := time.Now().UTC()
-	role := createManagementRole(t, db, ctx, domain.RoleTypeDeveloper, "开发角色", now)
+	roleType := workflowRoleTypeOf(options.stepType)
+	role := createManagementRole(t, db, ctx, roleType, "执行角色", now)
 	host := createManagementHost(t, db, ctx, now)
 	host = markHostNormal(t, db, ctx, host)
 	requirement, err := domain.NewRequirement("需求标题", "需求正文", domain.PriorityNormal, now)
@@ -286,13 +308,13 @@ func newWorkflowFixture(t *testing.T, options workflowOptions) *workflowFixture 
 	step, err := domain.NewAgentStep(
 		task.ID,
 		1,
-		domain.StepTypeDevelop,
+		workflowStepTypeOf(options.stepType),
 		"实现接口",
 		"按需求实现接口",
 		"不要修改构建脚本",
 		role,
 		spec,
-		domain.RetryConfig{MaxAttempts: 1},
+		workflowRetryOf(options.retry),
 		now,
 	)
 	if err != nil {
@@ -314,11 +336,12 @@ func newWorkflowFixture(t *testing.T, options workflowOptions) *workflowFixture 
 		}
 	}
 	containers := &workflowContainerPort{
-		running:      !options.stopped,
-		inspectErr:   options.inspectErr,
-		agentReplies: options.agentReplies,
-		checkReplies: options.checkReplies,
-		sessions:     db,
+		running:       !options.stopped,
+		inspectErr:    options.inspectErr,
+		agentReplies:  options.agentReplies,
+		checkReplies:  options.checkReplies,
+		checkSequence: options.checkSequence,
+		sessions:      db,
 	}
 	if containers.checkReplies == nil {
 		containers.checkReplies = map[string]workflowCheckReply{}
@@ -327,6 +350,7 @@ func newWorkflowFixture(t *testing.T, options workflowOptions) *workflowFixture 
 		StepExecutionStore: db,
 		updateAttemptErr:   options.updateAttemptErr,
 	}
+	workflowStore := workflowStoreOf(db, options.createFeedbackErr)
 	gitPort := &fakeGitPort{
 		before: domain.GitWorktreeState{StatusRead: true, Branch: "agent/" + task.ID.String()},
 		after:  domain.GitWorktreeState{StatusRead: true, Branch: "agent/" + task.ID.String()},
@@ -353,7 +377,7 @@ func newWorkflowFixture(t *testing.T, options workflowOptions) *workflowFixture 
 	service, err := app.NewStepWorkflowService(app.StepWorkflowOptions{
 		Steps:      executor,
 		Validation: validation,
-		Store:      db,
+		Store:      workflowStore,
 		Logger:     logger.Slog(),
 	})
 	if err != nil {
@@ -363,7 +387,7 @@ func newWorkflowFixture(t *testing.T, options workflowOptions) *workflowFixture 
 	return &workflowFixture{
 		db:         db,
 		containers: containers,
-		store:      store,
+		store:      workflowStore,
 		executor:   executor,
 		validation: validation,
 		service:    service,

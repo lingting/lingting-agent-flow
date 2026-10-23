@@ -224,3 +224,115 @@ func closeoutStatusOfOutcome(outcome StepExecutionOutcome) StepStatus {
 		return StepStatusFailed
 	}
 }
+
+// RepairCloseoutInput 是修复循环停止后计算步骤终态所需的证据。
+//
+// 它与 StepCloseoutInput 表达的是同一件事的不同视角：后者描述"单轮开发—验证如何
+// 收口"，前者描述"整条修复循环因为什么停下"。两者都不允许依赖自然语言结论。
+type RepairCloseoutInput struct {
+	// Decision 是修复循环的停止或结束判定。
+	Decision RepairDecision
+	// Attempts 是本次循环中已确认落库的开发尝试次数（含首轮）。
+	Attempts int
+	// MaxAttempts 是步骤生效的尝试次数上限。
+	MaxAttempts int
+}
+
+// RepairCloseoutDecision 是修复循环的收口结论。
+type RepairCloseoutDecision struct {
+	// Status 是步骤应当进入的状态。
+	Status StepStatus
+	// Summary 是写入步骤的结果说明。
+	Summary string
+	// MaxAttempts 是本次循环生效的尝试次数上限（含首次执行）。
+	//
+	// 它与 Status 一起写入收口记录，使"为什么停在这里"在展示层可解释：达到上限
+	// 与未开启修复都会停在 failed，但原因完全不同。
+	MaxAttempts int
+}
+
+// Verified 判断收口结论是否为"已验证完成"。
+func (d RepairCloseoutDecision) Verified() bool {
+	return d.Status == StepStatusCompleted
+}
+
+// AttemptsLimitOr 返回收口记录中的尝试上限，缺失时退化为给定值。
+//
+// 历史记录（本字段引入之前写入的）没有上限信息，展示层不应因此显示 0。
+func (d RepairCloseoutDecision) AttemptsLimitOr(fallback int) int {
+	if d.MaxAttempts > 0 {
+		return d.MaxAttempts
+	}
+	return fallback
+}
+
+// DecideRepairCloseout 依据修复循环判定计算步骤的最终状态。
+//
+// 规则（顺序固定）：
+//  1. 验证通过：completed，这是唯一允许按成功路径收口的结论；
+//  2. 取消：cancelled；
+//  3. 结果无法确认（持久化失败、基础设施异常、验证未启动、反馈不可用）：recovery_required，
+//     既不判通过，也不写成"代码有问题"；
+//  4. 验证结论不确定或步骤不适用自动修复：recovery_required；
+//  5. 开发中断：recovery_required；
+//  6. 其余真实失败（开发失败、验证失败且已用尽上限或未开启修复）：failed。
+//
+// 达到尝试上限属于"真实的代码失败"：所有轮次都拿到了可解释的失败证据，因此步骤
+// 进入 failed 而不是 recovery_required，失败摘要说明已用尽的上限。
+func DecideRepairCloseout(input RepairCloseoutInput) RepairCloseoutDecision {
+	class := input.Decision.Class
+	if input.Decision.Completed() {
+		return RepairCloseoutDecision{
+			Status:      StepStatusCompleted,
+			Summary:     "开发阶段已完成，全部必需检查通过",
+			MaxAttempts: input.MaxAttempts,
+		}
+	}
+	switch class {
+	case RepairClassCancelled:
+		return RepairCloseoutDecision{
+			Status:      StepStatusCancelled,
+			Summary:     "修复循环被取消，不能判定通过",
+			MaxAttempts: input.MaxAttempts,
+		}
+	case RepairClassNotPersisted,
+		RepairClassInfrastructure,
+		RepairClassVerificationNotRun,
+		RepairClassFeedbackUnavailable:
+		return RepairCloseoutDecision{
+			Status:      StepStatusRecoveryRequired,
+			Summary:     "修复循环停止：结果无法确认，需要人工核验: " + input.Decision.Summary,
+			MaxAttempts: input.MaxAttempts,
+		}
+	case RepairClassDeveloperTimedOut, RepairClassDeveloperFailed,
+		RepairClassRepairDisabled:
+		// 开发阶段的真实失败与"未开启自动修复"都是可解释的失败证据：
+		// 它们停在 failed，等待用户显式决定是否重新执行。
+		return RepairCloseoutDecision{
+			Status:      StepStatusFailed,
+			Summary:     "修复循环停止：开发阶段未成功或未开启自动修复: " + input.Decision.Summary,
+			MaxAttempts: input.MaxAttempts,
+		}
+	case RepairClassVerificationInconclusive,
+		RepairClassUnsupportedStep,
+		RepairClassDeveloperInterrupted:
+		return RepairCloseoutDecision{
+			Status:      StepStatusRecoveryRequired,
+			Summary:     "修复循环停止：需要人工核验: " + input.Decision.Summary,
+			MaxAttempts: input.MaxAttempts,
+		}
+	case RepairClassAttemptsExhausted:
+		return RepairCloseoutDecision{
+			Status: StepStatusFailed,
+			Summary: "已达到尝试次数上限 " + itoa(input.MaxAttempts) +
+				"（共 " + itoa(input.Attempts) + " 次开发尝试），验证仍未通过",
+			MaxAttempts: input.MaxAttempts,
+		}
+	default:
+		return RepairCloseoutDecision{
+			Status:      StepStatusFailed,
+			Summary:     "修复循环停止：验证未通过: " + input.Decision.Summary,
+			MaxAttempts: input.MaxAttempts,
+		}
+	}
+}

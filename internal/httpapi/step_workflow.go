@@ -96,6 +96,19 @@ type ExecuteAndValidateStepResponse struct {
 	// Verified 表示步骤是否进入"已验证完成"。
 	Verified bool `json:"verified"`
 
+	// Round 是本次闭环中最后一轮修复的轮次（从 1 开始）。
+	Round int `json:"round"`
+	// Attempts 是本次闭环中已确认落库的开发尝试次数（含首轮）。
+	Attempts int `json:"attempts"`
+	// MaxAttempts 是该步骤生效的尝试次数上限。
+	MaxAttempts int `json:"max_attempts"`
+	// RepairDecision 是修复循环的下一步动作：retry / completed / stop。
+	RepairDecision string `json:"repair_decision"`
+	// RepairClass 是修复循环停止或结束的原因类别。
+	RepairClass string `json:"repair_class,omitempty"`
+	// RepairSummary 是修复循环停止或结束的原因说明。
+	RepairSummary string `json:"repair_summary,omitempty"`
+
 	// Finalized 表示收口状态是否全部写入成功。
 	Finalized          bool      `json:"finalized"`
 	FinalizationErrors []string  `json:"finalization_errors,omitempty"`
@@ -300,6 +313,12 @@ func executeAndValidateResponse(result app.ExecuteAndValidateResult) ExecuteAndV
 		StepStatus:                  string(result.StepStatus),
 		TaskStatus:                  string(result.TaskStatus),
 		Verified:                    result.Verified,
+		Round:                       result.Round,
+		Attempts:                    result.Attempts,
+		MaxAttempts:                 result.RepairCloseout.AttemptsLimitOr(result.Attempts),
+		RepairDecision:              string(result.Repair.Kind),
+		RepairClass:                 string(result.Repair.Class),
+		RepairSummary:               result.Repair.Summary,
 		Finalized:                   result.Finalized,
 		FinalizationErrors:          result.FinalizationErrors,
 		StartedAt:                   result.StartedAt,

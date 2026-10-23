@@ -114,7 +114,7 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
 |---|---|---|---|
 | P1-M1 | 核实并打通任务启动至计划生成的前置流程 | `completed` | 无 |
 | P1-M2 | 打通 Developer、确定性验证与 Validator Agent 的完整验证决策链 | `completed` | P1-M1 ✅ |
-| P1-M3 | 实现有上限、可停止的验证失败修复与重新验证闭环 | `pending` | P1-M2 |
+| P1-M3 | 实现有上限、可停止的验证失败修复与重新验证闭环 | `completed` | P1-M2 ✅ |
 | P1-M4 | 将修复闭环与代码保存、会话归档、任务收尾串联 | `pending` | P1-M3 |
 | P1-M5 | 完成单任务端到端验收（成功/验证失败/修复失败/无法确认） | `pending` | P1-M4 |
 
@@ -122,8 +122,10 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
 > uncertain 四类路径均有真实数据库上的测试证据。
 > P1-M2 已完成（证据见该里程碑"完成记录"）：Validator Agent 已接入真实生产调用链，
 > 评估写入 `validation_runs`，最终结论统一由 `domain.DecideValidation` 计算。
-> M3–M5 仍为 `pending`。
-> 当前里程碑为 **P1-M3**。
+> P1-M3 已完成（证据见该里程碑"完成记录"）：修复闭环已接入真实生产调用链，轮次上限、
+> 停止条件与终态映射统一由 `domain.DecideRepairLoop` 与 `domain.DecideRepairCloseout`
+> 计算，编排器只消费领域判定。
+> M4–M5 仍为 `pending`；当前里程碑为 **P1-M4**。
 
 ## 阶段退出条件（可验证的客观标准）
 
@@ -160,8 +162,9 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
 1. **P1-M1 已完成**（启动→计划前置流程已核实并修补）。
 2. **P1-M2 已完成**（Validator 接入真实生产调用链，评估持久化，结论统一由
    `DecideValidation` 计算）。
-3. 当前应推进 **P1-M3**：修复闭环依赖 M2 已成立的"可修复、可追溯"验证结论。
-4. 再完成 **P1-M4**：串联收尾依赖 M3。
+3. **P1-M3 已完成**（有上限的修复与重验闭环已接入生产调用链，领域判定统一由
+   `DecideRepairLoop` / `DecideRepairCloseout` 计算）。
+4. 当前应推进 **P1-M4**：串联收尾依赖 M3 已成立的"步骤终态与停止原因可解释"结论。
 5. 最后 **P1-M5**：验收依赖前四项全部成立。
 
 ---
@@ -443,7 +446,7 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
 
 - **ID**：`P1-M3`
 - **名称**：实现有上限、可停止的验证失败修复与重新验证闭环
-- **状态**：`pending`
+- **状态**：`completed`
 - **必要性**：验证失败后只停止为 `blocked` 意味着"任务自己不会向交付前进"，需要人工反复
   干预。受控的修复闭环是 P1 端到端交付的核心：让失败能转化为下一次修复的输入，同时用
   上限与停止条件防止无限循环和额度浪费。
@@ -484,7 +487,84 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
   做成通用重试框架。
 - **风险与待决问题**：修复循环是否会消耗大量模型额度，需明确默认上限与用户可配置边界；
   停止条件的语义（"连续失败"还是"累计失败"）需在领域规则中确认。
-- **完成记录**：（待完成时填写实际改动、测试结果、未解决问题与证据）
+- **完成记录**（2026-10-24）：
+
+  **真实断点（改动前的代码证据）**：
+  - `ExecuteAndValidate` 一次性执行"开发 + 验证 + 收口"就返回，验证失败即收口为 `failed`；
+    工作流随后停止为 `blocked`（`stopForStepResult` 的 `verification_failed` 分支）。
+  - `domain.RetryPolicy.CanRetry` / `NextAttemptNumber` 与 `Step.MaxAttempts` 已持久化
+    （`steps.max_attempts`、`steps.retry_json`），但**没有任何生产调用方**——领域规则与
+    编排器之间缺少连接点。
+  - 失败反馈已持久化并按步骤注入首轮提示词（`persistFeedback` / `stepWorkflowPrompt`），
+    但读取失败被静默降级为"没有反馈"，无法支撑"必须拿到可信修复依据才重放调用"。
+  - `StepStatus.retry_wait` 已在状态机中，但编排器从未使用：失败后不需要中间状态即可回到
+    `running`。
+
+  **领域规则（`internal/domain/retry.go`、`internal/domain/step_verification.go`）**：
+  - 新增 `RepairFailureClass`（14 个停止/结束类别，可 `Validate`）、`RepairDecision` 与
+    纯函数 `DecideRepairLoop`：按固定顺序判定取消 → 开发结论 → 是否发起验证 → 是否通过 →
+    是否可靠落库/基础设施异常 → 结论不确定/取消 → 收口未持久化 → 反馈不可用 → 步骤类型 →
+    修复开关 → 尝试上限。
+  - 新增 `DecideRepairCloseout`：把停止类别映射为步骤终态（通过 → `completed`；取消 →
+    `cancelled`；记录不可确认/结论不确定/步骤不适用/开发中断 → `recovery_required`；
+    达到上限与其他真实失败 → `failed`）。`RepairCloseoutDecision` 同时记录生效上限。
+  - 尝试次数口径：**`Step.MaxAttempts` 表示本次闭环调用允许的 Developer 执行总次数（含首轮）**。
+    缺省 `domain.DefaultMaxAttempts = 3`，硬上限 `MaxTaskMaxAttempts = 10`，由
+    `RetryConfig.Limit()` 在计划生成时写入 `steps.max_attempts`；计数只累加本轮真实创建并
+    落库的 Attempt。用户显式发起的下一次执行是新决定，从新预算开始计数。
+
+  **生产调用链（`internal/app/step_workflow_repair.go`）**：
+  - `app.StepWorkflowService.ExecuteAndValidate` 改为驱动 `runRepairLoop`：每轮调用既有的
+    `StepExecutor.Execute(DeferCompletion)` + `ValidationService.Validate` + 既有单轮收口，
+    每轮新建 Attempt / Session / Validation Run，历史一律保留。
+  - 首轮依据由 `initialFeedback` 读取（读取失败或归属不符直接拒绝执行，不再静默降级）；
+    后续轮次由 `repairPrompt` 按上一轮 `ValidationRunID` 精确读取反馈并校验 Task/Step 归属。
+  - 循环每轮消费 `domain.DecideRepairLoop`；停止时由 `closeRepairLoop` 依据
+    `domain.DecideRepairCloseout` 写入终态（带状态前置条件，释放执行占用），并把需要人工核验
+    的结论同步推进任务到 `recovery_required`。
+  - `internal/app/task_workflow_exec.go` 的 `stopForStepResult` 新增
+    `result.Repair.Class != ""` 分支，由 `repairStopMapping` 把领域类别映射为工作流状态与
+    错误分类（`attempts_exhausted` / `verification_inconclusive` /
+    `verification_unconfirmed` / `step_not_repairable` 等），不在编排层重新推导规则。
+  - `internal/domain/event.go` 新增 `EventTypeRepairRound`（`repair.round`）：每轮记录轮次、
+    上限、Attempt / Session / Validation Run、继续或停止原因；写入失败只记日志，不改业务状态。
+  - `ExecuteAndValidateResult` 新增 `Round` / `Attempts` / `Repair` / `RepairCloseout`；
+    HTTP 响应新增 `round` / `attempts` / `max_attempts` / `repair_decision` / `repair_class`
+    / `repair_summary`。
+  - 未新增任何状态迁移：`failed` / `recovery_required` / `retry_wait` → `running` 的现有迁移
+    已足够支撑循环，`retry_wait` 未被使用（循环在同一调用内推进，不需要中间状态）。
+
+  **测试结果（如实区分）**：
+  - 通过：`go test -count=1 -p 1 ./tests/...` → 45 个包、1639 个用例全部通过。
+  - 新增 `tests/unit/app/step_workflow_repair_test.go`（14 个用例，真实 SQLite + 真实
+    `StepExecutor`/`ValidationService`/`StepWorkflowService`，只替换容器内 Agent 调用与
+    命令执行）：两轮修复后通过（新 Attempt/Session/Validation Run、提示词引用上一轮反馈）、
+    达到上限立即停止（不再产生 Attempt、检查与 Agent 调用）、显式上限 3、未开启修复即停止、
+    结论不确定不修复、基础设施异常不修复、反馈写入失败不重放调用、开发失败/超时不修复、
+    规划步骤不修复、轮次之间取消不再调用 Agent、每轮事件与历史可追溯、达到上限后可显式重新执行。
+  - 新增 `tests/unit/domain/repair_loop_test.go`（44 个用例，含子用例）：默认上限与显式上限、
+    上限边界（1/2/3/4、零值走默认）、14 类停止类别、通过优先、取消优先、未知类别拒绝、
+    终态映射全表、上限摘要、`AttemptsLimitOr` 回退、`RetryConfig` 修复开关语义。
+  - 新增 `tests/unit/app/task_workflow_repair_test.go`（11 个用例）：编排器消费修复停止类别，
+    逐类断言工作流状态与错误分类，且停止后不推进下一步骤、不执行代码保存、不记入已完成进度。
+  - 无跳过用例；`tests/integration/remote/*` 的真实远程修复循环未执行（该路径需要真实
+    SSH + Docker + 模型，属于 P1-M5 端到端验收范围）。
+  - 检查：`gofmt -l internal cmd tests` 无输出；`go vet ./...` 无输出。
+
+  **未解决问题（不阻塞 M3 完成定义）**：
+  - 尝试上限按"单次闭环调用"计数：用户显式重新执行会重新获得完整预算，因此理论上可以靠
+    人工反复重试无限消耗额度。累计上限属于任务级策略，留待 P2 评估。
+  - `validation_feedbacks` 仍不收录 Validator 的 `findings`。本轮经调查确认**不是自动修复
+    的必需信息**：进入修复的前提是必需确定性检查全部失败（`DecideValidation` 在确定性检查
+    未通过时不会调用审查，`reviewSemantics` 也因此不发起调用），此时不存在可用 `findings`；
+    唯一带 `findings` 的失败形态是"审查判定未通过 → 结论 `failed`"，其结构化原因已通过
+    `validation_runs.review_summary` / `assessment_json` 持久化，但当前修复提示词只引用
+    `validation_feedbacks` 的检查条目。是否把审查发现并入反馈结构留待真实需求出现时决定。
+  - 契约变更：`StepWorkflowStore` 新增 `GetValidationFailureFeedback`，`ExecuteAndValidate`
+    的语义从"单轮"变为"有上限的循环"；外部调用方（HTTP/CLI/编排器）无需改动，但若有人
+    依赖"单次调用只产生一次 Attempt"，需要按新语义调整预期。
+  - 未修改 `internal/httpapi` 之外的接口层：CLI 仍通过 `POST execute-workflow` 触发，
+    `agentflow task run` 的展示未增加修复轮次信息。
 
 ---
 

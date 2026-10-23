@@ -53,6 +53,14 @@ type StepWorkflowStore interface {
 		ctx context.Context,
 		feedback domain.ValidationFailureFeedback,
 	) error
+	// GetValidationFailureFeedback 读取某轮验证的失败反馈。
+	//
+	// 修复循环按上一轮的 ValidationRunID 精确读取依据，避免误用其他步骤或任务的
+	// 反馈；没有反馈时返回 storage.ErrNotFound。
+	GetValidationFailureFeedback(
+		ctx context.Context,
+		runID domain.ID,
+	) (*domain.ValidationFailureFeedback, error)
 }
 
 // ExecuteAndValidateRequest 是通过接口发起一次"开发 + 验证"闭环的输入。
@@ -159,6 +167,19 @@ type ExecuteAndValidateResult struct {
 	// StartedAt / FinishedAt 是闭环的开始与结束时间。
 	StartedAt  time.Time
 	FinishedAt time.Time
+	// Round 是本次闭环中这一轮修复的轮次（从 1 开始）。
+	//
+	// 轮次只用于追溯：每一轮都是独立的 Attempt / Session / Validation Run，历史
+	// 记录不会被覆盖。
+	Round int
+	// Attempts 是本次闭环中已确认落库的开发尝试次数（含首轮）。
+	Attempts int
+	// Repair 是修复循环的最终判定：是否继续、为什么停止。
+	//
+	// 它由 domain.DecideRepairLoop 依据持久化事实计算，编排器不复制规则。
+	Repair domain.RepairDecision
+	// RepairCloseout 是修复循环结束时依据 domain.DecideRepairCloseout 得出的收口结论。
+	RepairCloseout domain.RepairCloseoutDecision
 }
 
 // StepWorkflowOptions 是构造闭环协调器的输入。
@@ -400,29 +421,34 @@ func (s *StepWorkflowService) checkPrerequisites(
 	return nil
 }
 
-// latestFeedback 读取步骤最近一次的验证失败反馈。
+// initialFeedback 读取步骤最近一次的验证失败反馈，作为首轮执行的修复依据。
 //
-// 读取失败不阻止执行：反馈是提示词上下文而不是执行前提，但"没有反馈"与"读取失败"
-// 必须区分记录，不能把读取失败当作"上一轮没有失败"。
-func (s *StepWorkflowService) latestFeedback(
+// 与"读取失败不阻止执行"的旧语义不同，这里区分三种情况：
+//   - 没有反馈：返回 nil，表示这是该步骤的首次执行，提示词不需要历史问题小节；
+//   - 读取成功但归属不符：返回错误，拿错步骤的反馈会让修复方向完全错误；
+//   - 读取失败：返回错误，不能在"不确定上一轮有没有失败"的情况下继续执行。
+//
+// 归属校验是必需的：数据库不声明外键，孤立或错配的关联 ID 只能由应用层识别。
+func (s *StepWorkflowService) initialFeedback(
 	ctx context.Context,
 	step domain.Step,
-) *domain.ValidationFailureFeedback {
+) (*domain.ValidationFailureFeedback, error) {
 	feedback, err := s.store.LatestValidationFailureFeedbackByStep(ctx, step.ID)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
-			return nil
+			return nil, nil
 		}
-		s.logger.WarnContext(
-			ctx,
-			"读取上一次验证失败反馈失败",
-			slog.String("task_id", step.TaskID.String()),
-			slog.String("step_id", step.ID.String()),
-			slog.String("error", errorSummary(err)),
-		)
-		return nil
+		return nil, fmt.Errorf("读取上一次验证失败反馈失败: %w", err)
 	}
-	return feedback
+	if feedback.StepID != step.ID || feedback.TaskID != step.TaskID {
+		return nil, fmt.Errorf(
+			"%w: 失败反馈 %s 与步骤 %s 的归属不一致",
+			ErrStepWorkflowInvalidConfig,
+			feedback.ValidationRunID,
+			step.ID,
+		)
+	}
+	return feedback, nil
 }
 
 // validationTimeout 返回本次验证的总超时时间。
