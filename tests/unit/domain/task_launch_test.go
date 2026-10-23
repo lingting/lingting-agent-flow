@@ -74,6 +74,45 @@ func launchStep(t *testing.T, taskID domain.ID, sequence int, status domain.Step
 	return step
 }
 
+// launchWorkspaceRecord 构造一条指定状态的任务级工作区初始化记录。
+func launchWorkspaceRecord(
+	t *testing.T,
+	taskID domain.ID,
+	containerID string,
+	status domain.TaskWorkspaceInitStatus,
+) *domain.TaskWorkspaceInitRecord {
+	t.Helper()
+	record, err := domain.NewTaskWorkspaceInitRecord(
+		domain.NewID(),
+		taskID.String(),
+		containerID,
+		"docker-"+containerID,
+		domain.CodeSourceGit,
+		domain.DefaultContainerWorkDir,
+		time.Now(),
+	)
+	if err != nil {
+		t.Fatalf("构造工作区初始化记录失败: %v", err)
+	}
+	record.Status = status
+	return &record
+}
+
+// launchWorkspaceReadyState 构造"当前容器上工作区已就绪"的现场。
+func launchWorkspaceReadyState(
+	taskID domain.ID,
+	containerID string,
+) domain.TaskWorkspaceState {
+	return domain.TaskWorkspaceState{
+		ContainerUsable: true,
+		Record: &domain.TaskWorkspaceInitRecord{
+			TaskID:      taskID.String(),
+			ContainerID: containerID,
+			Status:      domain.TaskWorkspaceInitStatusSucceeded,
+			CommitSHA:   "1111111111111111111111111111111111111111",
+		},
+	}
+}
 func TestDecideTaskLaunchNextPicksEarliestUnfinishedStage(t *testing.T) {
 	t.Parallel()
 	task := launchTask(t)
@@ -90,24 +129,63 @@ func TestDecideTaskLaunchNextPicksEarliestUnfinishedStage(t *testing.T) {
 			want:  domain.TaskLaunchStageContainer,
 		},
 		{
-			name:  "容器可用但没有计划时生成计划",
-			input: domain.TaskLaunchInput{Task: task, ContainerUsable: true},
-			want:  domain.TaskLaunchStagePlan,
-		},
-		{
-			name: "容器可用且计划已持久化时启动编排",
+			name: "容器可用但工作区未就绪时先初始化工作区",
 			input: domain.TaskLaunchInput{
 				Task:            task,
 				ContainerUsable: true,
+				Workspace:       domain.TaskWorkspaceState{ContainerUsable: true},
+			},
+			want: domain.TaskLaunchStageWorkspace,
+		},
+		{
+			name: "工作区已就绪但没有计划时生成计划",
+			input: domain.TaskLaunchInput{
+				Task:            task,
+				ContainerUsable: true,
+				Workspace:       launchWorkspaceReadyState(task.ID, "container-1"),
+			},
+			want: domain.TaskLaunchStagePlan,
+		},
+		{
+			name: "工作区已就绪且计划已持久化时启动编排",
+			input: domain.TaskLaunchInput{
+				Task:            task,
+				ContainerUsable: true,
+				Workspace:       launchWorkspaceReadyState(task.ID, "container-1"),
 				Steps:           []domain.Step{launchStep(t, task.ID, 1, domain.StepStatusPending)},
 			},
 			want: domain.TaskLaunchStageWorkflow,
+		},
+		{
+			name: "工作区初始化结果不确定时拒绝启动",
+			input: domain.TaskLaunchInput{
+				Task:            task,
+				ContainerUsable: true,
+				Workspace: domain.TaskWorkspaceState{
+					ContainerUsable: true,
+					Record:          launchWorkspaceRecord(t, task.ID, "container-1", domain.TaskWorkspaceInitStatusUncertain),
+				},
+			},
+			wantInvalid: true,
+		},
+		{
+			name: "工作区正在初始化时拒绝重复启动",
+			input: domain.TaskLaunchInput{
+				Task:            task,
+				ContainerUsable: true,
+				Workspace: domain.TaskWorkspaceState{
+					ContainerUsable: true,
+					Record:          launchWorkspaceRecord(t, task.ID, "container-1", domain.TaskWorkspaceInitStatusRunning),
+				},
+			},
+			wantInvalid: true,
 		},
 		{
 			name: "已有未结束执行时拒绝启动",
 			input: domain.TaskLaunchInput{
 				Task:                 task,
 				ContainerUsable:      true,
+				Workspace:            launchWorkspaceReadyState(task.ID, "container-1"),
 				HasActiveWorkflowRun: true,
 			},
 			wantInvalid: true,
@@ -117,6 +195,7 @@ func TestDecideTaskLaunchNextPicksEarliestUnfinishedStage(t *testing.T) {
 			input: domain.TaskLaunchInput{
 				Task:            task,
 				ContainerUsable: true,
+				Workspace:       launchWorkspaceReadyState(task.ID, "container-1"),
 				Steps: []domain.Step{
 					launchStep(t, task.ID, 1, domain.StepStatusRecoveryRequired),
 				},

@@ -36,7 +36,7 @@ type StartTaskRequest struct {
 // 以及工作流是否真的启动。`workflow_started` 为 false 时不得把任务展示为已开始执行。
 type StartTaskResponse struct {
 	TaskID string `json:"task_id"`
-	// Stage 是本次启动最后进入的阶段：validate / container / plan / workflow。
+	// Stage 是本次启动最后进入的阶段：validate / container / workspace / plan / workflow。
 	Stage string `json:"stage"`
 	// TaskStatus 是收尾后读取到的任务真实状态。
 	TaskStatus string `json:"task_status"`
@@ -44,6 +44,13 @@ type StartTaskResponse struct {
 	ContainerID string `json:"container_id,omitempty"`
 	// ContainerPrepared 表示本次调用真的创建了容器。
 	ContainerPrepared bool `json:"container_prepared"`
+	// WorkspaceStatus 是本次启动观察到的任务级工作区初始化状态。
+	//
+	// 为空表示没有走到工作区阶段，或该任务在当前容器上早已就绪。只有 succeeded /
+	// skipped 表示代码已就绪；其余取值都不是成功。
+	WorkspaceStatus string `json:"workspace_status,omitempty"`
+	// WorkspaceCommit 是工作区初始化核验到的 commit SHA。
+	WorkspaceCommit string `json:"workspace_commit,omitempty"`
 	// PlanPersisted 表示计划是否已完整写入数据库。
 	PlanPersisted bool `json:"plan_persisted"`
 	// PlanSteps 是已持久化的计划步骤，按序号升序排列。
@@ -181,6 +188,8 @@ func startTaskResponse(result app.TaskLaunchResult) StartTaskResponse {
 		TaskStatus:        string(result.TaskStatus),
 		ContainerID:       result.ContainerID,
 		ContainerPrepared: result.ContainerPrepared,
+		WorkspaceStatus:   result.WorkspaceStatus.String(),
+		WorkspaceCommit:   result.WorkspaceCommit,
 		PlanPersisted:     result.PlanPersisted,
 		PlanSteps:         steps,
 		WorkflowStarted:   result.WorkflowStarted,
@@ -204,6 +213,7 @@ func (h *taskLaunchHandler) writeError(w http.ResponseWriter, r *http.Request, e
 	case errors.Is(err, app.ErrTaskLaunchInvalidInput),
 		errors.Is(err, app.ErrWorkflowInvalidInput),
 		errors.Is(err, app.ErrPlanInvalidOutput),
+		errors.Is(err, app.ErrTaskWorkspaceInvalidInput),
 		errors.Is(err, domain.ErrInvalidValue),
 		errors.Is(err, domain.ErrEmptyID):
 		status = http.StatusBadRequest
@@ -215,6 +225,10 @@ func (h *taskLaunchHandler) writeError(w http.ResponseWriter, r *http.Request, e
 		code = CodeNotFound
 	case errors.Is(err, app.ErrTaskLaunchConflict),
 		errors.Is(err, app.ErrWorkflowConflict),
+		// 工作区初始化结果不确定属于状态冲突：现场存在但无法确认，必须先核验，
+		// 既不是参数错误，也不是"缺东西"的前置条件缺失。
+		errors.Is(err, app.ErrTaskWorkspaceConflict),
+		errors.Is(err, app.ErrTaskWorkspaceUncertain),
 		errors.Is(err, domain.ErrInvalidState),
 		errors.Is(err, domain.ErrInvalidTransition),
 		errors.Is(err, storage.ErrConflict):
@@ -224,9 +238,14 @@ func (h *taskLaunchHandler) writeError(w http.ResponseWriter, r *http.Request, e
 		errors.Is(err, app.ErrWorkflowPrerequisite),
 		errors.Is(err, app.ErrStepExecutionPrerequisite),
 		errors.Is(err, app.ErrValidationPrerequisite),
+		errors.Is(err, app.ErrTaskWorkspacePrerequisite),
 		errors.Is(err, domain.ErrValidationPrerequisite):
 		status = http.StatusPreconditionFailed
 		code = CodePreconditionFailed
+	case errors.Is(err, app.ErrTaskWorkspaceNotPersisted):
+		// 代码获取已经发生但结果没落库：不能报告为成功，也不能当成普通失败。
+		status = http.StatusInternalServerError
+		code = CodeExecutionNotPersisted
 	case errors.Is(err, app.ErrTaskLaunchFailed):
 		// 启动流程已经真实执行但没有成功：这不是参数错误，也不是前置条件缺失。
 		status = http.StatusInternalServerError

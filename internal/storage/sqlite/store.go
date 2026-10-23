@@ -26,6 +26,8 @@ type dbStore struct {
 	containerStore
 	codeSaveStore
 	codeFetchStore
+	// taskWorkspaceInitStore 提供任务级工作区初始化记录的追加与查询。
+	taskWorkspaceInitStore
 	stepExecutionStore
 	// validationFeedbackStore 提供验证失败反馈的追加与查询。
 	validationFeedbackStore
@@ -49,6 +51,8 @@ type txStore struct {
 	containerStore
 	codeSaveStore
 	codeFetchStore
+	// taskWorkspaceInitStore 提供任务级工作区初始化记录的追加与查询。
+	taskWorkspaceInitStore
 	stepExecutionStore
 	// validationFeedbackStore 提供验证失败反馈的追加与查询。
 	validationFeedbackStore
@@ -74,6 +78,7 @@ func newDBStore(db *sql.DB) *dbStore {
 		containerStore:          containerStore{q: pool},
 		codeSaveStore:           codeSaveStore{q: pool},
 		codeFetchStore:          codeFetchStore{q: pool},
+		taskWorkspaceInitStore:  taskWorkspaceInitStore{q: pool},
 		stepExecutionStore:      stepExecutionStore{q: pool},
 		validationFeedbackStore: validationFeedbackStore{q: pool},
 		workflowRunStore:        workflowRunStore{q: pool},
@@ -97,6 +102,7 @@ func newTxStore(tx *sql.Tx) *txStore {
 		containerStore:          containerStore{q: tx},
 		codeSaveStore:           codeSaveStore{q: tx},
 		codeFetchStore:          codeFetchStore{q: tx},
+		taskWorkspaceInitStore:  taskWorkspaceInitStore{q: tx},
 		stepExecutionStore:      stepExecutionStore{q: tx},
 		validationFeedbackStore: validationFeedbackStore{q: tx},
 		workflowRunStore:        workflowRunStore{q: tx},

@@ -615,6 +615,42 @@ type CodeFetchStore interface {
 	ListCodeFetchRecordsByTask(ctx context.Context, taskID string) ([]domain.CodeFetchRecord, error)
 }
 
+// TaskWorkspaceInitStore 保存任务级工作区初始化（容器内代码获取 + 任务分支准备）的记录。
+//
+// 它与 CodeFetchStore 是不同层次的概念：CodeFetchStore 记录"针对某个 Attempt 的
+// 一次初始化"，本接口记录"某个任务在某个容器代次上的工作区是否已就绪"。统一任务
+// 启动发生在任何 Step / Attempt 存在之前，因此不能复用 code_fetches 的必填字段。
+//
+// 记录只追加不覆盖：一次初始化对应一条记录，失败与成功都必须落库，使"该任务在该
+// 容器上是否已初始化成功"可以由记录直接判断，而不是重新探测容器内文件系统。
+type TaskWorkspaceInitStore interface {
+	CreateTaskWorkspaceInit(ctx context.Context, record domain.TaskWorkspaceInitRecord) error
+	// UpdateTaskWorkspaceInit 按主键更新记录，不存在时返回 storage.ErrNotFound。
+	//
+	// 已进入终态的记录不会被重新打开：调用方必须先读取当前状态再经状态机判定。
+	UpdateTaskWorkspaceInit(ctx context.Context, record domain.TaskWorkspaceInitRecord) error
+	GetTaskWorkspaceInit(
+		ctx context.Context,
+		id domain.ID,
+	) (*domain.TaskWorkspaceInitRecord, error)
+	// ListTaskWorkspaceInitsByTask 按任务列出记录，最新的在前。
+	ListTaskWorkspaceInitsByTask(
+		ctx context.Context,
+		taskID string,
+	) ([]domain.TaskWorkspaceInitRecord, error)
+	// ListTaskWorkspaceInitsByContainer 按容器列出记录，最新的在前。
+	ListTaskWorkspaceInitsByContainer(
+		ctx context.Context,
+		containerID string,
+	) ([]domain.TaskWorkspaceInitRecord, error)
+	// ListInterruptedTaskWorkspaceInits 返回仍停留在 pending / running 的记录。
+	//
+	// 启动恢复用它定位"进程退出后仍被占用"的初始化现场，不重放任何远程操作。
+	ListInterruptedTaskWorkspaceInits(
+		ctx context.Context,
+	) ([]domain.TaskWorkspaceInitRecord, error)
+}
+
 type Tx interface {
 	RoleStore
 	ExecutionHostStore
@@ -635,6 +671,8 @@ type Tx interface {
 	CodeSaveStore
 	// CodeFetchStore 提供代码初始化记录的追加与查询。
 	CodeFetchStore
+	// TaskWorkspaceInitStore 提供任务级工作区初始化记录的追加与查询。
+	TaskWorkspaceInitStore
 	// StepExecutionStore 提供单步骤执行的原子占用，与其余实体共享同一事务边界。
 	StepExecutionStore
 	// WorkflowRunStore 提供任务级工作流执行记录的追加与推进。

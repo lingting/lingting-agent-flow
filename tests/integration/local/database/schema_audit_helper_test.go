@@ -257,6 +257,12 @@ var requiredConstraints = []requiredConstraint{
 	{"workflow_runs", "worker_id IS NULL OR lease_expires_at IS NOT NULL"},
 	{"workflow_runs", "last_completed_sequence >= 0"},
 	{"workflow_runs", "revision >= 0"},
+	{"task_workspace_initializations", "base_branch IS NULL OR base_branch <> task_branch"},
+	{"task_workspace_initializations", "length(commit_sha) IN (40, 64)"},
+	{
+		"task_workspace_initializations",
+		"status NOT IN ('succeeded', 'skipped') OR commit_sha IS NOT NULL",
+	},
 }
 
 // expectedIndexes 是必须保留的索引名。
@@ -314,6 +320,10 @@ var expectedIndexes = []string{
 	"idx_workflow_runs_task",
 	"idx_workflow_runs_status",
 	"idx_workflow_runs_step",
+	"idx_task_workspace_init_task",
+	"idx_task_workspace_init_container",
+	"idx_task_workspace_init_status",
+	"idx_task_workspace_init_active",
 }
 
 // quoteIdentifier 校验表名并返回可直接拼接的标识符。
@@ -459,6 +469,46 @@ func hasConstraint(t *testing.T, conn *sql.DB, table, fragment string) bool {
 // normalizeSQL 把空白折叠为单个空格并转小写，便于比较约束片段。
 func normalizeSQL(value string) string {
 	return strings.Join(strings.Fields(strings.ToLower(value)), " ")
+}
+
+// taskWorkspaceProbes 是任务级工作区初始化记录的 Schema 审计探针。
+//
+// 0020 新增的表不声明枚举白名单：status / source_type / stage / task_branch_source
+// 的未知取值必须能写入并原样读回，业务校验由 Go 层状态机承担。
+//
+// 每条探针使用不同的 container_id：该表有"同任务同容器只允许一条未结束记录"的
+// 部分唯一索引，未知 status 取值不在终态列表内，因此同容器写入第二条会被拒绝。
+var taskWorkspaceProbes = []enumProbe{
+	{
+		table:  "task_workspace_initializations",
+		column: "status",
+		value:  "awaiting_review",
+		statement: `INSERT INTO task_workspace_initializations
+			(id, task_id, container_id, source_type, work_dir, task_branch, status,
+			 started_at, created_at, updated_at)
+			VALUES ('probe-task-workspace-status', 'probe-task', 'probe-container-status', 'git',
+			 '/workspace/project', 'agent/probe-task', 'awaiting_review', 1, 1, 1)`,
+	},
+	{
+		table:  "task_workspace_initializations",
+		column: "stage",
+		value:  "mirror_sync",
+		statement: `INSERT INTO task_workspace_initializations
+			(id, task_id, container_id, source_type, work_dir, task_branch, status,
+			 stage, started_at, created_at, updated_at)
+			VALUES ('probe-task-workspace-stage', 'probe-task', 'probe-container-stage', 'git',
+			 '/workspace/project', 'agent/probe-task', 'running', 'mirror_sync', 1, 1, 1)`,
+	},
+	{
+		table:  "task_workspace_initializations",
+		column: "source_type",
+		value:  "http_download",
+		statement: `INSERT INTO task_workspace_initializations
+			(id, task_id, container_id, source_type, work_dir, task_branch, status,
+			 started_at, created_at, updated_at)
+			VALUES ('probe-task-workspace-source', 'probe-task', 'probe-container-source',
+			 'http_download', '/workspace/project', 'agent/probe-task', 'running', 1, 1, 1)`,
+	},
 }
 
 // codeSaveRecoveryProbes 是代码保存恢复字段的 Schema 审计探针。

@@ -674,26 +674,12 @@ func (s *CodeInitializeService) requireContainer(
 // ensureHostUsable 校验执行节点是否允许执行真实远程操作。
 //
 // 任务没有绑定执行节点时跳过：该情况会在容器核验阶段以更具体的错误报告。
+// 判定本身由 checkHostUsableForCodeFetch 提供，尝试级与任务级共用同一份规则。
 func (s *CodeInitializeService) ensureHostUsable(
 	ctx context.Context,
 	task domain.Task,
 ) error {
-	if task.HostID == nil {
-		return nil
-	}
-	host, err := s.store.GetExecutionHost(ctx, *task.HostID)
-	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return fmt.Errorf(
-				"%w: 任务 %s 关联的执行节点 %s 不存在",
-				ErrCodeInitPrerequisite,
-				task.ID,
-				*task.HostID,
-			)
-		}
-		return fmt.Errorf("读取执行节点失败: %w", err)
-	}
-	if err := EnsureHostUsableForRemoteTask(*host); err != nil {
+	if err := checkHostUsableForCodeFetch(ctx, s.store, task); err != nil {
 		return fmt.Errorf("%w: %w", ErrCodeInitPrerequisite, err)
 	}
 	return nil
@@ -701,20 +687,14 @@ func (s *CodeInitializeService) ensureHostUsable(
 
 // resolveWorkDir 返回本次初始化使用的容器内工作目录。
 //
-// 优先级固定为：请求显式给出 > 任务配置 > 容器默认项目目录。任何来源都必须落在
-// 容器内 /workspace 之下，不允许把代码写到 AgentFlow 管理工作区。
+// 优先级固定为：请求显式给出 > 任务配置 > 容器默认项目目录。规则只在
+// resolveCodeFetchWorkDir 中定义一次，尝试级与任务级共用同一份判定。
 func (s *CodeInitializeService) resolveWorkDir(
 	task domain.Task,
 	requested string,
 ) (string, error) {
-	workDir := strings.TrimSpace(requested)
-	if workDir == "" {
-		workDir = strings.TrimSpace(task.Config.WorkDir)
-	}
-	if workDir == "" {
-		workDir = domain.DefaultContainerWorkDir
-	}
-	if err := domain.ValidateContainerWorkDir(workDir); err != nil {
+	workDir, err := resolveCodeFetchWorkDir(task, requested)
+	if err != nil {
 		return "", fmt.Errorf("%w: %w", ErrCodeInitInvalidInput, err)
 	}
 	return workDir, nil
@@ -853,29 +833,4 @@ func checkCodeInitAllowed(task domain.Task, attempt domain.Attempt) error {
 			attempt.Status,
 		)
 	}
-}
-
-// codeFetchStatusOf 把执行错误与上下文状态映射为初始化状态。
-//
-// 取消与超时必须与失败区分：前者说明调用方或时限终止了操作，后者说明操作本身失败。
-func codeFetchStatusOf(err error, ctx context.Context) domain.CodeFetchStatus {
-	if err != nil {
-		switch source.ErrorCodeOf(err) {
-		case source.CodeCloneTimeout:
-			return domain.CodeFetchStatusTimedOut
-		case source.CodeCloneInterrupted:
-			return domain.CodeFetchStatusCancelled
-		case source.CodeStateUncertain:
-			return domain.CodeFetchStatusUncertain
-		}
-	}
-	if ctx != nil {
-		switch {
-		case errors.Is(ctx.Err(), context.DeadlineExceeded):
-			return domain.CodeFetchStatusTimedOut
-		case errors.Is(ctx.Err(), context.Canceled):
-			return domain.CodeFetchStatusCancelled
-		}
-	}
-	return domain.CodeFetchStatusFailed
 }

@@ -399,6 +399,29 @@ Docker 或模型：
 - 验证失败反馈用例会检查输出摘要已脱敏（例如 `password=` 的内容被隐藏）且长度受限。
 - 服务停止用例会确认在途闭环收敛，且停止后不再接受新请求。
 
+## 任务级工作区初始化测试分层
+
+统一启动中的「初始化工作区」阶段（`app.TaskWorkspaceService`）与尝试级的 `code init` 是两个
+层次，测试按此分开：
+
+| 目录 | 覆盖内容 |
+|---|---|
+| `tests/unit/domain/` | 记录状态机（`uncertain` 非终态、终态不可重开）、`DecideTaskWorkspaceNext`（无记录/成功/跳过/失败/超时/不确定/占用）、`DecideTaskWorkspaceRecovery` |
+| `tests/unit/app/` | 协调器：成功写入完整记录、同容器重复初始化记录 `skipped` 且不重新 Clone、换容器后重新初始化、`uncertain` 阻止重放、容器未运行/detached/已删除/缺失的前置条件错误、失败阶段与错误类别落库、超时与取消映射、事件写入、中断收敛不改写终态 |
+| `tests/unit/store/` | `task_workspace_initializations` 的写入、按任务/容器查询、同任务同容器只允许一条未结束记录（部分唯一索引）、中断记录查询、未知枚举值原样读回、成功必须带 commit、记录不存在语义 |
+| `tests/unit/httpapi/` | 启动接口的工作区阶段与错误映射：`uncertain` → 409、前置条件缺失 → 412、未落库 → `execution_not_persisted` |
+| `tests/integration/local/workflow/` | 真实 SQLite 上的阶段顺序、结果不确定时停在 workspace 阶段、重启后记录仍有效、中断记录收敛为 `uncertain` 且不重放 |
+| `tests/integration/local/fetcher/` | 真实 Git：任务级初始化复用同一套 `source.Fetcher`（`AttemptID` 为空、任务分支正确、工作区落在容器内目录）、重复初始化不覆盖已有改动、目标目录非空时失败且不删除内容 |
+
+工作区用例的关键约束：
+
+- 任务级初始化不携带 `attempt_id`：用例显式断言传给 `FetchSourceWith` 的 `AttemptID` 为空，
+  防止后续实现为了复用尝试级代码而伪造归属。
+- 集成用例的容器替身同时是代码获取端口，内部直接调用 `source.NewGitFetcher`，因此断言的是
+  "走的是同一条实现"，而不是"另写了一套 Git 命令"。
+- 重启通过"关闭连接 → 同一路径重新打开"模拟，只断言数据库里的持久化事实。
+- 收敛用例的容器替身在被调用时直接失败，用来证明恢复路径不访问容器、不重放代码获取。
+
 ## 启动恢复测试分层
 
 启动恢复（`app.TaskWorkflowService.Start`）的测试分两层，纯函数与链路分开覆盖：

@@ -33,6 +33,8 @@ type startAPITaskStore struct {
 	notFound bool
 	// activeRun 表示存在未结束的执行记录。
 	activeRun bool
+	// workspacePending 表示当前容器上还没有成功的工作区初始化记录。
+	workspacePending bool
 }
 
 // GetTask 返回受控的任务记录。
@@ -100,6 +102,62 @@ func (s *startAPITaskStore) ListTasksWithOccupiedSteps(
 	return nil, nil
 }
 
+// ListTaskWorkspaceInitsByTask 返回受控的工作区初始化记录。
+//
+// 默认返回一条"当前容器上工作区已就绪"的记录：既有用例关注阶段判定与错误映射，
+// 不需要每次都为工作区准备单独现场。需要覆盖工作区阶段的用例把 workspacePending
+// 置为 true，使判定停在 workspace 阶段。
+func (s *startAPITaskStore) ListTaskWorkspaceInitsByTask(
+	ctx context.Context,
+	taskID string,
+) ([]domain.TaskWorkspaceInitRecord, error) {
+	if s.workspacePending {
+		return nil, nil
+	}
+	return []domain.TaskWorkspaceInitRecord{
+		{
+			TaskID:      taskID,
+			ContainerID: s.task.ContainerID,
+			Status:      domain.TaskWorkspaceInitStatusSucceeded,
+			CommitSHA:   "1111111111111111111111111111111111111111",
+		},
+	}, nil
+}
+
+// startAPIWorkspace 是任务级工作区初始化的替身。
+//
+// 默认报告"已就绪"，使既有用例继续覆盖计划与工作流阶段。
+type startAPIWorkspace struct {
+	// calls 记录初始化调用次数。
+	calls int
+	// result 是返回的初始化结果，零值时按 succeeded 返回。
+	result app.TaskWorkspaceResult
+	// err 是返回的错误。
+	err error
+}
+
+// InitializeTaskWorkspace 返回受控的初始化结果。
+func (w *startAPIWorkspace) InitializeTaskWorkspace(
+	ctx context.Context,
+	request app.TaskWorkspaceRequest,
+) (app.TaskWorkspaceResult, error) {
+	w.calls++
+	if w.err != nil {
+		return w.result, w.err
+	}
+	result := w.result
+	if result.Status == "" {
+		result.Status = domain.TaskWorkspaceInitStatusSucceeded
+		result.Succeeded = true
+	}
+	return result, nil
+}
+
+// RecoverInterrupted 忽略收敛：启动接口测试不覆盖恢复路径。
+func (w *startAPIWorkspace) RecoverInterrupted(ctx context.Context) error {
+	return nil
+}
+
 // startAPIContainers 是容器核验的替身。
 type startAPIContainers struct {
 	// usable 表示核验结果中的容器是否运行中。
@@ -149,9 +207,10 @@ func (w *startAPIWorkflow) StartWorkflow(
 
 // startAPIFixture 是一套可直接发起启动请求的受控现场。
 type startAPIFixture struct {
-	handler http.Handler
-	store   *startAPITaskStore
-	task    domain.Task
+	handler   http.Handler
+	store     *startAPITaskStore
+	task      domain.Task
+	workspace *startAPIWorkspace
 }
 
 // startAPITestTask 构造一条可用于启动判定的任务记录。
@@ -190,9 +249,11 @@ func newStartAPIFixture(t *testing.T, store *startAPITaskStore) *startAPIFixture
 	if err != nil {
 		t.Fatalf("构造日志器失败: %v", err)
 	}
+	workspace := &startAPIWorkspace{}
 	service, err := app.NewTaskLaunchService(app.TaskLaunchOptions{
 		Store:      store,
 		Containers: &startAPIContainers{usable: true},
+		Workspace:  workspace,
 		Workflow:   &startAPIWorkflow{},
 	})
 	if err != nil {
@@ -211,8 +272,9 @@ func newStartAPIFixture(t *testing.T, store *startAPITaskStore) *startAPIFixture
 			TaskLaunch: service,
 			Logger:     logger.Slog(),
 		}),
-		store: store,
-		task:  store.task,
+		store:     store,
+		task:      store.task,
+		workspace: workspace,
 	}
 }
 
@@ -273,6 +335,76 @@ func TestStartAPIReachesWorkflowStage(t *testing.T) {
 	}
 	if response.Run == nil {
 		t.Fatal("启动成功后必须返回执行记录")
+	}
+}
+
+// TestStartAPIReportsWorkspaceStage 校验响应如实报告工作区阶段与结论。
+func TestStartAPIReportsWorkspaceStage(t *testing.T) {
+	t.Parallel()
+	task := startAPITestTask(t)
+	store := &startAPITaskStore{task: task, workspacePending: true}
+	fixture := newStartAPIFixture(t, store)
+	fixture.workspace.result = app.TaskWorkspaceResult{
+		Status:    domain.TaskWorkspaceInitStatusSucceeded,
+		Succeeded: true,
+		Commit:    "1111111111111111111111111111111111111111",
+	}
+	fixture.workspace.err = app.ErrTaskWorkspaceFailed
+	recorder := fixture.do(t, http.MethodPost, fixture.startPath(), httpapi.StartTaskRequest{})
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("工作区初始化失败应返回 500，实际 %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if fixture.workspace.calls != 1 {
+		t.Fatalf("工作区初始化应调用 1 次，实际 %d", fixture.workspace.calls)
+	}
+}
+
+// TestStartAPIMapsWorkspaceUncertainToConflict 校验结果不确定返回 409。
+func TestStartAPIMapsWorkspaceUncertainToConflict(t *testing.T) {
+	t.Parallel()
+	task := startAPITestTask(t)
+	store := &startAPITaskStore{task: task, workspacePending: true}
+	fixture := newStartAPIFixture(t, store)
+	fixture.workspace.result = app.TaskWorkspaceResult{
+		Status: domain.TaskWorkspaceInitStatusUncertain,
+	}
+	fixture.workspace.err = app.ErrTaskWorkspaceUncertain
+	recorder := fixture.do(t, http.MethodPost, fixture.startPath(), httpapi.StartTaskRequest{})
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("结果不确定应返回 409，实际 %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+// TestStartAPIMapsWorkspacePrerequisiteToPrecondition 校验前置条件缺失返回 412。
+func TestStartAPIMapsWorkspacePrerequisiteToPrecondition(t *testing.T) {
+	t.Parallel()
+	task := startAPITestTask(t)
+	store := &startAPITaskStore{task: task, workspacePending: true}
+	fixture := newStartAPIFixture(t, store)
+	fixture.workspace.err = app.ErrTaskWorkspacePrerequisite
+	recorder := fixture.do(t, http.MethodPost, fixture.startPath(), httpapi.StartTaskRequest{})
+	if recorder.Code != http.StatusPreconditionFailed {
+		t.Fatalf("前置条件缺失应返回 412，实际 %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+// TestStartAPIMapsWorkspaceNotPersisted 校验未落库返回 execution_not_persisted。
+func TestStartAPIMapsWorkspaceNotPersisted(t *testing.T) {
+	t.Parallel()
+	task := startAPITestTask(t)
+	store := &startAPITaskStore{task: task, workspacePending: true}
+	fixture := newStartAPIFixture(t, store)
+	fixture.workspace.err = app.ErrTaskWorkspaceNotPersisted
+	recorder := fixture.do(t, http.MethodPost, fixture.startPath(), httpapi.StartTaskRequest{})
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("未落库应返回 500，实际 %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response httpapi.ErrorResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("解析错误响应失败: %v", err)
+	}
+	if response.Error.Code != httpapi.CodeExecutionNotPersisted {
+		t.Fatalf("错误码应为 %s，实际 %s", httpapi.CodeExecutionNotPersisted, response.Error.Code)
 	}
 }
 

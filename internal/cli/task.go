@@ -363,12 +363,14 @@ func newTaskStartCommand(a *app.App) *cobra.Command {
 	)
 	command := &cobra.Command{
 		Use:   "start <task-id>",
-		Short: "通过本地服务完成一次任务启动（准备环境 → 生成计划 → 启动工作流）",
+		Short: "通过本地服务完成一次任务启动（准备环境 → 初始化工作区 → 生成计划 → 启动工作流）",
 		Long: "向本地 API 发起 POST /api/v1/tasks/{taskID}/start，由服务端按数据库事实决定：\n" +
 			"  1. 任务已有受管理且运行中的容器时不会重复创建；\n" +
-			"  2. 任务还没有持久化计划时在容器内调用 Planner 并一次写入数据库；\n" +
-			"  3. 计划就绪后启动任务级工作流执行。\n" +
+			"  2. 任务容器内的工作区尚未就绪时先完成代码获取与 agent/<task-id> 分支准备；\n" +
+			"  3. 任务还没有持久化计划时在容器内调用 Planner 并一次写入数据库；\n" +
+			"  4. 计划就绪后启动任务级工作流执行。\n" +
 			"任一阶段失败立即停止，不自动重试、不删除容器、不重放外部操作；\n" +
+			"工作区初始化结果无法确认时返回状态冲突，必须先核验容器内实际状态；\n" +
 			"失败与中断一律保留容器现场。服务地址默认取配置文件的 server 段。",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

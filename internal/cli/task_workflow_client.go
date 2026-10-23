@@ -114,19 +114,23 @@ type workflowAPIStartTaskRequest struct {
 // 四个布尔与状态字段互相独立：`plan_persisted` 为 false 表示计划没有落库，
 // `workflow_started` 为 false 表示编排没有启动；命令不得把它们当作成功。
 type workflowAPIStartTask struct {
-	TaskID            string                `json:"task_id"`
-	Stage             string                `json:"stage"`
-	TaskStatus        string                `json:"task_status"`
-	ContainerID       string                `json:"container_id"`
-	ContainerPrepared bool                  `json:"container_prepared"`
-	PlanPersisted     bool                  `json:"plan_persisted"`
-	PlanSteps         []workflowAPIPlanStep `json:"plan_steps"`
-	WorkflowStarted   bool                  `json:"workflow_started"`
-	Run               *workflowAPIRun       `json:"run"`
-	FailureStage      string                `json:"failure_stage"`
-	Failure           string                `json:"failure"`
-	StartedAt         time.Time             `json:"started_at"`
-	FinishedAt        time.Time             `json:"finished_at"`
+	TaskID            string `json:"task_id"`
+	Stage             string `json:"stage"`
+	TaskStatus        string `json:"task_status"`
+	ContainerID       string `json:"container_id"`
+	ContainerPrepared bool   `json:"container_prepared"`
+	// WorkspaceStatus 是任务级工作区初始化状态，空值表示本次没有走到该阶段。
+	WorkspaceStatus string `json:"workspace_status"`
+	// WorkspaceCommit 是工作区初始化核验到的 commit SHA。
+	WorkspaceCommit string                `json:"workspace_commit"`
+	PlanPersisted   bool                  `json:"plan_persisted"`
+	PlanSteps       []workflowAPIPlanStep `json:"plan_steps"`
+	WorkflowStarted bool                  `json:"workflow_started"`
+	Run             *workflowAPIRun       `json:"run"`
+	FailureStage    string                `json:"failure_stage"`
+	Failure         string                `json:"failure"`
+	StartedAt       time.Time             `json:"started_at"`
+	FinishedAt      time.Time             `json:"finished_at"`
 }
 
 // workflowAPIError 是统一错误响应。
@@ -420,6 +424,10 @@ func printStartTaskResult(a *app.App, result workflowAPIStartTask) error {
 		fmt.Sprintf("容器: %s（本次创建: %s）",
 			emptyAsUnknown(result.ContainerID),
 			flagMark(result.ContainerPrepared),
+		),
+		fmt.Sprintf("工作区: %s（commit %s）",
+			emptyAsUnknown(result.WorkspaceStatus),
+			emptyAsUnknown(result.WorkspaceCommit),
 		),
 		fmt.Sprintf("计划已落库: %s（步骤数 %d）",
 			flagMark(result.PlanPersisted),

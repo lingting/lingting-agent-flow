@@ -31,6 +31,7 @@ var businessTables = []string{
 	"roles",
 	"sessions",
 	"steps",
+	"task_workspace_initializations",
 	"tasks",
 	"validation_check_results",
 	"validation_feedbacks",
@@ -168,6 +169,8 @@ func TestSchemaHasNoEnumWhitelist(t *testing.T) {
 	// 代码保存的恢复状态是 0019 新增的枚举式字段，同样不允许取值白名单。
 	probes := append([]enumProbe{}, enumProbes...)
 	probes = append(probes, codeSaveRecoveryProbes...)
+	// 0020 新增的任务级工作区初始化表同样不得声明枚举白名单。
+	probes = append(probes, taskWorkspaceProbes...)
 	for _, probe := range probes {
 		if err := insertUnknownEnumValue(ctx, conn, probe); err != nil {
 			t.Fatalf("枚举字段 %s.%s 无法保存未知值: %v", probe.table, probe.column, err)

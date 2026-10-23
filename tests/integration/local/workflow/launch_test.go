@@ -19,6 +19,7 @@ import (
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/execenv"
 	"github.com/lingting/agentflow/internal/logging"
+	"github.com/lingting/agentflow/internal/source"
 	"github.com/lingting/agentflow/internal/storage"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
 	"github.com/lingting/agentflow/tests/internal/testkit"
@@ -341,12 +342,60 @@ func (w *launchWorkflow) StartWorkflow(
 	}, nil
 }
 
+// launchWorkspaceStub 是任务级工作区初始化的受控替身。
+//
+// 它默认报告"已就绪"，使既有用例继续覆盖容器 → 计划 → 工作流的主链路；
+// 需要验证工作区阶段的用例通过字段控制返回结论。
+type launchWorkspaceStub struct {
+	mu sync.Mutex
+	// calls 记录初始化调用次数。
+	calls int
+	// recoverCalls 记录中断收敛调用次数。
+	recoverCalls int
+	// result 是返回的初始化结果，零值时按 succeeded 返回。
+	result app.TaskWorkspaceResult
+	// err 是返回的错误。
+	err error
+}
+
+// InitializeTaskWorkspace 返回受控的初始化结果。
+func (w *launchWorkspaceStub) InitializeTaskWorkspace(
+	ctx context.Context,
+	request app.TaskWorkspaceRequest,
+) (app.TaskWorkspaceResult, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.calls++
+	if w.err != nil {
+		return w.result, w.err
+	}
+	result := w.result
+	if result.Status == "" {
+		result.Status = domain.TaskWorkspaceInitStatusSucceeded
+		result.Succeeded = true
+	}
+	result.TaskID = domain.ID(request.TaskID)
+	return result, nil
+}
+
+// RecoverInterrupted 记录收敛调用并返回 nil。
+func (w *launchWorkspaceStub) RecoverInterrupted(ctx context.Context) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.recoverCalls++
+	return nil
+}
+
 // launchService 构造并启动一个统一启动服务实例。
+//
+// workspace 为空表示本次运行不提供工作区初始化能力：用例据此验证"缺少能力时
+// 返回前置条件错误"而不是静默跳过。
 func (f *launchFixture) launchService(
 	t *testing.T,
 	environments app.TaskLaunchEnvironmentPort,
 	containers app.TaskLaunchContainerPort,
 	planner app.TaskLaunchPlanPort,
+	workspace app.TaskLaunchWorkspacePort,
 	workflow app.TaskLaunchWorkflowPort,
 ) *app.TaskLaunchService {
 	t.Helper()
@@ -355,6 +404,7 @@ func (f *launchFixture) launchService(
 		Environments: environments,
 		Containers:   containers,
 		Planner:      planner,
+		Workspace:    workspace,
 		Workflow:     workflow,
 		Logger:       f.logger.Slog(),
 	})
@@ -381,7 +431,14 @@ func TestLaunchPersistsContainerAndPlanAcrossStages(t *testing.T) {
 	containers := &launchContainers{usable: true}
 	planner := &launchPlanner{steps: steps}
 	workflow := &launchWorkflow{}
-	service := fixture.launchService(t, environments, containers, planner, workflow)
+	service := fixture.launchService(
+		t,
+		environments,
+		containers,
+		planner,
+		&launchWorkspaceStub{},
+		workflow,
+	)
 
 	result, err := service.Launch(fixture.ctx, app.TaskLaunchRequest{
 		TaskID: fixture.task.ID.String(),
@@ -418,7 +475,14 @@ func TestLaunchDoesNotCreateSecondContainer(t *testing.T) {
 	containers := &launchContainers{usable: true}
 	planner := &launchPlanner{steps: steps}
 	workflow := &launchWorkflow{}
-	service := fixture.launchService(t, environments, containers, planner, workflow)
+	service := fixture.launchService(
+		t,
+		environments,
+		containers,
+		planner,
+		&launchWorkspaceStub{},
+		workflow,
+	)
 
 	if _, err := service.Launch(fixture.ctx, app.TaskLaunchRequest{
 		TaskID: fixture.task.ID.String(),
@@ -454,7 +518,14 @@ func TestLaunchRejectsSecondCallWhileRunActive(t *testing.T) {
 	containers := &launchContainers{usable: true}
 	planner := &launchPlanner{steps: steps}
 	workflow := &launchWorkflow{}
-	service := fixture.launchService(t, environments, containers, planner, workflow)
+	service := fixture.launchService(
+		t,
+		environments,
+		containers,
+		planner,
+		&launchWorkspaceStub{},
+		workflow,
+	)
 
 	_, launchErr := service.Launch(fixture.ctx, app.TaskLaunchRequest{
 		TaskID: fixture.task.ID.String(),
@@ -497,6 +568,7 @@ func TestRecoverStepOccupancyPersistsRecoveryRequired(t *testing.T) {
 		&launchEnvironment{containerID: "container-launch"},
 		&launchContainers{usable: true},
 		&launchPlanner{},
+		&launchWorkspaceStub{},
 		&launchWorkflow{},
 	)
 	if err := service.RecoverStepOccupancy(fixture.ctx); err != nil {
@@ -542,6 +614,7 @@ func TestRecoverStepOccupancyKeepsActiveRunOccupancy(t *testing.T) {
 		&launchEnvironment{containerID: "container-launch"},
 		&launchContainers{usable: true},
 		&launchPlanner{},
+		&launchWorkspaceStub{},
 		&launchWorkflow{},
 	)
 	if err := service.RecoverStepOccupancy(fixture.ctx); err != nil {
@@ -556,12 +629,230 @@ func TestRecoverStepOccupancyKeepsActiveRunOccupancy(t *testing.T) {
 	}
 }
 
+// TestLaunchInitializesWorkspaceBeforePlan 校验工作区未就绪时先初始化再生成计划。
+func TestLaunchInitializesWorkspaceBeforePlan(t *testing.T) {
+	t.Parallel()
+	fixture := newLaunchFixture(t)
+	fixture.attachContainer(t, "container-existing")
+	environments := &launchEnvironment{containerID: "container-new"}
+	containers := &launchContainers{usable: true}
+	planner := &launchPlanner{steps: fixture.writeSteps(t, 1)}
+	workspace := &launchWorkspaceStub{}
+	workflow := &launchWorkflow{}
+	service := fixture.launchService(
+		t,
+		environments,
+		containers,
+		planner,
+		workspace,
+		workflow,
+	)
+
+	result, err := service.Launch(fixture.ctx, app.TaskLaunchRequest{
+		TaskID: fixture.task.ID.String(),
+	})
+	if err != nil {
+		t.Fatalf("启动失败: %v", err)
+	}
+	if workspace.calls != 1 {
+		t.Fatalf("工作区未就绪时必须初始化一次，实际 %d 次", workspace.calls)
+	}
+	if planner.calls != 0 {
+		t.Fatalf("计划已持久化时不得重新生成，实际 %d 次", planner.calls)
+	}
+	if result.Stage != domain.TaskLaunchStageWorkflow {
+		t.Fatalf("阶段应为 workflow，实际 %s", result.Stage)
+	}
+	if result.WorkspaceStatus != domain.TaskWorkspaceInitStatusSucceeded {
+		t.Fatalf("结果应如实报告工作区结论，实际 %s", result.WorkspaceStatus)
+	}
+}
+
+// TestLaunchStopsAtWorkspaceStageWhenUncertain 校验结果不确定时停在 workspace 阶段。
+func TestLaunchStopsAtWorkspaceStageWhenUncertain(t *testing.T) {
+	t.Parallel()
+	fixture := newLaunchFixture(t)
+	fixture.attachContainer(t, "container-existing")
+	environments := &launchEnvironment{containerID: "container-new"}
+	containers := &launchContainers{usable: true}
+	planner := &launchPlanner{}
+	workspace := &launchWorkspaceStub{err: app.ErrTaskWorkspaceUncertain}
+	workflow := &launchWorkflow{}
+	service := fixture.launchService(
+		t,
+		environments,
+		containers,
+		planner,
+		workspace,
+		workflow,
+	)
+
+	result, err := service.Launch(fixture.ctx, app.TaskLaunchRequest{
+		TaskID: fixture.task.ID.String(),
+	})
+	if err == nil {
+		t.Fatal("结果不确定时必须返回错误")
+	}
+	if result.FailureStage != domain.TaskLaunchStageWorkspace.String() {
+		t.Fatalf("失败阶段应为 workspace，实际 %s", result.FailureStage)
+	}
+	if planner.calls != 0 || workflow.calls != 0 {
+		t.Fatal("工作区未确认时不得继续生成计划或启动工作流")
+	}
+	// 任务状态必须来自数据库，不得由内存对象覆盖。
+	stored, loadErr := fixture.db.GetTask(fixture.ctx, fixture.task.ID)
+	if loadErr != nil {
+		t.Fatalf("读取任务失败: %v", loadErr)
+	}
+	if stored.Status == domain.TaskStatusCompleted {
+		t.Fatal("工作区未确认时任务不得被标记为完成")
+	}
+}
+
+// TestWorkspaceInitializationPersistsAcrossRestart 校验重启后记录仍然有效。
+func TestWorkspaceInitializationPersistsAcrossRestart(t *testing.T) {
+	t.Parallel()
+	fixture := newLaunchFixture(t)
+	fixture.attachContainer(t, "container-existing")
+	// 直接写入一条成功记录：等价于上一次进程已完成初始化。
+	record, err := domain.NewTaskWorkspaceInitRecord(
+		"",
+		fixture.task.ID.String(),
+		"container-existing",
+		"docker-container-existing",
+		domain.CodeSourceGit,
+		domain.DefaultContainerWorkDir,
+		fixture.now,
+	)
+	if err != nil {
+		t.Fatalf("构造工作区初始化记录失败: %v", err)
+	}
+	if markErr := record.MarkRunning(domain.CodeFetchStageProbe, fixture.now); markErr != nil {
+		t.Fatalf("标记运行失败: %v", markErr)
+	}
+	if markErr := record.MarkSucceeded(
+		"main",
+		domain.GitBranchSelectionOriginHead,
+		"1111111111111111111111111111111111111111",
+		domain.TaskBranchSourceNew.String(),
+		"2222222222222222222222222222222222222222",
+		fixture.now,
+	); markErr != nil {
+		t.Fatalf("标记成功失败: %v", markErr)
+	}
+	if createErr := fixture.db.CreateTaskWorkspaceInit(fixture.ctx, record); createErr != nil {
+		t.Fatalf("写入记录失败: %v", createErr)
+	}
+	// 关闭连接后用同一路径重新打开，模拟进程退出。
+	path := fixture.db.Path()
+	if closeErr := fixture.db.Close(); closeErr != nil {
+		t.Fatalf("关闭数据库失败: %v", closeErr)
+	}
+	reopened, openErr := sqlite.Open(fixture.ctx, sqlite.Options{Path: path})
+	if openErr != nil {
+		t.Fatalf("重新打开数据库失败: %v", openErr)
+	}
+	t.Cleanup(func() {
+		if closeErr := reopened.Close(); closeErr != nil {
+			t.Errorf("关闭数据库失败: %v", closeErr)
+		}
+	})
+	stored, getErr := reopened.ListTaskWorkspaceInitsByTask(
+		fixture.ctx,
+		fixture.task.ID.String(),
+	)
+	if getErr != nil {
+		t.Fatalf("读取记录失败: %v", getErr)
+	}
+	if len(stored) != 1 {
+		t.Fatalf("记录数应为 1，实际 %d", len(stored))
+	}
+	if stored[0].Status != domain.TaskWorkspaceInitStatusSucceeded {
+		t.Fatalf("重启后状态不得丢失: %s", stored[0].Status)
+	}
+	if stored[0].CommitSHA == "" {
+		t.Fatal("重启后 commit 不得丢失")
+	}
+}
+
+// TestWorkspaceInterruptedConvergesToUncertain 校验中断记录收敛且不重放。
+func TestWorkspaceInterruptedConvergesToUncertain(t *testing.T) {
+	t.Parallel()
+	fixture := newLaunchFixture(t)
+	fixture.attachContainer(t, "container-existing")
+	record, err := domain.NewTaskWorkspaceInitRecord(
+		"",
+		fixture.task.ID.String(),
+		"container-existing",
+		"docker-container-existing",
+		domain.CodeSourceGit,
+		domain.DefaultContainerWorkDir,
+		fixture.now,
+	)
+	if err != nil {
+		t.Fatalf("构造工作区初始化记录失败: %v", err)
+	}
+	if markErr := record.MarkRunning(domain.CodeFetchStageClone, fixture.now); markErr != nil {
+		t.Fatalf("标记运行失败: %v", markErr)
+	}
+	if createErr := fixture.db.CreateTaskWorkspaceInit(fixture.ctx, record); createErr != nil {
+		t.Fatalf("写入记录失败: %v", createErr)
+	}
+	// 启动服务只负责把收敛转交给工作区服务；这里直接验证真实工作区服务的收敛。
+	realWorkspace, err := app.NewTaskWorkspaceService(app.TaskWorkspaceOptions{
+		Store:      fixture.db,
+		Containers: &launchWorkspaceContainers{},
+		Logger:     fixture.logger.Slog(),
+	})
+	if err != nil {
+		t.Fatalf("构造工作区服务失败: %v", err)
+	}
+	if recoverErr := realWorkspace.RecoverInterrupted(fixture.ctx); recoverErr != nil {
+		t.Fatalf("收敛失败: %v", recoverErr)
+	}
+	stored, getErr := fixture.db.GetTaskWorkspaceInit(fixture.ctx, record.ID)
+	if getErr != nil {
+		t.Fatalf("读取记录失败: %v", getErr)
+	}
+	if stored.Status != domain.TaskWorkspaceInitStatusUncertain {
+		t.Fatalf("应收敛为 uncertain，实际 %s", stored.Status)
+	}
+	if stored.ErrorSummary == "" {
+		t.Fatal("收敛后必须写入可读摘要")
+	}
+}
+
+// launchWorkspaceContainers 是只用于收敛路径的容器替身。
+//
+// 收敛不访问容器：任何 Inspect 或代码获取调用都会让用例失败。
+type launchWorkspaceContainers struct{}
+
+// InspectContainer 在收敛路径上不应被调用。
+func (c *launchWorkspaceContainers) InspectContainer(
+	ctx context.Context,
+	request app.InspectContainerRequest,
+) (app.ContainerDetail, error) {
+	return app.ContainerDetail{}, errors.New("收敛路径不得核验容器")
+}
+
+// FetchSourceWith 在收敛路径上不应被调用。
+func (c *launchWorkspaceContainers) FetchSourceWith(
+	ctx context.Context,
+	containerID string,
+	request source.FetchRequest,
+) (source.FetchResult, error) {
+	return source.FetchResult{}, errors.New("收敛路径不得执行代码获取")
+}
+
 // 编译期确认替身满足启动服务的端口契约，避免签名漂移后测试静默失效。
 var (
-	_ app.TaskLaunchEnvironmentPort = (*launchEnvironment)(nil)
-	_ app.TaskLaunchContainerPort   = (*launchContainers)(nil)
-	_ app.TaskLaunchPlanPort        = (*launchPlanner)(nil)
-	_ app.TaskLaunchWorkflowPort    = (*launchWorkflow)(nil)
-	_ app.TaskLaunchStore           = (*sqlite.DB)(nil)
-	_ storage.Store                 = (*sqlite.DB)(nil)
+	_ app.TaskLaunchEnvironmentPort  = (*launchEnvironment)(nil)
+	_ app.TaskLaunchContainerPort    = (*launchContainers)(nil)
+	_ app.TaskLaunchPlanPort         = (*launchPlanner)(nil)
+	_ app.TaskLaunchWorkspacePort    = (*launchWorkspaceStub)(nil)
+	_ app.TaskLaunchWorkflowPort     = (*launchWorkflow)(nil)
+	_ app.TaskWorkspaceContainerPort = (*launchWorkspaceContainers)(nil)
+	_ app.TaskLaunchStore            = (*sqlite.DB)(nil)
+	_ app.TaskWorkspaceStore         = (*sqlite.DB)(nil)
+	_ storage.Store                  = (*sqlite.DB)(nil)
 )

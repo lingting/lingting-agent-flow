@@ -76,6 +76,13 @@ type TaskLaunchResult struct {
 	ContainerID string
 	// ContainerPrepared 表示本次调用真的创建了容器。
 	ContainerPrepared bool
+	// WorkspaceStatus 是本次启动观察到的任务级工作区初始化状态。
+	//
+	// 为空表示没有走到工作区阶段，或该任务在该容器上早已就绪（此时不会产生新记录）。
+	// 它绝不表示"代码已就绪"：只有 succeeded / skipped 才是就绪。
+	WorkspaceStatus domain.TaskWorkspaceInitStatus
+	// WorkspaceCommit 是工作区初始化核验到的 commit SHA，未初始化时为空。
+	WorkspaceCommit string
 	// PlanPersisted 表示计划是否已完整写入数据库。
 	PlanPersisted bool
 	// PlanSteps 是已持久化的计划步骤，按序号升序排列。
@@ -108,6 +115,13 @@ type TaskLaunchStore interface {
 	//
 	// 启动恢复用它定位"进程退出后仍被占用"的步骤，不重放任何 Agent 调用。
 	ListTasksWithOccupiedSteps(ctx context.Context) ([]domain.ID, error)
+	// ListTaskWorkspaceInitsByTask 返回该任务的工作区初始化记录，最新的在前。
+	//
+	// 启动流程用它判定"当前容器上是否已经初始化过工作区"，不重新探测容器文件系统。
+	ListTaskWorkspaceInitsByTask(
+		ctx context.Context,
+		taskID string,
+	) ([]domain.TaskWorkspaceInitRecord, error)
 }
 
 // TaskLaunchEnvironmentPort 是启动流程对环境准备能力的需求。
@@ -134,6 +148,19 @@ type TaskLaunchWorkflowPort interface {
 	StartWorkflow(ctx context.Context, request StartWorkflowRequest) (WorkflowRunView, error)
 }
 
+// TaskLaunchWorkspacePort 是启动流程对任务级工作区初始化能力的需求。
+//
+// 实现复用尝试级初始化完全相同的代码获取路径：启动流程不构造 Git 命令，
+// 也不自行拼接容器内路径。
+type TaskLaunchWorkspacePort interface {
+	InitializeTaskWorkspace(
+		ctx context.Context,
+		request TaskWorkspaceRequest,
+	) (TaskWorkspaceResult, error)
+	// RecoverInterrupted 收敛进程退出留下的初始化残留。
+	RecoverInterrupted(ctx context.Context) error
+}
+
 // TaskLaunchOptions 是构造统一启动服务的输入。
 type TaskLaunchOptions struct {
 	// Store 是持久化入口，必填。
@@ -149,6 +176,11 @@ type TaskLaunchOptions struct {
 	Planner TaskLaunchPlanPort
 	// Workflow 提供工作流启动能力。
 	Workflow TaskLaunchWorkflowPort
+	// Workspace 提供任务级工作区初始化能力。
+	//
+	// 为空表示本次运行不提供工作区初始化：判定需要初始化时启动流程返回前置条件
+	// 错误，而不是跳过初始化去执行一个没有代码的工作区。
+	Workspace TaskLaunchWorkspacePort
 	// Logger 是日志器，为空时使用默认日志器。
 	Logger *slog.Logger
 	// Now 是可注入的时钟，零值使用当前时间。
@@ -169,6 +201,7 @@ type TaskLaunchService struct {
 	environments TaskLaunchEnvironmentPort
 	containers   TaskLaunchContainerPort
 	planner      TaskLaunchPlanPort
+	workspace    TaskLaunchWorkspacePort
 	workflow     TaskLaunchWorkflowPort
 	logger       *slog.Logger
 	now          func() time.Time
@@ -200,6 +233,7 @@ func NewTaskLaunchService(options TaskLaunchOptions) (*TaskLaunchService, error)
 		environments: options.Environments,
 		containers:   options.Containers,
 		planner:      options.Planner,
+		workspace:    options.Workspace,
 		workflow:     options.Workflow,
 		logger:       logger,
 		now:          now,
@@ -231,6 +265,10 @@ func (s *TaskLaunchService) Start(ctx context.Context) error {
 	state.stopOnce = stop
 	state.mu.Unlock()
 	// 恢复结论没有落库时不得让服务继续启动：那会让未经处理的现场被当作已恢复。
+	// 先收敛工作区初始化残留，再收敛步骤占用：前者发生在任何 Step / Attempt 之前。
+	if err := s.recoverWorkspace(ctx); err != nil {
+		return err
+	}
 	return s.RecoverStepOccupancy(ctx)
 }
 
@@ -331,6 +369,21 @@ func (l *taskLaunchLifecycle) activeCount() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.active
+}
+
+// recoverWorkspace 收敛进程退出留下的工作区初始化残留。
+//
+// 本服务自身不实现收敛规则：它把能力转交给工作区初始化服务，由后者按
+// domain.DecideTaskWorkspaceRecovery 收敛为 uncertain，不重放任何代码获取。
+// 未提供工作区初始化能力时跳过：没有该能力的运行不会产生这类记录。
+func (s *TaskLaunchService) recoverWorkspace(ctx context.Context) error {
+	if s.workspace == nil {
+		return nil
+	}
+	if err := s.workspace.RecoverInterrupted(ctx); err != nil {
+		return fmt.Errorf("收敛工作区初始化残留失败: %w", err)
+	}
+	return nil
 }
 
 // loadTask 读取未被逻辑删除的任务。

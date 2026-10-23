@@ -75,6 +75,13 @@ func (s *TaskLaunchService) Launch(
 	}
 	result.TaskStatus = input.Task.Status
 	result.ContainerID = strings.TrimSpace(input.Task.ContainerID)
+	// needsPlan 记录本次启动是否真的需要生成计划。
+	//
+	// 进入 plan 分支可能来自 container 或 workspace 的 fallthrough，而那时计划
+	// 可能早已持久化：容器准备与工作区初始化都要求计划尚未生成，但它们的完成
+	// 并不蕴含"计划还需要生成"。判定只在 domain 中定义一次，这里只复用它读到的
+	// 事实，不重新判断业务语义。
+	needsPlan := len(input.Steps) == 0
 	s.appendEvent(runCtx, task.ID, domain.EventTypeTaskStarted, map[string]any{
 		"stage":        string(stage),
 		"status":       string(input.Task.Status),
@@ -99,17 +106,28 @@ func (s *TaskLaunchService) Launch(
 		}
 		result.TaskStatus = refreshed.Status
 		fallthrough
+	case domain.TaskLaunchStageWorkspace:
+		initialized, initErr := s.initializeWorkspace(runCtx, task.ID)
+		result.Stage = domain.TaskLaunchStageWorkspace
+		result.WorkspaceStatus = initialized.Status
+		result.WorkspaceCommit = initialized.Commit
+		if initErr != nil {
+			return s.failLaunch(result, domain.TaskLaunchStageWorkspace, initErr)
+		}
+		fallthrough
 	case domain.TaskLaunchStagePlan:
-		planResult, planErr := s.planTask(runCtx, task.ID, prompt, request.PlanTimeout)
-		result.Stage = domain.TaskLaunchStagePlan
-		result.PlanSteps = planResult.Steps
-		result.PlanPersisted = planResult.Persisted
-		result.TaskStatus = planResult.TaskStatus
-		if planErr != nil {
-			if planResult.FailureStage != "" {
-				result.FailureStage = planResult.FailureStage
+		if needsPlan {
+			planResult, planErr := s.planTask(runCtx, task.ID, prompt, request.PlanTimeout)
+			result.Stage = domain.TaskLaunchStagePlan
+			result.PlanSteps = planResult.Steps
+			result.PlanPersisted = planResult.Persisted
+			result.TaskStatus = planResult.TaskStatus
+			if planErr != nil {
+				if planResult.FailureStage != "" {
+					result.FailureStage = planResult.FailureStage
+				}
+				return s.failLaunch(result, domain.TaskLaunchStagePlan, planErr)
 			}
-			return s.failLaunch(result, domain.TaskLaunchStagePlan, planErr)
 		}
 		fallthrough
 	case domain.TaskLaunchStageWorkflow:
@@ -181,12 +199,46 @@ func (s *TaskLaunchService) loadLaunchInput(
 		}
 		usable = checked
 	}
+	workspace, err := s.loadWorkspaceState(ctx, task, usable)
+	if err != nil {
+		return domain.TaskLaunchInput{}, err
+	}
 	return domain.TaskLaunchInput{
 		Task:                 task,
 		Steps:                steps,
 		HasActiveWorkflowRun: hasActive,
 		ContainerUsable:      usable,
+		Workspace:            workspace,
 	}, nil
+}
+
+// loadWorkspaceState 读取当前容器上的任务级工作区初始化现场。
+//
+// 判定只使用"当前容器代次"的记录：旧容器上的成功记录不适用于新容器，任务重新
+// 开始时必须在新容器上重新初始化。
+func (s *TaskLaunchService) loadWorkspaceState(
+	ctx context.Context,
+	task domain.Task,
+	containerUsable bool,
+) (domain.TaskWorkspaceState, error) {
+	state := domain.TaskWorkspaceState{ContainerUsable: containerUsable}
+	if !containerUsable {
+		return state, nil
+	}
+	records, err := s.store.ListTaskWorkspaceInitsByTask(ctx, task.ID.String())
+	if err != nil {
+		return domain.TaskWorkspaceState{}, fmt.Errorf("读取工作区初始化记录失败: %w", err)
+	}
+	containerID := strings.TrimSpace(task.ContainerID)
+	for index := range records {
+		if strings.TrimSpace(records[index].ContainerID) != containerID {
+			continue
+		}
+		record := records[index]
+		state.Record = &record
+		break
+	}
+	return state, nil
 }
 
 // containerUsable 核验任务记录关联的容器当前是否受管理且运行中。
@@ -266,6 +318,32 @@ func (s *TaskLaunchService) prepareContainer(
 			ErrTaskLaunchPrerequisite,
 			prepared.FailedStep(),
 		)
+	}
+	return result, nil
+}
+
+// initializeWorkspace 在任务容器内初始化代码工作区。
+//
+// 复用任务级工作区初始化服务：启动流程不构造 Git 命令，也不探测容器文件系统。
+// 缺少该能力时返回前置条件错误，而不是跳过初始化去执行一个没有代码的工作区。
+func (s *TaskLaunchService) initializeWorkspace(
+	ctx context.Context,
+	taskID domain.ID,
+) (TaskWorkspaceResult, error) {
+	if s.workspace == nil {
+		return TaskWorkspaceResult{}, fmt.Errorf(
+			"%w: 本次运行未提供工作区初始化能力，无法为任务 %s 准备代码工作区",
+			ErrTaskLaunchPrerequisite,
+			taskID,
+		)
+	}
+	result, err := s.workspace.InitializeTaskWorkspace(ctx, TaskWorkspaceRequest{
+		TaskID: taskID.String(),
+	})
+	if err != nil {
+		// 结果无法确认既不是"失败后可以直接重试"，也不是成功：原样上抛，让调用方
+		// 按类别映射，并且不继续生成计划。
+		return result, fmt.Errorf("%w: %w", ErrTaskLaunchFailed, err)
 	}
 	return result, nil
 }

@@ -16,6 +16,11 @@ const (
 	TaskLaunchStageValidate TaskLaunchStage = "validate"
 	// TaskLaunchStageContainer 准备任务容器。
 	TaskLaunchStageContainer TaskLaunchStage = "container"
+	// TaskLaunchStageWorkspace 在任务容器内初始化代码工作区。
+	//
+	// 它发生在任何 Step / Attempt 存在之前，因此由任务级工作区初始化承担，
+	// 不复用尝试级的 initialize-code 契约。
+	TaskLaunchStageWorkspace TaskLaunchStage = "workspace"
 	// TaskLaunchStagePlan 在容器内生成并持久化计划。
 	TaskLaunchStagePlan TaskLaunchStage = "plan"
 	// TaskLaunchStageWorkflow 启动任务级工作流执行。
@@ -32,6 +37,7 @@ func (s TaskLaunchStage) Validate() error {
 	switch s {
 	case TaskLaunchStageValidate,
 		TaskLaunchStageContainer,
+		TaskLaunchStageWorkspace,
 		TaskLaunchStagePlan,
 		TaskLaunchStageWorkflow:
 		return nil
@@ -55,6 +61,11 @@ type TaskLaunchInput struct {
 	//
 	// 只有 Task.ContainerID 非空时才可能有意义：容器标识为空时该字段必须为 false。
 	ContainerUsable bool
+	// Workspace 是任务级工作区初始化现场。
+	//
+	// 它只包含从数据库读到的记录与上面的容器核验结论：判定是否需要初始化时
+	// 不得用"目录看起来是空的"之类推断替代这条事实。
+	Workspace TaskWorkspaceState
 }
 
 // CheckTaskLaunchStart 校验任务是否允许开始一次统一启动。
@@ -136,17 +147,26 @@ func CheckTaskLaunchStart(input TaskLaunchInput) error {
 // 规则（顺序固定，只在 domain 中定义一次）：
 //  1. 存在未结束的工作流执行 → 不再推进，返回 ErrInvalidState；
 //  2. 任务容器不可用 → 准备容器；
-//  3. 没有已持久化的计划步骤 → 生成计划；
-//  4. 其余情况 → 启动任务级工作流。
+//  3. 任务容器内的工作区尚未就绪 → 初始化工作区；
+//  4. 没有已持久化的计划步骤 → 生成计划；
+//  5. 其余情况 → 启动任务级工作流。
 //
 // 该函数是纯函数：不读数据库、不启动进程、不产生任何远程副作用。调用方不得在
-// 别处复制同一套判定，否则"要不要建容器""要不要生成计划"会出现第二份实现。
+// 别处复制同一套判定，否则"要不要建容器""要不要初始化工作区""要不要生成计划"
+// 会出现第二份实现。
 func DecideTaskLaunchNext(input TaskLaunchInput) (TaskLaunchStage, error) {
 	if err := CheckTaskLaunchStart(input); err != nil {
 		return "", err
 	}
 	if !input.ContainerUsable {
 		return TaskLaunchStageContainer, nil
+	}
+	needed, err := DecideTaskWorkspaceNext(input.Workspace)
+	if err != nil {
+		return "", err
+	}
+	if needed {
+		return TaskLaunchStageWorkspace, nil
 	}
 	if len(input.Steps) == 0 {
 		return TaskLaunchStagePlan, nil

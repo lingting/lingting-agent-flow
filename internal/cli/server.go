@@ -209,6 +209,18 @@ func runServer(cmd *cobra.Command, a *app.App, configPath, address string, requi
 			if executionErr != nil {
 				return nil, executionErr
 			}
+			// 任务级工作区初始化复用同一容器服务的代码获取能力：它不拼接 Git 命令，
+			// 也不重新实现 source 层的执行顺序与错误分类。
+			workspace, workspaceErr := app.NewTaskWorkspaceService(
+				app.TaskWorkspaceOptions{
+					Store:      store,
+					Containers: containers,
+					Logger:     a.Logger().Slog(),
+				},
+			)
+			if workspaceErr != nil {
+				return nil, workspaceErr
+			}
 			return app.NewTaskLaunchService(app.TaskLaunchOptions{
 				Store: store,
 				// 容器准备复用统一执行环境实现：启动服务不拼接 Docker 命令。
@@ -216,9 +228,11 @@ func runServer(cmd *cobra.Command, a *app.App, configPath, address string, requi
 				// 容器核验复用同一容器服务：只读观测，不创建也不删除。
 				Containers: containers,
 				// 计划生成与工作流编排复用编排器：启动服务不重复实现它们。
-				Planner:  workflow,
-				Workflow: workflow,
-				Logger:   a.Logger().Slog(),
+				Planner: workflow,
+				// 工作区初始化复用任务级协调器：它发生在任何 Step / Attempt 之前。
+				Workspace: workspace,
+				Workflow:  workflow,
+				Logger:    a.Logger().Slog(),
 			})
 		},
 		SystemInfo:   a.SystemInfo,

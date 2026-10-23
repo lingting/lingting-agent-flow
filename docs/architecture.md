@@ -6,8 +6,8 @@
 > 日志封装、SQLite 数据层、执行节点管理与环境预检、SSH 服务探测与 SSH 连接层（主机密钥校验、
 > 私钥认证、远程命令执行、SFTP 传输与远端 Unix 套接字通道）、统一 Pi Runner（本机与容器内）、
 > **单步骤执行协调器与开发步骤顺序执行**、**确定性验证引擎**、**统一执行环境（远程 Linux +
-> Docker）**、**代码获取（CodeFetcher）与代码初始化协调器**、**单步骤开发—验证闭环**、
-> **任务级工作流编排器**与任务管理 HTTP 接口。
+> Docker）**、**代码获取（CodeFetcher）与代码初始化协调器**、**任务级工作区初始化**、
+> **单步骤开发—验证闭环**、**任务级工作流编排器**与任务管理 HTTP 接口。
 > 图中调度、计划自动生成与 UI 的完整形态尚未实现。
 
 ## 目标架构
@@ -569,14 +569,16 @@ CodeSaver 缺失时编排器仍会按顺序执行并验证全部步骤，但收�
 - 不实现多任务并发调度队列：`agentflow server` 中同一任务串行、不同任务之间相互独立。
 - CLI 的执行入口只是 HTTP 客户端：`agentflow task start` 与 `agentflow task run` 发起请求并
   轮询进度，不装配 SSH、容器、Pi 或代码保存能力，也不会在服务不可达时退回本机执行。
-- 完整执行链路有两个入口：`agentflow task start <task-id>` 一个入口完成「准备容器 → 生成
-  计划 → 启动编排」；需要分步排查时仍可依次执行 `execenv prepare-task`、`task plan`、
-  `task run`。代码初始化（`initialize-code`）仍未接入自动启动链路。
+- 完整执行链路有两个入口：`agentflow task start <task-id>` 一个入口完成「准备容器 → 初始化
+  工作区 → 生成计划 → 启动编排」；需要分步排查时仍可依次执行 `execenv prepare-task`、
+  `code init`、`task plan`、`task run`。
 
 ## 统一任务启动边界
 
 启动入口固定为 `app.TaskLaunchService`（`internal/app/task_launch*.go`）：HTTP Handler、CLI 与
-前端都不得自行串联「准备容器 → 生成计划 → 启动编排」，也不得自行判断某一阶段是否已完成。
+前端都不得自行串联「准备容器 → 初始化工作区 → 生成计划 → 启动编排」，也不得自行判断某一
+阶段是否已完成。阶段判定集中在 `domain.DecideTaskLaunchNext`，顺序固定为
+`container → workspace → plan → workflow`。
 
 ### 阶段判定
 
@@ -624,12 +626,33 @@ CodeSaver 缺失时编排器仍会按顺序执行并验证全部步骤，但收�
 
 `POST /api/v1/tasks/{taskID}/start` 只接受执行参数（补充提示词与三类超时），不接受容器、步骤
 列表、Session 路径、工作目录或角色覆盖。响应显式区分 `stage`、`task_status`、
-`container_prepared`、`plan_persisted` 与 `workflow_started`。错误映射：参数错误 400、目标不
-存在 404、状态冲突 409、前置条件缺失 412、启动已执行但未成功 500、服务已停止 503。
+`container_prepared`、`workspace_status`、`workspace_commit`、`plan_persisted` 与
+`workflow_started`。错误映射：参数错误 400、目标不存在 404、状态冲突 409（含工作区初始化
+结果 `uncertain`）、前置条件缺失 412、启动已执行但未成功 500、结果未落库 500 且错误码为
+`execution_not_persisted`、服务已停止 503。
+
+### 任务级工作区初始化边界
+
+启动链路中的工作区阶段固定为 `app.TaskWorkspaceService`（`internal/app/task_workspace*.go`）：
+它发生在任何 Step / Attempt 存在之前，因此与尝试级的 `app.CodeInitializeService` 是两个层次。
+
+- 记录模型：`task_workspace_initializations`（迁移 `0020`），以「任务 + 容器代次」为幂等边界。
+  `code_fetches` 的 `step_id` / `attempt_id` 保持必填，尝试级契约不变，不得伪造归属。
+- 状态与结论分离：`status`（`pending` / `running` / `succeeded` / `skipped` / `failed` /
+  `cancelled` / `timed_out` / `uncertain`）与失败阶段 `stage`、错误类别 `error_code` 分别保存。
+- `uncertain` 不是终态：它只能经只读核验收敛为确定结论，判定函数
+  `domain.DecideTaskWorkspaceNext` 在遇到 `uncertain` 时直接返回状态冲突，禁止重放 Clone。
+  部分唯一索引 `idx_task_workspace_init_active` 从数据库层面拒绝同任务同容器的第二条未结束记录。
+- 代码获取复用同一条 `source.Fetcher` 路径（`ContainerService.FetchSourceWith`），不存在第二套
+  Git 命令；工作目录解析、执行节点准入与错误状态映射由 `internal/app/code_fetch_support.go`
+  统一提供，尝试级与任务级共用。
+- 容器替换：判定按 `container_id` 过滤，旧容器上的成功记录不适用于新容器，历史记录一律保留。
+- 启动恢复：`RecoverInterrupted` 把停留在 `pending` / `running` 的记录收敛为 `uncertain`，
+  不重放代码获取，不删除容器与工作区。
 
 ### 当前能力边界
 
-- 不自动执行代码初始化（`initialize-code`）：首次启动链路仍需另行初始化代码工作区。
+- 不提供 `uncertain` 记录的只读核验入口：当前只能由人工在容器内确认后显式处理。
 - 不自动重试任一阶段，也不在失败后自动删除容器或重放外部操作。
 - 不实现多任务并发调度：同一任务进程内以任务为键串行，跨进程仍由各阶段自身的条件更新与
   `workflow_runs` 的部分唯一索引拒绝。
@@ -752,6 +775,9 @@ HTTP Handler / CLI
 - 接口固定为 `POST /api/v1/tasks/{taskID}/steps/{stepID}/attempts/{attemptID}/initialize-code`，
   只接受执行参数（可选目标目录与超时）。错误映射：参数错误 400、目标不存在或归属不符 404、
   状态冲突 409、前置条件缺失 412、执行未成功 500。
+- 该入口是尝试级的：它要求 `step_id` / `attempt_id`，并核验容器登记的 `attempt_id` 与本请求
+  一致。任务级工作区准备由 `app.TaskWorkspaceService` 承担（见「任务级工作区初始化边界」），
+  两者复用同一套 `source.Fetcher` 实现，但记录表与幂等边界不同。
 - 代码初始化成功不等于 Agent 开发流程已打通：Developer 逐步执行仍由后续阶段实现。
 
 ## 工作区边界

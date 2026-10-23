@@ -32,6 +32,8 @@ type launchTaskStore struct {
 	appendErr error
 	// events 记录写入的事件类型。
 	events []domain.EventType
+	// workspaceRecords 是受控的工作区初始化记录集合。
+	workspaceRecords []domain.TaskWorkspaceInitRecord
 }
 
 // GetTask 返回当前任务记录。
@@ -132,6 +134,16 @@ func (s *launchTaskStore) ListTasksWithOccupiedSteps(
 	return occupied, nil
 }
 
+// ListTaskWorkspaceInitsByTask 返回受控的工作区初始化记录。
+func (s *launchTaskStore) ListTaskWorkspaceInitsByTask(
+	ctx context.Context,
+	taskID string,
+) ([]domain.TaskWorkspaceInitRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]domain.TaskWorkspaceInitRecord(nil), s.workspaceRecords...), nil
+}
+
 // launchEnvironment 是环境准备的替身。
 type launchEnvironment struct {
 	mu sync.Mutex
@@ -185,6 +197,38 @@ func (c *launchContainers) InspectContainer(
 	}, nil
 }
 
+// launchWorkspace 是任务级工作区初始化的替身。
+type launchWorkspace struct {
+	mu sync.Mutex
+	// calls 记录初始化调用次数。
+	calls int
+	// recoverCalls 记录收敛调用次数。
+	recoverCalls int
+	// result 是返回的初始化结果。
+	result app.TaskWorkspaceResult
+	// err 是返回的错误。
+	err error
+}
+
+// InitializeTaskWorkspace 返回受控的初始化结果。
+func (w *launchWorkspace) InitializeTaskWorkspace(
+	ctx context.Context,
+	request app.TaskWorkspaceRequest,
+) (app.TaskWorkspaceResult, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.calls++
+	return w.result, w.err
+}
+
+// RecoverInterrupted 记录收敛调用并返回 nil。
+func (w *launchWorkspace) RecoverInterrupted(ctx context.Context) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.recoverCalls++
+	return nil
+}
+
 // launchPlanner 是计划生成的替身。
 type launchPlanner struct {
 	mu sync.Mutex
@@ -235,6 +279,7 @@ type launchFixture struct {
 	environments *launchEnvironment
 	containers   *launchContainers
 	planner      *launchPlanner
+	workspace    *launchWorkspace
 	workflow     *launchWorkflow
 	service      *app.TaskLaunchService
 }
@@ -269,6 +314,7 @@ func newLaunchFixture(t *testing.T) *launchFixture {
 		environments: &launchEnvironment{},
 		containers:   &launchContainers{usable: true},
 		planner:      &launchPlanner{},
+		workspace:    &launchWorkspace{},
 		workflow:     &launchWorkflow{},
 	}
 	service, err := app.NewTaskLaunchService(app.TaskLaunchOptions{
@@ -276,6 +322,7 @@ func newLaunchFixture(t *testing.T) *launchFixture {
 		Environments: fixture.environments,
 		Containers:   fixture.containers,
 		Planner:      fixture.planner,
+		Workspace:    fixture.workspace,
 		Workflow:     fixture.workflow,
 	})
 	if err != nil {
@@ -300,6 +347,29 @@ func (f *launchFixture) setContainer(containerID string) {
 	f.store.task.ContainerID = containerID
 }
 
+// launchSucceededWorkspaceRecord 构造一条"该容器上工作区已就绪"的记录。
+func launchSucceededWorkspaceRecord(
+	t *testing.T,
+	taskID domain.ID,
+	containerID string,
+) domain.TaskWorkspaceInitRecord {
+	t.Helper()
+	record, err := domain.NewTaskWorkspaceInitRecord(
+		"",
+		taskID.String(),
+		containerID,
+		"docker-"+containerID,
+		domain.CodeSourceGit,
+		domain.DefaultContainerWorkDir,
+		time.Now(),
+	)
+	if err != nil {
+		t.Fatalf("构造工作区初始化记录失败: %v", err)
+	}
+	record.Status = domain.TaskWorkspaceInitStatusSucceeded
+	record.CommitSHA = "1111111111111111111111111111111111111111"
+	return record
+}
 func TestLaunchRunsContainerThenPlanThenWorkflow(t *testing.T) {
 	t.Parallel()
 	fixture := newLaunchFixture(t)
@@ -374,6 +444,10 @@ func TestLaunchSkipsPlanWhenStepsPersisted(t *testing.T) {
 	t.Parallel()
 	fixture := newLaunchFixture(t)
 	fixture.setContainer("container-existing")
+	// 计划已持久化且工作区已就绪：判定应直接进入工作流阶段。
+	fixture.store.workspaceRecords = []domain.TaskWorkspaceInitRecord{
+		launchSucceededWorkspaceRecord(t, fixture.store.task.ID, "container-existing"),
+	}
 	fixture.store.steps = []domain.Step{
 		launchFixtureStep(t, fixture.store.task.ID, domain.StepStatusPending),
 	}
@@ -396,6 +470,158 @@ func TestLaunchSkipsPlanWhenStepsPersisted(t *testing.T) {
 	}
 }
 
+// TestLaunchRunsContainerThenWorkspaceThenPlanThenWorkflow 校验四阶段顺序。
+func TestLaunchRunsContainerThenWorkspaceThenPlanThenWorkflow(t *testing.T) {
+	t.Parallel()
+	fixture := newLaunchFixture(t)
+	step := launchFixtureStep(t, fixture.store.task.ID, domain.StepStatusPending)
+	fixture.planner.result = app.PlanGenerationResult{
+		TaskID:     fixture.store.task.ID,
+		TaskStatus: domain.TaskStatusPlanned,
+		Persisted:  true,
+		Steps:      []domain.Step{step},
+	}
+	fixture.workspace.result = app.TaskWorkspaceResult{
+		Status:    domain.TaskWorkspaceInitStatusSucceeded,
+		Succeeded: true,
+		Commit:    "1111111111111111111111111111111111111111",
+	}
+	fixture.workflow.result = app.WorkflowRunView{
+		RunID:  domain.NewID(),
+		TaskID: fixture.store.task.ID,
+		Status: domain.WorkflowRunRunning,
+	}
+	fixture.environments.prepared = preparedContainer(t, fixture.store.task.ID)
+
+	result, err := fixture.service.Launch(context.Background(), app.TaskLaunchRequest{
+		TaskID: fixture.store.task.ID.String(),
+	})
+	if err != nil {
+		t.Fatalf("启动失败: %v", err)
+	}
+	if result.Stage != domain.TaskLaunchStageWorkflow {
+		t.Fatalf("阶段应为 workflow，实际 %s", result.Stage)
+	}
+	if fixture.environments.calls != 1 {
+		t.Fatalf("容器准备应调用 1 次，实际 %d", fixture.environments.calls)
+	}
+	if fixture.workspace.calls != 1 {
+		t.Fatalf("工作区初始化应调用 1 次，实际 %d", fixture.workspace.calls)
+	}
+	if fixture.planner.calls != 1 {
+		t.Fatalf("计划生成应调用 1 次，实际 %d", fixture.planner.calls)
+	}
+	if fixture.workflow.calls != 1 {
+		t.Fatalf("工作流启动应调用 1 次，实际 %d", fixture.workflow.calls)
+	}
+	if result.WorkspaceStatus != domain.TaskWorkspaceInitStatusSucceeded {
+		t.Fatalf("结果应如实报告工作区结论，实际 %s", result.WorkspaceStatus)
+	}
+	if result.WorkspaceCommit == "" {
+		t.Fatal("结果应如实报告工作区 commit")
+	}
+}
+
+// TestLaunchSkipsWorkspaceWhenAlreadyReady 校验已就绪时不再初始化工作区。
+func TestLaunchSkipsWorkspaceWhenAlreadyReady(t *testing.T) {
+	t.Parallel()
+	fixture := newLaunchFixture(t)
+	fixture.setContainer("container-existing")
+	fixture.store.workspaceRecords = []domain.TaskWorkspaceInitRecord{
+		launchSucceededWorkspaceRecord(t, fixture.store.task.ID, "container-existing"),
+	}
+	step := launchFixtureStep(t, fixture.store.task.ID, domain.StepStatusPending)
+	fixture.planner.result = app.PlanGenerationResult{
+		TaskID:     fixture.store.task.ID,
+		TaskStatus: domain.TaskStatusPlanned,
+		Persisted:  true,
+		Steps:      []domain.Step{step},
+	}
+	fixture.workflow.result = app.WorkflowRunView{
+		RunID:  domain.NewID(),
+		TaskID: fixture.store.task.ID,
+		Status: domain.WorkflowRunRunning,
+	}
+	result, err := fixture.service.Launch(context.Background(), app.TaskLaunchRequest{
+		TaskID: fixture.store.task.ID.String(),
+	})
+	if err != nil {
+		t.Fatalf("启动失败: %v", err)
+	}
+	if fixture.workspace.calls != 0 {
+		t.Fatalf("工作区已就绪时不得再次初始化，实际调用 %d 次", fixture.workspace.calls)
+	}
+	if result.Stage != domain.TaskLaunchStageWorkflow {
+		t.Fatalf("阶段应为 workflow，实际 %s", result.Stage)
+	}
+}
+
+// TestLaunchStopsAfterWorkspaceFailure 校验工作区失败后不再生成计划。
+func TestLaunchStopsAfterWorkspaceFailure(t *testing.T) {
+	t.Parallel()
+	fixture := newLaunchFixture(t)
+	fixture.setContainer("container-existing")
+	fixture.workspace.err = errors.New("目标目录非空")
+
+	result, err := fixture.service.Launch(context.Background(), app.TaskLaunchRequest{
+		TaskID: fixture.store.task.ID.String(),
+	})
+	if err == nil {
+		t.Fatal("工作区初始化失败时必须返回错误")
+	}
+	if result.FailureStage != domain.TaskLaunchStageWorkspace.String() {
+		t.Fatalf("失败阶段应为 workspace，实际 %s", result.FailureStage)
+	}
+	if fixture.planner.calls != 0 {
+		t.Fatalf("工作区失败后不得生成计划，实际调用 %d 次", fixture.planner.calls)
+	}
+	if fixture.workflow.calls != 0 {
+		t.Fatalf("工作区失败后不得启动工作流，实际调用 %d 次", fixture.workflow.calls)
+	}
+}
+
+// TestLaunchWithoutWorkspacePortReturnsPrerequisite 校验缺少能力时返回前置条件错误。
+func TestLaunchWithoutWorkspacePortReturnsPrerequisite(t *testing.T) {
+	t.Parallel()
+	fixture := newLaunchFixture(t)
+	fixture.setContainer("container-existing")
+	service, err := app.NewTaskLaunchService(app.TaskLaunchOptions{
+		Store:        fixture.store,
+		Environments: fixture.environments,
+		Containers:   fixture.containers,
+		Planner:      fixture.planner,
+		Workflow:     fixture.workflow,
+	})
+	if err != nil {
+		t.Fatalf("构造启动服务失败: %v", err)
+	}
+	if startErr := service.Start(context.Background()); startErr != nil {
+		t.Fatalf("启动服务失败: %v", startErr)
+	}
+	t.Cleanup(func() {
+		if stopErr := service.Stop(context.Background()); stopErr != nil {
+			t.Errorf("停止启动服务失败: %v", stopErr)
+		}
+	})
+	_, launchErr := service.Launch(context.Background(), app.TaskLaunchRequest{
+		TaskID: fixture.store.task.ID.String(),
+	})
+	if !errors.Is(launchErr, app.ErrTaskLaunchPrerequisite) {
+		t.Fatalf("缺少工作区能力时必须返回前置条件错误，实际 %v", launchErr)
+	}
+	if fixture.planner.calls != 0 {
+		t.Fatalf("缺少能力时不得生成计划，实际调用 %d 次", fixture.planner.calls)
+	}
+}
+
+// TestLaunchRecoversWorkspaceOnStart 校验启动时收敛工作区初始化残留。
+func TestLaunchRecoversWorkspaceOnStart(t *testing.T) {
+	t.Parallel()
+	fixture := newLaunchFixture(t)
+	if fixture.workspace.recoverCalls != 1 {
+		t.Fatalf("启动时应收敛一次工作区残留，实际 %d 次", fixture.workspace.recoverCalls)
+	}
+}
 func TestLaunchStopsAfterContainerFailure(t *testing.T) {
 	t.Parallel()
 	fixture := newLaunchFixture(t)

@@ -75,21 +75,27 @@ API 兼容性、Docker CLI 帮助信息、基础 Dockerfile 的外部 `FROM` 镜
   尚未支持，需要认证时返回明确错误，不静默降级为匿名访问。
 
 - 统一任务启动入口：`POST /api/v1/tasks/{taskID}/start`（CLI：`agentflow task start <task-id>`）
-  把「准备容器 → 生成计划 → 启动编排」收敛为一个入口。服务端依据数据库事实决定从哪个阶段
-  继续：已有受管理且运行中的容器时不会创建第二个容器；计划已持久化时不会重新生成。判定规则
-  集中在 `domain.DecideTaskLaunchNext`，不在 Handler 或 CLI 中重复实现。任一阶段失败立即停止，
+  把「准备容器 → 初始化工作区 → 生成计划 → 启动编排」收敛为一个入口。服务端依据数据库事实
+  决定从哪个阶段继续：已有受管理且运行中的容器时不会创建第二个容器；当前容器上工作区已就绪
+  时不会重新 Clone；计划已持久化时不会重新生成。判定规则集中在
+  `domain.DecideTaskLaunchNext`，不在 Handler 或 CLI 中重复实现。任一阶段失败立即停止，
   不自动重试、不删除容器、不重放外部操作；失败与中断一律保留容器现场。
-- 步骤占用启动恢复：进程在 Pi 调用期间退出会留下 `running` / `developing` / `verifying` 的
-  步骤，占用本身会阻止该步骤再次执行。`app.TaskLaunchService.RecoverStepOccupancy` 在服务
-  启动时把这类步骤收敛为 `recovery_required`，释放 `current_attempt_id` 并写入事件，不重放
-  任何 Agent 调用；所属任务仍有未结束执行记录时不抢占。
+- 任务级工作区初始化：`app.TaskWorkspaceService` 在任何 Step / Attempt 存在之前完成容器内
+  代码获取与任务分支准备，结果持久化到 `task_workspace_initializations`。它与尝试级的
+  `code_fetches` 是不同层次的概念：后者绑定具体 Attempt，前者以「任务 + 容器代次」为幂等
+  边界，因此不伪造 `step_id` / `attempt_id`。代码获取复用同一条 `source.Fetcher` 路径，
+  不存在第二套 Git 命令。远端结果无法确认时收敛为 `uncertain` 并返回 409，必须先核验容器内
+  实际状态，不得重放 Clone。
+- 启动恢复：进程退出会留下两类残留。`app.TaskLaunchService.RecoverStepOccupancy` 把
+  `running` / `developing` / `verifying` 的步骤收敛为 `recovery_required`，释放
+  `current_attempt_id` 并写入事件；`app.TaskWorkspaceService.RecoverInterrupted` 把停留在
+  `pending` / `running` 的工作区初始化记录收敛为 `uncertain`。两者都在服务启动时执行，
+  都不重放任何 Agent 调用或代码获取；所属任务仍有未结束执行记录时不抢占。
 
 第一版目标（尚未实现）：
 
 - 持久化任务队列，并限制同时执行的任务数量。
 - 计划版本化与重新规划：计划生成入口拒绝覆盖已有计划，重新规划尚未设计。
-- 代码初始化与统一启动的自动串联：`agentflow task start` 不会自动执行 `initialize-code`，
-  首次启动链路仍需另行初始化代码工作区。
 - Planner → Developer → Validator 的自动串联中的 Validator Agent 环节：当前只执行确定性
   检查，编排器不发起 Validator Session 调用。
 - 自动重试与退避策略。
@@ -239,7 +245,7 @@ make web-dev            # 等价于 cd lingting-agent-flow-ui && pnpm dev
 | POST   | `/api/v1/tasks/{taskID}/steps/{stepID}/execute` | 单步骤执行（真实 Pi 调用）             |
 | POST   | `/api/v1/tasks/{taskID}/steps/{stepID}/execute-and-validate` | 单步骤开发—验证闭环 |
 | POST   | `/api/v1/tasks/{taskID}/execute-steps` | 按序号显式顺序执行多个开发步骤        |
-| POST   | `/api/v1/tasks/{taskID}/start` | 统一启动：准备容器 → 生成计划 → 启动编排，返回 202 与真实阶段 |
+| POST   | `/api/v1/tasks/{taskID}/start` | 统一启动：准备容器 → 初始化工作区 → 生成计划 → 启动编排，返回 202 与真实阶段 |
 | POST   | `/api/v1/tasks/{taskID}/execute-workflow` | 启动任务级工作流执行，返回 202 与真实初始状态 |
 | GET    | `/api/v1/tasks/{taskID}/workflow` | 查询工作流执行进度（任务级编排）      |
 | POST   | `/api/v1/tasks/{taskID}/cancel-workflow` | 请求取消工作流执行            |
@@ -954,27 +960,35 @@ Content-Type: application/json
 统一启动入口（推荐）：
 
 ```bash
-# 一个入口完成：准备容器 → 生成计划 → 启动编排
+# 一个入口完成：准备容器 → 初始化工作区 → 生成计划 → 启动编排
 ./bin/agentflow task start <task-id>
 
-# 已有可用容器与已持久化计划时，前面两步会被跳过，不会创建第二个容器
+# 已有可用容器、已就绪工作区与已持久化计划时，前面几步会被跳过，不会创建第二个容器
 ./bin/agentflow task start <task-id> --prompt "优先保证兼容性" --timeout 30m --wait=false
 ```
 
-`task start` 只调用 `POST /api/v1/tasks/{taskID}/start`：要不要建容器、要不要生成计划
-由服务端依据数据库事实决定（`domain.DecideTaskLaunchNext`），命令层不装配 SSH、容器、
-Pi 或代码保存能力，也不会在服务不可达时退回本机执行。
+`task start` 只调用 `POST /api/v1/tasks/{taskID}/start`：要不要建容器、要不要初始化工作区、
+要不要生成计划由服务端依据数据库事实决定（`domain.DecideTaskLaunchNext`），命令层不装配
+SSH、容器、Pi 或代码保存能力，也不会在服务不可达时退回本机执行。
+
+工作区初始化结果无法确认（`uncertain`）时接口返回 409：此时容器内代码状态不明，
+必须先核验现场，不能重放 Clone。
 
 需要分步执行时仍可使用底层动作：
 
 ```bash
-# 1. 准备容器与容器内代码工作区（一次执行一个全新容器）
+# 1. 准备容器（一次执行一个全新容器）
 ./bin/agentflow execenv prepare-task <task-id>
 
-# 2. 在容器内调用 Planner 生成并持久化计划
+# 2. 在容器内获取代码并准备 agent/<task-id> 分支
+#    task start 已自动完成这一步；分步执行时也可单独调用
+./bin/agentflow execenv prepare-task <task-id> --attempt <attempt-id>
+./bin/agentflow code init --task <task-id> --step <step-id> --attempt <attempt-id>
+
+# 3. 在容器内调用 Planner 生成并持久化计划
 ./bin/agentflow task plan <task-id>
 
-# 3. 通过服务启动任务级工作流并等待收敛
+# 4. 通过服务启动任务级工作流并等待收敛
 ./bin/agentflow task run <task-id>
 ```
 
@@ -1259,7 +1273,7 @@ go run ./cmd/agentflow --help
 任务执行的完整链路（需要先启动 `agentflow server`）：
 
 ```bash
-# 推荐：一个入口完成准备容器 → 生成计划 → 启动编排
+# 推荐：一个入口完成准备容器 → 初始化工作区 → 生成计划 → 启动编排
 ./bin/agentflow task start <task-id>
 ./bin/agentflow task start <task-id> --prompt "优先保证兼容性" --timeout 30m --wait=false
 
@@ -1267,20 +1281,24 @@ go run ./cmd/agentflow --help
 # 1. 依据任务记录准备执行环境：校验配置、准备镜像、创建全新容器并写回任务关联
 ./bin/agentflow execenv prepare-task <task-id>
 
-# 2. 在容器内调用 Planner 生成并持久化计划
+# 2. 在容器内获取代码并准备任务分支（task start 已自动完成这一步）
+./bin/agentflow code init --task <task-id> --step <step-id> --attempt <attempt-id>
+
+# 3. 在容器内调用 Planner 生成并持久化计划
 ./bin/agentflow task plan <task-id>
 ./bin/agentflow task plan <task-id> --prompt "优先保证兼容性" --timeout 15m
 
-# 3. 启动任务级工作流执行并轮询真实进度
+# 4. 启动任务级工作流执行并轮询真实进度
 ./bin/agentflow task run <task-id>
 ./bin/agentflow task run <task-id> --address 127.0.0.1:26380 --timeout 30m --verify-timeout 10m
 ./bin/agentflow task run <task-id> --wait=false   # 只发起请求，立即返回真实初始状态
 ```
 
 `task start` 调用 `POST /api/v1/tasks/{taskID}/start`：服务端依据数据库事实决定从哪个阶段继续，
-已有受管理且运行中的容器时不会创建第二个容器，计划已持久化时不会重新生成。响应显式区分
-`stage`、`task_status`、`container_prepared`、`plan_persisted` 与 `workflow_started`，任一为
-false 都不得当作"任务已开始执行"。该命令不自动重试、不删除容器、不重放外部操作。
+已有受管理且运行中的容器时不会创建第二个容器，当前容器上工作区已就绪时不会重新 Clone，
+计划已持久化时不会重新生成。响应显式区分 `stage`、`task_status`、`container_prepared`、
+`workspace_status`、`workspace_commit`、`plan_persisted` 与 `workflow_started`，任一为 false
+都不得当作"任务已开始执行"。该命令不自动重试、不删除容器、不重放外部操作。
 `task plan` 调用 `POST /api/v1/tasks/{taskID}/plan`：它在任务容器内调用 Planner，把输出校验
 为结构化计划后一次写入数据库，计划固定以 `plan` 阶段步骤开头、其后是 `develop` 步骤。
 该命令不创建容器、不自动重试、不覆盖已有计划。
@@ -1757,7 +1775,6 @@ SSH 连接层按三层覆盖：`tests/unit/ssh/`（主机密钥、认证配置�
 
 - 需求队列、Worker 与并发调度（`internal/scheduler`）。
 - 持久化任务队列与任务自动领取。
-- 代码初始化与统一启动的自动串联：`agentflow task start` 不会自动执行 `initialize-code`。
 
 - Validator Agent 调用接入：验证结论当前只来自确定性检查命令。
 - 旧容器的显式处置命令：`task retry` / `task recover` 已随 `internal/workflow` 引擎包移除，
