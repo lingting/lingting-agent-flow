@@ -82,6 +82,10 @@ func (s *TaskLaunchService) Launch(
 	// 并不蕴含"计划还需要生成"。判定只在 domain 中定义一次，这里只复用它读到的
 	// 事实，不重新判断业务语义。
 	needsPlan := len(input.Steps) == 0
+	// 计划是否已持久化与"本次是否执行了计划生成"是两件事：计划早已落库时启动会
+	// 跳过 plan 阶段，但它依然是已持久化的计划。因此这里先按读到的持久化事实给出
+	// 结论，只有真正执行了计划生成时才用生成结果覆盖。
+	result.PlanPersisted = !needsPlan
 	s.appendEvent(runCtx, task.ID, domain.EventTypeTaskStarted, map[string]any{
 		"stage":        string(stage),
 		"status":       string(input.Task.Status),

@@ -74,6 +74,8 @@ type planOptions struct {
 type planStore struct {
 	app.TaskWorkflowStore
 	updateTaskErr error
+	// createStepsErr 使事务内的步骤写入失败，用于验证整体回滚。
+	createStepsErr error
 }
 
 // UpdateTaskIfStatus 在配置了错误时返回该错误。
@@ -86,6 +88,33 @@ func (s *planStore) UpdateTaskIfStatus(
 		return s.updateTaskErr
 	}
 	return s.TaskWorkflowStore.UpdateTaskIfStatus(ctx, task, expected)
+}
+
+// WithTx 在配置了步骤写入失败时把失败注入到真实事务内部。
+//
+// 只有把失败放进真实事务回调，才能验证"部分步骤不落库、状态不先于步骤推进"的
+// 回滚语义：在事务之外注入失败只会让请求在进入事务之前就被拒绝，覆盖不到回滚。
+func (s *planStore) WithTx(
+	ctx context.Context,
+	fn func(ctx context.Context, tx storage.Tx) error,
+) error {
+	if s.createStepsErr == nil {
+		return s.TaskWorkflowStore.WithTx(ctx, fn)
+	}
+	return s.TaskWorkflowStore.WithTx(ctx, func(ctx context.Context, tx storage.Tx) error {
+		return fn(ctx, &failingStepTx{Tx: tx, createStepsErr: s.createStepsErr})
+	})
+}
+
+// failingStepTx 包装真实事务，只把步骤写入替换为可控失败。
+type failingStepTx struct {
+	storage.Tx
+	createStepsErr error
+}
+
+// CreateSteps 返回配置的错误，使事务整体回滚。
+func (t *failingStepTx) CreateSteps(ctx context.Context, steps []domain.Step) error {
+	return t.createStepsErr
 }
 
 // newPlanFixture 在工作空间中准备一套可发起计划生成的测试数据。
@@ -220,6 +249,7 @@ func newPlanFixture(t *testing.T, options planOptions) *planFixture {
 	store := &planStore{
 		TaskWorkflowStore: db,
 		updateTaskErr:     options.updateTaskErr,
+		createStepsErr:    options.createStepsErr,
 	}
 	containers := &taskWorkflowContainer{
 		running:      true,
@@ -543,21 +573,30 @@ func TestGeneratePlanRejectsPrerequisites(t *testing.T) {
 // TestGeneratePlanRollsBackOnPersistFailure 校验计划写入失败整体回滚。
 func TestGeneratePlanRollsBackOnPersistFailure(t *testing.T) {
 	t.Parallel()
-	fixture := newPlanFixture(t, planOptions{})
-	// 通过状态条件更新失败模拟事务内写入失败：事务必须整体回滚，步骤不落库。
-	fixture.store.updateTaskErr = storage.ErrConflict
-
+	// 失败注入到事务内部的步骤写入：Planner 已经真实执行完成，只有回滚能阻止
+	// 半成品计划落库。把失败注入到事务之外（例如任务状态条件更新）只会让请求在
+	// 进入事务之前就被拒绝，覆盖不到回滚语义。
+	fixture := newPlanFixture(t, planOptions{
+		createStepsErr: errors.New("写入计划步骤失败"),
+	})
 	result, err := fixture.service.GeneratePlan(fixture.ctx, app.GeneratePlanRequest{
 		TaskID: fixture.task.ID.String(),
 	})
 	if err == nil {
 		t.Fatalf("写入失败必须返回错误")
 	}
+	if fixture.containers.agentCalls == 0 {
+		t.Fatal("写入失败路径必须发生在 Planner 调用之后，否则覆盖不到事务回滚")
+	}
 	if result.Persisted {
 		t.Fatalf("写入失败不得报告计划已就绪")
 	}
+	// 事务整体回滚：不得留下任何步骤，也不得让任务进入 planned。
 	if len(fixture.steps(t)) != 0 {
 		t.Fatalf("事务回滚后不得留下步骤")
+	}
+	if task := fixture.taskStatus(t); task.Status == domain.TaskStatusPlanned {
+		t.Fatalf("事务回滚后任务不得进入 planned，实际 %s", task.Status)
 	}
 }
 
