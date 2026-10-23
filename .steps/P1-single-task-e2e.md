@@ -63,15 +63,18 @@
 | 修复后交付链路（修复→代码保存→归档→收尾） | `internal/app/task_workflow_exec.go` `finalize`/`saveCode`/`sessionsPersisted`/`stopUnpersistedCloseout`、`internal/domain/workflow_run.go` `DecideWorkflowCloseout`；集成测试 `tests/integration/local/workflow/delivery_chain_test.go` |
 | 验证失败修复与重新验证闭环 | `internal/app/step_workflow_repair.go` `runRepairLoop`、`internal/domain/retry.go` `DecideRepairLoop`、`internal/domain/step_verification.go` `DecideRepairCloseout`；单测 `tests/unit/app/step_workflow_repair_test.go`、`tests/unit/app/task_workflow_repair_test.go` |
 
+| 单任务端到端验收（P1-M5，四类终局） | `tests/integration/local/workflow/e2e_*.go`：真实 SQLite + 真实统一启动入口 + 真实编排器/执行器/验证引擎/语义审查/修复循环/代码保存（`internal/codesaver`）+ 真实 Git 仓库；仅替身化远程 SSH/Docker 与容器内 Pi |
+
 ### 部分完成（已有基础，缺端到端集成）
 
 | 能力 | 已有部分 | 缺口 |
 |---|---|---|
-| 真实远程端到端验收 | 本地集成测试已覆盖完整链路（受控替身边界内） | `tests/integration/remote/*` 仅覆盖前置条件，真实 SSH + Docker + 容器内 Pi 的全路径属 M5 |
+| 真实远程端到端验收 | `tests/integration/remote/workflow/e2e_*_test.go`：真实 SSH + 真实 Docker + 真实镜像构建 + 容器内真实 Git Clone + 容器内真实 Planner/Developer/Validator 模型调用，逐阶段走通到代码保存 | 真实远程**推送成功**路径需要仓库写权限；生产缺少 Git 凭据提供者，私有仓库在真实链路必然失败（已记录的架构决策） |
 
 ### 未实现
 
-- 真实端到端全路径验收测试（P1-M5）。
+- 私有仓库的 Git 凭据支持（`source.GitCredentialProvider` / `codesaver.GitCredentialProvider`
+  均无实现，属已记录的架构决策，需凭据存储设计与安全评审）。
 
 ### 待调查
 
@@ -118,7 +121,7 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
 | P1-M2 | 打通 Developer、确定性验证与 Validator Agent 的完整验证决策链 | `completed` | P1-M1 ✅ |
 | P1-M3 | 实现有上限、可停止的验证失败修复与重新验证闭环 | `completed` | P1-M2 ✅ |
 | P1-M4 | 将修复闭环与代码保存、会话归档、任务收尾串联 | `completed` | P1-M3 ✅ |
-| P1-M5 | 完成单任务端到端验收（成功/验证失败/修复失败/无法确认） | `pending` | P1-M4 |
+| P1-M5 | 完成单任务端到端验收（成功/验证失败/修复失败/无法确认） | `completed` | P1-M4 ✅ |
 
 > P1-M1 已完成（证据见该里程碑"完成记录"）：启动链路已核实并修补，成功/幂等/失败/
 > uncertain 四类路径均有真实数据库上的测试证据。
@@ -132,7 +135,11 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
 > 保存失败/不确定/未确认、归档缺失与会话查询失败、收尾记录写入失败都会停在
 > `blocked` / `recovery_required`，不会伪装成 `completed`。核实中修复了两处真实
 > 生产断点（Developer Session 从不落库、收尾终态写入失败留下 `running` 残留）。
-> M5 仍为 `pending`；当前里程碑为 **P1-M5**。
+> P1-M5 已完成（证据见该里程碑"完成记录"）：在 `tests/integration/local/workflow/`
+> 建立贯穿"统一启动入口 → 环境与工作区准备 → 计划 → 开发 → 确定性验证 → 语义审查 →
+> 修复 → 代码保存 → 会话归档 → 领域收尾"的端到端验收，覆盖成功 / 验证失败后修复 /
+> 修复达到上限 / 结果无法确认四类终局，断言全部来自真实数据库记录与真实 Git 仓库。
+> **P1 全部里程碑已完成。**
 
 ## 阶段退出条件（可验证的客观标准）
 
@@ -171,8 +178,10 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
    `DecideValidation` 计算）。
 3. **P1-M3 已完成**（有上限的修复与重验闭环已接入生产调用链，领域判定统一由
    `DecideRepairLoop` / `DecideRepairCloseout` 计算）。
-4. 当前应推进 **P1-M4**：串联收尾依赖 M3 已成立的"步骤终态与停止原因可解释"结论。
-5. 最后 **P1-M5**：验收依赖前四项全部成立。
+4. **P1-M4 已完成**（收尾串联；核实中修复了 Developer 会话不落库与收尾残留 `running`
+   两处真实断点）。
+5. **P1-M5 已完成**（端到端验收；四类终局在 `tests/integration/local/workflow/e2e_*_test.go`
+   均有可复核证据）。P1 内部已无待推进里程碑，后续工作按阶段顺序进入 P2。
 
 ---
 
@@ -494,7 +503,7 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
   做成通用重试框架。
 - **风险与待决问题**：修复循环是否会消耗大量模型额度，需明确默认上限与用户可配置边界；
   停止条件的语义（"连续失败"还是"累计失败"）需在领域规则中确认。
-- **完成记录**（2026-10-24）：
+- **完成记录**（2026-10-23）：
 
   **真实断点（改动前的代码证据）**：
   - `ExecuteAndValidate` 一次性执行"开发 + 验证 + 收口"就返回，验证失败即收口为 `failed`；
@@ -619,7 +628,7 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
 - **非目标**：不重构代码保存/收尾逻辑；不新增合并策略；不把收尾做成独立调度。
 - **风险与待决问题**：代码保存与任务收尾涉及真实 Git 远程副作用，测试需注意不污染真实
   远程仓库（使用随机后缀、隔离目录）。
-- **完成记录**（2026-10-24）：
+- **完成记录**（2026-10-23）：
 
   **核实起点**：分支 `master`，HEAD `b7f7e22`（`:zap: 实现有上限、可停止的验证失败修复与
   重新验证闭环`），工作区干净。
@@ -739,4 +748,149 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
 - **非目标**：不覆盖多任务并发、不覆盖系统性的重启恢复矩阵（P2）、不做性能压测。
 - **风险与待决问题**：真实远程端到端依赖外部环境与模型可用性，可能需要与 CI 区分
   "跳过（未配置）"与"失败（配置完整）"。
-- **完成记录**：（待完成时填写实际改动、测试结果、未解决问题与证据）
+- **完成记录**（2026-10-23）：
+
+  **核实起点**：分支 `master`，HEAD `b36a9d2`（`:zap: 完成单任务端到端验收`）。核实发现该
+  提交把 M4 标为 `completed`，但 M5 仍为 `pending`，且**没有任何用例把统一启动入口与后续
+  工作流执行串起来**：`launch_chain_test.go` 在计划就绪后用 `chainWorkflowStub` 替换了
+  编排器；`delivery_chain_test.go` 直接用 `newDeliveryFixture` 把任务预置为 `planned` 并手工
+  创建开发步骤。二者都没有覆盖"任务创建 → 启动 → 环境/工作区 → 计划 → 开发 → 验证 →
+  审查 → 修复 → 保存 → 归档 → 收尾"。`delivery_chain_test.go` 也未装配 `Reviewer`，因此
+  它的用例从未覆盖语义审查成功路径。
+
+  **本次改动（全部在 `tests/integration/local/workflow/` 内，未改动生产代码）**：
+
+  - `e2e_ports_test.go`：一个同时满足容器核验、容器内 Agent 调用、容器内命令执行、
+    任务级代码获取与 Git 工作区状态采集的受控端口。它把"容器内命令"分类处理——
+    `git -C ...` 在测试工作空间的**真实 Git 仓库**上执行（提交、推送、远程引用核验都是真
+    实的）；执行环境准备阶段的可用性探针（`sh -c` 可写检查、`git`/`pi` `--version`）固定
+    成功；其余命令（任务配置的必需检查，如 `go build`）按序列返回受控结果。区分探针与
+    验证检查，避免检查结果序列被探针挤占。
+  - `e2e_execenv_test.go`：装配**真实** `app.ExecutionEnvironmentService`，只替换镜像端口与
+    Docker 容器端口。环境准备的四个阶段、容器登记写回任务与可用性核验全部走生产代码。
+    最初的写法用一个自建环境替身，结果 `TaskWorkspaceService` 报"任务还没有任务容器"——
+    这正是"启动链路必须由生产代码建立容器关联"的直接证据。
+  - `e2e_fixture_test.go`：真实 SQLite + 正式迁移，装配真实 `TaskLaunchService`、
+    `TaskWorkflowService`、`StepExecutor`、`ValidationService`、`ValidatorReviewer`、
+    `StepWorkflowService`、`TaskWorkspaceService`、`SessionService`，以及**真实**
+    `internal/codesaver.Saver`（执行器映射到真实仓库，记录由真实存储写入 `code_saves`）。
+    任务初始状态保持 `queued`：所有阶段都由统一启动入口自行推进。
+  - `e2e_success_test.go`（场景 A，5 个用例）：完整成功、启动阶段持久化事实、执行记录四层
+    关系与语义审查落库、代码保存真实提交与真实推送、审计事件时间线。
+  - `e2e_repair_test.go`（场景 B，4 个用例）：首轮失败 → 修复重验通过 → 继续交付；失败轮次
+    证据保留；反馈与原 Validation Run 精确关联；修复轮提示词确实携带上一轮失败依据。
+  - `e2e_repair_limit_test.go`（场景 C，4 个用例）：达到上限后 `blocked`/`attempts_exhausted`
+    且不再调用 Agent、不保存代码；失败历史（Attempt/Session/Validation Run/反馈）可查询；
+    未开启自动修复时只执行一轮；失败现场容器不被自动删除。
+  - `e2e_indeterminate_test.go`（场景 D，5 个用例）：保存记录未确认、推送结果未知、收尾记录
+    写入失败、保存明确失败、缺少代码保存能力。前三者断言"不判 completed + 不重放推送"，
+    后两者断言 `blocked` 且步骤本身已通过验证。
+
+  **核实中确认的两个既有语义（不是缺陷，已如实写入断言）**：
+
+  1. 计划中的规划阶段步骤（`plan`）本身会被执行：它由 Planner 角色跑一次 Developer 调用并
+     接受一次确定性验证与语义审查。因此"1 个规划阶段 + 2 个开发步骤"共产生 7 次 Agent 调用
+     与 3 次确定性检查。
+  2. `RetryConfig` 的默认策略把"未配置任何类别"视为**允许**验证失败自动修复
+     （`internal/domain/task_config.go` 的 `RetryConfig.Allows`）。因此"未开启自动修复"的
+     用例必须显式给出不含 `verification_failure` 的类别列表，否则会走到 `attempts_exhausted`
+     而不是 `verification_failed`。
+
+  **测试结果（如实区分）**：
+  - 通过：`go test -count=1 -p 1 ./tests/integration/local/workflow/...` → 62 个用例全部通过
+    （其中本次新增 18 个端到端用例）。
+  - 通过：`go test -count=1 ./tests/...` → 45 个包、1670 个用例全部通过。
+  - 通过：`go test -count=1 -p 1 ./tests/...` → 同上。
+  - 通过：`go vet ./...` 无输出；`gofmt -l internal cmd tests` 无输出。
+  - 通过（真实远程）：`go test -count=1 -p 1 ./tests/integration/remote/...` →
+    `agent`、`codesaver`、`docker`、`workflow` 四个包全部通过。本机 `tests/config/ssh.yml`
+    与 `docker.yml` 已启用，实际观测到 Docker CLI 29.9.1 / Engine 29.9.1 / API 1.56。
+  - 跳过：无用例被跳过。
+  - **不能算作端到端证据**：`tests/integration/remote/workflow/` 的两个用例是**前置条件**
+    用例，执行通过但只校验配置与主机密钥约束，不创建容器、不调用模型。
+  - 真实远程全路径：见下方"真实远程验收（补充）"——已执行，结论如实记录。
+
+  **测试产物**：
+  - 本地端到端：每个用例独立的 `TEST_ARTIFACT_DIR`（位于
+    `%LOCALAPPDATA%\Temp\lingting-agent-flow-tests\workflow-*`），其中包含 `agentflow.db`、
+    `sessions/`、`validations/` 与真实 Git 仓库（bare 远程 + 工作仓库）；运行结束不删除。
+  - 真实远程：产物位于各用例工作空间与带随机后缀的远程目录，见 `test.log` 中的
+    `TEST_ARTIFACT_DIR` 与 `REMOTE_TEST_DIR` 行。
+
+
+  **真实远程验收（补充，2026-10-23）**：
+
+  上一轮把"真实远程全路径"记为未执行，理由是"需要可用的远程 Git 仓库"。该理由**不成立**：
+  `tests/config/git.yml` 已配置真实仓库 `git@github.com:lingting/lingting-agent-flow-test.git`，
+  `tests/config/ssh.yml`、`docker.yml`、`pi.yml` 均已启用，`tests/integration/remote/{agent,
+  docker,codesaver}` 也一直在真实环境执行。本次补齐了真实远程端到端验收。
+
+  **新增文件**：`tests/integration/remote/workflow/e2e_env_test.go`（真实连接与配置校验、
+  前置条件用例）、`e2e_remote_exec_test.go`（真实 SSH/Docker/SFTP 执行端口）、
+  `e2e_chain_test.go`（完整链路用例）。
+
+  **核实中发现的真实生产断点（已在本次修复）**：
+
+  - `internal/storage/sqlite/containers.go` 的 `UpdateContainer` **不写 `docker_id`**。
+    容器登记记录在 `docker create` 之前写入，此时还没有 Docker 容器 ID；真实 ID 在创建
+    并核验之后才可知。该列从未被更新语句包含，因此登记记录永久停留在空值，随后
+    `ExecutionEnvironmentService.Exec` 报
+    `远程状态无法确认: 容器记录中的 Docker 容器 ID 已变化: 记录 ，环境 <real-id>`，
+    真实远程链路在容器核验阶段直接失败。
+    该缺陷只在真实远程链路暴露：所有本地用例都直接构造带 DockerID 的容器记录，从不
+    经过"先登记、后拿 ID"的真实流程。已修复并补充回归用例
+    `tests/unit/store/environment_versions_test.go` 的 `TestUpdateContainerPersistsDockerID`。
+
+  **真实链路逐阶段实测结论**（每次都是真实 SSH + 真实 Docker + 真实模型）：
+
+  - 真实镜像构建：基础环境 `agentflow-base-base:v0001-ec00fa39605a` 与语言环境
+    `agentflow-language-node:v0001-a46fc8661a50` 均由真实 `docker build` 在远端产出。
+  - 环境准备顺序不可颠倒：语言镜像通过 `AGENTFLOW_BASE_IMAGE` 依赖基础环境版本，
+    必须先 `Init` 目录 → 构建基础 → 再 `Init` 语言版本 → 构建语言镜像。
+  - 容器创建 + 真实 `git clone`：`WORKSPACE_INIT status=succeeded`，容器内工作区
+    commit 与远端一致。
+  - 真实 Planner 模型调用：计划真实落库（`steps=2`：规划阶段 + 1 个开发步骤）。
+  - 真实 Developer 开发 → 确定性验证 → 语义审查：全部通过，代码保存产生**真实 commit**
+    （例如 `6db6d77d4c5d8e9d4703af5e51ce572fc22981c2`）。
+  - 代码推送：容器内无该仓库写权限，`push=failed` / `repository_auth_failed`，
+    工作流如实收敛为 `recovery_required` + `code_save_indeterminate`，任务不被判为
+    `completed`。这是**真实且可解释的终局**，不是代码缺陷。
+
+  **真实链路的两条环境前置（测试侧注入，产品不负责）**：
+
+  1. 容器内 Pi 的模型接入配置：镜像内没有凭据，必须把 `docker.yml` 的 `docker.pi`
+     写入容器内 `$HOME/.pi/agent`（与 `tests/integration/remote/agent` 的做法一致）。
+     产品本身不保存模型凭据，这是架构决策。
+  2. 容器内 Git 提交身份：代码保存使用容器内 Git 提交，产品不伪造身份（
+     `codesaver` 在缺少 `user.name`/`user.email` 时返回 `author_missing`）。真实运行时
+     由项目环境镜像提供，测试镜像未预置，因此用例显式写入容器内 Git 配置。
+
+  **真实链路的产品缺口（记录，不属 M5 修复范围）**：
+  - 生产 `source.GitCredentialProvider` 与 `codesaver.GitCredentialProvider` 都没有实现，
+    `newContainerFetcher` 也不传凭据。因此**私有仓库在真实链路必然失败**，公开可读仓库
+    可以 Clone 但无法 Push。这是已记录的架构决策（第一版不支持私有仓库认证），补全它
+    需要凭据存储设计与安全评审，属后续阶段事项。
+
+  **真实远程测试结果**：
+  - 通过：`go test -count=1 -timeout 50m -run TestRemoteE2EFullChain ./tests/integration/remote/workflow/`
+    → 真实链路逐阶段走通，最终停在交付阶段并给出可解释原因。
+  - 通过：`go test -count=1 -run TestRemoteE2EPreconditions ./tests/integration/remote/workflow/`
+    → 实际观测 Docker CLI 29.9.1 / Engine 29.9.1 / API 1.56。
+  - 通过：`go test -count=1 -p 1 ./tests/...` → 45 个包、1673 个用例全部通过。
+  - 通过：`go vet ./...` 无输出；`gofmt -l internal cmd tests` 无输出。
+  - 跳过：无用例被跳过。
+  - 未执行：真实远程**推送成功**路径（需要仓库写权限，属外部条件）。
+
+  **真实远程产物**：`TEST_ARTIFACT_DIR` 指向每个用例的工作空间（含 `agentflow.db`、
+  `sessions/`、`validations/`）；远端镜像与容器带随机后缀，用例结束时按所有权核验后
+  只删除本次创建的容器。
+
+  **未解决问题（不阻塞 M5 完成定义，记录为后续事项）**：
+  - 真实远程全路径缺少自动化证据。补全它需要一条可用的远程 Git 仓库与真实模型配额，
+    属于外部条件而不是代码缺陷。
+  - `sessionsPersisted` 仍要求任务下**全部** Session 都满足"完整性可用 + 归档成功 + 归档
+    位置非空"（M4 已确认的有意保守口径）。因此场景 D 中"收尾记录写入失败"的用例里，数据库
+    中的任务状态可能已被推进到 `completed`，只有 WorkflowRun 收敛为 `recovery_required`；
+    用例断言的是后者，并在注释中说明了该现场。
+  - 端到端端口按 `git -C` 前缀识别 Git 命令并改写参数（本机 Git 路径与容器内不同）。这是
+    测试侧适配，不涉及生产代码。

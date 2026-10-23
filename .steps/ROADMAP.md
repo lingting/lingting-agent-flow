@@ -4,7 +4,9 @@
 > 撰写依据：commit `330e7c4`（2026-10-23）工作区的实际代码与测试状态，非旧对话或 README 推断；
 > P1-M1 已在 commit `a0ee19b` 之后按实际核实与改动更新；
 > P1-M2 已在 HEAD `3219591` 之后按实际接入与改动更新；
-> P1-M3 已在 HEAD `2545e74` 之后按实际接入与改动更新。
+> P1-M3 已在 HEAD `2545e74` 之后按实际接入与改动更新；
+> P1-M4 已在 HEAD `b7f7e22` 之后按实际核实与改动更新；
+> P1-M5 已在 HEAD `b36a9d2` 之后按实际核实与改动更新。
 
 ## 项目最终业务目标
 
@@ -32,21 +34,32 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 
 ## 当前实现状态摘要（基于代码证据）
 
-> **当前里程碑：P1-M5**（P1-M1、P1-M2 已于 2026-10-23 完成，P1-M3 与 P1-M4 已于
-> 2026-10-24 完成，证据见 `P1-single-task-e2e.md` 的对应"完成记录"）。
+> **当前阶段：P1 已完成**（P1-M1、P1-M2 于 2026-10-23 完成，P1-M3、P1-M4 于 2026-10-23
+> 完成，P1-M5 于 2026-10-23 核实并完成；证据见 `P1-single-task-e2e.md` 的对应"完成记录"）。
 >
 > P1-M4 的核实结论：修复闭环确实在生产调用链内并自然进入交付阶段；核实中修复了两处
 > 真实生产断点——(1) Developer 执行从不写入 Session 记录（`callAgent` 只 `Load` 而不
 > `Start`/`Finish`，导致归档核验对 Developer 会话完全空转），(2) 收尾终态写入失败时会
 > 静默留下 `running` 残留（`completed → recovery_required` 被状态机拒绝后无兜底）。
-> 完整链路现在有本地集成证据（`tests/integration/local/workflow/delivery_chain_test.go`）。
 >
-> **待调查事项（不影响 M1/M2 已完成结论）**：
+> P1-M5 的核实结论：此前**没有任何用例把统一启动入口与后续工作流执行串起来**
+> （`launch_chain_test.go` 用替身替换编排器，`delivery_chain_test.go` 预置 `planned` 任务），
+> 因此 M5 在 `tests/integration/local/workflow/e2e_*_test.go` 新建 18 个端到端用例，从
+> `queued` 任务出发贯穿启动 → 环境/工作区 → 计划 → 开发 → 确定性验证 → 语义审查 → 修复 →
+> 代码保存 → 会话归档 → 收尾，覆盖成功 / 修复 / 修复上限 / 无法确认四类终局；代码保存使用
+> 真实 `internal/codesaver` 落在真实 Git 仓库上（真实提交与真实推送）。
+>
+> **待调查事项（不阻塞 P1 已完成结论）**：
 > - `TestPlanGenerationInterruptedByShutdown` 在干净工作区上以约 40% 概率失败（测试内
 >   `duringCall` 用 goroutine 触发 Stop，与取消传播存在竞态）。属既有测试缺陷，
 >   待 P2（可靠性与恢复）阶段处理。
-> - `tests/integration/remote/workflow/` 尚未覆盖真实远程"启动到计划"与真实远程 Validator
->   调用，留待 P1-M5 端到端验收。
+> - 真实远程全路径已自动化并通过：`tests/integration/remote/workflow/e2e_*_test.go` 用真实
+>   SSH + 真实 Docker + 真实镜像构建 + 容器内真实 Git Clone + 容器内真实模型调用，逐阶段
+>   走通到代码保存。核实中修复了一处真实生产断点：`UpdateContainer` 不写 `docker_id`，
+>   导致真实远程链路在容器核验阶段失败（本地用例从不经过"先登记、后拿 ID"的流程）。
+> - 真实远程**推送成功**路径仍未覆盖：生产 `source.GitCredentialProvider` 与
+>   `codesaver.GitCredentialProvider` 都没有实现，私有仓库在真实链路必然失败。这是已记录的
+>   架构决策（第一版不支持私有仓库认证），补全需要凭据存储设计与安全评审。
 
 **已实现且有代码证据（可直接复用）**：
 
@@ -101,6 +114,13 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - 验证失败修复依据：`validation_feedbacks` 已持久化并按 `ValidationRunID` 精确引用
   （`internal/app/step_workflow_prompt.go`、`step_workflow_repair.go` 的 `repairPrompt`），
   读取失败或归属不符时停止循环而不是静默降级。
+- **单任务端到端验收**（P1-M5）：本地 `tests/integration/local/workflow/e2e_*_test.go`
+  （18 个用例）+ 真实远程 `tests/integration/remote/workflow/e2e_*_test.go`。真实 SQLite + 正式迁移、真实统一启动入口（`app.TaskLaunchService`）与真实
+  `app.ExecutionEnvironmentService` 四阶段准备、真实编排器/执行器/验证引擎/语义审查/
+  修复循环/收尾决策，以及真实 `internal/codesaver` 与真实 Git 仓库；只替身化远程 SSH、
+  Docker 与容器内 Pi 进程。四类终局：成功（`completed`，代码真实推送、全部会话已归档）、
+  验证失败后修复重验成功、修复达到上限（`blocked`/`attempts_exhausted`，历史全部保留）、
+  结果无法确认（`recovery_required`，不重放外部副作用）。
 - **修复后交付与任务收尾闭环**（P1-M4）：`internal/app/task_workflow_exec.go` 的
   `finalize` → `saveCode` → `sessionsPersisted` → `applyCloseout` 顺序执行，收尾结论只由
   `domain.DecideWorkflowCloseout` 计算。核实中修复两处真实断点：
@@ -116,7 +136,8 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 **尚未实现**：
 
 - 多任务调度队列、有界并发与任务领取。
-- 真实端到端全路径验收测试（成功 / 验证失败 / 修复失败 / 无法确认结果）。
+- 私有仓库的 Git 凭据支持：`source.GitCredentialProvider` 与 `codesaver.GitCredentialProvider`
+  均无实现，真实链路上私有仓库必然失败（已记录的架构决策，需凭据存储设计与安全评审）。
 
 **待调查**：
 

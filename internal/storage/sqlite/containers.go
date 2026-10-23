@@ -41,21 +41,26 @@ func (s containerStore) CreateContainer(ctx context.Context, container domain.Co
 
 // UpdateContainer 按主键更新容器记录。
 //
-// 容器 ID、创建时间与 Docker 容器 ID 一经写入不再修改；记录不存在时返回
-// storage.ErrNotFound。
+// 容器 ID 与创建时间一经写入不再修改；记录不存在时返回 storage.ErrNotFound。
+//
+// docker_id 必须可以被更新：容器登记记录在 `docker create` 之前写入，此时还没有
+// Docker 容器 ID，MarkCreated 之后才拿到真实 ID。若更新语句忽略该列，登记记录会
+// 永久停留在空值，后续所有容器内操作都会因为"记录中的 Docker 容器 ID 已变化"
+// 而无法定位真实容器。
 func (s containerStore) UpdateContainer(ctx context.Context, container domain.Container) error {
 	if err := container.Validate(); err != nil {
 		return err
 	}
 	const statement = `
 UPDATE containers SET
-	state = ?, docker_state = ?, started_at = ?, finished_at = ?,
+	docker_id = ?, state = ?, docker_state = ?, started_at = ?, finished_at = ?,
 	end_reason = ?, detached = ?, detached_at = ?, synced_at = ?,
 	error_summary = ?, updated_at = ?
 WHERE id = ?`
 	result, err := s.q.ExecContext(
 		ctx,
 		statement,
+		nullIfBlank(container.DockerID),
 		container.State.String(),
 		container.DockerState.String(),
 		toMillisPtr(container.StartedAt),

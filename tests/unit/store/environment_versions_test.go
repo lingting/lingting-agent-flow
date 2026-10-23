@@ -353,3 +353,41 @@ func TestConcurrentEnvironmentVersionCreationDoesNotCollide(t *testing.T) {
 		t.Fatalf("并发写入结果不符: 成功 %d，冲突 %d", succeeded, conflicted)
 	}
 }
+
+// TestUpdateContainerPersistsDockerID 验证容器登记记录会持久化 Docker 容器 ID。
+//
+// 容器记录在 `docker create` 之前写入，此时还没有 Docker 容器 ID；真实 ID 只在
+// 创建并核验之后才可知，因此 MarkCreated 之后的 UpdateContainer 必须把该列落库。
+// 若更新语句忽略它，登记记录会永久停留在空值，后续所有容器内操作都会因为
+// "记录中的 Docker 容器 ID 已变化" 而无法定位真实容器——这是一条只在真实远程
+// 链路上才会暴露的缺陷。
+func TestUpdateContainerPersistsDockerID(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ctx := testContext(t)
+	host := mustExecutionHost(t, db, "节点", "10.0.0.33", false)
+	container := mustContainer(t, db, host.ID, "agentflow-222222222222")
+	if container.DockerID != "" {
+		t.Fatalf("新登记记录的 Docker 容器 ID 应为空，实际 %q", container.DockerID)
+	}
+	dockerID := strings.Repeat("d", 64)
+	if err := container.MarkCreated(dockerID, domain.DockerStateCreated, time.Now()); err != nil {
+		t.Fatalf("标记创建完成失败: %v", err)
+	}
+	if err := container.MarkRunning(time.Now()); err != nil {
+		t.Fatalf("标记运行中失败: %v", err)
+	}
+	if err := db.UpdateContainer(ctx, container); err != nil {
+		t.Fatalf("更新容器记录失败: %v", err)
+	}
+	reloaded, err := db.GetContainer(ctx, container.ID)
+	if err != nil {
+		t.Fatalf("读取容器记录失败: %v", err)
+	}
+	if reloaded.DockerID != dockerID {
+		t.Fatalf("Docker 容器 ID 未持久化: 期望 %q，实际 %q", dockerID, reloaded.DockerID)
+	}
+	if reloaded.State != domain.ContainerStateRunning {
+		t.Fatalf("容器状态未持久化: %s", reloaded.State)
+	}
+}
