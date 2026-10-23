@@ -57,9 +57,14 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 >   SSH + 真实 Docker + 真实镜像构建 + 容器内真实 Git Clone + 容器内真实模型调用，逐阶段
 >   走通到代码保存。核实中修复了一处真实生产断点：`UpdateContainer` 不写 `docker_id`，
 >   导致真实远程链路在容器核验阶段失败（本地用例从不经过"先登记、后拿 ID"的流程）。
-> - 真实远程**推送成功**路径仍未覆盖：生产 `source.GitCredentialProvider` 与
->   `codesaver.GitCredentialProvider` 都没有实现，私有仓库在真实链路必然失败。这是已记录的
->   架构决策（第一版不支持私有仓库认证），补全需要凭据存储设计与安全评审。
+> - 真实远程推送成功路径已实测通过（`push=succeeded`，5 个会话全部归档）。早期出现的
+>   `repository_auth_failed` 是测试装配缺失造成的错误结论：容器内既没有私钥，也没有
+>   github.com 的 443 端口映射。后者已作为**基础镜像默认配置**内置到
+>   `internal/docker.DefaultBaseDockerfile`——`ssh.github.com:443` 是 GitHub 官方支持的
+>   等价接入点，22 可达与不可达的环境都成立。
+> - 生产 `source.GitCredentialProvider` 与 `codesaver.GitCredentialProvider` 仍未实现，
+>   私有仓库在真实链路必然失败。这是已记录的架构决策（第一版不支持私有仓库认证），
+>   补全需要凭据存储设计与安全评审。
 
 **已实现且有代码证据（可直接复用）**：
 

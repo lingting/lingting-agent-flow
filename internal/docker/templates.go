@@ -31,7 +31,14 @@ const (
 //   - 不写入任何凭据、Token 或私钥；
 //   - 不挂载或引用宿主机 Docker Socket；
 //   - 不预装任何需要人工交互的 Pi 扩展或凭据配置；
-//   - 提供可验证的常驻运行契约（sleep 可用）。
+//   - 提供可验证的常驻运行契约（sleep 可用）；
+//   - 内置 GitHub 的 SSH 客户端配置，使 github.com 走 ssh.github.com:443。
+//
+// 关于 SSH 客户端配置：该配置在"22 端口可达"与"22 端口不可达"两类环境下都成立，
+// 因为 ssh.github.com:443 是 GitHub 官方支持的等价接入点，直连 22 可用的环境使用它
+// 同样正常。把它作为基础镜像的默认值，可以避免容器内 Git 在受限网络中因为
+// `kex_exchange_identification: Connection closed by remote host` 而无法 Clone/Push。
+// 它只包含主机与端口映射，不包含任何凭据或身份信息。
 const DefaultBaseDockerfile = `# AgentFlow 基础环境
 #
 # 说明：
@@ -73,6 +80,20 @@ RUN npm install -g --ignore-scripts \
         ` + DefaultPiCLIPackage + `@` + DefaultPiCLIVersion + ` \
     && npm cache clean --force \
     && pi --version
+
+# GitHub 的 SSH 客户端配置：把 github.com 映射到官方支持的 443 端口接入点。
+#
+# 该配置在能直连 22 的环境同样可用，因此作为基础镜像默认值；它只声明主机与端口，
+# 不包含任何凭据、私钥或身份信息，凭据仍由运行期按需注入。
+RUN mkdir -p /root/.ssh \
+    && chmod 700 /root/.ssh \
+    && printf '%s\n' \
+        'Host github.com' \
+        '    Hostname ssh.github.com' \
+        '    Port 443' \
+        '    User git' \
+        > /root/.ssh/config \
+    && chmod 600 /root/.ssh/config
 
 # 任务项目目录只存在于容器内部可写层，不绑定挂载宿主机目录。
 WORKDIR /workspace/project

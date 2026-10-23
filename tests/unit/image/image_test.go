@@ -262,3 +262,31 @@ func TestLanguageTemplateLookup(t *testing.T) {
 		t.Fatal("未知语言模板应当失败")
 	}
 }
+
+// TestDefaultBaseDockerfileMapsGitHubToPort443 验证基础镜像内置 GitHub 的 443 接入点配置。
+//
+// 该配置在"22 端口可达"与"22 端口不可达"两类环境下都成立：ssh.github.com:443 是
+// GitHub 官方支持的等价接入点，直连 22 可用的环境使用它同样正常。因此它属于基础镜像
+// 的合理默认值，而不是特定环境的临时补丁——缺失时容器内 Git 会在受限网络中因为
+// `kex_exchange_identification: Connection closed by remote host` 无法 Clone/Push。
+func TestDefaultBaseDockerfileMapsGitHubToPort443(t *testing.T) {
+	t.Parallel()
+	content := docker.DefaultBaseDockerfile
+	for _, expected := range []string{
+		"Host github.com",
+		"Hostname ssh.github.com",
+		"Port 443",
+		"User git",
+		"/root/.ssh/config",
+	} {
+		if !strings.Contains(content, expected) {
+			t.Fatalf("默认基础 Dockerfile 缺少 GitHub 443 接入点配置项 %q", expected)
+		}
+	}
+	// 配置只声明主机与端口，不得包含任何凭据或身份信息。
+	for _, forbidden := range []string{"PRIVATE KEY", "IdentityFile", "id_rsa", "id_ed25519"} {
+		if strings.Contains(content, forbidden) {
+			t.Fatalf("SSH 客户端配置不得包含凭据相关内容 %q", forbidden)
+		}
+	}
+}

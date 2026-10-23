@@ -46,9 +46,11 @@
     真实启动入口 + 真实编排链路 + 真实 Git 仓库，仅替身化远程 SSH、Docker 与容器内 Pi，
     覆盖成功 / 验证失败后修复 / 修复达到上限 / 结果无法确认四类终局；
   - 真实远程 `tests/integration/remote/workflow/e2e_*_test.go`：真实 SSH + 真实 Docker +
-    真实镜像构建 + 容器内真实 Git Clone + 容器内真实模型调用，逐阶段走通到代码保存。
-  核实中修复了一处真实生产断点（`UpdateContainer` 不写 `docker_id`）。详见
-  `P1-single-task-e2e.md` 的 M5"完成记录"。
+    真实镜像构建 + 容器内真实 Git Clone + 容器内真实模型调用，全程走通到 `completed`
+    （真实提交 + 真实推送成功 + 全部会话归档）。
+  核实中修复了一处真实生产断点（`UpdateContainer` 不写 `docker_id`），并把 GitHub 的
+  443 接入点配置内置到基础镜像（`ssh.github.com:443` 是官方等价接入点，22 可达与不可达
+  的环境都成立）。详见 `P1-single-task-e2e.md` 的 M5"完成记录"。
 - **下一步**：按"下一步工作的选择规则"进入下游阶段。P1 剩余的真实缺口是私有仓库 Git
   凭据支持（`source.GitCredentialProvider` / `codesaver.GitCredentialProvider` 无实现），
   以及重启恢复矩阵，分别记录在 `ROADMAP.md` 与 `P2-reliability-recovery.md`。

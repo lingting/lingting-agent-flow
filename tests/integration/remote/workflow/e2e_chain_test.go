@@ -263,7 +263,7 @@ func (f *e2eFixture) seedTask(t *testing.T) {
 		t.Fatalf("写入需求失败: %v", err)
 	}
 	task, err := domain.NewTask(
-		requirement.ID, f.anonymousRepository(), "main", "", now,
+		requirement.ID, f.repo.ResolvedRepository(), "main", "", now,
 	)
 	if err != nil {
 		t.Fatalf("构造任务失败: %v", err)
@@ -356,32 +356,6 @@ func (f *e2eFixture) prepareEnvironmentVersion(t *testing.T) {
 	}
 	t.Logf("ENV_IMAGE=%s IMAGE_ID=%s VERSION=%s",
 		built.Version.ImageRef, built.Version.ImageID, built.Version.Label())
-}
-
-// anonymousRepository 返回本次端到端链路使用的仓库地址。
-//
-// 生产链路当前没有 Git 凭据提供者（internal/source.GitCredentialProvider 无实现），
-// 因此真实端到端只能验证"无需认证即可访问"的仓库。这里把 scp/ssh 形式统一改写为
-// https 形式：同一个仓库在 https 下可匿名读取，不需要把任何凭据放进容器。
-func (f *e2eFixture) anonymousRepository() string {
-	repository := strings.TrimSpace(f.repo.ResolvedRepository())
-	parsed, err := domain.ParseGitRepositoryURL(repository)
-	if err != nil {
-		return repository
-	}
-	if strings.HasPrefix(parsed.Display(), "https://") {
-		return repository
-	}
-	// 从 scp 形式 git@host:owner/repo.git 提取 host 与路径，改写为 https。
-	authority, pathPart, ok := strings.Cut(repository, ":")
-	if !ok || strings.Contains(authority, "/") {
-		return repository
-	}
-	host := authority
-	if _, hostPart, found := strings.Cut(authority, "@"); found {
-		host = hostPart
-	}
-	return "https://" + host + "/" + strings.TrimPrefix(pathPart, "/")
 }
 
 // steps 读取任务已持久化的计划步骤。
@@ -676,6 +650,61 @@ func (f *e2eFixture) applyContainerPiConfig(t *testing.T, dockerID string) {
 		dir, config.Pi.ResolvedProvider(), config.Pi.Model, config.Pi.ThinkingLevel)
 }
 
+// verifySSHClientConfig 校验基础镜像已内置 GitHub 的 443 接入点配置。
+//
+// 该配置由产品基础镜像（internal/docker.DefaultBaseDockerfile）提供：ssh.github.com:443
+// 是 GitHub 官方支持的等价接入点，在 22 可达与不可达的环境下都成立，因此属于镜像
+// 默认值。这里只做只读校验，不再由测试注入——如果它缺失，说明基础镜像回归了，应当
+// 让用例失败而不是在测试侧补齐。
+func (f *e2eFixture) verifySSHClientConfig(t *testing.T, dockerID string) {
+	t.Helper()
+	output, err := f.containerExec(t, dockerID, []string{"cat", "/root/.ssh/config"})
+	if err != nil {
+		t.Fatalf("读取容器内 SSH 客户端配置失败: %v", err)
+	}
+	for _, expected := range []string{
+		"Host github.com",
+		"Hostname ssh.github.com",
+		"Port 443",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("基础镜像缺少 GitHub 443 接入点配置项 %q，实际内容:\n%s", expected, output)
+		}
+	}
+	t.Logf("CONTAINER_SSH_CONFIG=/root/.ssh/config（由基础镜像内置）")
+}
+
+// applyGitCredentials 把 git.yml 中的凭据注入容器内临时目录。
+//
+// 与 tests/integration/remote/agent 的做法一致：私钥经标准输入写入容器内临时文件，
+// 并通过 core.sshCommand 限定到该私钥。凭据只存在于本次容器内部文件系统，不写入
+// 项目代码目录、不写入远程项目配置目录、不挂载宿主机目录，容器删除后随之消失；
+// 私钥内容不会出现在日志或数据库里。
+//
+// 该步骤属于测试侧凭据注入：产品本身不保存 Git 凭据（internal/source 与
+// internal/codesaver 的 GitCredentialProvider 均无实现）。
+func (f *e2eFixture) applyGitCredentials(t *testing.T, dockerID string) {
+	t.Helper()
+	if missing := f.repo.CredentialMissing(); len(missing) > 0 {
+		t.Fatalf("Git 凭据不完整，缺少 %s", strings.Join(missing, ", "))
+	}
+	auth, err := testkit.ApplyGitCredentials(
+		f.ctx,
+		f.exec,
+		dockerID,
+		f.repo,
+		"/tmp/agentflow-credentials-"+f.suffix,
+	)
+	if err != nil {
+		t.Fatalf("注入容器内 Git 凭据失败: %v", err)
+	}
+	if !auth.Enabled() {
+		t.Logf("GIT_CREDENTIAL=none（沿用容器内已有配置）")
+		return
+	}
+	t.Logf("GIT_CREDENTIAL=%s DIR=%s", auth.Kind, auth.Dir)
+}
+
 // applyGitIdentity 在容器内配置提交身份。
 //
 // 代码保存使用容器内 Git 提交，而提交身份属于执行环境的一部分：产品不伪造身份，
@@ -756,6 +785,8 @@ func (p *piConfigPort) CreateContainer(
 		return detail, fmt.Errorf("容器 %s 创建后缺少 Docker 容器 ID", detail.Container.ID)
 	}
 	p.fixture.applyContainerPiConfig(p.t, detail.Container.DockerID)
+	p.fixture.verifySSHClientConfig(p.t, detail.Container.DockerID)
+	p.fixture.applyGitCredentials(p.t, detail.Container.DockerID)
 	p.fixture.applyGitIdentity(p.t, detail.Container.DockerID)
 	return detail, nil
 }

@@ -69,12 +69,13 @@
 
 | 能力 | 已有部分 | 缺口 |
 |---|---|---|
-| 真实远程端到端验收 | `tests/integration/remote/workflow/e2e_*_test.go`：真实 SSH + 真实 Docker + 真实镜像构建 + 容器内真实 Git Clone + 容器内真实 Planner/Developer/Validator 模型调用，逐阶段走通到代码保存 | 真实远程**推送成功**路径需要仓库写权限；生产缺少 Git 凭据提供者，私有仓库在真实链路必然失败（已记录的架构决策） |
+| 真实远程端到端验收 | `tests/integration/remote/workflow/e2e_*_test.go`：真实 SSH + 真实 Docker + 真实镜像构建 + 容器内真实 Git Clone + 容器内真实 Planner/Developer/Validator 模型调用，逐阶段走通到代码保存 | 真实远程推送成功路径已实测通过；生产缺少 Git 凭据提供者，私有仓库在真实链路必然失败（已记录的架构决策） |
 
 ### 未实现
 
 - 私有仓库的 Git 凭据支持（`source.GitCredentialProvider` / `codesaver.GitCredentialProvider`
-  均无实现，属已记录的架构决策，需凭据存储设计与安全评审）。
+  均无实现，属已记录的架构决策，需凭据存储设计与安全评审）。当前真实远程验收通过
+  "测试侧把私钥写入容器内临时文件 + 配置 `core.sshCommand`"完成认证，产品本身不保存凭据。
 
 ### 待调查
 
@@ -852,9 +853,8 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
   - 真实 Planner 模型调用：计划真实落库（`steps=2`：规划阶段 + 1 个开发步骤）。
   - 真实 Developer 开发 → 确定性验证 → 语义审查：全部通过，代码保存产生**真实 commit**
     （例如 `6db6d77d4c5d8e9d4703af5e51ce572fc22981c2`）。
-  - 代码推送：容器内无该仓库写权限，`push=failed` / `repository_auth_failed`，
-    工作流如实收敛为 `recovery_required` + `code_save_indeterminate`，任务不被判为
-    `completed`。这是**真实且可解释的终局**，不是代码缺陷。
+  - 代码推送：**已成功**（`push=succeeded`）。早期出现的 `repository_auth_failed` 是
+    测试装配缺失造成的错误结论，原因见下方"基础镜像内置 GitHub 443 接入点"。
 
   **真实链路的两条环境前置（测试侧注入，产品不负责）**：
 
@@ -873,17 +873,52 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
 
   **真实远程测试结果**：
   - 通过：`go test -count=1 -timeout 50m -run TestRemoteE2EFullChain ./tests/integration/remote/workflow/`
-    → 真实链路逐阶段走通，最终停在交付阶段并给出可解释原因。
+    → 真实链路全程走通到 `completed`：真实提交 + 真实推送成功 + 5 个会话全部归档。
   - 通过：`go test -count=1 -run TestRemoteE2EPreconditions ./tests/integration/remote/workflow/`
     → 实际观测 Docker CLI 29.9.1 / Engine 29.9.1 / API 1.56。
   - 通过：`go test -count=1 -p 1 ./tests/...` → 45 个包、1673 个用例全部通过。
   - 通过：`go vet ./...` 无输出；`gofmt -l internal cmd tests` 无输出。
   - 跳过：无用例被跳过。
-  - 未执行：真实远程**推送成功**路径（需要仓库写权限，属外部条件）。
+  - 未执行：无。真实远程推送成功路径已实测通过。
 
   **真实远程产物**：`TEST_ARTIFACT_DIR` 指向每个用例的工作空间（含 `agentflow.db`、
   `sessions/`、`validations/`）；远端镜像与容器带随机后缀，用例结束时按所有权核验后
   只删除本次创建的容器。
+
+
+  **基础镜像内置 GitHub 443 接入点（2026-10-23 补充）**：
+
+  真实远程链路最初在 Clone 阶段失败：`kex_exchange_identification: Connection closed by
+  remote host`。原因不是凭据缺失，而是**容器内 SSH 客户端没有 github.com 的端口映射**，
+  默认直连 22 端口；测试环境的 22 端口不可达。
+
+  在虚拟机中手工 `git clone git@github.com:...` 能成功，是因为该机器上已有
+  `~/.ssh/config`：`Host github.com` → `Hostname ssh.github.com` / `Port 443`。
+  容器内没有这份配置，因此同一密钥也无法连通。
+
+  **处置**：把该配置内置到产品基础镜像（`internal/docker/templates.go` 的
+  `DefaultBaseDockerfile`），而不是只在测试里临时注入。判定依据是**两类环境都成立**：
+
+  - 22 端口可达时，`ssh.github.com:443` 是 GitHub 官方支持的等价接入点，同样正常；
+  - 22 端口不可达时，它是唯一可用的官方接入方式。
+
+  因此它属于基础镜像的合理默认值，不是特定环境的补丁。配置只声明主机与端口，不包含
+  任何凭据、私钥或身份信息；凭据仍由运行期按需注入。
+
+  **回归保护**：`tests/unit/image/image_test.go` 的
+  `TestDefaultBaseDockerfileMapsGitHubToPort443` 断言四个配置项存在，且不得包含
+  `PRIVATE KEY` / `IdentityFile` / `id_rsa` / `id_ed25519` 等凭据内容。
+
+  **真实远程最终实测结果**（产品基础镜像内置配置后）：
+
+  - `WORKFLOW status=completed`，`FINAL_TASK status=completed result=succeeded`
+  - `CODE_SAVE commit=549776fb1bce7f0ca5fd57a78d6c9e805faaab9 push=succeeded`
+  - `SESSIONS=5 全部已归档`
+  - 容器内日志确认：`CONTAINER_SSH_CONFIG=/root/.ssh/config（由基础镜像内置）`
+
+  此前记录的"推送 `repository_auth_failed`"是**测试装配缺失**造成的错误结论：
+  当时用例既没有把私钥注入容器，也没有容器内的 443 端口映射。真实原因是缺少
+  `~/.ssh/config` 与凭据注入，不是产品缺陷，也不是仓库权限问题。
 
   **未解决问题（不阻塞 M5 完成定义，记录为后续事项）**：
   - 真实远程全路径缺少自动化证据。补全它需要一条可用的远程 Git 仓库与真实模型配额，
