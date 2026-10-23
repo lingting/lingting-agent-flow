@@ -408,6 +408,17 @@ type ValidationRunFinishRequest struct {
 	SkippedChecks int
 	// Duration 是验证总耗时。
 	Duration time.Duration
+	// ReviewStatus 是语义审查这一次实际发生了什么。
+	//
+	// 它与 Status / Verdict 互相独立：审查调用失败不得改写确定性检查流程状态，
+	// 也不得让结论变成通过。零值表示本次没有要求语义审查。
+	ReviewStatus domain.ReviewStatus
+	// ReviewSummary 是语义审查的可读说明（已脱敏并裁剪）。
+	ReviewSummary string
+	// Assessment 是语义审查产出的结构化评估，未取得可解释结论时为空。
+	Assessment *domain.AgentAssessment
+	// ValidatorSessionID 是本次语义审查使用的会话标识，未发起审查时为空。
+	ValidatorSessionID *domain.ID
 	// At 是结束时间，零值使用当前时间。
 	At time.Time
 }

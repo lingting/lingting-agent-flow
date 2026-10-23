@@ -201,6 +201,16 @@ type ValidationRunResponse struct {
 	ExecutionEnv string `json:"execution_env,omitempty"`
 	Workspace    string `json:"workspace,omitempty"`
 	ContainerID  string `json:"container_id,omitempty"`
+	// ReviewRan 表示本轮验证是否真的发起了 Validator Agent 语义审查。
+	ReviewRan bool `json:"review_ran"`
+	// ReviewStatus 是语义审查的实际结论；未发起审查时为空。
+	ReviewStatus string `json:"review_status,omitempty"`
+	// ReviewSummary 是语义审查的可读说明（已脱敏并裁剪）。
+	ReviewSummary string `json:"review_summary,omitempty"`
+	// ValidatorSessionID 是语义审查使用的会话标识，用于追溯对应 Session。
+	ValidatorSessionID string `json:"validator_session_id,omitempty"`
+	// Assessment 是语义审查产出的结构化评估。
+	Assessment *domain.AgentAssessment `json:"assessment,omitempty"`
 	// Checks 是逐项检查结果摘要，不含完整 stdout / stderr。
 	Checks     []ValidateCheckResultResponse `json:"checks,omitempty"`
 	StartedAt  time.Time                     `json:"started_at"`
@@ -371,26 +381,39 @@ func validationRunResponse(entry app.ValidationHistoryEntry) ValidationRunRespon
 		checks = append(checks, validateCheckResultResponse(check))
 	}
 	return ValidationRunResponse{
-		ID:             entry.Run.ID.String(),
-		TaskID:         entry.Run.TaskID.String(),
-		StepID:         entry.Run.StepID.String(),
-		AttemptID:      entry.Run.AttemptID.String(),
-		Status:         string(entry.Run.Status),
-		Verdict:        string(entry.Run.Verdict),
-		Summary:        entry.Run.Summary,
-		FailureSummary: entry.Run.FailureSummary,
-		ErrorDetail:    entry.Run.ErrorDetail,
-		PassedChecks:   entry.Run.PassedChecks,
-		FailedChecks:   entry.Run.FailedChecks,
-		SkippedChecks:  entry.Run.SkippedChecks,
-		TotalChecks:    entry.Run.TotalChecks,
-		ExecutionEnv:   entry.Run.ExecutionEnv,
-		Workspace:      entry.Run.Workspace,
-		ContainerID:    entry.Run.ContainerID,
-		Checks:         checks,
-		StartedAt:      entry.Run.StartedAt,
-		FinishedAt:     entry.Run.FinishedAt,
+		ID:                 entry.Run.ID.String(),
+		TaskID:             entry.Run.TaskID.String(),
+		StepID:             entry.Run.StepID.String(),
+		AttemptID:          entry.Run.AttemptID.String(),
+		Status:             string(entry.Run.Status),
+		Verdict:            string(entry.Run.Verdict),
+		Summary:            entry.Run.Summary,
+		FailureSummary:     entry.Run.FailureSummary,
+		ErrorDetail:        entry.Run.ErrorDetail,
+		PassedChecks:       entry.Run.PassedChecks,
+		FailedChecks:       entry.Run.FailedChecks,
+		SkippedChecks:      entry.Run.SkippedChecks,
+		TotalChecks:        entry.Run.TotalChecks,
+		ExecutionEnv:       entry.Run.ExecutionEnv,
+		Workspace:          entry.Run.Workspace,
+		ContainerID:        entry.Run.ContainerID,
+		ReviewRan:          entry.Run.ReviewStatus != domain.ReviewStatusNotRequested,
+		ReviewStatus:       string(entry.Run.ReviewStatus),
+		ReviewSummary:      entry.Run.ReviewSummary,
+		ValidatorSessionID: validatorSessionIDOf(entry.Run.ValidatorSessionID),
+		Assessment:         entry.Run.Assessment,
+		Checks:             checks,
+		StartedAt:          entry.Run.StartedAt,
+		FinishedAt:         entry.Run.FinishedAt,
 	}
+}
+
+// validatorSessionIDOf 把可空会话标识转换为字符串，空值返回空字符串。
+func validatorSessionIDOf(id *domain.ID) string {
+	if id == nil || id.IsEmpty() {
+		return ""
+	}
+	return id.String()
 }
 
 // getSession 处理 GET /api/v1/tasks/{taskID}/sessions/{sessionID}。

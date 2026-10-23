@@ -86,6 +86,16 @@ type ValidateAttemptResponse struct {
 	Persisted bool `json:"persisted"`
 	// PersistenceErrors 是写入失败的原因，成功时为空。
 	PersistenceErrors []string `json:"persistence_errors,omitempty"`
+	// ReviewRan 表示本轮验证是否真的发起了语义审查。
+	ReviewRan bool `json:"review_ran"`
+	// ReviewStatus 是语义审查的实际结论；未发起审查时为空。
+	ReviewStatus string `json:"review_status,omitempty"`
+	// ReviewSummary 是语义审查的可读说明（已脱敏并裁剪）。
+	ReviewSummary string `json:"review_summary,omitempty"`
+	// ValidatorSessionID 是语义审查使用的会话标识。
+	ValidatorSessionID string `json:"validator_session_id,omitempty"`
+	// Assessment 是语义审查产出的结构化评估。
+	Assessment *domain.AgentAssessment `json:"assessment,omitempty"`
 	// Checks 是逐项检查结果的摘要，不含完整 stdout / stderr。
 	Checks     []ValidateCheckResultResponse `json:"checks"`
 	StartedAt  time.Time                     `json:"started_at"`
@@ -275,26 +285,31 @@ func validateAttemptResponse(result app.ValidationExecuteResult) ValidateAttempt
 		checks = append(checks, validateCheckResultResponse(check))
 	}
 	return ValidateAttemptResponse{
-		ValidationRunID:   result.ValidationRunID.String(),
-		TaskID:            result.TaskID.String(),
-		StepID:            result.StepID.String(),
-		AttemptID:         result.AttemptID.String(),
-		Status:            string(result.Status),
-		Verdict:           string(result.Verdict),
-		Passed:            result.Passed,
-		Summary:           result.Summary,
-		FailureSummary:    result.FailureSummary,
-		PassedChecks:      result.PassedChecks,
-		FailedChecks:      result.FailedChecks,
-		SkippedChecks:     result.SkippedChecks,
-		ExecutionEnv:      result.ExecutionEnv,
-		Workspace:         result.Workspace,
-		ContainerID:       result.ContainerID,
-		Persisted:         result.Persisted,
-		PersistenceErrors: result.PersistenceErrors,
-		Checks:            checks,
-		StartedAt:         result.StartedAt,
-		FinishedAt:        result.FinishedAt,
+		ValidationRunID:    result.ValidationRunID.String(),
+		TaskID:             result.TaskID.String(),
+		StepID:             result.StepID.String(),
+		AttemptID:          result.AttemptID.String(),
+		Status:             string(result.Status),
+		Verdict:            string(result.Verdict),
+		Passed:             result.Passed,
+		Summary:            result.Summary,
+		FailureSummary:     result.FailureSummary,
+		PassedChecks:       result.PassedChecks,
+		FailedChecks:       result.FailedChecks,
+		SkippedChecks:      result.SkippedChecks,
+		ExecutionEnv:       result.ExecutionEnv,
+		Workspace:          result.Workspace,
+		ContainerID:        result.ContainerID,
+		ReviewRan:          result.ReviewRan,
+		ReviewStatus:       string(result.ReviewStatus),
+		ReviewSummary:      result.ReviewSummary,
+		ValidatorSessionID: validatorSessionIDOf(&result.ValidatorSessionID),
+		Assessment:         result.Assessment,
+		Persisted:          result.Persisted,
+		PersistenceErrors:  result.PersistenceErrors,
+		Checks:             checks,
+		StartedAt:          result.StartedAt,
+		FinishedAt:         result.FinishedAt,
 	}
 }
 

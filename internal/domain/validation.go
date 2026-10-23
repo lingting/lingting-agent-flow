@@ -472,6 +472,17 @@ type ValidationRun struct {
 	//
 	// 它与确定性检查结果相互独立：Agent 结论不能改写命令退出码。
 	ValidatorSessionID *ID `json:"validator_session_id,omitempty"`
+	// ReviewStatus 是语义审查这一次实际发生了什么，零值等价于未要求审查。
+	//
+	// 它与 Status / Verdict 三者互相独立：审查调用失败不能写成验证流程失败，
+	// 也不能让 Verdict 变成通过。
+	ReviewStatus ReviewStatus `json:"review_status,omitempty"`
+	// ReviewSummary 是语义审查的可读说明（已脱敏并裁剪）。
+	ReviewSummary string `json:"review_summary,omitempty"`
+	// Assessment 是语义审查产出的结构化评估，只在取得可解释结论时非空。
+	//
+	// 它与最终结论分离：评估是证据，结论由 DecideValidation 依据证据计算。
+	Assessment *AgentAssessment `json:"assessment,omitempty"`
 	// StartedAt / FinishedAt 是验证的执行时间。
 	StartedAt  time.Time  `json:"started_at"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
@@ -509,6 +520,14 @@ func (r ValidationRun) Validate() error {
 	}
 	if r.ValidatorSessionID != nil {
 		if err := r.ValidatorSessionID.Validate(); err != nil {
+			return err
+		}
+	}
+	if err := r.ReviewStatus.Validate(); err != nil {
+		return err
+	}
+	if r.Assessment != nil {
+		if err := r.Assessment.Validate(); err != nil {
 			return err
 		}
 	}

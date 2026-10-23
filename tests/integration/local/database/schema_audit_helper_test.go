@@ -307,6 +307,7 @@ var expectedIndexes = []string{
 	"idx_validation_runs_step",
 	"idx_validation_runs_task",
 	"idx_validation_runs_status",
+	"idx_validation_runs_review_status",
 	"idx_validation_check_results_run",
 	"idx_validation_check_results_status",
 	"idx_code_fetches_task",

@@ -1,7 +1,9 @@
 package sqlite_test
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -371,5 +373,90 @@ func newCheckResult(
 		StartedAt:       now,
 		FinishedAt:      now,
 		CreatedAt:       now,
+	}
+}
+
+// TestFinishValidationRunPersistsReview 验证语义审查状态、评估与会话一起落库。
+func TestFinishValidationRunPersistsReview(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	built := newFixture(t, db)
+	run := beginValidation(t, db, built)
+	validatorSession := domain.NewID()
+	assessment := domain.AgentAssessment{
+		Passed:           true,
+		Summary:          "需求已满足",
+		Evidence:         []string{"internal/app/x.go"},
+		NeedsHumanReview: false,
+	}
+	assessmentJSON, err := json.Marshal(assessment)
+	if err != nil {
+		t.Fatalf("编码评估失败: %v", err)
+	}
+	// 通过评估必须原样写入，不能被裁剪成布尔值。
+	if err := db.FinishValidationRun(testContext(t), storage.ValidationRunFinishRequest{
+		RunID:              run.ID,
+		Status:             domain.ValidationRunStatusCompleted,
+		Verdict:            domain.VerificationVerdictPassed,
+		Summary:            "验证通过",
+		PassedChecks:       2,
+		Duration:           time.Second,
+		ReviewStatus:       domain.ReviewStatusPassed,
+		ReviewSummary:      "语义审查通过",
+		ValidatorSessionID: &validatorSession,
+		Assessment:         &assessment,
+	}); err != nil {
+		t.Fatalf("写入验证结论失败: %v", err)
+	}
+	finished, err := db.GetValidationRun(testContext(t), run.ID)
+	if err != nil {
+		t.Fatalf("读取验证记录失败: %v", err)
+	}
+	if finished.ReviewStatus != domain.ReviewStatusPassed {
+		t.Fatalf("审查状态未保存: %s", finished.ReviewStatus)
+	}
+	if finished.ReviewSummary != "语义审查通过" {
+		t.Fatalf("审查说明未保存: %q", finished.ReviewSummary)
+	}
+	if finished.ValidatorSessionID == nil || *finished.ValidatorSessionID != validatorSession {
+		t.Fatalf("审查会话未保存: %+v", finished.ValidatorSessionID)
+	}
+	if finished.Assessment == nil {
+		t.Fatal("结构化评估未保存")
+	}
+	if finished.Assessment.Summary != assessment.Summary {
+		t.Fatalf("评估摘要不符: %q", finished.Assessment.Summary)
+	}
+	if !strings.Contains(string(assessmentJSON), "internal/app/x.go") {
+		t.Fatalf("测试数据编码异常: %s", assessmentJSON)
+	}
+	if finished.Assessment.Passed != true || len(finished.Assessment.Evidence) != 1 {
+		t.Fatalf("评估内容不符: %+v", finished.Assessment)
+	}
+}
+
+// TestFinishValidationRunPersistsUnknownReviewStatus 验证未知审查状态可以写入并原样读回。
+func TestFinishValidationRunPersistsUnknownReviewStatus(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	built := newFixture(t, db)
+	run := beginValidation(t, db, built)
+	if err := db.FinishValidationRun(testContext(t), storage.ValidationRunFinishRequest{
+		RunID:          run.ID,
+		Status:         domain.ValidationRunStatusCompleted,
+		Verdict:        domain.VerificationVerdictInconclusive,
+		Summary:        "验证结果不确定",
+		FailureSummary: "语义审查未完成",
+		PassedChecks:   2,
+		ReviewStatus:   domain.ReviewStatus("awaiting_vendor_review"),
+	}); err != nil {
+		t.Fatalf("写入验证结论失败: %v", err)
+	}
+	finished, err := db.GetValidationRun(testContext(t), run.ID)
+	if err != nil {
+		t.Fatalf("读取验证记录失败: %v", err)
+	}
+	if finished.ReviewStatus != domain.ReviewStatus("awaiting_vendor_review") {
+		t.Fatalf("未知审查状态应原样读回: %s", finished.ReviewStatus)
 	}
 }

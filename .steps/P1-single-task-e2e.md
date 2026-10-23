@@ -20,10 +20,10 @@
 当前主链路（启动 → 容器 → 工作区 → 计划 → 逐步开发+确定性验证 → 代码保存 → 归档核验 →
 收尾）的绝大部分能力已经存在，但**缺口恰好卡在"真正交付"这一环**：
 
-1. **Validator Agent 语义审查没有任何生产调用方**：`domain.DecideValidation` 已经定义了
-   `assessment` 参数与"只能收紧、不能放宽"的决策规则，但 `internal/app/validation.go:157`
-   明确"不调用 Validator Agent"。确定性检查只能证明"命令通过"，不能替代对需求是否被真正
-   满足的语义判断；没有它，验证决策链是残缺的。
+1. **Validator Agent 语义审查没有生产调用方（已由 P1-M2 补齐）**：`domain.DecideValidation`
+   早已定义 `assessment` 参数与"只能收紧、不能放宽"的规则，但接入前没有任何调用方。确定性
+   检查只能证明"命令通过"，不能替代对需求是否被真正满足的语义判断；没有它，验证决策链
+   是残缺的。（现状见"已完成"表格中的 Validator 条目。）
 2. **验证失败后没有自动修复闭环**：失败只停止为 `blocked`，等待用户显式 `resume-workflow`
    或重新执行。虽然 `validation_feedbacks` 已经持久化并能在下次执行时注入提示词，但
    "修复→重新验证"的循环没有编排入口与终止条件。
@@ -58,12 +58,12 @@
 | 任务级工作流编排与收尾 | `internal/app/task_workflow_exec.go`、`internal/domain/workflow_run.go` `CheckWorkflowStart`/`DecideWorkflowCloseout`；单测 `tests/unit/app/task_workflow_test.go` |
 | 代码保存与恢复核验 | `internal/app/code_save*.go`、`internal/domain/code_save*.go`；集成测试 `tests/integration/local/codesaver/` |
 | 验证失败结构化反馈 | `internal/domain/validation_feedback.go`、`internal/app/step_workflow_run.go` `persistFeedback`、`internal/app/step_workflow_prompt.go` |
+| Validator 语义审查（生产调用链 + 评估持久化） | `internal/app/validation_review.go` `ValidatorReviewer`、`internal/app/validation_run.go` `reviewSemantics`、`internal/domain/agent_assessment_parse.go`、`internal/domain/validation_decision.go` `ReviewStatus`；迁移 `0021_validator_review.sql`；测试 `tests/unit/domain/agent_assessment_test.go`、`tests/unit/app/validation_review_test.go` |
 
 ### 部分完成（已有基础，缺端到端集成）
 
 | 能力 | 已有部分 | 缺口 |
 |---|---|---|
-| Validator 语义审查 | `domain.StepTypeReview`、`domain.RoleTypeValidator`、`domain.AgentAssessment`、`DecideValidation` 的 `assessment` 分支、`verifications.assessment_json` 列 | 无生产调用方；`Review` 步骤无执行路径；评估结果无写入路径 |
 | 验证失败修复依据 | `validation_feedbacks` 持久化 + 下次执行注入提示词 | 无自动"修复→重验"循环 |
 
 ### 未实现
@@ -73,17 +73,18 @@
 
 ### 待调查
 
-- `Review`（Validator）步骤应由 Planner 生成、还是由编排器在每个 `develop` 步骤验证后
-  动态追加：当前 `domain.BuildPlan` 只产出 `plan` + `develop`，无既定事实。
-- Validator 辅助评估的持久化字段与 `validation_runs` / `verifications` 的关系：列已存在，
-  但尚无生产写入约定，需在实施 M2 时确认。
+- Validator 评估应写入 `validation_runs` 还是 `verification_results`：M2 已确认生产链路
+  只写 `validation_runs`，评估落 `assessment_json`；`verification_results` 与
+  `domain.NewVerificationResult` 只有测试在用，属待清理的历史遗留双判定模型（P2 事项）。
+- `validation_feedbacks` 是否应收录 Validator 的 `findings`：M2 未扩大该结构，审查发现完整
+  保留在 `assessment_json` 中；是否纳入修复提示词由 M3 决定。
 
 ## 阶段范围
 
 **做**：
 
 - 打通并核验"任务启动 → 计划生成"前置流程（M1）。
-- 把 Validator Agent 接入验证决策链，明确其与确定性验证的职责边界（M2）。
+- 把 Validator Agent 接入验证决策链，明确其与确定性验证的职责边界（M2，已完成）。
 - 实现有上限、可停止的验证失败修复与重新验证闭环（M3）。
 - 把修复闭环与代码保存、会话归档、任务收尾串联成完整端到端路径（M4）。
 - 用真实运行路径完成成功 / 验证失败 / 修复失败 / 无法确认结果的验收（M5）。
@@ -112,15 +113,17 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
 | ID | 名称 | 状态 | 依赖 |
 |---|---|---|---|
 | P1-M1 | 核实并打通任务启动至计划生成的前置流程 | `completed` | 无 |
-| P1-M2 | 打通 Developer、确定性验证与 Validator Agent 的完整验证决策链 | `pending` | P1-M1 ✅ |
+| P1-M2 | 打通 Developer、确定性验证与 Validator Agent 的完整验证决策链 | `completed` | P1-M1 ✅ |
 | P1-M3 | 实现有上限、可停止的验证失败修复与重新验证闭环 | `pending` | P1-M2 |
 | P1-M4 | 将修复闭环与代码保存、会话归档、任务收尾串联 | `pending` | P1-M3 |
 | P1-M5 | 完成单任务端到端验收（成功/验证失败/修复失败/无法确认） | `pending` | P1-M4 |
 
 > P1-M1 已完成（证据见该里程碑"完成记录"）：启动链路已核实并修补，成功/幂等/失败/
-> uncertain 四类路径均有真实数据库上的测试证据。M2–M5 仍为 `pending`：M2/M4 的底层
-> 能力大多已存在，但尚未按"端到端闭环"的退出条件完成核验与串联。
-> 当前里程碑为 **P1-M2**。
+> uncertain 四类路径均有真实数据库上的测试证据。
+> P1-M2 已完成（证据见该里程碑"完成记录"）：Validator Agent 已接入真实生产调用链，
+> 评估写入 `validation_runs`，最终结论统一由 `domain.DecideValidation` 计算。
+> M3–M5 仍为 `pending`。
+> 当前里程碑为 **P1-M3**。
 
 ## 阶段退出条件（可验证的客观标准）
 
@@ -155,9 +158,9 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
 在 P1 内部按"解除最多下游依赖"原则选择：
 
 1. **P1-M1 已完成**（启动→计划前置流程已核实并修补）。
-2. 当前应推进 **P1-M2**：Validator 是 P1 决策链的唯一结构性缺口，M3 修复循环依赖"验证能给出
-   可修复的结构化结论"。
-3. 再完成 **P1-M3**：修复闭环依赖 M2 的验证结论。
+2. **P1-M2 已完成**（Validator 接入真实生产调用链，评估持久化，结论统一由
+   `DecideValidation` 计算）。
+3. 当前应推进 **P1-M3**：修复闭环依赖 M2 已成立的"可修复、可追溯"验证结论。
 4. 再完成 **P1-M4**：串联收尾依赖 M3。
 5. 最后 **P1-M5**：验收依赖前四项全部成立。
 
@@ -277,7 +280,7 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
 
 - **ID**：`P1-M2`
 - **名称**：打通 Developer、确定性验证与 Validator Agent 的完整验证决策链
-- **状态**：`pending`
+- **状态**：`completed`（2026-10-23 接入生产调用链，证据见下方"完成记录"）
 - **必要性**：这是 P1 的结构性缺口。确定性检查只能证明"命令通过"，不能证明"需求被真正
   满足"；`domain.DecideValidation` 已经为 Validator 语义审查预留了"只能收紧、不能放宽"
   的位置，但没有生产调用方。不补齐它，"开发→验证"就缺了语义审查这一环，后续修复闭环也
@@ -325,7 +328,114 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
   确定性规则。
 - **风险与待决问题**：`Review` 步骤 vs 动态调用尚未定案，需要先确认最小编排改动；Validator
   输出协议需与真实模型行为磨合，避免过度结构化导致调用频繁失败。
-- **完成记录**：（待完成时填写实际改动、测试结果、未解决问题与证据）
+- **完成记录**（2026-10-23，分支 `master`，改动前 HEAD `3219591`）：
+
+  调查结论（先调查后改码）：生产链路的唯一验证结论来源是
+  `domain.DecideValidation`（`internal/app/validation_run.go` 调用）；`verification_results`
+  表、`domain.NewVerificationResult`、`domains/verification.go` 的 `decideVerdict` 只有
+  测试在写，**不是**生产写入路径。因此没有把评估写进 `verification_results`，而是写进
+  `validation_runs`（生产链路真实落库的那张表），避免同时维护两套判定模型。
+
+  实际断点（改动前）：
+  1. `ValidationService` 没有任何 Validator 调用方（注释明确写"不调用 Validator Agent"）。
+  2. `DecideValidation` 的 `Assessment` 参数在生产链路永远为 nil。
+  3. `Review` 步骤（`StepTypeReview`）没有任何执行路径：`BuildPlan` 只产 `plan`+`develop`，
+     `CheckWorkflowStart` 拒绝非 `plan`/`develop` 步骤。
+  4. `validation_runs` 只有 `validator_session_id` 一个预留列，没有审查状态与评估列。
+
+  接入方式选择：**动态调用，不引入 `Review` 步骤**。理由是可证伪的最小方案：
+  `CheckWorkflowStart` 会直接拒绝 `review` 步骤、`NextStepToExecute` 也不处理它，引入步骤
+  类型就必须改动计划生成、步骤排序与编排器三处，而语义审查在语义上就属于"某一步的验证"，
+  不是独立执行阶段。因此接入点固定在 `ValidationService.runValidation`：确定性检查跑完后、
+  计算结论之前调用。
+
+  生产调用链（`internal/app/validation_run.go` → `internal/app/validation_review.go`）：
+  ```text
+  executeChecks（逐项真实执行 + 逐项落库）
+    → reviewSemantics：三条门控全成立才调用 Validator
+        ① 服务装配了语义审查能力（`ValidationOptions.Reviewer`）
+        ② 确定性流程正常跑完（completed，非 cancelled/timed_out/failed）
+        ③ 仅凭确定性检查即可判通过（必需检查全过）
+    → ValidatorReviewer.Review
+        loadValidatorRole（类型/启用/模型校验，缺失 → ErrReviewNotConfigured）
+        → SessionService.Start（进程启动前写库，独立 Session + InvocationID）
+        → ContainerService.RunAgent（真实容器内 Pi 调用，工作目录 = 任务工作区）
+        → SessionService.Finish（未取消上下文，写产出与归档）
+        → domain.ParseAgentAssessment（结构化解析 + 领域校验）
+    → domain.DecideValidation{RunStatus, Results, ReviewStatus, Assessment}
+    → finalizeValidation（结论 + 审查状态 + 审查会话 + 评估一次写入）
+  ```
+
+  输出协议与校验（`internal/domain/agent_assessment_parse.go`）：
+  - 只接受一个完整 JSON 对象，允许围栏与前后说明文字；
+  - `DisallowUnknownFields`，`passed` 必须显式出现；
+  - 解析后再走 `AgentAssessment.Validate`（findings/evidence 条数上限复用领域常量）；
+  - 错误分两类：`ErrAssessmentUnparseable`（不是可解析结构）与 `ErrAssessmentInvalid`
+    （结构合法但违反领域约束），分别映射 `unparseable` / `invalid_output`；
+  - 解析失败、调用失败、超时、取消、中断、未配置一律不产出评估，因此不可能通过。
+
+  统一决策（`internal/domain/validation_decision.go`）：
+  - 新增 `ReviewStatus` 与 `ValidationDecisionInput.ReviewStatus`；
+  - `decideWithReviewStatus` 只做"证据门槛"：未要求审查不阻塞；审查完成且可解释不阻塞；
+    其余状态（含"声称通过但评估缺失"）一律 `inconclusive`；
+  - 顺序固定在必需检查判定之后，因此必需检查失败时审查结论无效（无覆盖可能）。
+
+  持久化（迁移 `0021_validator_review.sql`，只加列不重建表）：
+  - `validation_runs.review_status`（审查状态）
+  - `validation_runs.review_summary`（脱敏裁剪后的说明）
+  - `validation_runs.assessment_json`（结构化 `AgentAssessment`，`json_valid` 约束）
+  - `validator_session_id` 补齐生产写入（审查会话）
+  - 枚举不设取值白名单，未知状态可写入并原样读回（有存储测试覆盖）
+
+  收口一致性（`internal/domain/step_verification.go`）：
+  - 新增 `StepVerificationInconclusive`；此前 `inconclusive` 被压平成 `failed`，会把"要求
+    人工复核"误读成"代码有问题"；
+  - `DecideStepCloseout` 新增该分支 → `recovery_required`（不判通过，也不写成验证失败）；
+  - `validation_run.go` 的 `InfrastructureError` 与预期相反的问题被修正：结论写入失败
+    （`ValidationPersisted=false`）现在按基础设施异常收口（`recovery_required`），不会把
+    一次未落库的"通过"写成已验证完成。
+
+  实际改动（新增 4 个文件 + 修改 14 个文件）：
+  - 新增 `internal/app/validation_review.go`（`ValidatorReviewer`、`ReviewPort`，
+    复用 `ContainerService.RunAgent` 与 `SessionService`）
+  - 新增 `internal/app/validation_prompt.go`（审查提示词，输出摘要复用
+    `domain.ClipFeedbackText` 脱敏）
+  - 新增 `internal/domain/agent_assessment_parse.go`（解析 + 共享 `ExtractJSONObject`；
+    `task_workflow_plan_parse.go` 改为复用它，删除重复的括号配平扫描）
+  - 新增 `internal/storage/sqlite/migrations/0021_validator_review.sql`
+  - 修改 `validation.go` / `validation_run.go` / `validation_decision.go` /
+    `step_verification.go` / `validation.go`(domain) / `step_workflow*.go` /
+    `storage/interfaces.go` / `sqlite/validations.go` / `cli/server.go` /
+    `httpapi/{validation,step_workflow,executions}.go`
+
+  测试结果（如实区分）：
+  - 通过：`go test -count=1 -p 1 ./tests/...` → 45 个包全部通过（1568 个用例）。
+  - 新增领域单测 `tests/unit/domain/agent_assessment_test.go`（10 个用例）：结构化解析、
+    7 类不可解释输出、审查不得覆盖必需检查失败、审查状态门槛、通过需评估、收紧、人工复核、
+    未完成流程审查无效。
+  - 新增应用集成 `tests/unit/app/validation_review_test.go`（12 个用例，真实 SQLite +
+    真实 `StepExecutor`/`ValidationService`/`StepWorkflowService`/`ValidatorReviewer`，
+    只把容器内 Agent 调用与命令执行替换为替身）：确定性通过+审查通过、确定性失败+审查声称
+    通过仍失败（且不发起审查调用）、审查未通过收紧为失败、人工复核不通过、输出非法不可解析、
+    调用失败、超时、评估持久化失败不报成功、验证角色不可用、任务未配置验证角色、服务未装配
+    审查能力、历史只追加（两轮独立记录且第一轮结论未被覆盖）、审查会话不复用 Developer 会话、
+    提示词携带确定性证据。
+  - 新增存储测试 2 个：审查状态/说明/会话/评估一起落库并可读回；未知审查状态原样读回。
+  - 未执行：`tests/integration/remote/*` 的真实远程 Validator 调用——本里程碑的完成定义
+    允许在测试边界内用受控替身覆盖（计划/审查/容器入口都在生产代码路径上，只替换了进程
+    调用本身）。真实远程全链路验收属于 P1-M5。
+  - 无跳过用例。
+
+  检查：`gofmt -l internal cmd tests` 无输出；`go vet ./...` 无输出。
+
+  未解决问题（不阻塞 M2 完成定义）：
+  - 审查提示词与真实模型行为尚未磨合：结构化协议在受控替身下验证完备，真实模型遵循度需
+    在 P1-M5 的真实远程路径上观察。
+  - `validation_feedbacks` 目前只收录失败检查，不收录审查发现（`findings`）。M2 未扩大
+    该结构：审查发现通过 `assessment_json` 完整保留，M3 设计修复提示词时再决定是否需要
+    把 findings 纳入反馈结构。
+  - `verification_results` 表与 `domain.NewVerificationResult` 仍是历史遗留的双判定模型，
+    生产链路不再使用。本轮按"不扩大范围"的要求未删除，记录为 P2 待清理事项。
 
 ---
 

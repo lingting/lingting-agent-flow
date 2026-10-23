@@ -76,21 +76,109 @@ func (s *ValidationService) runValidation(
 	)
 
 	execution := s.executeChecks(runCtx, run, request)
+	// 语义审查与结论计算严格分离：审查只产出"审查状态 + 结构化评估"，
+	// 最终结论一律由 domain.DecideValidation 依据结构化事实计算。
+	review := s.reviewSemantics(runCtx, run, request, execution)
 	decision := domain.DecideValidation(domain.ValidationDecisionInput{
+		Spec:         request.spec,
+		Results:      execution.results,
+		RunStatus:    execution.terminalStatus(),
+		ReviewStatus: review.outcome.Status,
+		Assessment:   review.outcome.Assessment,
+	})
+	return s.finalizeValidation(runCtx, run, request, execution, decision, review)
+}
+
+// reviewExecution 是一次语义审查的执行情况。
+type reviewExecution struct {
+	// requested 表示本轮验证要求并真的发起了语义审查。
+	requested bool
+	outcome   ReviewOutcome
+}
+
+// reviewSemantics 在必需确定性检查全部通过后调用 Validator Agent。
+//
+// 启动条件固定为三条，任一不成立都不发起审查：
+//   - 服务装配了语义审查能力；
+//   - 确定性检查流程正常跑完（取消、超时与服务停止都说明没有拿到可用证据）；
+//   - 仅依据确定性检查即可判通过：必需检查失败时，审查结论无权改写该结果，
+//     因此不做一次注定被忽略的模型调用。
+//
+// 任务未声明验证角色时视为"本次不要求语义审查"：该配置在领域层是可选的，
+// 结果会如实记录 review_status 为空，不会伪装成"审查通过"。任务声明了验证角色
+// 但角色无法使用（不存在、类型不符、已被禁用、未配置模型）时收敛为
+// not_configured，最终结论因此不可能通过。
+func (s *ValidationService) reviewSemantics(
+	ctx context.Context,
+	run domain.ValidationRun,
+	request runValidationRequest,
+	execution checkExecution,
+) reviewExecution {
+	if request.task.Config.ValidatorRoleID.IsEmpty() {
+		// 任务没有声明验证角色：领域模型把语义审查定义为可选增强，因此本次视为
+		// 不要求审查，结论只依据确定性检查。它不是"审查通过"，也不会被报告为通过。
+		return reviewExecution{outcome: ReviewOutcome{Status: domain.ReviewStatusNotRequested}}
+	}
+	if s.reviewer == nil {
+		// 任务声明了验证角色，但本次运行没有装配语义审查能力：要求过的证据拿不到，
+		// 必须如实收敛为 not_configured，不能静默判通过。
+		return reviewExecution{
+			requested: true,
+			outcome: ReviewOutcome{
+				Status:  domain.ReviewStatusNotConfigured,
+				Summary: "本次运行未装配语义审查能力，任务声明的验证角色无法执行",
+			},
+		}
+	}
+	if execution.terminalStatus() != domain.ValidationRunStatusCompleted {
+		return reviewExecution{outcome: ReviewOutcome{Status: domain.ReviewStatusNotRequested}}
+	}
+	deterministic := domain.DecideValidation(domain.ValidationDecisionInput{
 		Spec:      request.spec,
 		Results:   execution.results,
 		RunStatus: domain.ValidationRunStatusCompleted,
 	})
-	if terminal := execution.terminalStatus(); terminal != domain.ValidationRunStatusCompleted {
-		// 验证流程本身没有跑完（取消、超时或服务停止）：此时结论只能是 failed，
-		// 由 DecideValidation 依据 RunStatus 给出，不需要另写一套判定。
-		decision = domain.DecideValidation(domain.ValidationDecisionInput{
-			Spec:      request.spec,
-			Results:   execution.results,
-			RunStatus: terminal,
-		})
+	if !deterministic.Passed() {
+		return reviewExecution{outcome: ReviewOutcome{Status: domain.ReviewStatusNotRequested}}
 	}
-	return s.finalizeValidation(runCtx, run, request, execution, decision)
+	outcome, err := s.reviewer.Review(ctx, ReviewRequest{
+		Task:      request.task,
+		Step:      request.step,
+		Attempt:   request.attempt,
+		Container: request.container,
+		Results:   execution.results,
+		Timeout:   0,
+	})
+	if err != nil {
+		// 前置条件无法满足（例如任务声明的验证角色不存在）：不发起调用，但也不能
+		// 静默判通过，因此收敛为 not_configured。
+		return reviewExecution{
+			requested: true,
+			outcome: ReviewOutcome{
+				Status:  domain.ReviewStatusNotConfigured,
+				Summary: clipReviewText(err.Error(), maxReviewSummaryLength),
+			},
+		}
+	}
+	s.logger.InfoContext(
+		ctx,
+		"语义审查已完成",
+		slog.String("validation_run_id", run.ID.String()),
+		slog.String("review_status", string(outcome.Status)),
+		slog.String("validator_session_id", outcome.SessionID.String()),
+	)
+	return reviewExecution{requested: true, outcome: outcome}
+}
+
+// reviewSessionPointer 把会话标识转换为可空形式，空值返回 nil。
+//
+// 验证记录里空标识表示"本次没有发起语义审查"，与"发起了但没有会话"必须区分：
+// 后者在审查状态里表达，不会用空标识冒充。
+func reviewSessionPointer(id domain.ID) *domain.ID {
+	if id.IsEmpty() {
+		return nil
+	}
+	return &id
 }
 
 // beginValidationRun 原子占用并创建验证记录。
@@ -370,6 +458,7 @@ func (s *ValidationService) finalizeValidation(
 	request runValidationRequest,
 	execution checkExecution,
 	decision domain.ValidationDecision,
+	review reviewExecution,
 ) (ValidationExecuteResult, error) {
 	writeCtx := context.WithoutCancel(ctx)
 	finishedAt := s.now()
@@ -381,24 +470,29 @@ func (s *ValidationService) finalizeValidation(
 		failureSummary = "验证未通过"
 	}
 	result := ValidationExecuteResult{
-		ValidationRunID: run.ID,
-		TaskID:          request.task.ID,
-		StepID:          request.step.ID,
-		AttemptID:       request.attempt.ID,
-		Status:          status,
-		Verdict:         decision.Verdict,
-		Passed:          decision.Passed(),
-		Summary:         summary,
-		FailureSummary:  failureSummary,
-		Checks:          execution.results,
-		PassedChecks:    passed,
-		FailedChecks:    failed,
-		SkippedChecks:   skipped,
-		ExecutionEnv:    request.executor.Name(),
-		Workspace:       request.task.Config.EffectiveWorkDir(),
-		ContainerID:     request.container.ID.String(),
-		StartedAt:       run.StartedAt,
-		FinishedAt:      finishedAt,
+		ValidationRunID:    run.ID,
+		TaskID:             request.task.ID,
+		StepID:             request.step.ID,
+		AttemptID:          request.attempt.ID,
+		Status:             status,
+		Verdict:            decision.Verdict,
+		Passed:             decision.Passed(),
+		Summary:            summary,
+		FailureSummary:     failureSummary,
+		Checks:             execution.results,
+		PassedChecks:       passed,
+		FailedChecks:       failed,
+		SkippedChecks:      skipped,
+		ExecutionEnv:       request.executor.Name(),
+		Workspace:          request.task.Config.EffectiveWorkDir(),
+		ContainerID:        request.container.ID.String(),
+		ReviewStatus:       review.outcome.Status,
+		ReviewSummary:      review.outcome.Summary,
+		ReviewRan:          review.requested,
+		ValidatorSessionID: review.outcome.SessionID,
+		Assessment:         review.outcome.Assessment,
+		StartedAt:          run.StartedAt,
+		FinishedAt:         finishedAt,
 	}
 	var persistenceErrors []string
 	finishErr := s.store.FinishValidationRun(writeCtx, storage.ValidationRunFinishRequest{
@@ -412,7 +506,12 @@ func (s *ValidationService) finalizeValidation(
 		FailedChecks:   failed,
 		SkippedChecks:  skipped,
 		Duration:       finishedAt.Sub(run.StartedAt),
-		At:             finishedAt,
+		// 语义审查结果与确定性结论同一次写入：审查会话、评估与结论必须能一起追溯。
+		ReviewStatus:       review.outcome.Status,
+		ReviewSummary:      review.outcome.Summary,
+		Assessment:         review.outcome.Assessment,
+		ValidatorSessionID: reviewSessionPointer(review.outcome.SessionID),
+		At:                 finishedAt,
 	})
 	if finishErr != nil {
 		persistenceErrors = append(persistenceErrors, finishErr.Error())
@@ -506,9 +605,14 @@ func (s *ValidationService) appendFinalizeEvent(
 		"failed_checks":     result.FailedChecks,
 		"skipped_checks":    result.SkippedChecks,
 		"persisted":         result.Persisted,
+		"review_ran":        result.ReviewRan,
+		"review_status":     string(result.ReviewStatus),
 	}
 	if result.FailureSummary != "" {
 		payload["failure_summary"] = result.FailureSummary
+	}
+	if !result.ValidatorSessionID.IsEmpty() {
+		payload["validator_session_id"] = result.ValidatorSessionID.String()
 	}
 	if _, err := s.appendEvent(ctx, request.task, &request.step.ID, &request.attempt.ID, nil,
 		eventType, payload,

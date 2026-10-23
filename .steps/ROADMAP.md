@@ -2,7 +2,8 @@
 
 > 本文件是路线图总览。具体里程碑的工作项、依赖与验收见各阶段文档。
 > 撰写依据：commit `330e7c4`（2026-10-23）工作区的实际代码与测试状态，非旧对话或 README 推断；
-> P1-M1 已在 commit `a0ee19b` 之后按实际核实与改动更新。
+> P1-M1 已在 commit `a0ee19b` 之后按实际核实与改动更新；
+> P1-M2 已在 HEAD `3219591` 之后按实际接入与改动更新。
 
 ## 项目最终业务目标
 
@@ -30,14 +31,15 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 
 ## 当前实现状态摘要（基于代码证据）
 
-> **当前里程碑：P1-M2**（P1-M1 已于 2026-10-23 完成，证据见
-> `P1-single-task-e2e.md` 的 P1-M1"完成记录"）。
+> **当前里程碑：P1-M3**（P1-M1、P1-M2 已于 2026-10-23 完成，证据见
+> `P1-single-task-e2e.md` 的对应"完成记录"）。
 >
-> **待调查事项（不影响 M1 已完成结论）**：
+> **待调查事项（不影响 M1/M2 已完成结论）**：
 > - `TestPlanGenerationInterruptedByShutdown` 在干净工作区上以约 40% 概率失败（测试内
 >   `duringCall` 用 goroutine 触发 Stop，与取消传播存在竞态）。属既有测试缺陷，
 >   待 P2（可靠性与恢复）阶段处理。
-> - `tests/integration/remote/workflow/` 尚未覆盖真实远程"启动到计划"，留待 P1-M5 端到端验收。
+> - `tests/integration/remote/workflow/` 尚未覆盖真实远程"启动到计划"与真实远程 Validator
+>   调用，留待 P1-M5 端到端验收。
 
 **已实现且有代码证据（可直接复用）**：
 
@@ -60,6 +62,16 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
   `internal/app/step_sequence.go`、`internal/app/step_workflow*.go`）。
 - 确定性验证引擎（`internal/app/validation.go`、`internal/domain/validation_decision.go`
   的 `DecideValidation`）。
+- **Validator Agent 语义审查的生产调用链**（P1-M2）：必需确定性检查全部通过后，由
+  `internal/app/validation_run.go` 的 `reviewSemantics` 调用
+  `internal/app/validation_review.go` 的 `ValidatorReviewer`；每次审查创建独立 Session
+  （`SessionService.Start` 先于进程启动写库）并通过 `ContainerService.RunAgent` 在同一任务
+  容器工作区内调用 Pi。模型输出经 `internal/domain/agent_assessment_parse.go`
+  `ParseAgentAssessment` 解析为结构化 `AgentAssessment`（未知字段拒绝、`passed` 必填、领域
+  条数上限）。最终结论统一由 `domain.DecideValidation` 依据"确定性结果 + `ReviewStatus` +
+  评估"计算：审查只能收紧、不能放宽。审查状态、评估与审查会话写入 `validation_runs`
+  （`review_status` / `review_summary` / `assessment_json` / `validator_session_id`，迁移
+  `0021_validator_review.sql`）。
 - 任务级工作流编排与收尾（`internal/app/task_workflow_exec.go`、
   `internal/app/task_workflow_run.go`、`internal/domain/workflow_run.go` 的
   `CheckWorkflowStart` / `DecideWorkflowCloseout`）。
@@ -73,9 +85,6 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 
 **已有部分实现、尚未端到端集成**：
 
-- Validator Agent 语义审查：领域类型与决策参数已就绪（`StepTypeReview`、
-  `RoleTypeValidator`、`AgentAssessment`、`DecideValidation` 的 `assessment` 分支），
-  但**没有生产调用方**——`internal/app/validation.go:157` 明确"不调用 Validator Agent"。
 - 验证失败修复依据：`validation_feedbacks` 已持久化，且下次显式执行时被注入提示词
   （`internal/app/step_workflow_prompt.go`），但**没有自动修复循环**。
 
@@ -88,11 +97,14 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 
 **待调查**：
 
-- 计划生成是否能产出 `review`（Validator）步骤、以及 `Review` 步骤在编排器中的执行
-  语义是否已有隐含设计——当前 `domain.BuildPlan` 只产出 `plan` + `develop`，编排器
-  `NextStepToExecute` / `executableSteps` 也只处理这两类，`review` 尚无执行路径。
-- Validator 辅助评估结果应如何持久化：`verifications` 表已有 `assessment_json` 列
-  （迁移 `0008`/`0009`），但尚无生产写入路径。
+- `Review` 步骤是否仍需要：P1-M2 已确认语义审查作为"某一步验证的一环"动态调用即可满足
+  需求，`domain.BuildPlan` 与编排器都不需要新增步骤类型。是否要为其他用途引入独立审查
+  阶段，留待真实需求出现。
+- `verification_results` 表与 `domain.NewVerificationResult`（`internal/domain/
+  verification.go` 的 `decideVerdict`）是历史遗留的第二套判定模型，生产链路已不再使用
+  （唯一生产结论来源是 `DecideValidation`）。清理属 P2 范围。
+- `validation_feedbacks` 是否应收录 Validator 的 `findings`：当前审查发现只进入
+  `assessment_json`，是否纳入修复提示词由 M3 决定。
 
 ## 四阶段总览
 

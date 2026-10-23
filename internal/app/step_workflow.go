@@ -125,6 +125,16 @@ type ExecuteAndValidateResult struct {
 	ValidationPersisted bool
 	// ValidationPersistenceErrors 是验证结果写入失败的原因。
 	ValidationPersistenceErrors []string
+	// ReviewRan 表示开发通过确定性检查后是否真的发起了语义审查。
+	ReviewRan bool
+	// ReviewStatus 是语义审查的实际结论，未发起审查时为空。
+	ReviewStatus domain.ReviewStatus
+	// ReviewSummary 是语义审查的可读说明（已脱敏并裁剪）。
+	ReviewSummary string
+	// ValidatorSessionID 是语义审查使用的会话标识，未发起审查时为空。
+	ValidatorSessionID domain.ID
+	// Assessment 是语义审查产出的结构化评估，未取得可解释结论时为空。
+	Assessment *domain.AgentAssessment
 	// InfrastructureError 表示验证因基础设施异常没有拿到可用证据。
 	//
 	// 它与"代码验证失败"是不同事实：容器不可用、命令无法启动或结果无法确认都属于

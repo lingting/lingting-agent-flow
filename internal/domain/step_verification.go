@@ -18,6 +18,10 @@ const (
 	StepVerificationPassed StepVerificationState = "passed"
 	// StepVerificationFailed 表示验证跑完且结论为未通过或不确定。
 	StepVerificationFailed StepVerificationState = "failed"
+	// StepVerificationInconclusive 表示验证跑完但结论不确定（例如必需检查结果无法
+	// 确认，或 Validator 要求人工复核）。它与 failed 必须区分：failed 说明已经拿到
+	// "没有通过"的证据，inconclusive 说明证据本身不足以判定通过或失败。
+	StepVerificationInconclusive StepVerificationState = "inconclusive"
 	// StepVerificationCancelled 表示验证被取消。
 	StepVerificationCancelled StepVerificationState = "cancelled"
 	// StepVerificationInfrastructure 表示验证因基础设施问题没有拿到可用证据。
@@ -31,6 +35,7 @@ func (s StepVerificationState) Validate() error {
 		StepVerificationRunning,
 		StepVerificationPassed,
 		StepVerificationFailed,
+		StepVerificationInconclusive,
 		StepVerificationCancelled,
 		StepVerificationInfrastructure:
 		return nil
@@ -97,6 +102,11 @@ func DeriveStepVerificationState(
 	if ValidationInfrastructureAnomaly(run.Status, results) {
 		return StepVerificationInfrastructure
 	}
+	// 结论不确定与结论失败必须区分：前者没有拿到可用证据，后者已经拿到"没有通过"
+	// 的证据。把两者压平成 failed 会让"要求人工复核"被误读为"代码有问题"。
+	if run.Verdict == VerificationVerdictInconclusive {
+		return StepVerificationInconclusive
+	}
 	return StepVerificationFailed
 }
 
@@ -122,6 +132,9 @@ type StepCloseoutInput struct {
 	// VerificationRan 表示开发成功之后是否真的启动过验证。
 	VerificationRan bool
 	// Verification 是本次验证的派生状态，未发起验证时忽略。
+	//
+	// 语义审查的缺失已经体现在派生状态里：要求了审查却没有可用结论时，
+	// 验证结论是不确定，派生状态因此不可能通过。收口规则不需要第二条判据。
 	Verification StepVerificationState
 }
 
@@ -146,7 +159,9 @@ func (d StepCloseoutDecision) Verified() bool {
 //  3. 开发阶段成功且验证通过：completed（已验证完成）；
 //  4. 开发阶段成功但验证未通过：failed；
 //  5. 开发阶段成功但验证被取消：cancelled；
-//  6. 开发阶段成功但验证基础设施异常：recovery_required，不伪装成代码失败，也不判通过。
+//  6. 开发阶段成功但验证基础设施异常：recovery_required，不伪装成代码失败，也不判通过；
+//  7. 开发阶段成功但验证结论不确定（含 Validator 要求人工复核）：recovery_required，
+//     既不判通过，也不写成"验证未通过"。
 //
 // 该函数是纯函数：不读数据库、不启动进程，因此可以被完整地单元测试。
 func DecideStepCloseout(input StepCloseoutInput) StepCloseoutDecision {
@@ -182,6 +197,13 @@ func DecideStepCloseout(input StepCloseoutInput) StepCloseoutDecision {
 		return StepCloseoutDecision{
 			Status:  StepStatusRecoveryRequired,
 			Summary: "开发阶段已完成，但验证因基础设施异常未拿到可用证据，需要人工核验",
+		}
+	case StepVerificationInconclusive:
+		// 不确定与失败必须区分：要求人工复核或评估不可解释时，步骤既不是"通过"，
+		// 也不该被当作"代码失败"留下误导性的失败结论。
+		return StepCloseoutDecision{
+			Status:  StepStatusRecoveryRequired,
+			Summary: "开发阶段已完成，但验证结论不确定（需要人工复核），不能判定通过",
 		}
 	default:
 		return StepCloseoutDecision{

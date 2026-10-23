@@ -26,11 +26,15 @@
 ## 当前阶段与当前里程碑
 
 - **当前阶段**：P1 —— 单任务完整开发闭环。
-- **上一个里程碑**：`P1-M1` —— 核实并打通任务启动至计划生成的前置流程，状态
-  `completed`（2026-10-23）。启动链路已核实并修补：成功 / 幂等 / 失败 / 结果不确定
-  四类路径均有真实数据库上的测试证据，见 `P1-single-task-e2e.md` 的 P1-M1"完成记录"。
-- **当前里程碑**：`P1-M2` —— 打通 Developer、确定性验证与 Validator Agent 的完整
-  验证决策链（详见 `P1-single-task-e2e.md`）。
+- **上一个里程碑**：`P1-M2` —— 打通 Developer、确定性验证与 Validator Agent 的完整
+  验证决策链，状态 `completed`（2026-10-23）。Validator 已接入真实生产调用链：必需
+  确定性检查全部通过后创建独立 Session 调用 Validator，结构化评估写入
+  `validation_runs`，最终结论统一由 `domain.DecideValidation` 计算，见
+  `P1-single-task-e2e.md` 的 P1-M2"完成记录"。
+- **更早里程碑**：`P1-M1` —— 核实并打通任务启动至计划生成的前置流程，状态
+  `completed`（2026-10-23）。
+- **当前里程碑**：`P1-M3` —— 实现有上限、可停止的验证失败修复与重新验证闭环
+  （详见 `P1-single-task-e2e.md`）。
 
 > 阶段与里程碑的状态可能随开发推进而变化，以上仅为撰写本路线图时的快照；最新状态
 > 以 `ROADMAP.md` 的"当前实现状态摘要"和 `P1-single-task-e2e.md` 的里程碑表为准。

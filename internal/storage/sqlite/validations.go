@@ -16,10 +16,11 @@ import (
 const validationRunColumns = `id, task_id, step_id, attempt_id, status, verdict, summary,
 	failure_summary, spec_json, spec_snapshot, total_checks, passed_checks, failed_checks,
 	skipped_checks, execution_env, workspace, container_id, validator_session_id,
+	review_status, review_summary, assessment_json,
 	started_at, finished_at, duration_ms, error_detail, created_at, updated_at`
 
 // validationRunInsertCount 是写入验证记录时的参数个数。
-const validationRunInsertCount = 24
+const validationRunInsertCount = 27
 
 // validationCheckResultColumns 是检查结果表的完整列顺序。
 const validationCheckResultColumns = `id, validation_run_id, check_id, check_name, required,
@@ -208,6 +209,9 @@ func (s validationStore) insertRun(ctx context.Context, record validationRunReco
 		sqlNullString(record.run.Workspace),
 		sqlNullString(record.run.ContainerID),
 		toIDPtrParam(record.run.ValidatorSessionID),
+		sqlNullString(string(record.run.ReviewStatus)),
+		sqlNullString(record.run.ReviewSummary),
+		record.assessmentJSON,
 		toMillis(record.run.StartedAt),
 		toMillisPtr(record.run.FinishedAt),
 		record.run.Duration.Milliseconds(),
@@ -338,9 +342,19 @@ func (s validationStore) FinishValidationRun(
 	if at.IsZero() {
 		at = time.Now().UTC()
 	}
+	var assessmentParam any
+	if request.Assessment != nil {
+		encoded, encodeErr := marshalJSON("ValidationRun.assessment", request.Assessment)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		assessmentParam = encoded
+	}
 	const statement = `UPDATE validation_runs
 		SET status = ?, verdict = ?, summary = ?, failure_summary = ?, error_detail = ?,
 			passed_checks = ?, failed_checks = ?, skipped_checks = ?, duration_ms = ?,
+			review_status = ?, review_summary = ?, assessment_json = ?,
+			validator_session_id = ?,
 			finished_at = ?, updated_at = ?
 		WHERE id = ? AND status = 'running'`
 	result, err := s.q.ExecContext(
@@ -355,6 +369,10 @@ func (s validationStore) FinishValidationRun(
 		request.FailedChecks,
 		request.SkippedChecks,
 		request.Duration.Milliseconds(),
+		sqlNullString(string(request.ReviewStatus)),
+		sqlNullString(request.ReviewSummary),
+		assessmentParam,
+		toIDPtrParam(request.ValidatorSessionID),
 		toMillis(at),
 		toMillis(at),
 		toIDParam(request.RunID),
@@ -487,6 +505,8 @@ func (s validationStore) ListValidationCheckResults(
 type validationRunRecord struct {
 	run      domain.ValidationRun
 	specJSON string
+	// assessmentJSON 是结构化辅助评估的 JSON 编码，nil 表示本次没有评估。
+	assessmentJSON any
 }
 
 // validationCheckResultRecord 是写入检查结果前的 JSON 编码结果。
@@ -504,7 +524,15 @@ func encodeValidationRun(run domain.ValidationRun) (validationRunRecord, error) 
 	if err != nil {
 		return validationRunRecord{}, err
 	}
-	return validationRunRecord{run: run, specJSON: spec}, nil
+	var assessment any
+	if run.Assessment != nil {
+		encoded, encodeErr := marshalJSON("ValidationRun.assessment", run.Assessment)
+		if encodeErr != nil {
+			return validationRunRecord{}, encodeErr
+		}
+		assessment = encoded
+	}
+	return validationRunRecord{run: run, specJSON: spec, assessmentJSON: assessment}, nil
 }
 
 // encodeValidationCheckResult 校验检查结果并编码其 JSON 字段。
@@ -539,6 +567,9 @@ func scanValidationRun(row scanner) (*domain.ValidationRun, error) {
 		workspace          sql.NullString
 		containerID        sql.NullString
 		validatorSessionID sql.NullString
+		reviewStatus       sql.NullString
+		reviewSummary      sql.NullString
+		assessmentJSON     sql.NullString
 		startedAt          int64
 		finishedAt         sql.NullInt64
 		durationMillis     int64
@@ -565,6 +596,9 @@ func scanValidationRun(row scanner) (*domain.ValidationRun, error) {
 		&workspace,
 		&containerID,
 		&validatorSessionID,
+		&reviewStatus,
+		&reviewSummary,
+		&assessmentJSON,
 		&startedAt,
 		&finishedAt,
 		&durationMillis,
@@ -588,6 +622,15 @@ func scanValidationRun(row scanner) (*domain.ValidationRun, error) {
 	run.Workspace = workspace.String
 	run.ContainerID = containerID.String
 	run.ValidatorSessionID = fromIDPtr(validatorSessionID)
+	run.ReviewStatus = domain.ReviewStatus(reviewStatus.String)
+	run.ReviewSummary = reviewSummary.String
+	if assessmentJSON.Valid && assessmentJSON.String != "" {
+		var assessment domain.AgentAssessment
+		if err := unmarshalJSON("ValidationRun.assessment", assessmentJSON.String, &assessment); err != nil {
+			return nil, err
+		}
+		run.Assessment = &assessment
+	}
 	run.StartedAt = fromMillis(startedAt)
 	run.FinishedAt = fromMillisPtr(finishedAt)
 	run.Duration = time.Duration(durationMillis) * time.Millisecond

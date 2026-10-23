@@ -70,6 +70,18 @@ type ExecuteAndValidateStepResponse struct {
 	// ValidationPersisted 表示验证结论与检查结果是否可靠写入。
 	ValidationPersisted         bool     `json:"validation_persisted"`
 	ValidationPersistenceErrors []string `json:"validation_persistence_errors,omitempty"`
+	// ReviewRan 表示开发通过确定性检查后是否真的发起了语义审查。
+	ReviewRan bool `json:"review_ran"`
+	// ReviewStatus 是语义审查的实际结论：passed / failed / needs_human_review /
+	// unparseable / invalid_output / call_failed / timed_out / cancelled /
+	// interrupted / not_configured，未发起审查时为空。
+	ReviewStatus string `json:"review_status,omitempty"`
+	// ReviewSummary 是语义审查的可读说明（已脱敏并裁剪）。
+	ReviewSummary string `json:"review_summary,omitempty"`
+	// ValidatorSessionID 是语义审查使用的会话标识，用于追溯对应 Session。
+	ValidatorSessionID string `json:"validator_session_id,omitempty"`
+	// Assessment 是语义审查产出的结构化评估。
+	Assessment *domain.AgentAssessment `json:"assessment,omitempty"`
 	// InfrastructureError 表示验证因基础设施异常没有拿到可用证据。
 	InfrastructureError bool `json:"infrastructure_error"`
 	// FeedbackPersisted 表示验证失败反馈是否已保存。
@@ -278,6 +290,11 @@ func executeAndValidateResponse(result app.ExecuteAndValidateResult) ExecuteAndV
 		ValidationPersisted:         result.ValidationPersisted,
 		ValidationPersistenceErrors: result.ValidationPersistenceErrors,
 		InfrastructureError:         result.InfrastructureError,
+		ReviewRan:                   result.ReviewRan,
+		ReviewStatus:                string(result.ReviewStatus),
+		ReviewSummary:               result.ReviewSummary,
+		ValidatorSessionID:          validatorSessionIDOf(&result.ValidatorSessionID),
+		Assessment:                  result.Assessment,
 		FeedbackPersisted:           result.FeedbackPersisted,
 		Verification:                string(result.Verification),
 		StepStatus:                  string(result.StepStatus),

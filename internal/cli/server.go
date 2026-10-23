@@ -107,10 +107,30 @@ func runServer(cmd *cobra.Command, a *app.App, configPath, address string, requi
 			if containersErr != nil {
 				return nil, containersErr
 			}
+			sessions, sessionsErr := app.NewSessionService(
+				store,
+				app.SessionRoot(cfg),
+				a.Logger().Slog(),
+			)
+			if sessionsErr != nil {
+				return nil, sessionsErr
+			}
+			// 语义审查复用同一个容器服务与会话服务：Validator 与 Developer 使用
+			// 同一任务工作区，但各自创建独立 Session。
+			reviewer, reviewerErr := app.NewValidatorReviewer(app.ValidatorReviewerOptions{
+				Store:      store,
+				Containers: containers,
+				Sessions:   sessions,
+				Logger:     a.Logger().Slog(),
+			})
+			if reviewerErr != nil {
+				return nil, reviewerErr
+			}
 			return app.NewValidationService(app.ValidationOptions{
 				Store:      store,
 				Containers: containers,
 				OutputRoot: app.ValidationOutputRoot(cfg),
+				Reviewer:   reviewer,
 				Logger:     a.Logger().Slog(),
 			})
 		},

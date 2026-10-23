@@ -95,6 +95,16 @@ type ValidationExecuteResult struct {
 	Workspace string
 	// ContainerID 是执行本次验证的容器登记记录 ID。
 	ContainerID string
+	// ReviewRan 表示本轮验证是否真的发起了 Validator Agent 语义审查。
+	ReviewRan bool
+	// ReviewStatus 是语义审查的实际结论；未发起审查时为空。
+	ReviewStatus domain.ReviewStatus
+	// ReviewSummary 是语义审查的可读说明（已脱敏并裁剪）。
+	ReviewSummary string
+	// ValidatorSessionID 是语义审查使用的会话标识，未发起审查时为空。
+	ValidatorSessionID domain.ID
+	// Assessment 是语义审查产出的结构化评估，未取得可解释结论时为空。
+	Assessment *domain.AgentAssessment
 	// Persisted 表示结论与检查结果是否全部可靠写入数据库。
 	Persisted bool
 	// PersistenceErrors 是写入失败的原因。
@@ -118,6 +128,14 @@ type ValidationStore interface {
 	storage.ValidationStore
 }
 
+// ReviewPort 是验证服务对语义审查能力的需求。
+//
+// 实现只能返回"审查实际发生了什么"：调用失败、超时与输出不可解释都不是错误，
+// 而是必须如实上报的审查状态。只有前置条件无法满足（未配置验证角色）才返回错误。
+type ReviewPort interface {
+	Review(ctx context.Context, request ReviewRequest) (ReviewOutcome, error)
+}
+
 // ValidationContainerPort 是验证服务对任务容器的需求。
 //
 // 容器只被核验与使用：验证服务不会创建、启动、删除或接管容器，也不会在容器
@@ -137,6 +155,11 @@ type ValidationOptions struct {
 	Containers ValidationContainerPort
 	// OutputRoot 是检查输出的本机持久化根目录，必填。
 	OutputRoot string
+	// Reviewer 是语义审查能力，可选。
+	//
+	// 非空时，在必需确定性检查全部通过之后调用 Validator Agent；为空表示本次
+	// 服务不提供语义审查，此时结论只依据确定性检查（不会被误当作"审查通过"）。
+	Reviewer ReviewPort
 	// Logger 是日志器，为空时使用默认日志器。
 	Logger *slog.Logger
 	// Now 是可注入的时钟，零值使用当前时间。
@@ -150,11 +173,14 @@ type ValidationOptions struct {
 // 职责边界：
 //   - 校验任务、步骤、尝试的归属与状态，并以数据库条件更新原子占用验证；
 //   - 按配置顺序执行检查，逐项记录真实结果；
-//   - 依据 domain.DecideValidation 的确定性规则计算结论；
+//   - 必需确定性检查全部通过后，按需调用 Validator Agent 做语义审查；
+//   - 依据 domain.DecideValidation 的确定性规则计算结论（Agent 结论无权改写
+//     命令退出码，也无权让未执行的检查变成通过）；
 //   - 把结论与检查结果持久化，并把判定写回执行尝试。
 //
 // 它不实现完整工作流编排：不创建容器、不自动重试、不决定任务最终状态，
-// 也不调用 Validator Agent（Agent 结论无权改写命令退出码）。
+// 也不决定是否要进入修复循环。语义审查只是验证决策链的一环：审查失败无法让验证
+// 通过，审查通过也无法让失败的必需检查变成通过。
 type ValidationService struct {
 	store      ValidationStore
 	containers ValidationContainerPort
@@ -164,9 +190,12 @@ type ValidationService struct {
 	// defaultTimeout 是整次验证的默认总超时。
 	defaultTimeout time.Duration
 	// running 记录本进程内正在验证的尝试，用于快速拒绝重复请求。
+	// running 记录本进程内正在验证的尝试，用于快速拒绝重复请求。
 	//
 	// 它是第一道防线而不是一致性保证：真正的占用由数据库条件更新完成。
 	running *validationRegistry
+	// reviewer 是语义审查能力，为 nil 表示本次运行不提供语义审查。
+	reviewer ReviewPort
 	// lifecycle 管理后台服务状态与在途验证，使 Server 停止时能取消并等待收敛。
 	lifecycle validationLifecycle
 }
@@ -218,6 +247,7 @@ func NewValidationService(options ValidationOptions) (*ValidationService, error)
 		now:            now,
 		defaultTimeout: timeout,
 		running:        newValidationRegistry(),
+		reviewer:       options.Reviewer,
 	}, nil
 }
 

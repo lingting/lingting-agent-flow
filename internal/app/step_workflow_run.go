@@ -204,8 +204,12 @@ func (s *StepWorkflowService) validateAndCloseout(
 		result.Checks,
 	)
 	if !result.ValidationPersisted {
-		// 结论没能可靠保存时不能报告成功：已产生的检查证据仍然如实返回。
+		// 结论没能可靠保存时不能报告成功：已产生的检查证据仍然如实返回，但收口
+		// 只能按"结果无法确认"处理，否则会把一次未落库的通过写成已验证完成。
 		result.ValidationSkipReason = "验证结果未能可靠写入数据库"
+		result.InfrastructureError = true
+		verification = domain.StepVerificationInfrastructure
+		result.Verification = verification
 	}
 	result.FeedbackPersisted = s.persistFeedback(ctx, result)
 	result.FinishedAt = s.now()
@@ -240,6 +244,11 @@ func applyValidationResult(
 	result.Checks = validation.Checks
 	result.ValidationPersisted = validation.Persisted
 	result.ValidationPersistenceErrors = validation.PersistenceErrors
+	result.ReviewRan = validation.ReviewRan
+	result.ReviewStatus = validation.ReviewStatus
+	result.ReviewSummary = validation.ReviewSummary
+	result.ValidatorSessionID = validation.ValidatorSessionID
+	result.Assessment = validation.Assessment
 	return result
 }
 
@@ -371,6 +380,8 @@ func (s *StepWorkflowService) closeout(
 		"verified":              result.Verified,
 		"finalized":             result.Finalized,
 		"feedback_persisted":    result.FeedbackPersisted,
+		"review_ran":            result.ReviewRan,
+		"review_status":         string(result.ReviewStatus),
 		"step_workflow_outcome": closeoutOutcomeName(result),
 	})
 	s.logger.InfoContext(
@@ -385,6 +396,7 @@ func (s *StepWorkflowService) closeout(
 		slog.String("step_status", string(result.StepStatus)),
 		slog.Bool("verified", result.Verified),
 		slog.Bool("finalized", result.Finalized),
+		slog.String("review_status", string(result.ReviewStatus)),
 	)
 	return result, nil
 }

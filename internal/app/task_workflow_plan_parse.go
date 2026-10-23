@@ -105,40 +105,12 @@ func planCommands(items []planCommandOutput) []domain.VerificationCommand {
 
 // extractPlanJSONObject 从文本中提取第一个完整的 JSON 对象。
 //
-// 只做括号配平扫描，不做语义解释：这样既能容忍代码块围栏与前后说明文字，
-// 也不会把任意自由文本当作 JSON 接受。
+// 括号配平扫描只在领域层实现一次（domain.ExtractJSONObject）：这里只把它的
+// 通用错误包装为本服务的输出错误类别，避免两处扫描规则各自演化。
 func extractPlanJSONObject(text string) (string, error) {
-	start := strings.Index(text, "{")
-	if start < 0 {
-		return "", fmt.Errorf("%w: 输出中找不到 JSON 对象", ErrPlanInvalidOutput)
+	candidate, err := domain.ExtractJSONObject(text)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrPlanInvalidOutput, err)
 	}
-	depth := 0
-	inString := false
-	escaped := false
-	for index := start; index < len(text); index++ {
-		char := text[index]
-		if inString {
-			switch {
-			case escaped:
-				escaped = false
-			case char == '\\':
-				escaped = true
-			case char == '"':
-				inString = false
-			}
-			continue
-		}
-		switch char {
-		case '"':
-			inString = true
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return text[start : index+1], nil
-			}
-		}
-	}
-	return "", fmt.Errorf("%w: JSON 对象未闭合", ErrPlanInvalidOutput)
+	return candidate, nil
 }
