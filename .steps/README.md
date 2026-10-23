@@ -26,17 +26,22 @@
 ## 当前阶段与当前里程碑
 
 - **当前阶段**：P1 —— 单任务完整开发闭环。
-- **上一个里程碑**：`P1-M3` —— 实现有上限、可停止的验证失败修复与重新验证闭环，状态
-  `completed`（2026-10-24）。修复闭环已接入真实生产调用链：`ExecuteAndValidate` 驱动
-  `runRepairLoop`，每轮新建 Attempt / Session / Validation Run 并保留历史；是否继续修复由
-  `domain.DecideRepairLoop` 依据持久化事实判定，终态由 `domain.DecideRepairCloseout` 计算，
-  编排器通过 `repairStopMapping` 消费停止类别，见 `P1-single-task-e2e.md` 的 P1-M3
-  "完成记录"。
-- **更早里程碑**：`P1-M2` —— 打通 Developer、确定性验证与 Validator Agent 的完整验证
-  决策链，状态 `completed`（2026-10-23）；`P1-M1` —— 核实并打通任务启动至计划生成的
-  前置流程，状态 `completed`（2026-10-23）。
-- **当前里程碑**：`P1-M4` —— 将修复闭环与代码保存、会话归档、任务收尾串联
-  （详见 `P1-single-task-e2e.md`）。
+- **上一个里程碑**：`P1-M4` —— 将修复闭环与代码保存、会话归档、任务收尾串联，状态
+  `completed`（2026-10-24）。修复通过的步骤会自然进入 `finalize` → `saveCode` →
+  `sessionsPersisted` → `applyCloseout`，收尾结论只由 `domain.DecideWorkflowCloseout`
+  计算。核实中修复了两处真实生产断点：Developer 会话从未写入数据库（`callAgent` 只
+  `Load` 不 `Start`/`Finish`），以及收尾终态写入失败会留下 `running` 残留
+  （新增 `stopUnpersistedCloseout`）。证据见 `P1-single-task-e2e.md` 的 P1-M4
+  "完成记录"与 `tests/integration/local/workflow/delivery_chain_test.go`。
+- **更早里程碑**：`P1-M3` —— 实现有上限、可停止的验证失败修复与重新验证闭环，状态
+  `completed`（2026-10-24）：`ExecuteAndValidate` 驱动 `runRepairLoop`，每轮新建
+  Attempt / Session / Validation Run 并保留历史；是否继续修复由
+  `domain.DecideRepairLoop` 依据持久化事实判定，终态由 `domain.DecideRepairCloseout`
+  计算，编排器通过 `repairStopMapping` 消费停止类别。`P1-M2` —— 打通 Developer、
+  确定性验证与 Validator Agent 的完整验证决策链，状态 `completed`（2026-10-23）；
+  `P1-M1` —— 核实并打通任务启动至计划生成的前置流程，状态 `completed`（2026-10-23）。
+- **当前里程碑**：`P1-M5` —— 完成单任务端到端验收（成功 / 验证失败 / 修复失败 /
+  无法确认）（详见 `P1-single-task-e2e.md`）。
 
 > 阶段与里程碑的状态可能随开发推进而变化，以上仅为撰写本路线图时的快照；最新状态
 > 以 `ROADMAP.md` 的"当前实现状态摘要"和 `P1-single-task-e2e.md` 的里程碑表为准。

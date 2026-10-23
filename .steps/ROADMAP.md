@@ -32,8 +32,14 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 
 ## 当前实现状态摘要（基于代码证据）
 
-> **当前里程碑：P1-M4**（P1-M1、P1-M2 已于 2026-10-23 完成，P1-M3 已于 2026-10-24
-> 完成，证据见 `P1-single-task-e2e.md` 的对应"完成记录"）。
+> **当前里程碑：P1-M5**（P1-M1、P1-M2 已于 2026-10-23 完成，P1-M3 与 P1-M4 已于
+> 2026-10-24 完成，证据见 `P1-single-task-e2e.md` 的对应"完成记录"）。
+>
+> P1-M4 的核实结论：修复闭环确实在生产调用链内并自然进入交付阶段；核实中修复了两处
+> 真实生产断点——(1) Developer 执行从不写入 Session 记录（`callAgent` 只 `Load` 而不
+> `Start`/`Finish`，导致归档核验对 Developer 会话完全空转），(2) 收尾终态写入失败时会
+> 静默留下 `running` 残留（`completed → recovery_required` 被状态机拒绝后无兜底）。
+> 完整链路现在有本地集成证据（`tests/integration/local/workflow/delivery_chain_test.go`）。
 >
 > **待调查事项（不影响 M1/M2 已完成结论）**：
 > - `TestPlanGenerationInterruptedByShutdown` 在干净工作区上以约 40% 概率失败（测试内
@@ -95,6 +101,17 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - 验证失败修复依据：`validation_feedbacks` 已持久化并按 `ValidationRunID` 精确引用
   （`internal/app/step_workflow_prompt.go`、`step_workflow_repair.go` 的 `repairPrompt`），
   读取失败或归属不符时停止循环而不是静默降级。
+- **修复后交付与任务收尾闭环**（P1-M4）：`internal/app/task_workflow_exec.go` 的
+  `finalize` → `saveCode` → `sessionsPersisted` → `applyCloseout` 顺序执行，收尾结论只由
+  `domain.DecideWorkflowCloseout` 计算。核实中修复两处真实断点：
+  (1) `internal/app/step_executor_run.go` 的 `callAgent` 改为
+  `SessionService.Start` → `RunAgent` → `SessionService.Finish`，Developer 会话现在真实
+  落库并写入归档状态（此前只 `Load`，`attempt.SessionIDs` 恒为空，归档核验对 Developer
+  完全空转）；(2) 新增 `stopUnpersistedCloseout`：收尾终态写入失败时重新读取数据库真实
+  记录并写入 `recovery_required` / `closeout_failed`，不再静默留下 `running` 残留。
+  证据：`tests/integration/local/workflow/delivery_chain_test.go`（13 个用例，真实
+  SQLite + 真实编排器/执行器/验证引擎/闭环/会话服务，仅替身化容器内 Pi、命令执行、
+  容器核验与外部 Git）。
 
 **尚未实现**：
 

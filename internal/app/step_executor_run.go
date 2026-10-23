@@ -74,7 +74,14 @@ func (e *StepExecutor) runAttempt(
 	return result
 }
 
-// callAgent 通过容器内执行端口调用 Pi，并把会话记录一并返回。
+// callAgent 在任务容器内执行一次 Agent 调用并返回真实持久化的会话记录。
+//
+// 顺序固定为：先创建会话记录并推进到 running → 用该会话标识启动容器内进程 →
+// 写入产出与归档状态。会话记录必须先于进程启动落库，否则一次真实执行不会留下可
+// 追溯的会话，收尾阶段的归档核验也就失去了对象。
+//
+// 会话标识由本方法生成并传给执行端口，不能由执行端口自行生成：否则 Session 文件
+// 目录与数据库记录会指向两次不同的"会话"。
 //
 // 调用失败时仍然尽力返回可用的会话记录：Session 是排查问题的唯一线索，
 // 不能因为执行失败而丢弃。
@@ -82,47 +89,78 @@ func (e *StepExecutor) callAgent(
 	ctx context.Context,
 	request runAttemptRequest,
 ) stepExecutionRun {
+	invocationID := agent.NewInvocationID()
+	stepID := request.step.ID
+	attemptID := request.attempt.ID
+	session, err := e.sessions.Start(ctx, StartRequest{
+		Scope: domain.SessionScope{
+			TaskID:    request.task.ID,
+			StepID:    &stepID,
+			AttemptID: &attemptID,
+		},
+		Role:         request.role,
+		InvocationID: invocationID,
+		ContainerID:  request.containerID,
+		DockerID:     request.dockerID,
+	})
+	if err != nil {
+		// 会话无法登记时不能启动进程：否则会出现一次没有任何记录的真实执行。
+		e.logger.ErrorContext(
+			ctx,
+			"创建开发会话失败",
+			slog.String("task_id", request.task.ID.String()),
+			slog.String("step_id", stepID.String()),
+			slog.String("attempt_id", attemptID.String()),
+			slog.String("error", errorSummary(err)),
+		)
+		return stepExecutionRun{runErr: fmt.Errorf("创建开发会话失败: %w", err)}
+	}
 	agentResult, runErr := e.containers.RunAgent(ctx, ContainerAgentRequest{
 		ContainerID:  request.containerID,
 		TaskID:       request.task.ID.String(),
-		StepID:       request.step.ID.String(),
-		AttemptID:    request.attempt.ID.String(),
+		StepID:       stepID.String(),
+		AttemptID:    attemptID.String(),
 		RoleType:     request.role.Type.String(),
 		Model:        request.role.Model,
 		SystemPrompt: request.role.SystemPrompt,
 		Prompt:       request.prompt,
 		SessionRoot:  e.sessions.LocalRoot(),
+		SessionID:    session.ID.String(),
+		InvocationID: invocationID,
 		WorkDir:      request.task.Config.EffectiveWorkDir(),
 		Timeout:      request.timeout,
 	})
 	run := stepExecutionRun{result: agentResult.Result, runErr: runErr}
-	sessionID := domain.ID(strings.TrimSpace(agentResult.Result.SessionID))
-	if sessionID.IsEmpty() {
+	if returned := domain.ID(strings.TrimSpace(agentResult.Result.SessionID)); !returned.IsEmpty() &&
+		returned != session.ID {
+		// 执行端口必须复用调用方给出的会话标识：不一致说明会话文件与记录已经分叉。
+		e.logger.WarnContext(
+			ctx,
+			"Agent 调用返回的会话标识与登记的会话不一致",
+			slog.String("session_id", session.ID.String()),
+			slog.String("returned_session_id", returned.String()),
+		)
+	}
+	// 收尾必须使用未取消的上下文：取消与超时恰恰是最需要写入结果与归档状态的场景。
+	finished, finishErr := e.sessions.Finish(context.WithoutCancel(ctx), FinishRequest{
+		SessionID: session.ID,
+		Result:    agentResult.Result,
+		Archive:   archiveOf(agentResult.Result),
+	})
+	if finishErr != nil {
+		// 会话未收敛时不伪造记录：执行事实通过结果与日志暴露，调用方据此判定
+		// "执行完成但记录不完整"。
 		e.logger.ErrorContext(
 			ctx,
-			"Agent 调用未返回会话标识",
+			"写入开发会话结果失败",
+			slog.String("session_id", session.ID.String()),
 			slog.String("task_id", request.task.ID.String()),
-			slog.String("step_id", request.step.ID.String()),
-			slog.String("attempt_id", request.attempt.ID.String()),
-			slog.String("error", errorSummary(runErr)),
+			slog.String("step_id", stepID.String()),
+			slog.String("error", errorSummary(finishErr)),
 		)
 		return run
 	}
-	session, loadErr := e.sessions.Load(context.WithoutCancel(ctx), sessionID)
-	if loadErr != nil {
-		// 会话元数据无法读取时不伪造记录：执行事实通过返回结果与日志暴露，
-		// 会话状态留空，调用方据此判断"执行完成但记录不完整"。
-		e.logger.ErrorContext(
-			ctx,
-			"读取会话记录失败",
-			slog.String("session_id", sessionID.String()),
-			slog.String("task_id", request.task.ID.String()),
-			slog.String("step_id", request.step.ID.String()),
-			slog.String("error", loadErr.Error()),
-		)
-		return run
-	}
-	run.session = session
+	run.session = finished
 	return run
 }
 

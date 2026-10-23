@@ -59,17 +59,19 @@
 | 代码保存与恢复核验 | `internal/app/code_save*.go`、`internal/domain/code_save*.go`；集成测试 `tests/integration/local/codesaver/` |
 | 验证失败结构化反馈 | `internal/domain/validation_feedback.go`、`internal/app/step_workflow_run.go` `persistFeedback`、`internal/app/step_workflow_prompt.go` |
 | Validator 语义审查（生产调用链 + 评估持久化） | `internal/app/validation_review.go` `ValidatorReviewer`、`internal/app/validation_run.go` `reviewSemantics`、`internal/domain/agent_assessment_parse.go`、`internal/domain/validation_decision.go` `ReviewStatus`；迁移 `0021_validator_review.sql`；测试 `tests/unit/domain/agent_assessment_test.go`、`tests/unit/app/validation_review_test.go` |
+| Developer 执行会话持久化 | `internal/app/step_executor_run.go` `callAgent`（`SessionService.Start` → `RunAgent` → `Finish`）；集成测试 `tests/integration/local/workflow/delivery_chain_test.go` |
+| 修复后交付链路（修复→代码保存→归档→收尾） | `internal/app/task_workflow_exec.go` `finalize`/`saveCode`/`sessionsPersisted`/`stopUnpersistedCloseout`、`internal/domain/workflow_run.go` `DecideWorkflowCloseout`；集成测试 `tests/integration/local/workflow/delivery_chain_test.go` |
+| 验证失败修复与重新验证闭环 | `internal/app/step_workflow_repair.go` `runRepairLoop`、`internal/domain/retry.go` `DecideRepairLoop`、`internal/domain/step_verification.go` `DecideRepairCloseout`；单测 `tests/unit/app/step_workflow_repair_test.go`、`tests/unit/app/task_workflow_repair_test.go` |
 
 ### 部分完成（已有基础，缺端到端集成）
 
 | 能力 | 已有部分 | 缺口 |
 |---|---|---|
-| 验证失败修复依据 | `validation_feedbacks` 持久化 + 下次执行注入提示词 | 无自动"修复→重验"循环 |
+| 真实远程端到端验收 | 本地集成测试已覆盖完整链路（受控替身边界内） | `tests/integration/remote/*` 仅覆盖前置条件，真实 SSH + Docker + 容器内 Pi 的全路径属 M5 |
 
 ### 未实现
 
-- 自动验证失败修复与重新验证闭环（含修复次数上限、停止条件、终态）。
-- 真实端到端全路径验收测试。
+- 真实端到端全路径验收测试（P1-M5）。
 
 ### 待调查
 
@@ -115,7 +117,7 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
 | P1-M1 | 核实并打通任务启动至计划生成的前置流程 | `completed` | 无 |
 | P1-M2 | 打通 Developer、确定性验证与 Validator Agent 的完整验证决策链 | `completed` | P1-M1 ✅ |
 | P1-M3 | 实现有上限、可停止的验证失败修复与重新验证闭环 | `completed` | P1-M2 ✅ |
-| P1-M4 | 将修复闭环与代码保存、会话归档、任务收尾串联 | `pending` | P1-M3 |
+| P1-M4 | 将修复闭环与代码保存、会话归档、任务收尾串联 | `completed` | P1-M3 ✅ |
 | P1-M5 | 完成单任务端到端验收（成功/验证失败/修复失败/无法确认） | `pending` | P1-M4 |
 
 > P1-M1 已完成（证据见该里程碑"完成记录"）：启动链路已核实并修补，成功/幂等/失败/
@@ -125,7 +127,12 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
 > P1-M3 已完成（证据见该里程碑"完成记录"）：修复闭环已接入真实生产调用链，轮次上限、
 > 停止条件与终态映射统一由 `domain.DecideRepairLoop` 与 `domain.DecideRepairCloseout`
 > 计算，编排器只消费领域判定。
-> M4–M5 仍为 `pending`；当前里程碑为 **P1-M4**。
+> P1-M4 已完成（证据见该里程碑"完成记录"）：修复通过的步骤会自然进入代码保存、
+> 会话归档核验与收尾；`DecideWorkflowCloseout` 的必要条件在真实路径中被执行，
+> 保存失败/不确定/未确认、归档缺失与会话查询失败、收尾记录写入失败都会停在
+> `blocked` / `recovery_required`，不会伪装成 `completed`。核实中修复了两处真实
+> 生产断点（Developer Session 从不落库、收尾终态写入失败留下 `running` 残留）。
+> M5 仍为 `pending`；当前里程碑为 **P1-M5**。
 
 ## 阶段退出条件（可验证的客观标准）
 
@@ -572,17 +579,19 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
 
 - **ID**：`P1-M4`
 - **名称**：将修复闭环与代码保存、会话归档、任务收尾串联
-- **状态**：`pending`
+- **状态**：`completed`
 - **必要性**：修复闭环只是中间环节，最终要落到"代码被安全保存、会话被归档、任务被正确
   收尾"。现有代码保存与收尾能力已存在，但尚未与修复闭环一起形成完整路径；这一步把它
   们接成一条从需求到交付的链。
-- **当前证据**：
+- **当前证据（核实后）**：
   - 已实现：代码保存（`internal/app/code_save.go`）、保存结果恢复核验（
     `internal/app/code_save_verify.go`、`internal/domain/code_save_recovery.go`）。
   - 已实现：会话归档核验（`internal/app/task_workflow_exec.go` `sessionsPersisted`）。
   - 已实现：任务收尾（`internal/domain/workflow_run.go` `DecideWorkflowCloseout`）。
-  - 缺口：修复闭环（M3）尚未接入，因此"失败修复后成功"的完整路径（修复→重验→代码保存→
-    归档→收尾）没有端到端证据。
+  - 已实现：修复闭环（M3）已在生产调用链内，修复通过后步骤进入 `completed`
+    （`internal/app/step_workflow_repair.go`），编排器随即推进游标。
+  - **核实前文档中的"缺口：修复闭环（M3）尚未接入"已失效**：M3 在 commit `b7f7e22`
+    完成接入，此处属于旧描述。核实中发现的真实断点见下方"完成记录"。
 - **前置依赖**：`P1-M3`。
 - **目标结果**：一条任务在修复闭环成功后，能继续完成代码保存、会话归档核验与任务收尾；
   任一步骤的持久化失败或结果不确定都按 `DecideWorkflowCloseout` 收敛为正确状态，不把
@@ -610,7 +619,91 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
 - **非目标**：不重构代码保存/收尾逻辑；不新增合并策略；不把收尾做成独立调度。
 - **风险与待决问题**：代码保存与任务收尾涉及真实 Git 远程副作用，测试需注意不污染真实
   远程仓库（使用随机后缀、隔离目录）。
-- **完成记录**：（待完成时填写实际改动、测试结果、未解决问题与证据）
+- **完成记录**（2026-10-24）：
+
+  **核实起点**：分支 `master`，HEAD `b7f7e22`（`:zap: 实现有上限、可停止的验证失败修复与
+  重新验证闭环`），工作区干净。
+
+  **路线图冲突（已修正）**：`P1-single-task-e2e.md` 的 M4 章节仍写"M3 尚未接入，因此
+  '失败修复后成功'的完整路径没有端到端证据"。事实是该描述已过时：M3 的 `runRepairLoop`
+  与 `repairStopMapping` 已经在生产调用链内。已按代码证据改写"当前证据"。
+
+  **核实中发现的真实生产断点（两条）**：
+
+  1. **Developer 执行从不写入 Session 记录**（真实断点）。
+     `internal/app/step_executor_run.go` 的 `callAgent` 只调用 `SessionService.Load(sessionID)`，
+     而 `ContainerService.RunAgent` 从不写数据库——全仓库 `CreateSession` 的唯一生产调用方
+     是 `SessionService.Start`，它只被 Planner（`task_workflow_plan.go`）与 Validator
+     （`validation_review.go`）使用。后果链条：
+     `attempt.SessionIDs` 恒为空 → `finalize` 里 `sessionsPersisted` 对 Developer 会话
+     完全空转 → 只要任务里存在任何非 Developer 会话（Planner），归档核验就永远只覆盖
+     Planner，Developer 会话完全没被核验过；若任务无 Planner 会话则直接判"无会话"。
+     内部测试未暴露该缺陷，因为三个测试替身（`step_executor_fixture_test.go`、
+     `step_workflow_test.go`、`validation_review_test.go`）都在 `RunAgent` 里自行
+     `CreateSession`，把"谁负责持久化会话"的职责错误地放进了替身。
+
+  2. **收尾终态写入失败会留下 `running` 残留**（真实断点）。
+     `applyCloseout` 先用 `run.Complete()` 把内存副本推进到终态，再 `persistRun`；写入失败时
+     调用 `stopRun(recovery_required)`，但 `WorkflowRun` 状态机不允许 `completed → recovery_required`，
+     `stopWithEvent` 退化为 `run.Fail()` 同样被拒绝，最终**静默返回内存对象**：
+     数据库里的记录永久停在 `running`，接口看起来"已停止"，重启后也没有租约收敛路径。
+
+  **实际改动**：
+
+  - `internal/app/step_executor_run.go`：`callAgent` 改为
+    `SessionService.Start`（先写库）→ 用该 SessionID 调用 `RunAgent` → `SessionService.Finish`
+    （写入产出、导出与归档状态），与 Planner / Validator 完全同构。执行端口若返回不同的
+    SessionID 只记录告警不覆盖。会话登记失败时不启动进程（避免一次没有任何记录的真实执行）。
+  - `internal/app/task_workflow_exec.go`：新增 `stopUnpersistedCloseout`。收尾终态写入失败时
+    重新读取数据库真实记录，在其之上写 `recovery_required` / `closeout_failed`，不写
+    "工作流已完成"事件；连重新读取都失败时保留原始现场并记录 Error 日志。
+
+  **新增测试**：`tests/integration/local/workflow/delivery_chain_test.go`（13 个用例）。
+  装配真实 `TaskWorkflowService` + `StepExecutor` + `ValidationService` +
+  `StepWorkflowService` + `SessionService` 与真实 SQLite、真实迁移；只把容器内 Pi 调用、
+  容器内命令执行、容器核验与外部 Git 保存替换为受控替身。
+
+  覆盖场景：
+  - A 修复后成功交付：首轮检查失败 → 修复重验通过 → 第 2 步通过 → 代码保存 → 全部会话
+    已归档 → `completed`；并断言 Attempt 递增且不覆盖、每次尝试 1 条 Session 且
+    `ArchiveStatus=succeeded`、每次尝试 1 条 Validation Run 且归属正确、`attempt.SessionIDs`
+    全部指向真实会话、修复轮次事件 ≥2、代码保存只调用 1 次、事件链完整。
+  - B 修复达到上限：`attempts_exhausted` → `blocked`，不再产生第 3 次 Developer/检查调用，
+    不执行代码保存，任务不 completed，2 次尝试/2 条会话/2 条验证记录均可查询。
+  - C 代码保存：明确失败（`code_save_failed`/`blocked`）、推送结果未知
+    （`code_save_indeterminate`/`recovery_required`）、记录未确认
+    （`code_save_unconfirmed`/`recovery_required`）、能力缺失
+    （`code_saver_unavailable`/`blocked`）。
+  - D 会话归档：归档失败、归档位置缺失、完整性 partial、完整性 missing、会话查询失败
+    （均 `session_not_persisted`/`recovery_required`），以及收尾记录写入失败
+    （`closeout_failed`/`recovery_required`，数据库不得出现 `completed`）。
+  - E 状态推进边界：上述用例同时断言"步骤已通过验证但保存失败时任务不 completed"。
+
+  **为使替身不再掩盖断点而调整的既有测试辅助代码**（`tests/unit/app/`）：
+  `step_executor_fixture_test.go`、`step_workflow_test.go`、`validation_review_test.go` 的
+  容器替身删除 `RunAgent` 内自行 `CreateSession` 的逻辑，以及随之失去引用的
+  `fakeStepSession` / `reviewSessionOf` 两个辅助函数。会话改由产品代码的
+  `StepExecutor.callAgent`（Developer）与 `ValidatorReviewer.Review`（Validator）登记。
+
+  **测试结果（如实区分）**：
+  - 通过：`go test -count=1 ./tests/...` → 45 个包、1652 个用例全部通过。
+  - 通过：`go test -count=1 -p 1 ./tests/...` → 同上（串行执行，排除并发偶发掩盖）。
+  - 通过：`go test -count=1 -run TestDeliveryChain ./tests/integration/local/workflow/` → 13 个用例。
+  - 跳过：`tests/integration/remote/*` 的真实远程路径未执行（需要真实 SSH + Docker + 模型，
+    属 P1-M5 端到端验收范围）。因此**真实远程交付链路本轮无法确认**。
+  - 检查：`gofmt -l internal cmd tests` 无输出；`go vet ./...` 无输出；`go build ./...` 通过。
+  - 测试产物：`TEST_ARTIFACT_DIR=C:\Users\lingting\AppData\Local\Temp\lingting-agent-flow-tests\workflow-2198399842`。
+
+  **未解决问题（不阻塞 M4 完成定义）**：
+  - 远程路径未验证：本轮的端到端证据全部来自受控替身边界内的本地集成测试，
+    真实 SSH + Docker + 容器内 Pi 的同类场景仍需 P1-M5 覆盖。
+  - `sessionsPersisted` 仍要求任务下**全部** Session 都满足"完整性可用 + 归档成功 + 归档位置非空"。
+    本次核实确认这是有意为之的保守口径（执行失败会话同样必须留下可读归档），
+    但它意味着 Validator 审查失败会让收尾停在 `recovery_required`。该语义已在用例
+    `TestDeliveryChainStopsWhenSessionArchiveIncomplete` 中被固化。
+  - `tests/unit/app/task_workflow_test.go` 的 `taskWorkflowStore.sessions` 仍以"整体替换会话
+    查询结果"的方式注入，无法表达"部分会话归档成功、部分失败"。若后续需要覆盖
+    "开发已归档但 Validator 未归档"的混合现场，需要把该注入点改为按会话逐条控制。
 
 ---
 

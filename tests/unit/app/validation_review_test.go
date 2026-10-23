@@ -21,7 +21,6 @@ import (
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/logging"
 	"github.com/lingting/agentflow/internal/sshclient"
-	"github.com/lingting/agentflow/internal/storage"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
 	"github.com/lingting/agentflow/tests/internal/testkit"
 )
@@ -49,8 +48,6 @@ type reviewPort struct {
 	agentRequests []app.ContainerAgentRequest
 	// checkReplies 按命令名返回受控的检查结果。
 	checkReplies map[string]workflowCheckReply
-	// sessions 非空时把会话记录写入数据库。
-	sessions storage.SessionStore
 	// onAgent 在返回 Agent 结果前执行，用于注入副作用。
 	onAgent func(request app.ContainerAgentRequest)
 }
@@ -86,7 +83,6 @@ func (f *reviewPort) RunAgent(
 		reply = f.agentReplies[index]
 	}
 	onAgent := f.onAgent
-	sessions := f.sessions
 	f.mu.Unlock()
 	if onAgent != nil {
 		onAgent(request)
@@ -111,11 +107,8 @@ func (f *reviewPort) RunAgent(
 	if reply.status != agent.RunCompleted {
 		result.Session.Completeness = agent.SessionPartial
 	}
-	if sessions != nil {
-		if err := sessions.CreateSession(ctx, reviewSessionOf(request, result, now)); err != nil {
-			return app.ContainerAgentResult{Result: result}, err
-		}
-	}
+	// 会话记录由调用方（StepExecutor 或语义审查器）通过 SessionService 登记：
+	// 替身只返回执行结果，不代写数据库记录。
 	return app.ContainerAgentResult{Result: result}, reply.err
 }
 
@@ -279,7 +272,6 @@ func newReviewFixture(t *testing.T, options reviewOptions) *reviewFixture {
 		t.Fatalf("写入步骤失败: %v", err)
 	}
 	port := &reviewPort{
-		sessions:     db,
 		agentReplies: options.agentReplies,
 		checkReplies: options.checkReplies,
 	}
@@ -405,76 +397,6 @@ func (f *reviewFixture) sessionsOf(t *testing.T) []domain.Session {
 		t.Fatalf("读取会话失败: %v", err)
 	}
 	return sessions
-}
-
-// reviewSessionOf 构造与假执行结果一致的会话记录。
-func reviewSessionOf(
-	request app.ContainerAgentRequest,
-	result agent.RunResult,
-	at time.Time,
-) domain.Session {
-	roleType := domain.RoleType(request.RoleType)
-	var roleID domain.ID
-	var stepID, attemptID *domain.ID
-	if roleType == domain.RoleTypeValidator {
-		if value := domain.ID(request.StepID); !value.IsEmpty() {
-			stepID = &value
-		}
-		if value := domain.ID(request.AttemptID); !value.IsEmpty() {
-			attemptID = &value
-		}
-		roleID = "validator"
-	} else {
-		if value := domain.ID(request.StepID); !value.IsEmpty() {
-			stepID = &value
-		}
-		if value := domain.ID(request.AttemptID); !value.IsEmpty() {
-			attemptID = &value
-		}
-		roleID = "developer"
-	}
-	role := domain.Role{
-		ID:           roleID,
-		Name:         string(roleType),
-		Type:         roleType,
-		Runner:       domain.RoleRunnerPi,
-		Model:        request.Model,
-		SystemPrompt: "提示词",
-		ToolsPolicy:  domain.DefaultToolsPolicy(roleType),
-		Enabled:      true,
-	}
-	session, err := domain.NewSession(
-		domain.SessionScope{
-			TaskID:    domain.ID(request.TaskID),
-			StepID:    stepID,
-			AttemptID: attemptID,
-		},
-		role,
-		app.ProviderOf(request.Model),
-		request.Model,
-		at,
-	)
-	if err != nil {
-		return domain.Session{}
-	}
-	if id := domain.ID(result.SessionID); !id.IsEmpty() {
-		session.ID = id
-	}
-	session.InvocationID = result.InvocationID
-	session.ContainerID = request.ContainerID
-	if err := session.MarkRunning(""); err != nil {
-		return domain.Session{}
-	}
-	if err := session.Complete(at); err != nil {
-		return domain.Session{}
-	}
-	session.RunStatus = domain.SessionRunCompleted
-	session.Completeness = domain.SessionCompletenessComplete
-	session.ExportStatus = domain.SessionExportNotAttempted
-	session.ArchiveStatus = domain.SessionArchiveSucceeded
-	session.ArchivePath = "sessions/" + session.ID.String() + "/session.jsonl"
-	session.JSONLPath = session.ArchivePath
-	return session
 }
 
 // TestReviewPassedWithDeterministicPassed 验证确定性通过 + 审查通过时最终通过。

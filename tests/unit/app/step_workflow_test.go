@@ -19,7 +19,6 @@ import (
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/logging"
 	"github.com/lingting/agentflow/internal/sshclient"
-	"github.com/lingting/agentflow/internal/storage"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
 	"github.com/lingting/agentflow/tests/internal/testkit"
 )
@@ -58,8 +57,6 @@ type workflowContainerPort struct {
 	checkSequence func(index int) workflowCheckReply
 	// execRequests 记录收到的检查命令执行请求。
 	execRequests []app.ExecRequest
-	// sessions 非空时把会话记录写入数据库。
-	sessions storage.SessionStore
 	// onAgent 在返回 Agent 结果前执行，用于注入副作用。
 	onAgent func(request app.ContainerAgentRequest)
 	// onExec 在返回检查结果前执行，用于在验证阶段注入副作用（例如取消）。
@@ -102,7 +99,6 @@ func (f *workflowContainerPort) RunAgent(
 		reply = f.agentReplies[index]
 	}
 	onAgent := f.onAgent
-	sessions := f.sessions
 	f.mu.Unlock()
 	if onAgent != nil {
 		onAgent(request)
@@ -131,11 +127,8 @@ func (f *workflowContainerPort) RunAgent(
 			result.Session.Completeness = agent.SessionPartial
 		}
 	}
-	if sessions != nil {
-		if err := sessions.CreateSession(ctx, fakeStepSession(request, result, now)); err != nil {
-			return app.ContainerAgentResult{Result: result}, err
-		}
-	}
+	// 会话记录由 StepExecutor 自己通过 SessionService 登记：替身只返回执行结果，
+	// 不代写数据库记录，否则会掩盖"谁负责持久化会话"的职责边界。
 	return app.ContainerAgentResult{Result: result}, reply.err
 }
 
@@ -341,7 +334,6 @@ func newWorkflowFixture(t *testing.T, options workflowOptions) *workflowFixture 
 		agentReplies:  options.agentReplies,
 		checkReplies:  options.checkReplies,
 		checkSequence: options.checkSequence,
-		sessions:      db,
 	}
 	if containers.checkReplies == nil {
 		containers.checkReplies = map[string]workflowCheckReply{}
@@ -947,7 +939,7 @@ func TestWorkflowStopCancelsInFlightRun(t *testing.T) {
 			t.Fatalf("更新任务失败: %v", err)
 		}
 	}
-	containers := &workflowContainerPort{running: true, sessions: db}
+	containers := &workflowContainerPort{running: true}
 	executor, err := app.NewStepExecutor(app.StepExecutorOptions{
 		Store:      db,
 		Containers: containers,

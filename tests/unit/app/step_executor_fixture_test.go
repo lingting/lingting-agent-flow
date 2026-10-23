@@ -78,8 +78,6 @@ type fakeContainerPort struct {
 	started chan struct{}
 	// block 使 RunAgent 阻塞直到 ctx 结束。
 	block bool
-	// sessions 非空时把会话记录写入数据库，模拟真实执行器的持久化行为。
-	sessions storage.SessionStore
 }
 
 // fakeAgentReply 是一次受控的 Agent 调用结果。
@@ -175,83 +173,9 @@ func (f *fakeContainerPort) RunAgent(
 			result.Session.Completeness = agent.SessionPartial
 		}
 	}
-	if f.sessions != nil {
-		if err := f.sessions.CreateSession(ctx, fakeStepSession(request, result, now)); err != nil {
-			return app.ContainerAgentResult{Result: result}, err
-		}
-	}
+	// 会话记录由 StepExecutor 自己通过 SessionService 登记：替身只返回执行结果，
+	// 不代写数据库记录，否则会掩盖"谁负责持久化会话"的职责边界。
 	return app.ContainerAgentResult{Result: result}, reply.err
-}
-
-// fakeStepSession 构造一条与真实执行一致的会话记录。
-func fakeStepSession(
-	request app.ContainerAgentRequest,
-	result agent.RunResult,
-	now time.Time,
-) domain.Session {
-	runStatus := domain.SessionRunCompleted
-	status := domain.SessionStatusCompleted
-	completeness := domain.SessionCompletenessComplete
-	switch result.Status {
-	case agent.RunFailed:
-		runStatus = domain.SessionRunFailed
-		status = domain.SessionStatusFailed
-		completeness = domain.SessionCompletenessPartial
-	case agent.RunCancelled:
-		runStatus = domain.SessionRunCancelled
-		status = domain.SessionStatusCancelled
-		completeness = domain.SessionCompletenessPartial
-	case agent.RunTimedOut:
-		runStatus = domain.SessionRunTimedOut
-		status = domain.SessionStatusFailed
-		completeness = domain.SessionCompletenessPartial
-	}
-	if result.Session.Completeness == agent.SessionMissing {
-		completeness = domain.SessionCompletenessMissing
-	}
-	roleType := domain.RoleType(request.RoleType)
-	roleID := domain.ID(request.RoleType + "-role")
-	// 任务级调用（例如 Planner）没有步骤与尝试归属：此时必须留空，
-	// 否则会伪造出一条指向不存在步骤的会话记录。
-	var stepID, attemptID *domain.ID
-	if request.StepID != "" {
-		value := domain.ID(request.StepID)
-		stepID = &value
-	}
-	if request.AttemptID != "" {
-		value := domain.ID(request.AttemptID)
-		attemptID = &value
-	}
-	session := domain.Session{
-		ID:        domain.ID(result.SessionID),
-		TaskID:    domain.ID(request.TaskID),
-		StepID:    stepID,
-		AttemptID: attemptID,
-		RoleID:    roleID,
-		RoleSnapshot: domain.RoleSnapshot{
-			RoleID:       roleID,
-			Type:         roleType,
-			Name:         string(roleType),
-			Runner:       domain.RoleRunnerPi,
-			Model:        request.Model,
-			SystemPrompt: "系统提示词",
-			ToolsPolicy:  domain.DefaultToolsPolicy(roleType),
-		},
-		Provider:     "provider",
-		Model:        request.Model,
-		Status:       status,
-		RunStatus:    runStatus,
-		Completeness: completeness,
-		ExportStatus: domain.SessionExportNotAttempted,
-		InvocationID: result.InvocationID,
-		JSONLPath:    result.Session.JSONLPath,
-		StartedAt:    now,
-		CreatedAt:    now,
-	}
-	if completeness == domain.SessionCompletenessMissing {
-		session.JSONLPath = ""
-	}
-	return session
 }
 
 // fakeGitPort 是 Git 工作区状态采集的受控替身。
@@ -438,7 +362,7 @@ func newStepExecutorFixtureWithStart(
 			t.Fatalf("更新任务失败: %v", err)
 		}
 	}
-	containers := &fakeContainerPort{running: true, sessions: db}
+	containers := &fakeContainerPort{running: true}
 	store := &stepExecutorStore{
 		StepExecutionStore: db,
 		updateAttemptErr:   options.updateAttemptErr,

@@ -480,7 +480,10 @@ func (s *TaskWorkflowService) applyCloseout(
 	}
 	persisted, persistErr := s.persistRun(writeCtx, run)
 	if persistErr != nil {
-		return s.stopRun(writeCtx, run, domain.WorkflowRunRecoveryRequired, "closeout_failed", persistErr)
+		// 记录没能写成 completed：内存副本已经进入终态，无法再经状态机收敛为
+		// recovery_required。此时必须回到数据库事实并如实报告"收尾未落盘"，
+		// 不能对外宣布完成，也不能把 running 残留当成已收尾留在库里。
+		return s.stopUnpersistedCloseout(writeCtx, run, persistErr)
 	}
 	payload["task_status"] = string(updated.Status)
 	s.appendEvent(writeCtx, run.TaskID, nil, nil, domain.EventTypeWorkflowCompleted, payload)
@@ -638,6 +641,39 @@ func (s *TaskWorkflowService) cancelTask(ctx context.Context, taskID domain.ID) 
 			slog.String("error", errorSummary(err)),
 		)
 	}
+}
+
+// stopUnpersistedCloseout 处理"收尾结论没能写成 completed"的现场。
+//
+// 只有在全部收尾条件满足、任务已经推进到 completed，而执行记录的终态写入失败时
+// 才会走到这里。此时内存副本已经进入终态，任何状态机迁移都会被拒绝，因此不能再用
+// 本地对象覆盖数据库：
+//   - 先重新读取数据库中的真实记录，把停止状态写在真实值之上；
+//   - 该写入同样失败时保留 running 现场并记录日志，由启动恢复按租约过期收敛；
+//   - 任何情况下都不写 "工作流已完成" 事件。
+func (s *TaskWorkflowService) stopUnpersistedCloseout(
+	ctx context.Context,
+	run domain.WorkflowRun,
+	cause error,
+) domain.WorkflowRun {
+	summary := "收尾结论已判定完成，但执行记录终态写入失败: " + errorSummary(cause)
+	latest, readErr := s.store.GetWorkflowRun(ctx, run.ID)
+	if readErr != nil {
+		s.logger.ErrorContext(
+			ctx,
+			"收尾写入失败且无法重新读取执行记录，保留原始现场",
+			slog.String("run_id", run.ID.String()),
+			slog.String("task_id", run.TaskID.String()),
+			slog.String("error", errorSummary(readErr)),
+		)
+		return run
+	}
+	return s.stopWithEvent(ctx, *latest, domain.WorkflowRunRecoveryRequired,
+		"closeout_failed", summary, domain.EventTypeWorkflowRecovery, map[string]any{
+			"run_id":          latest.ID.String(),
+			"completed_steps": latest.CompletedSteps,
+			"total_steps":     latest.TotalSteps,
+		})
 }
 
 // stopRun 把工作流收敛为可恢复停止或需要人工核验，并记录原因。
