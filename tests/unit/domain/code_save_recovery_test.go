@@ -47,13 +47,33 @@ func TestDecideCodeSaveRecovery(t *testing.T) {
 		expectedSHA    string
 		expectedRetry  bool
 	}{
-		// 提交窗口：HEAD 已前进说明提交确实发生，只是记录没写进去。
+		// 提交窗口：HEAD 已前进且第一父是记录的基线，说明提交确实由本次操作产生。
 		{
-			name:           "提交已发生但记录仍是 pending",
-			record:         pendingCommitRecord(),
-			observation:    domain.CodeSaveObservation{HeadCommit: recoveryHead},
+			name:   "提交已发生但记录仍是 pending",
+			record: pendingCommitRecord(),
+			observation: domain.CodeSaveObservation{
+				HeadCommit:       recoveryHead,
+				HeadParentCommit: recoveryBaseline,
+			},
 			expectedStatus: domain.RecoveryStatusConfirmedApplied,
 			expectedSHA:    recoveryHead,
+		},
+		// 提交窗口：HEAD 变了但第一父不是基线，无法归因给本次操作。
+		{
+			name:   "HEAD 已变化但无法归因为本次提交",
+			record: pendingCommitRecord(),
+			observation: domain.CodeSaveObservation{
+				HeadCommit:       recoveryHead,
+				HeadParentCommit: recoveryOtherCommit,
+			},
+			expectedStatus: domain.RecoveryStatusUnverifiable,
+		},
+		// 提交窗口：读不到第一父（根提交或查询失败）同样不可归因。
+		{
+			name:           "HEAD 已变化但读不到第一父",
+			record:         pendingCommitRecord(),
+			observation:    domain.CodeSaveObservation{HeadCommit: recoveryHead},
+			expectedStatus: domain.RecoveryStatusUnverifiable,
 		},
 		// 提交窗口：HEAD 未变化说明提交确实没有发生，可以安全重试。
 		{
@@ -256,22 +276,50 @@ func TestDecideCodeSaveRecoveryForMerge(t *testing.T) {
 	}
 }
 
-// TestDecideCodeSaveRecoveryPrioritizesUnconfirmedRecord 校验记录不可信时先核验。
+// TestDecideCodeSaveRecoveryUnconfirmedRecordKeepsGitFact 校验记录不可信时仍保留 Git 事实。
 //
-// 记录写入未确认时，即使现场看起来一切正常也不能判定；反过来，现场看起来"没发生"
-// 也不能据此重试——记录本身可能是落后的。
-func TestDecideCodeSaveRecoveryPrioritizesUnconfirmedRecord(t *testing.T) {
+// 记录写入未确认时现场核验依然有意义：它给出的是"Git 到底做了什么"，与"我们对 Git
+// 结果的记录是否可信"是两个独立事实。因此结论保留 Git 事实，但一律不允许据此重试，
+// 重试前必须先让记录收敛。
+func TestDecideCodeSaveRecoveryUnconfirmedRecordKeepsGitFact(t *testing.T) {
 	t.Parallel()
-	record := pendingCommitRecord()
-	record.PersistStatus = domain.PersistStatusUnconfirmed
-	decision := domain.DecideCodeSaveRecovery(record, domain.CodeSaveObservation{
-		HeadCommit: recoveryBaseline,
-	})
-	if decision.Status != domain.RecoveryStatusUnverifiable {
-		t.Fatalf("记录不可信时必须转人工核验，实际 %s", decision.Status)
+	cases := []struct {
+		name           string
+		observation    domain.CodeSaveObservation
+		expectedStatus domain.RecoveryStatus
+	}{
+		{
+			// 现场看起来"没发生"，但记录可能落后于真实 Git 状态：不得据此重试。
+			name:           "记录不可信且 HEAD 未变化",
+			observation:    domain.CodeSaveObservation{HeadCommit: recoveryBaseline},
+			expectedStatus: domain.RecoveryStatusConfirmedNotApplied,
+		},
+		{
+			name: "记录不可信且 HEAD 已按基线前进",
+			observation: domain.CodeSaveObservation{
+				HeadCommit:       recoveryHead,
+				HeadParentCommit: recoveryBaseline,
+			},
+			expectedStatus: domain.RecoveryStatusConfirmedApplied,
+		},
 	}
-	if decision.SafeToRetry {
-		t.Fatal("记录不可信时不得判定可以安全重试")
+	for _, testCase := range cases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			record := pendingCommitRecord()
+			record.PersistStatus = domain.PersistStatusUnconfirmed
+			decision := domain.DecideCodeSaveRecovery(record, testCase.observation)
+			if decision.Status != testCase.expectedStatus {
+				t.Fatalf("期望结论 %s，实际 %s", testCase.expectedStatus, decision.Status)
+			}
+			if decision.SafeToRetry {
+				t.Fatal("记录不可信时不得判定可以安全重试")
+			}
+			if !containsText(decision.Summary, "记录未能可靠写入") {
+				t.Fatalf("判定说明必须指出记录不可信，实际 %q", decision.Summary)
+			}
+		})
 	}
 }
 

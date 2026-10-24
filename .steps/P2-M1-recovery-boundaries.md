@@ -284,10 +284,10 @@ agentflow server（internal/cli/server.go:runServer）
 | 成功证据 | 提交后重新读取 HEAD；`commit_status=succeeded` + `commit_sha` + `persist_status=persisted` |
 | 失败与中断窗口 | (a) 提交成功但写入失败 → `MarkPersistFailure` → `persist_status=unconfirmed`、DB 停在 `commit_status=pending`，错误类别 `CodeStateUnconfirmed`（`saver.go:persist`）；(b) 提交后 HEAD 不可读 → `commit_status=unknown` + `CodeStateUncertain`；(c) 进程在提交后崩溃 → DB 停在 `pending`，基线可用 |
 | 当前恢复入口 | **用户触发**：`agentflow code verify --record <id>`（`internal/cli/code.go:283`）→ `ContainerService.VerifyCodeSave`（`internal/app/code_save_verify.go:50`）→ `codesaver.Saver.Observe` → `domain.DecideCodeSaveRecovery`。**没有任何自动恢复调用它**（`grep VerifyCodeSave` 只命中 CLI 与定义） |
-| 当前收敛行为 | 核验结论写回 `recovery_status`：`confirmed_applied` / `confirmed_not_applied` / `unverifiable`；`SafeToRetry` 只在 `confirmed_not_applied` 时为 true。写入以原 `recovery_status` 为条件，冲突时重读 |
-| 重试安全性 | 只有 `confirmed_not_applied` 可重试；`unconfirmed` 记录禁止仅凭 `pending` 重放 |
-| 证据与测试 | `tests/integration/local/codesaver/codesaver_test.go`（`TestCommitSucceededButRecordFailedIsRecoverable`，真实 Git）、`tests/unit/source/codesaver/codesaver_test.go`（`TestCommitHeadChangedDespiteError`、`TestCommitFailureKeepsHead`）、`tests/unit/domain/code_save_recovery_test.go`（`TestDecideCodeSaveRecovery`、`TestDecideCodeSaveRecoveryPrioritizesUnconfirmedRecord`）、`tests/unit/store/code_saves_test.go` |
-| 剩余缺口 | 1) 核验是**人工**动作，收尾进入 `recovery_required` 后没有"核验并继续"的编排入口；2) `VerifyCodeSave` 需要容器仍然存在且可达，容器已删除时只能得到 `unverifiable`；3) 没有针对"核验过程中再次退出"的用例 |
+| 当前收敛行为 | **P2-M4 更新**：核验结论连同已确认阶段状态条件写回（`UpdateCodeSaveRecoveryResult` + `ApplyRecovery`）：`confirmed_applied` 才推进阶段状态，`confirmed_not_applied` / `unverifiable` 只写结论。`SafeToRetry` 只在"确认未发生"且记录可信时为 true；续跑资格统一由 `domain.DecideCodeSaveResume` 判定（`proceed` / `verify` / `blocked`） |
+| 重试安全性 | **P2-M4 更新**：只有 `confirmed_not_applied` 可重试；`unconfirmed` 记录禁止仅凭 `pending` 重放；`TaskWorkflowService.checkCodeSaveRecovery` 在启动与恢复之前拒绝存在未决副作用的请求 |
+| 证据与测试 | `tests/integration/local/codesaver/recovery_test.go`（11 个用例，真实 SQLite + 真实 Git）、`tests/integration/local/codesaver/codesaver_test.go`、`tests/unit/source/codesaver/codesaver_test.go`、`tests/unit/domain/code_save_recovery_test.go`、`tests/unit/domain/code_save_resume_test.go`、`tests/unit/store/code_saves_test.go` |
+| 剩余缺口 | **P2-M4 更新**：1) 核验仍是**人工**动作，收尾进入 `recovery_required` 后没有"核验并继续"的自动编排入口（恢复入口门控与启动扫描已落地）；2) `VerifyCodeSave` 需要容器仍然存在且可达，容器已删除时只能得到 `unverifiable`；3) 已用"条件写入 + 冲突重读"覆盖"核验期间记录被推进"，"核验过程中再次退出"由只读幂等性覆盖 |
 
 ### 2.10 push
 

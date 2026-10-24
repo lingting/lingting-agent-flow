@@ -411,19 +411,54 @@ func (x *Session) createRecord(ctx context.Context) error {
 // 每个阶段推进后都必须单独落盘：远程 Git 操作与数据库无法共享事务，
 // 只有及时写入才能在中断后定位最后一个已确认完成的阶段。
 //
-// 写入失败时记录会被标记为 unconfirmed：此时内存中的状态可能是"Git 已经成功"，
-// 而数据库里仍是 pending，后续恢复流程不得仅凭 pending 就重新执行 Git 操作。
-// 标记本身不需要额外写入：它只影响本次返回的记录与错误分类。
+// 写入失败时按两层处理：
+//  1. 先立即重试一次——写回是幂等的主键更新，瞬时故障重试成功时记录仍然收敛到
+//     真实 Git 状态，不必让整个保存流程停在"不可信"上；
+//  2. 仍然失败时把记录标记为 unconfirmed 并尽力单独落盘：此时内存中的状态可能是
+//     "Git 已经成功"，而数据库里仍是 pending。标记落盘后，后续恢复流程读到的就是
+//     "这条记录不可信"，不会仅凭 pending 就重新执行有副作用的 Git 操作。
+//
+// 标记写入也失败时不做任何伪装：本次返回的记录仍带 unconfirmed，调用方据此拒绝
+// 把写入失败当作 Git 结果。
 func (x *Session) persist(ctx context.Context) error {
 	if err := x.record.Validate(); err != nil {
 		return recordError(x.record.Stage, err)
 	}
-	if err := x.saver.recorder.Update(ctx, x.record); err != nil {
+	if err := x.writeRecord(ctx); err != nil {
+		if retryErr := x.writeRecord(ctx); retryErr == nil {
+			x.record.MarkPersisted(time.Now())
+			return nil
+		}
 		x.record.MarkPersistFailure(err.Error(), time.Now())
+		x.flagUnconfirmed(ctx)
 		return recordError(x.record.Stage, err)
 	}
 	x.record.MarkPersisted(time.Now())
 	return nil
+}
+
+// writeRecord 执行一次记录写回。
+func (x *Session) writeRecord(ctx context.Context) error {
+	return x.saver.recorder.Update(ctx, x.record)
+}
+
+// unconfirmedWriteTimeout 限制"标记记录不可信"这次写回的时间。
+//
+// 它必须独立于调用方上下文：调用方超时或取消正是写入失败的常见原因，不能同时
+// 成为"标记写不进去"的原因，否则数据库会停留在看似可信的 pending 上。
+const unconfirmedWriteTimeout = 5 * time.Second
+
+// flagUnconfirmed 尽力把"这条记录不可信"单独落盘。
+//
+// 失败只影响记录的可信度标记，不改变本次结论：调用方已经拿到带 unconfirmed 的
+// 记录，不会把写入失败误认为 Git 操作失败。
+func (x *Session) flagUnconfirmed(ctx context.Context) {
+	if x.record.ID.IsEmpty() {
+		return
+	}
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), unconfirmedWriteTimeout)
+	defer cancel()
+	_ = x.saver.recorder.Update(writeCtx, x.record)
 }
 
 // persistFailure 把"状态写入失败"报告为可区分的错误。

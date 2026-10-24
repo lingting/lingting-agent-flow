@@ -35,7 +35,9 @@ const (
 	testCommitSHA     = "2222222222222222222222222222222222222222"
 	testMergeSHA      = "3333333333333333333333333333333333333333"
 	testBaseRemoteSHA = "4444444444444444444444444444444444444444"
-	testRemoteDiverge = "5555555555555555555555555555555555555555"
+	// testHeadParentCommit 是初始 HEAD 的第一父提交，用于区分"本次提交"与"其他来源"。
+	testHeadParentCommit = "6666666666666666666666666666666666666666"
+	testRemoteDiverge    = "5555555555555555555555555555555555555555"
 )
 
 // succeeded 构造成功结果。
@@ -78,6 +80,8 @@ type fakeRepo struct {
 	mu sync.Mutex
 	// head 是当前 HEAD 指向的 commit。
 	head string
+	// headParent 是 HEAD 的第一父提交，用于验证"HEAD 变化能否归因本次提交"。
+	headParent string
 	// dirty 表示工作区存在未提交变更。
 	dirty bool
 	// staged 表示暂存区已有内容。
@@ -108,6 +112,7 @@ type fakeRepo struct {
 func newFakeRepo() *fakeRepo {
 	return &fakeRepo{
 		head:       testHeadCommit,
+		headParent: testHeadParentCommit,
 		taskBranch: testTaskBranch,
 		remoteTask: testHeadCommit,
 		remoteBase: testBaseRemoteSHA,
@@ -203,10 +208,14 @@ func (r *fakeRepo) defaultResult(
 		return succeeded("origin/main\norigin/master\n"), nil
 	case "ls-remote":
 		return r.lsRemote(args), nil
+	case "rev-list":
+		return r.revList(args), nil
 	case "add":
 		return succeeded(""), nil
 	case "commit":
 		r.set(func() {
+			// 新提交的第一父就是提交前的 HEAD：这是"提交由本次操作产生"的证据。
+			r.headParent = r.head
 			r.head = testCommitSHA
 			r.dirty = false
 			r.staged = false
@@ -283,6 +292,29 @@ func (r *fakeRepo) status() docker.CommandResult {
 		builder.WriteString(" M internal/app/app.go\x00")
 	}
 	return succeeded(builder.String())
+}
+
+// revList 返回提交的父子关系。
+//
+// 代码保存的恢复判定用 `rev-list --parents -n 1 <commit>` 读取第一父提交：
+// 只有第一父等于已记录基线时，HEAD 的前进才能归因为本次提交。
+func (r *fakeRepo) revList(args []string) docker.CommandResult {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	target := ""
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") && arg != "rev-list" {
+			target = arg
+		}
+	}
+	if target != r.head {
+		return failed(128, "unknown revision")
+	}
+	if r.headParent == "" {
+		// 根提交没有父提交：调用方必须按"不可归因"处理。
+		return succeeded(r.head + "\n")
+	}
+	return succeeded(r.head + " " + r.headParent + "\n")
 }
 
 // lsRemote 返回远程分支引用查询结果。
@@ -1737,9 +1769,11 @@ func TestPersistFailureLeavesPendingInDatabase(t *testing.T) {
 	if stored.BaselineCommitSHA != testHeadCommit {
 		t.Fatalf("提交基线必须在副作用之前落盘，实际 %q", stored.BaselineCommitSHA)
 	}
-	// 有了基线，恢复判定就可以确认"提交已经发生"。
+	// 有了基线与第一父关系，恢复判定才可以确认"提交已经发生"：只凭 HEAD 变化
+	// 无法排除其他来源的提交。
 	decision := domain.DecideCodeSaveRecovery(stored, domain.CodeSaveObservation{
-		HeadCommit: testCommitSHA,
+		HeadCommit:       testCommitSHA,
+		HeadParentCommit: testHeadCommit,
 	})
 	if decision.Status != domain.RecoveryStatusConfirmedApplied {
 		t.Fatalf("依据基线应确认提交已发生，实际 %s", decision.Status)

@@ -169,6 +169,11 @@ type TaskWorkflowStore interface {
 	WithTx(ctx context.Context, fn func(ctx context.Context, tx storage.Tx) error) error
 	// AppendEvent 追加任务事件。
 	AppendEvent(ctx context.Context, event domain.Event) (domain.Event, error)
+	// ListCodeSaveRecordsByTask 按任务列出代码保存记录，最新的在前。
+	//
+	// 恢复推进前必须据此判断是否还存在结果不明的外部 Git 副作用：数据库中的
+	// pending 不能证明提交、推送或合并没有发生。
+	ListCodeSaveRecordsByTask(ctx context.Context, taskID string) ([]domain.CodeSaveRecord, error)
 }
 
 // TaskWorkflowOptions 是构造任务级工作流编排器的输入。

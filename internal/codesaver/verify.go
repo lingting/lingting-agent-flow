@@ -83,6 +83,13 @@ func (x *Session) observeRecord(
 			return observation, err
 		}
 		observation.HeadCommit = head
+		// 第一父提交是"HEAD 的前进能否归因为本次提交"的唯一证据：读不到时留空，
+		// 由判定函数转人工，不得把任意 HEAD 变化都算作本次操作成功。
+		parent, parentErr := x.headParentCommit(ctx, head)
+		if parentErr != nil {
+			return observation, parentErr
+		}
+		observation.HeadParentCommit = parent
 	}
 	if record.PushStatus == domain.PushStatusPending {
 		remote, err := x.remoteBranchCommit(ctx, x.request.TaskBranch)
@@ -146,6 +153,42 @@ func (x *Session) localBranchCommit(ctx context.Context, branch string) (string,
 		)
 	}
 	return trimmed, nil
+}
+
+// headParentCommit 读取指定提交的第一父提交。
+//
+// 它只用于判断"HEAD 的前进能否归因为本次提交"：读不到父提交（根提交）或读取失败
+// 时返回空值而不是错误，因为此时正确的处理是"不可归因"而不是"核验失败"。
+// 查询本身失败与提交没有父提交无法从 rev-parse 的输出区分，因此统一按不可归因处理，
+// 由判定函数转人工核验，绝不据此判定提交已经发生。
+func (x *Session) headParentCommit(ctx context.Context, commit string) (string, error) {
+	trimmed := strings.TrimSpace(commit)
+	if !validCommit(trimmed) {
+		return "", nil
+	}
+	out, err := x.runner.output(
+		ctx,
+		"recover",
+		CodeStateUncertain,
+		"rev-list", "--parents", "-n", "1", trimmed,
+	)
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(strings.TrimSpace(out))
+	if len(fields) < 2 {
+		// 没有父提交（根提交）或输出为空：无法归因，交由判定函数转人工。
+		return "", nil
+	}
+	if !validCommit(fields[1]) {
+		return "", newError(
+			CodeStateUncertain,
+			"recover",
+			"rev-list 返回的父提交 SHA 非法",
+			nil,
+		)
+	}
+	return fields[1], nil
 }
 
 // expectedMergeCommit 依据基线、远程基础分支与任务分支推算唯一的合并提交。

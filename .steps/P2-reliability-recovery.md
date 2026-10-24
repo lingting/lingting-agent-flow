@@ -61,14 +61,19 @@ P2 主要补齐更系统的恢复语义与恢复验收。
 - **P2-M2 新增**：`attempts` / `sessions` / `validation_runs` 残留的启动收敛
   （`app.ExecutionResidueService`，B2/B3）。
 - **P2-M2 新增**：验证引擎的取消 / 超时 / 服务停止独立用例与持久化断言。
+- **P2-M4 新增**：代码保存三阶段的恢复收敛闭环——不可信标记落盘、HEAD 归因依靠第一父、
+  已确认阶段状态条件写回、多阶段核验顺序收敛、恢复入口前置门控、启动扫描可发现未决记录
+  （`app.CodeSaveRecoveryService`）。
 
 **已确认缺失（详见清单 §3.4、§5）**：
 
-- Attempt 级 `code_fetches`、`container.state=unknown` 两类残留仍**没有收敛路径**
-  （B4 与 G14，属于 P2-M4/M5 范围）。
-- 代码保存恢复核验（`code verify`）**只有 CLI 手工入口**，不属于自动恢复流程（M4）。
+- ~~Attempt 级 `code_fetches`、`container.state=unknown` 两类残留仍**没有收敛路径**
+  （B4 与 G14）。~~ 仍未收敛，转入 P2-M5 范围。
+- ~~代码保存恢复核验（`code verify`）**只有 CLI 手工入口**，不属于自动恢复流程（M4）。~~
+  P2-M4 已交付恢复入口的前置门控与启动扫描可发现性；"核验并继续"的自动编排入口仍未实现，
+  属 P2-M5 范围。
 - 收尾阶段 `tasks.status=completed` 与 `workflow_runs.status=recovery_required` 可以同时成立，
-  没有"任务结论存疑"的表达（M3/M4）。
+  没有"任务结论存疑"的表达（M5）。
 
 **待补**：
 
@@ -102,7 +107,7 @@ P2 主要补齐更系统的恢复语义与恢复验收。
 | P2-M1 | 梳理所有阶段的状态持久化和恢复边界 | `completed` | P1 退出 |
 | P2-M2 | 明确超时、取消、中断、进程重启后的恢复语义 | `completed` | P2-M1 |
 | P2-M3 | 明确修复次数上限、停止条件、重试资格和结果不确定处理规则 | `completed` | P2-M1 |
-| P2-M4 | 核验提交、推送、合并等外部副作用的恢复路径 | `pending` | P2-M2 |
+| P2-M4 | 核验提交、推送、合并等外部副作用的恢复路径 | `completed` | P2-M2 |
 | P2-M5 | 补齐关键恢复场景的集成测试与恢复验收 | `pending` | P2-M2、P2-M3、P2-M4 |
 
 ## 阶段退出条件
@@ -305,23 +310,72 @@ P2 主要补齐更系统的恢复语义与恢复验收。
 ### P2-M4 核验提交、推送、合并等外部副作用的恢复路径
 
 - **ID**：`P2-M4`
-- **状态**：`pending`
+- **状态**：`completed`（2026-10-25，基于 `master` HEAD `168fd2f` 实施）
 - **必要性**：外部副作用不可重放，恢复必须先核验。
-- **当前证据**：`DecideCodeSaveRecovery`、`code verify`、`persist_status`/`recovery_status`
-  已实现；commit/push/merge 三阶段的基线与核验判据在
-  `tests/integration/local/codesaver/codesaver_test.go` 与
-  `tests/unit/domain/code_save_recovery_test.go` 已有真实证据。
-- **前置依赖**：P2-M2。
-- **M1 移交的具体问题**：
-  1. `VerifyCodeSave` **只有 CLI 手工入口**（`agentflow code verify`），不属于自动恢复流程；
-     收尾进入 `recovery_required` 后没有"核验并继续"的编排入口（清单 §2.9、§3.2）；
-  2. `push_status=unknown` / `merge=unverifiable` 之后没有"再次核验"的自动路径
-     （清单 §2.10、§2.11）；
-  3. 容器已删除时核验只能得到 `unverifiable`，缺少可操作出路（清单 §2.9）；
-  4. 没有"核验过程中再次退出"的用例（清单 G5）；
-  5. `merge_after_push` 默认关闭，merge 恢复**没有真实远程证据**（清单 §2.11）。
-- **目标结果**：提交/推送/合并的恢复路径全部"先核验、后处理"，不可确认即 `unverifiable`。
-- **完成定义**：三阶段恢复判据有测试证据，且不盲目重放。
+- **前置依赖**：P2-M2（已完成）。
+
+#### 审计发现的真实故障窗口（均已修复或明确登记）
+
+| 窗口 | 位置 | 修复前行为 | 处置 |
+|---|---|---|---|
+| W1 提交已成功、记录写不进数据库 | `internal/codesaver/saver.go` `persist` | 只在内存记录上标记 `unconfirmed`，**不落盘**；数据库永远停在看似可信的 `pending`，重启后恢复无法区分"没发生"与"已发生但没记下来" | 改为"重试一次 → 仍失败则单独落盘不可信标记（`flagUnconfirmed`，独立 5s 超时上下文）" |
+| W2 HEAD 变化即判提交成功 | `internal/domain/code_save_recovery.go` `decideCommitRecovery` | 只要 HEAD ≠ 基线就判 `confirmed_applied`，他人提交也会被归因为本次成功 | 新增 `CodeSaveObservation.HeadParentCommit`（`git rev-list --parents -n 1`）：仅当第一父等于基线才判已发生，否则 `unverifiable` |
+| W3 核验结论只写 `recovery_status` | `internal/app/code_save_verify.go` `persistCodeSaveRecovery` | 已确认发生的阶段状态与 SHA 不落盘，数据库仍 `pending`，恢复反复要求核验同一现场 | 新增 `storage.CodeSaveStore.UpdateCodeSaveRecoveryResult`（窄范围、以 `recovery_status` 为条件），配合 `domain.CodeSaveRecord.ApplyRecovery` 写回已确认阶段 |
+| W4 多阶段核验无法收敛 | `internal/domain/code_save.go` `recoveryStatusMachine` | `confirmed_applied` / `confirmed_not_applied` 是终态，禁止互相迁移；"提交已确认发生 + 推送确认未发生"无法落库，`push_status` 永久 `pending` | 允许已收敛结论之间迁移（阶段归属由 `CodeSaveRecoveryDecision.Stage` 表达），并补两个阶段的顺序收敛用例 |
+| W5 阶段状态不确定即等于整体不确定 | `internal/app/task_workflow_exec.go` `codeSaveIndeterminate` | 用 `RequiresManualRecovery`，导致已核验确认未发生的记录仍被判不确定，恢复无法收敛 | 改用 `domain.CodeSaveRecord.HasUnresolvedSideEffect`；`confirmed_not_applied` 视为已覆盖后续阶段（不提交就不会推送） |
+| W6 恢复请求无视未决副作用 | `internal/app/task_workflow_run.go` | `ResumeWorkflow` 只核验容器与执行节点，直接重新执行代码保存，可能重放 commit / push / merge | 新增 `checkCodeSaveRecovery`：读全部记录 → `domain.DecideTaskCodeSaveResume` → 拒绝或放行；`StartWorkflow` 同样前置校验 |
+| W7 核验失败伪装成"操作没发生" | `internal/app/code_save_verify.go` `VerifyCodeSave` | 节点不可达 / Docker 不可访问 / Git 查询失败直接返回错误，数据库得不到 `unverifiable` | 降级为 `ReadFailed` 观察值 → `unverifiable` 结论并落盘，原始错误进日志 |
+| W8 重启后无人知晓存在未决副作用 | 无 | 进程重启后没有任何入口列出"仍需人工核验的代码保存记录" | 新增 `app.CodeSaveRecoveryService`（启动扫描，只读 + 追加 `code_save.recovery_required` 事件），注册进 `internal/lifecycle` |
+
+#### 判据与重试资格的变化
+
+- **`domain.DecideCodeSaveRecovery`**：`SafeToRetry` 只在"确认未发生"且记录可信时为真；记录不可信时保留 Git 事实但一律不给重试资格。
+- **`domain.DecideCodeSaveResume`（新增）**：`proceed` / `verify` / `blocked` 三态。顺序为"写入未确认 → 已核验无法确认 → 确认未发生 → 仍有未决副作用 → 可以继续"，并输出稳定 `ErrorClass`（`code_save_unconfirmed` / `code_save_indeterminate`）。
+- **`domain.DecideTaskCodeSaveResume`（新增）**：按任务全部记录判定，越保守的结论优先。
+- **`domain.CodeSaveRecord.HasUnresolvedSideEffect`（新增）**：只回答"是否还有必须核验才能重试的阶段"，与"是否需要人工介入"分离。
+- **`domain.CodeSaveRecord.ApplyRecovery`（新增）**：`confirmed_applied` 才推进阶段状态；`confirmed_not_applied` / `unverifiable` 只写恢复结论，不臆造 SHA。
+
+#### M1 移交问题的处理结果
+
+1. **核验入口仍然只有 CLI**：本阶段不做"核验并继续"的自动编排入口（需要满足"核验结论已落盘 + 任务容器仍可达 + 工作流可合法推进"三项，属于编排策略）。已交付的是**恢复入口的前置门控**（W6）与**可发现性**（W8），人工核验入口保持 `agentflow code verify --record <id>`（现同时输出续跑资格与四个独立事实）。
+2. **`push_status=unknown` 之后的再次核验路径**：已打通——同一记录可重复核验，且第二个阶段的结论现在能落盘（W3/W4）。
+3. **容器已删除时**：仍然只能得到 `unverifiable`（核验需要容器内 Git）。这是有意的：不伪造确定结论。
+4. **"核验过程中再次退出"**：核验是纯只读查询，退出后记录保持原状，重新核验幂等；以 W3 的条件写入 + 冲突重读覆盖"核验期间记录被推进"（`TestRecoveryConflictKeepsNewerRecord`）。
+5. **merge 恢复的真实远程证据**：仍无真实远程 Docker 用例（`docker.remote_docker_enabled` 未启用），本次用真实本机 Git 仓库（bare 远程）覆盖 merge 已发生 / 基础分支被他人推进两类判定。
+
+#### 测试证据（真实 SQLite + 正式迁移 + 真实 Git）
+
+- `tests/integration/local/codesaver/recovery_test.go`（11 个用例）：提交/推送/合并已发生但记录未落盘、HEAD 变化不可归因、远程被他人推进、缺少基线、并发冲突、确认未发生后重新执行、远程不可达、基础分支被他人推进、不可信标记落盘、多阶段顺序收敛。
+- `tests/integration/local/workflow/code_save_recovery_test.go`（4 个用例）：恢复请求被门控拒绝（4 种未决状态）、`unverifiable` 直接拒绝、已收敛放行、启动扫描可发现并只追加事件、已结束任务不被扫描。
+- `tests/integration/local/workflow/e2e_indeterminate_test.go` 新增 `TestE2EIndeterminateDoesNotResumeWithoutVerification`：端到端断言"结果不确定不会被一次恢复请求悄悄变成重放"。
+- `tests/unit/domain/code_save_resume_test.go`（5 个用例）：续跑资格矩阵、按任务判定优先级、跨阶段写回、幂等。
+- `tests/unit/domain/code_save_recovery_test.go`：补充"HEAD 变化但第一父不匹配 / 读不到第一父"与"记录不可信仍保留 Git 事实"。
+- `tests/unit/store/code_saves_test.go`：新增 `UpdateCodeSaveRecoveryResult` 的落盘、冲突拒绝、无关字段保持。
+
+#### 真实执行的测试命令与结果（2026-10-25）
+
+- `go test -count=1 ./tests/...` → 退出码 0，**1800 passed / 0 failed**（45 packages）。
+- `go test -count=1 ./tests/unit/domain/ ./tests/unit/app/ ./tests/unit/httpapi/
+  ./tests/unit/store/ ./tests/unit/source/codesaver/ ./tests/integration/local/codesaver/
+  ./tests/integration/local/workflow/ ./tests/integration/local/database/` → 退出码 0，1238 passed。
+- `go test -count=1 -run "TestRecovery|TestDecideCodeSaveResume|TestDecideTaskCodeSaveResume|
+  TestApplyRecovery|TestResumeWorkflowRejects|TestResumeWorkflowAccepts|
+  TestCodeSaveRecoveryService|TestE2EIndeterminateDoesNotResume|TestCodeSaveRecovery"
+  ./tests/integration/local/codesaver/ ./tests/integration/local/workflow/
+  ./tests/unit/domain/ ./tests/unit/store/` → 退出码 0，54 passed。
+- `gofmt -l internal cmd tests` → 无输出；`go vet ./...` → 无问题。
+- `TEST_ARTIFACT_DIR=C:\Users\lingting\AppData\Local\Temp\lingting-agent-flow-tests\codesaver-1801282134`
+  （测试产物按仓库约定保留，未清理）。
+- 未执行：真实远程 Docker / SSH / Pi 用例（`tests/config/docker.yml`、`ssh.yml`、`pi.yml`
+  均未启用），按约定输出 `WARN [SKIP]`；本次没有把跳过用例报告为通过。
+
+#### 剩余风险与移交
+
+- **merge 的真实远程证据**仍缺（依赖 `docker.remote_enabled`），属 M5 范围。
+- **`code verify` 仍为人工入口**：没有"核验并继续"的编排入口；恢复需要用户显式执行核验后再次请求恢复。这是本次刻意的范围边界（不新增恢复框架）。
+- **容器已删除时只能得到 `unverifiable`**：需要人工判断，无自动出路（`container.state=unknown` 的完整恢复体系属 M5）。
+- **启动扫描只覆盖未结束任务**：已结束任务的记录保持原样供查阅，不产生新事件。
+- **完成定义**：三阶段恢复判据有测试证据且不盲目重放 —— 已满足。
 
 ### P2-M5 补齐关键恢复场景的集成测试与恢复验收
 

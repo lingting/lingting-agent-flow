@@ -172,6 +172,10 @@ type Server struct {
 	// 它必须在下层服务（步骤执行、验证引擎）之后启动、在上层编排器之前启动：
 	// 先把"没有执行者"的残留收敛掉，编排器与启动恢复才能读到可信的现场。
 	residue *app.ExecutionResidueService
+	// codeSaveRecovery 在启动时扫描仍有未决 Git 副作用的代码保存记录。
+	//
+	// 它只读记录并追加事件，不重放 commit / push / merge，也不推进任务状态。
+	codeSaveRecovery *app.CodeSaveRecoveryService
 	// codeInitialize 是代码初始化协调器，为空时不提供初始化接口。
 	codeInitialize *app.CodeInitializeService
 	requireWeb     bool
@@ -354,6 +358,16 @@ func (s *Server) openDatabase(ctx context.Context) error {
 		}
 		s.residue = residue
 	}
+	// 代码保存恢复扫描只依赖已打开的数据库：它在编排器构造之后建立，启动时
+	// 找出仍有未决 Git 副作用的记录并写入事件，不重放任何外部操作。
+	codeSaveRecovery, recoveryErr := app.NewCodeSaveRecoveryService(app.CodeSaveRecoveryOptions{
+		Store:  store,
+		Logger: s.logger,
+	})
+	if recoveryErr != nil {
+		return fmt.Errorf("初始化代码保存恢复扫描服务失败: %w", recoveryErr)
+	}
+	s.codeSaveRecovery = codeSaveRecovery
 	if s.taskLaunchFactory != nil && s.taskWorkflow != nil {
 		// 统一启动服务只串联既有能力：环境准备、计划生成与工作流编排都在它们
 		// 各自的服务里实现，启动服务不重复实现任何一步。
@@ -431,6 +445,11 @@ func (s *Server) startServices(ctx context.Context) error {
 		// 统一启动服务注册在编排器之后：它依赖编排器，停止顺序因此反过来，
 		// 先停止新的启动请求，再让下层服务收敛在途工作。
 		services = append(services, s.taskLaunch)
+	}
+	if s.codeSaveRecovery != nil {
+		// 代码保存恢复扫描放在最后注册：它只读记录并追加事件，因此不需要在下层
+		// 服务收敛之前运行，也不会阻止任何在途工作完成。
+		services = append(services, s.codeSaveRecovery)
 	}
 	if len(services) == 0 {
 		return nil

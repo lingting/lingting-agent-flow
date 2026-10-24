@@ -292,8 +292,8 @@ func newCodeVerifyCommand(a *app.App) *cobra.Command {
 		Short: "只读核验一次代码保存记录对应的真实仓库状态",
 		Long: "读取已持久化的代码保存记录，并在容器内执行只读 Git 查询，判断提交、推送与\n" +
 			"合并是否真的已经发生。\n" +
-			"该命令不提交、不推送、不合并，也不会删除或接管容器；核验结论会写回记录的\n" +
-			"恢复状态，其余字段保持不变。\n" +
+			"该命令不提交、不推送、不合并，也不会删除或接管容器。核验确认某个 Git 操作已经\n" +
+			"发生时，结论连同该阶段状态一起写回记录；确认未发生或无法确认时只写恢复结论。\n" +
 			"记录仍是 pending 时，禁止仅凭记录重新执行有副作用的 Git 操作。",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -341,6 +341,11 @@ func printCodeSaveVerifyResult(a *app.App, result app.CodeSaveVerifyResult) erro
 	}
 	if result.Observation.ReadFailed {
 		lines = append(lines, "核验状态: 无法核验")
+		if detail := strings.TrimSpace(result.Observation.ReadError); detail != "" {
+			// 失败原因必须显式打印：否则用户只能得知"无法核验"，无法区分节点不可达、
+			// Docker 不可访问与 Git 查询失败。
+			lines = append(lines, "核验失败原因: "+detail)
+		}
 	}
 	if result.Observation.HeadCommit != "" {
 		lines = append(lines, fmt.Sprintf("当前 HEAD: %s", result.Observation.HeadCommit))
@@ -359,14 +364,21 @@ func printCodeSaveVerifyResult(a *app.App, result app.CodeSaveVerifyResult) erro
 		"判定说明: "+result.Decision.Summary,
 	)
 	if result.Decision.SafeToRetry {
-		lines = append(lines, "后续操作: 可以安全地重新执行对应操作")
+		lines = append(lines, "后续操作: 可以安全地重新执行对应操作（执行前仍会重新核验前置条件）")
 	} else {
 		lines = append(lines, "后续操作: 不要自动重试，先按判定说明人工核验")
 	}
+	// 四个事实必须分别输出：判定是否可靠、结论是否落盘、记录是否已推进、是否需要
+	// 用户介入。把它们合并成一句话会让"核验成功"掩盖"结论没写进数据库"。
 	if result.Persisted {
 		lines = append(lines, "结论已写回记录")
 	} else {
-		lines = append(lines, "结论未写回记录，请保存本次输出")
+		lines = append(lines, "结论未写回记录（写入失败或并发冲突），请保存本次输出并重新核验")
+	}
+	if result.Persisted && result.Updated.RecoveryConverged() {
+		lines = append(lines, "记录状态: 恢复已收敛，可按后续操作提示处理")
+	} else {
+		lines = append(lines, "记录状态: 仍需人工处理，任务不会自动继续推进")
 	}
 	_, err := fmt.Fprintln(a.Stdout(), strings.Join(lines, "\n"))
 	return err
@@ -403,6 +415,10 @@ func printCodeSaveStatus(a *app.App, records []domain.CodeSaveRecord) error {
 		if record.PersistError != "" {
 			lines = append(lines, fmt.Sprintf("写入失败: %s", record.PersistError))
 		}
+		// 续跑资格必须显式列出：仅凭状态字段用户无法判断"能不能继续推进"。
+		if resume := domain.DecideCodeSaveResume(record); resume.Action != domain.CodeSaveResumeProceed {
+			lines = append(lines, "续跑资格: "+string(resume.Action)+"（"+resume.Summary+"）")
+		}
 		blocks = append(blocks, strings.Join(lines, "\n"))
 	}
 	_, err := fmt.Fprintln(a.Stdout(), strings.Join(blocks, "\n\n"))
@@ -416,12 +432,22 @@ func codeSaveHint(record domain.CodeSaveRecord) string {
 		return "记录可能落后于真实 Git 状态；先执行 code verify 核验，不要直接重试"
 	case record.RecoveryStatus == domain.RecoveryStatusUnverifiable:
 		return "上次核验无法确认仓库状态；请检查容器与远程可达性后重新执行 code verify"
+	case record.RecoveryStatus == domain.RecoveryStatusConfirmedNotApplied:
+		return "已核验确认对应操作没有发生；可以重新执行，执行前会自动重新核验前置条件"
+	case record.PushStatus == domain.PushStatusPending:
+		return "推送结果尚未确认；先执行 code verify 核验远程任务分支，不要直接重试"
 	case record.PushStatus == domain.PushStatusUnknown:
 		return "先核验远程任务分支实际指向的 commit，再决定是否重试推送"
 	case record.PushStatus == domain.PushStatusConflict:
 		return "远程任务分支与本地历史不一致，需要人工处理；不要强制推送"
 	case record.PushStatus == domain.PushStatusFailed:
 		return "检查仓库认证与网络后重新执行 code push；容器内提交仍然保留"
+	case record.CommitStatus == domain.CommitStatusPending:
+		return "提交结果尚未确认；先执行 code verify 核验任务分支 HEAD"
+	case record.CommitStatus == domain.CommitStatusUnknown:
+		return "提交结果无法确认；先执行 code verify 核验任务分支 HEAD，不要直接重新提交"
+	case record.MergeStatus == domain.MergeStatusPending:
+		return "合并结果尚未确认；先执行 code verify 核验远程基础分支"
 	case record.MergeStatus == domain.MergeStatusConflict:
 		return "任务分支已成功推送；请在容器内人工解决合并冲突后重新执行 code merge"
 	case record.MergeStatus == domain.MergeStatusUnknown:

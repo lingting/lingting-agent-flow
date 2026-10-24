@@ -26,8 +26,21 @@
 ## 当前阶段与当前里程碑
 
 - **当前阶段**：P2 进行中 —— 流程可靠性与恢复。
-- **当前里程碑**：`P2-M4` —— 核验提交、推送、合并等外部副作用的恢复路径（`pending`）。
-- **上一个里程碑**：`P2-M3` —— 明确修复次数上限、停止条件、重试资格和结果不确定处理
+- **当前里程碑**：`P2-M5` —— 补齐关键恢复场景的集成测试与恢复验收（`pending`）。
+- **上一个里程碑**：`P2-M4` —— 核验提交、推送、合并等外部副作用的恢复路径，状态
+  `completed`（2026-10-25，基于 `master` HEAD `168fd2f` 实施）。交付内容：修复 8 个
+  真实故障窗口——不可信标记落盘（`codesaver.Session.flagUnconfirmed`）、HEAD 归因改为
+  依据第一父（`CodeSaveObservation.HeadParentCommit`）、已确认阶段状态条件写回
+  （`storage.CodeSaveStore.UpdateCodeSaveRecoveryResult` + `domain.CodeSaveRecord.ApplyRecovery`）、
+  多阶段核验顺序收敛（`recoveryStatusMachine` 允许已收敛结论间迁移）、
+  恢复入口前置门控（`TaskWorkflowService.checkCodeSaveRecovery`）、核验失败降级为
+  `unverifiable`、启动扫描可发现未决记录（`app.CodeSaveRecoveryService`）。
+  新增 `domain.DecideCodeSaveResume` / `domain.DecideTaskCodeSaveResume` /
+  `domain.CodeSaveRecord.HasUnresolvedSideEffect` 统一定义续跑资格。
+  测试证据：`tests/integration/local/codesaver/recovery_test.go`（11 个用例，真实 SQLite +
+  真实 Git）、`tests/integration/local/workflow/code_save_recovery_test.go`（4 个用例）、
+  `TestE2EIndeterminateDoesNotResumeWithoutVerification`、`tests/unit/domain/code_save_resume_test.go`。
+- **更早里程碑**：`P2-M3` —— 明确修复次数上限、停止条件、重试资格和结果不确定处理
   规则，状态 `completed`（2026-10-24，基于 `master` HEAD `2a1bb0d` 实施）。交付内容：
   预算落到持久化事实（`repair_cycles` + `attempts.budget_scope*`，迁移
   `0022_repair_cycles.sql`）；重试资格与预算由 `domain.DecideRepairStart` /
@@ -58,11 +71,13 @@
   Developer 会话从未写入数据库、收尾终态写入失败留下 `running` 残留两处生产断点）。
   `P1-M3` —— 有上限、可停止的验证失败修复与重新验证闭环。`P1-M2` —— Developer、
   确定性验证与 Validator Agent 的完整验证决策链。`P1-M1` —— 任务启动至计划生成的前置流程。
-- **下一步**：按"下一步工作的选择规则"进入 P2-M4（commit / push / merge 的恢复核验）。
-  P2-M3 的交接事项：`interrupted` / `unknown` / `recovery_required` 尝试一律阻止自动重放
-  与开启新周期，只保留人工核验；`code_fetches` 与 `container.state=unknown` 两类残留仍
-  没有收敛路径（B4/G14，属 M4/M5）；"任务结论存疑"（`tasks.completed` 与
-  `workflow_runs.recovery_required` 同时成立）仍没有专门表达。
+- **下一步**：按"下一步工作的选择规则"进入 P2-M5（关键恢复场景的集成测试与恢复验收）。
+  P2-M4 的交接事项：merge 恢复仍缺真实远程 Docker 证据（依赖 `docker.remote_enabled`）；
+  "核验并继续"的自动编排入口尚未实现，恢复仍需用户显式执行 `agentflow code verify`
+  后再次请求恢复；容器已删除时核验只能得到 `unverifiable`，无自动出路；
+  `code_fetches` 与 `container.state=unknown` 两类残留仍没有收敛路径（B4/G14）；
+  "任务结论存疑"（`tasks.completed` 与 `workflow_runs.recovery_required` 同时成立）
+  仍没有专门表达。
   P1 遗留的真实缺口是私有仓库 Git 凭据支持
   （`source.GitCredentialProvider` / `codesaver.GitCredentialProvider` 无实现），
   记录在 `ROADMAP.md` 的"尚未实现"。

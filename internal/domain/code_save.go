@@ -285,8 +285,15 @@ const (
 // recoveryStatusMachine 定义恢复结论的迁移。
 //
 // 核验结论可以因新的核验而修正（例如远端恢复可达后重新核验），但已经收敛为
-// applied 或 not_applied 之后不允许在记录层被反复改写为不确定状态：真实 Git 事实
-// 不会因为一次查询失败而消失，此时应当保留既有结论并单独记录查询错误。
+// applied 或 not_applied 之后不允许在记录层被改写成不确定状态：真实 Git 事实不会
+// 因为一次查询失败而消失，此时应当保留既有结论并单独记录查询错误。
+//
+// 已收敛的结论之间允许互相迁移：一条记录里提交、推送、合并是依次推进的三个阶段，
+// 而恢复结论只有一个字段。核验总是针对"第一个仍待确认的阶段"，因此同一字段会被
+// 不同阶段依次占用——提交确认已发生后，下一次核验判定的是推送，其结果可能是
+// confirmed_not_applied。禁止这类迁移会让数据库永远停在 push_status=pending，
+// 使恢复只能反复要求核验而无法收敛。阶段归属由 CodeSaveRecoveryDecision.Stage
+// 显式表达，写入时与结论一起处理。
 var recoveryStatusMachine = statusMachine{
 	entity: "CodeSave",
 	transitions: map[string][]string{
@@ -296,6 +303,15 @@ var recoveryStatusMachine = statusMachine{
 			string(RecoveryStatusUnverifiable),
 		},
 		string(RecoveryStatusUnverifiable): {
+			string(RecoveryStatusConfirmedApplied),
+			string(RecoveryStatusConfirmedNotApplied),
+		},
+		// 已确认的事实可以在后续阶段的核验中被新的已确认事实取代。
+		string(RecoveryStatusConfirmedApplied): {
+			string(RecoveryStatusConfirmedApplied),
+			string(RecoveryStatusConfirmedNotApplied),
+		},
+		string(RecoveryStatusConfirmedNotApplied): {
 			string(RecoveryStatusConfirmedApplied),
 			string(RecoveryStatusConfirmedNotApplied),
 		},
@@ -863,6 +879,37 @@ func (r CodeSaveRecord) RequiresManualRecovery() bool {
 	}
 	switch r.MergeStatus {
 	case MergeStatusConflict, MergeStatusUnknown, MergeStatusFailed:
+		return true
+	}
+	return false
+}
+
+// HasUnresolvedSideEffect 判断记录中是否仍有结果不明的外部 Git 副作用。
+//
+// 与 RequiresManualRecovery 的区别：后者回答"是否需要人工介入"，本方法只回答
+// "是否还有必须核验才能重试的阶段"。提交/推送/合并仍是 pending 表示对应操作可能
+// 已经发生但结果没落盘；unknown 与 conflict 表示结果无法确认或需要人工处理。
+//
+// 核验已经给出结论时以结论为准：
+//   - confirmed_not_applied 表示记录里那个待确认的操作确实没有发生。由于后一阶段
+//     以"前一阶段已成功"为前提（不提交就不会推送、不推送就不会合并），该结论同时
+//     覆盖后续阶段，因此不再算作未决副作用；
+//   - confirmed_applied 只把已确认的阶段推进为终态，其余阶段仍需单独核验，因此
+//     仍按各阶段的取值判断。
+func (r CodeSaveRecord) HasUnresolvedSideEffect() bool {
+	if r.RecoveryStatus.normalized() == RecoveryStatusConfirmedNotApplied {
+		return false
+	}
+	switch r.CommitStatus {
+	case CommitStatusPending, CommitStatusUnknown:
+		return true
+	}
+	switch r.PushStatus {
+	case PushStatusPending, PushStatusUnknown, PushStatusConflict:
+		return true
+	}
+	switch r.MergeStatus {
+	case MergeStatusPending, MergeStatusUnknown, MergeStatusConflict:
 		return true
 	}
 	return false

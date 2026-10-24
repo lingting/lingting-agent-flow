@@ -271,3 +271,51 @@ func (s *e2eFailingStore) UpdateWorkflowRun(
 	}
 	return s.TaskWorkflowStore.UpdateWorkflowRun(ctx, run)
 }
+
+// TestE2EIndeterminateDoesNotResumeWithoutVerification 验证未核验的未决副作用阻止恢复。
+//
+// 收尾停在 recovery_required 之后，任务并不自动继续。恢复入口必须先读持久化记录：
+// 只要仍有结果不明的 commit / push / merge 且尚未核验，就拒绝推进并给出可定位原因。
+// 这保证"结果不确定"不会被一次恢复请求悄悄变成"重放一次外部副作用"。
+func TestE2EIndeterminateDoesNotResumeWithoutVerification(t *testing.T) {
+	t.Parallel()
+	fixture := newE2EFixture(t, e2eOptions{
+		codeSaver:    true,
+		agentReplies: e2eIndeterminateReplies(),
+		codeSaverWrapper: func(saver *e2eCodeSaver) {
+			saver.pushUncertain = true
+		},
+	})
+	fixture.repo.writeFile(t, "internal/feature.go", "package internal\n")
+	fixture.launchTask(t)
+	result := fixture.settle(t)
+	if result.Run.Status != domain.WorkflowRunRecoveryRequired {
+		t.Fatalf("推送结果未知时应需要人工核验，实际 %s", formatE2ERun(result.Run))
+	}
+	pushesBefore := fixture.ports.gitPushCount()
+	// 直接请求恢复：未核验的记录必须阻止推进。
+	resumed, err := fixture.workflow.ResumeWorkflow(fixture.ctx, app.ResumeWorkflowRequest{
+		TaskID: fixture.task.ID.String(),
+		RunID:  result.Run.RunID.String(),
+	})
+	if err == nil {
+		t.Fatalf("未核验的未决副作用必须阻止恢复，实际返回状态 %s", resumed.Status)
+	}
+	if !errors.Is(err, app.ErrWorkflowPrerequisite) &&
+		!errors.Is(err, app.ErrWorkflowConflict) {
+		t.Fatalf("恢复应被明确拒绝，实际 %v", err)
+	}
+	// 执行记录仍停在 recovery_required，没有被恢复请求改写。
+	stored := fixture.reloadRun(t, result.Run.RunID)
+	if stored.Status != domain.WorkflowRunRecoveryRequired {
+		t.Fatalf("拒绝恢复不得改写执行记录，实际 %s", stored.Status)
+	}
+	// 外部副作用没有被重放。
+	if pushes := fixture.ports.gitPushCount(); pushes != pushesBefore {
+		t.Fatalf("拒绝恢复时不得重放推送，实际从 %d 变为 %d 次", pushesBefore, pushes)
+	}
+	if task := fixture.reloadTask(t); task.Status == domain.TaskStatusCompleted {
+		t.Fatal("结果未知时任务不得标记为完成")
+	}
+	assertE2EScenePreserved(t, fixture)
+}

@@ -149,6 +149,9 @@ func (s *TaskWorkflowService) StartWorkflow(
 	if err := s.checkHostReady(ctx, task); err != nil {
 		return WorkflowRunView{}, err
 	}
+	if err := s.checkCodeSaveRecovery(ctx, task); err != nil {
+		return WorkflowRunView{}, err
+	}
 	// 进程内以任务为键串行化：并发启动不会各自创建一条执行记录。
 	// 跨进程并发仍由 workflow_runs 的部分唯一索引拒绝。
 	unlock, acquired := s.taskLocks.tryLock(task.ID.String())
@@ -253,6 +256,9 @@ func (s *TaskWorkflowService) ResumeWorkflow(
 		return WorkflowRunView{}, err
 	}
 	if err := s.checkHostReady(ctx, task); err != nil {
+		return WorkflowRunView{}, err
+	}
+	if err := s.checkCodeSaveRecovery(ctx, task); err != nil {
 		return WorkflowRunView{}, err
 	}
 	// 恢复可能与上一次执行的收尾重叠：状态已经落盘为 blocked 时，上一次推进可能仍在
@@ -522,6 +528,53 @@ func (s *TaskWorkflowService) classifyStartError(err error) error {
 		return fmt.Errorf("%w: %w", ErrWorkflowConflict, err)
 	}
 	return fmt.Errorf("%w: %w", ErrWorkflowPrerequisite, err)
+}
+
+// checkCodeSaveRecovery 核验任务的代码保存记录是否允许再次推进。
+//
+// 收尾停在 blocked / recovery_required 后，恢复会再次执行代码保存。此前可能已经
+// 产生过结果不明的 commit / push / merge（记录停留在 pending 或 unknown），盲目
+// 重放会产生重复提交或覆盖远程历史。因此这里先读持久化记录，由
+// domain.DecideTaskCodeSaveResume 判定：
+//   - 记录写入未确认或仍有未决外部副作用 → 拒绝恢复并给出可定位原因，要求先做只读
+//     核验（agentflow code verify）；
+//   - 已核验为 unverifiable → 直接拒绝，保留现场等待人工处理；
+//   - 已核验为 confirmed_not_applied 或没有未决副作用 → 允许继续，真正的副作用仍由
+//     代码保存组件在执行前重新核验分支、工作区与远程状态。
+//
+// 读取失败同样拒绝推进：不能因为"读不到记录"就假设没有副作用。
+func (s *TaskWorkflowService) checkCodeSaveRecovery(
+	ctx context.Context,
+	task domain.Task,
+) error {
+	records, err := s.store.ListCodeSaveRecordsByTask(ctx, task.ID.String())
+	if err != nil {
+		return fmt.Errorf(
+			"%w: 读取任务 %s 的代码保存记录失败: %w",
+			ErrWorkflowPrerequisite,
+			task.ID,
+			err,
+		)
+	}
+	decision := domain.DecideTaskCodeSaveResume(records)
+	switch decision.Action {
+	case domain.CodeSaveResumeProceed:
+		return nil
+	case domain.CodeSaveResumeBlocked:
+		return fmt.Errorf(
+			"%w: %s: %s",
+			ErrWorkflowConflict,
+			decision.ErrorClass,
+			decision.Summary,
+		)
+	default:
+		return fmt.Errorf(
+			"%w: %s: %s；请先执行 agentflow code verify --record <记录标识> 完成只读核验",
+			ErrWorkflowPrerequisite,
+			decision.ErrorClass,
+			decision.Summary,
+		)
+	}
 }
 
 // checkContainerReady 核验任务容器仍然受管理且可执行命令。

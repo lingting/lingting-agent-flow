@@ -1046,6 +1046,10 @@ func codeSaveSucceeded(
 //
 // 记录写入未确认时不在此处判定：它由 codeSaveOutcome.unconfirmed 单独表达，两者的
 // 恢复动作不同，不能合并成一个分类。
+//
+// 判定依据是"是否仍有未决外部副作用"：已经核验确认未发生（confirmed_not_applied）
+// 的记录虽然仍需人工判断是否重试，但它的 Git 事实已经明确，不再属于"结果无法确认"。
+// 使用 RequiresManualRecovery 会把这类已核验的记录继续判为不确定，使恢复永远无法收敛。
 func codeSaveIndeterminate(
 	result CodeSaveResult,
 	record domain.CodeSaveRecord,
@@ -1053,7 +1057,10 @@ func codeSaveIndeterminate(
 	if record.ID.IsEmpty() || !result.Result.Persisted() {
 		return false
 	}
-	return record.RequiresManualRecovery()
+	if record.PersistStatus.IsUnconfirmed() {
+		return false
+	}
+	return record.HasUnresolvedSideEffect()
 }
 
 // developerStopSummary 生成开发阶段停止的说明。

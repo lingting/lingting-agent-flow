@@ -667,6 +667,19 @@ type CodeSaveStore interface {
 		status domain.RecoveryStatus,
 		at time.Time,
 	) error
+	// UpdateCodeSaveRecoveryResult 以读取时的恢复结论为条件写入一次完整的核验结果。
+	//
+	// 与 UpdateCodeSaveRecovery 的区别：核验确认某个 Git 操作已经发生时，必须把
+	// 该阶段的状态、提交 SHA 与恢复结论一起收敛，否则"已确认发生"这个事实只存在于
+	// 返回值里，下一次读取仍然看到 pending，恢复就会反复要求核验。
+	//
+	// 条件仍然以读取时的 recovery_status 为准：核验期间记录被其他执行推进时返回
+	// storage.ErrConflict，调用方必须重新读取真实记录而不是覆盖新事实。
+	UpdateCodeSaveRecoveryResult(
+		ctx context.Context,
+		record domain.CodeSaveRecord,
+		expected domain.RecoveryStatus,
+	) error
 	GetCodeSaveRecord(ctx context.Context, id domain.ID) (*domain.CodeSaveRecord, error)
 	// ListCodeSaveRecordsByTask 按任务列出记录，最新的在前。
 	ListCodeSaveRecordsByTask(ctx context.Context, taskID string) ([]domain.CodeSaveRecord, error)

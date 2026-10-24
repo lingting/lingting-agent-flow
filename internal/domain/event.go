@@ -62,6 +62,11 @@ const (
 	// 它记录"哪一次执行周期被开启、上一周期已消耗多少尝试、为什么允许重置"。开启
 	// 周期是用户显式决定，因此必须留下可追溯的审计记录，不能只改一行状态。
 	EventTypeRepairCycleOpened EventType = "repair.cycle_opened"
+	// 代码保存恢复待处理事件。
+	//
+	// 服务启动扫描到"仍有结果不明的外部 Git 副作用"时追加：它只记录现场与需要的
+	// 动作，不推进任务状态，也不重放 commit / push / merge。
+	EventTypeCodeSaveRecoveryRequired EventType = "code_save.recovery_required"
 )
 
 // knownEventTypes 是当前受支持的事件类型集合。
@@ -103,6 +108,7 @@ var knownEventTypes = []EventType{
 	EventTypeWorkflowCodeSaved,
 	EventTypeRepairRound,
 	EventTypeRepairCycleOpened,
+	EventTypeCodeSaveRecoveryRequired,
 }
 
 // Validate 校验事件类型是否受支持。

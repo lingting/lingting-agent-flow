@@ -160,6 +160,80 @@ WHERE id = ? AND COALESCE(recovery_status, '') = ?`
 	)
 }
 
+// UpdateCodeSaveRecoveryResult 以读取时的恢复结论为条件写入一次完整的核验结果。
+//
+// 与 UpdateCodeSaveRecovery 的差别在于"已确认发生"必须能落盘：核验确认某个 Git
+// 操作真的发生后，阶段状态与提交 SHA 必须一起收敛，否则数据库永远停在 pending，
+// 下一次恢复仍然要求核验同一个现场。
+//
+// 仍然只写核验涉及的列（阶段状态、提交 SHA、恢复结论与更新时间），不写与核验无关
+// 的字段：任务分支、容器、仓库地址等由真正的执行路径负责，核验不得改写它们。
+func (s codeSaveStore) UpdateCodeSaveRecoveryResult(
+	ctx context.Context,
+	record domain.CodeSaveRecord,
+	expected domain.RecoveryStatus,
+) error {
+	if err := record.ID.Validate(); err != nil {
+		return err
+	}
+	if err := record.RecoveryStatus.Validate(); err != nil {
+		return err
+	}
+	if err := record.CommitStatus.Validate(); err != nil {
+		return err
+	}
+	if err := record.PushStatus.Validate(); err != nil {
+		return err
+	}
+	if err := record.MergeStatus.Validate(); err != nil {
+		return err
+	}
+	const statement = `
+UPDATE code_saves SET
+	commit_status = ?, commit_sha = ?, push_status = ?, remote_commit_sha = ?,
+	merge_status = ?, merge_sha = ?, stage = ?, recovery_status = ?, updated_at = ?
+WHERE id = ? AND COALESCE(recovery_status, '') = ?`
+	result, err := s.q.ExecContext(
+		ctx,
+		statement,
+		record.CommitStatus.String(),
+		nullIfBlank(record.CommitSHA),
+		record.PushStatus.String(),
+		nullIfBlank(record.RemoteCommitSHA),
+		record.MergeStatus.String(),
+		nullIfBlank(record.MergeSHA),
+		nullIfBlank(record.Stage),
+		nullIfBlank(record.RecoveryStatus.String()),
+		toMillis(record.UpdatedAt),
+		toIDParam(record.ID),
+		strings.TrimSpace(expected.String()),
+	)
+	if err != nil {
+		return wrapError("写入代码保存核验结果", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return wrapError("写入代码保存核验结果", err)
+	}
+	if affected > 0 {
+		return nil
+	}
+	current, readErr := s.GetCodeSaveRecord(ctx, record.ID)
+	if readErr != nil {
+		if errors.Is(readErr, storage.ErrNotFound) {
+			return readErr
+		}
+		return wrapError("写入代码保存核验结果", readErr)
+	}
+	return wrapError(
+		"写入代码保存核验结果",
+		errors.Join(
+			storage.ErrConflict,
+			errors.New("恢复结论已被其他操作改写，当前值为 "+current.RecoveryStatus.String()),
+		),
+	)
+}
+
 // codeSaveArgs 构造写入代码保存记录时的参数列表。
 //
 // 顺序必须与 codeSaveColumns 完全一致。

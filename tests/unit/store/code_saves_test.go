@@ -576,3 +576,173 @@ func TestCodeSaveRecoveryWriteMissingRecord(t *testing.T) {
 func isConflict(err error) bool {
 	return err != nil && errors.Is(err, storage.ErrConflict)
 }
+
+// TestCodeSaveRecoveryResultPersistsConfirmedStage 校验核验确认的事实会落盘。
+//
+// 只写 recovery_status 会让数据库永远停在 pending：下一次恢复仍然看到"提交未确认"，
+// 于是一次已经发生的提交会被反复核验。本用例验证阶段状态与 SHA 一起收敛。
+func TestCodeSaveRecoveryResultPersistsConfirmedStage(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ctx := testContext(t)
+	record := newCodeSaveRecord(t, "task-confirmed-stage")
+	baseline := "1111111111111111111111111111111111111111"
+	head := "2222222222222222222222222222222222222222"
+	if err := record.MarkBaselineCommit(baseline, time.Now().UTC()); err != nil {
+		t.Fatalf("写入提交基线失败: %v", err)
+	}
+	if err := db.CreateCodeSaveRecord(ctx, record); err != nil {
+		t.Fatalf("写入代码保存记录失败: %v", err)
+	}
+	loaded, err := db.GetCodeSaveRecord(ctx, record.ID)
+	if err != nil {
+		t.Fatalf("读取代码保存记录失败: %v", err)
+	}
+	decision := domain.DecideCodeSaveRecovery(*loaded, domain.CodeSaveObservation{
+		HeadCommit:       head,
+		HeadParentCommit: baseline,
+	})
+	if decision.Status != domain.RecoveryStatusConfirmedApplied {
+		t.Fatalf("应确认提交已经发生，实际 %s（%s）", decision.Status, decision.Summary)
+	}
+	candidate, applyErr := loaded.ApplyRecovery(decision, time.Now().UTC())
+	if applyErr != nil {
+		t.Fatalf("写回恢复结论失败: %v", applyErr)
+	}
+	if err := db.UpdateCodeSaveRecoveryResult(ctx, candidate, loaded.RecoveryStatus); err != nil {
+		t.Fatalf("写入核验结果失败: %v", err)
+	}
+	stored, err := db.GetCodeSaveRecord(ctx, record.ID)
+	if err != nil {
+		t.Fatalf("再次读取记录失败: %v", err)
+	}
+	if stored.CommitStatus != domain.CommitStatusSucceeded {
+		t.Fatalf("提交状态必须落盘为 succeeded，实际 %s", stored.CommitStatus)
+	}
+	if stored.CommitSHA != head {
+		t.Fatalf("提交 SHA 必须落盘，实际 %q", stored.CommitSHA)
+	}
+	if stored.RecoveryStatus != domain.RecoveryStatusConfirmedApplied {
+		t.Fatalf("恢复结论必须落盘，实际 %s", stored.RecoveryStatus)
+	}
+	if stored.BaselineCommitSHA != baseline {
+		t.Fatalf("核验不得改写提交基线，实际 %q", stored.BaselineCommitSHA)
+	}
+	// 记录已收敛：不需要再次核验。
+	if !stored.RecoveryConverged() {
+		t.Fatal("确认已发生的记录应视为恢复已收敛")
+	}
+	// 提交阶段已不再是未决副作用，但推送仍然是：续跑判定必须继续要求核验推送。
+	// 这正是"一个阶段收敛不等于整条记录收敛"的体现，不能被一次核验掩盖。
+	if action := domain.DecideCodeSaveResume(*stored).Action; action != domain.CodeSaveResumeVerify {
+		t.Fatalf("推送仍未确认时应继续要求核验，实际 %s", action)
+	}
+	// 推送也确认发生后，记录才整体收敛，续跑判定允许继续。
+	pushDecision := domain.CodeSaveRecoveryDecision{
+		Status:  domain.RecoveryStatusConfirmedApplied,
+		Stage:   "push",
+		Summary: "推送已经发生",
+	}
+	pushed, pushErr := stored.ApplyRecovery(pushDecision, time.Now().UTC())
+	if pushErr != nil {
+		t.Fatalf("写回推送结论失败: %v", pushErr)
+	}
+	if err := db.UpdateCodeSaveRecoveryResult(ctx, pushed, stored.RecoveryStatus); err != nil {
+		t.Fatalf("写入推送核验结果失败: %v", err)
+	}
+	final, err := db.GetCodeSaveRecord(ctx, record.ID)
+	if err != nil {
+		t.Fatalf("再次读取记录失败: %v", err)
+	}
+	if final.PushStatus != domain.PushStatusSucceeded {
+		t.Fatalf("推送状态必须落盘为 succeeded，实际 %s", final.PushStatus)
+	}
+	if action := domain.DecideCodeSaveResume(*final).Action; action != domain.CodeSaveResumeProceed {
+		t.Fatalf("全部阶段收敛后应允许继续推进，实际 %s", action)
+	}
+}
+
+// TestCodeSaveRecoveryResultRejectsStaleWrite 校验核验结果不能覆盖并发写入。
+//
+// 核验期间记录可能被真正的执行推进（例如推送刚刚成功）。旧核验结果不得把新事实
+// 覆盖回旧值，调用方必须重新读取真实记录。
+func TestCodeSaveRecoveryResultRejectsStaleWrite(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ctx := testContext(t)
+	record := newCodeSaveRecord(t, "task-stale-verify")
+	if err := db.CreateCodeSaveRecord(ctx, record); err != nil {
+		t.Fatalf("写入代码保存记录失败: %v", err)
+	}
+	// 读取之后记录被推进：另一次核验先写入了结论。
+	if err := db.UpdateCodeSaveRecovery(
+		ctx,
+		record.ID,
+		"",
+		domain.RecoveryStatusUnverifiable,
+		time.Now().UTC(),
+	); err != nil {
+		t.Fatalf("写入并发核验结论失败: %v", err)
+	}
+	// 持有旧取值（空）的调用方必须冲突。
+	candidate := record
+	candidate.RecoveryStatus = domain.RecoveryStatusConfirmedApplied
+	err := db.UpdateCodeSaveRecoveryResult(ctx, candidate, "")
+	if !isConflict(err) {
+		t.Fatalf("记录已被推进时必须返回冲突，实际 %v", err)
+	}
+	stored, readErr := db.GetCodeSaveRecord(ctx, record.ID)
+	if readErr != nil {
+		t.Fatalf("读取代码保存记录失败: %v", readErr)
+	}
+	if stored.RecoveryStatus != domain.RecoveryStatusUnverifiable {
+		t.Fatalf("冲突写入不得覆盖已写入的结论，实际 %s", stored.RecoveryStatus)
+	}
+	if stored.CommitStatus != domain.CommitStatusPending {
+		t.Fatalf("冲突写入不得推进阶段状态，实际 %s", stored.CommitStatus)
+	}
+}
+
+// TestCodeSaveRecoveryResultKeepsUnrelatedFields 校验核验不覆盖与它无关的列。
+func TestCodeSaveRecoveryResultKeepsUnrelatedFields(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ctx := testContext(t)
+	record := newCodeSaveRecord(t, "task-narrow-verify")
+	if err := db.CreateCodeSaveRecord(ctx, record); err != nil {
+		t.Fatalf("写入代码保存记录失败: %v", err)
+	}
+	loaded, err := db.GetCodeSaveRecord(ctx, record.ID)
+	if err != nil {
+		t.Fatalf("读取代码保存记录失败: %v", err)
+	}
+	// 另一个执行者在此期间写入了仓库地址与错误摘要。
+	progressed := *loaded
+	progressed.Repository = "https://git.example.com/other/repo.git"
+	progressed.ErrorSummary = "推送失败: 网络不可达"
+	if err := db.UpdateCodeSaveRecord(ctx, progressed); err != nil {
+		t.Fatalf("写入推进后的记录失败: %v", err)
+	}
+	candidate := *loaded
+	candidate.RecoveryStatus = domain.RecoveryStatusUnverifiable
+	if err := db.UpdateCodeSaveRecoveryResult(
+		ctx,
+		candidate,
+		loaded.RecoveryStatus,
+	); err != nil {
+		t.Fatalf("写入核验结果失败: %v", err)
+	}
+	stored, err := db.GetCodeSaveRecord(ctx, record.ID)
+	if err != nil {
+		t.Fatalf("再次读取记录失败: %v", err)
+	}
+	if stored.RecoveryStatus != domain.RecoveryStatusUnverifiable {
+		t.Fatalf("恢复结论未写入: %s", stored.RecoveryStatus)
+	}
+	if stored.Repository != progressed.Repository {
+		t.Fatalf("核验不得改写仓库地址，实际 %q", stored.Repository)
+	}
+	if stored.ErrorSummary != progressed.ErrorSummary {
+		t.Fatalf("核验不得改写错误摘要，实际 %q", stored.ErrorSummary)
+	}
+}

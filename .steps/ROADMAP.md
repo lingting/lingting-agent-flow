@@ -39,10 +39,21 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 ## 当前实现状态摘要（基于代码证据）
 
 > **当前阶段：P2 进行中**（P1 全部里程碑于 2026-10-23 完成；P2-M1 于 2026-10-23 完成，
-> P2-M2 于 2026-10-24 完成，P2-M3 于 2026-10-24 完成）。P1 证据见
+> P2-M2 于 2026-10-24 完成，P2-M3 于 2026-10-24 完成，P2-M4 于 2026-10-25 完成）。P1 证据见
 > `P1-single-task-e2e.md` 的对应"完成记录"；P2-M1 证据见
 > `P2-M1-recovery-boundaries.md`；P2-M2 证据见 `P2-M2-interruption-semantics.md`；
-> P2-M3 证据见 `P2-reliability-recovery.md` 的 M3 详情。
+> P2-M3 与 P2-M4 证据见 `P2-reliability-recovery.md` 的对应里程碑详情。
+>
+> P2-M4 的核实结论：外部副作用的恢复此前有三类真实断点——(1) "记录写入失败"只标记在内存
+> 记录上，数据库停留在看似可信的 `pending`，重启后无法区分"没发生"与"已发生但没记下来"；
+> (2) 只要 HEAD 变化就判提交成功，他人提交会被归因为本次；(3) 核验结论只写
+> `recovery_status`，已确认发生的阶段状态不落盘，数据库永远 `pending`，恢复只能反复要求
+> 核验。本次分别用"不可信标记单独落盘"、"第一父等于基线才归因"、"已确认阶段条件写回"
+> 修复，并补上"多阶段核验顺序收敛"（此前 `confirmed_applied` 与 `confirmed_not_applied`
+> 互斥为终态，导致"提交已确认 + 推送确认未发生"无法落库）。新增
+> `domain.DecideCodeSaveResume` / `DecideTaskCodeSaveResume` 统一定义续跑资格，
+> `TaskWorkflowService` 在 `StartWorkflow` / `ResumeWorkflow` 前置门控，
+> `app.CodeSaveRecoveryService` 在服务启动时列出仍有未决副作用的记录（只读 + 追加事件）。
 >
 > P2-M3 的核实结论：修复预算此前只有进程内计数（`runRepairLoop` 的 `attempts := 0`），
 > 重启后的恢复与重复调用会重新得到"还有余额"的结论。本次把预算落到持久化事实：
@@ -162,6 +173,24 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
   `POST /api/v1/tasks/{taskID}/steps/{stepID}/open-repair-cycle`（CLI
   `agentflow task reopen-step`），只在上一周期已收敛且预算用尽或策略不再允许修复时成功。
   首轮修复依据改为按"当前周期内最近一次验证"精确读取，不再无条件使用步骤级最近反馈。
+- **代码保存三阶段恢复收敛闭环**（P2-M4）：`internal/domain/code_save_recovery.go` 的
+  `DecideCodeSaveRecovery` 现在只在"HEAD 的第一父等于基线"时把提交归因为本次操作；
+  新增 `DecideCodeSaveResume` / `DecideTaskCodeSaveResume` 把续跑资格定义为
+  `proceed` / `verify` / `blocked` 三态并给出稳定 `ErrorClass`；
+  `CodeSaveRecord.HasUnresolvedSideEffect` 把"是否还有必须核验才能重试的阶段"与
+  "是否需要人工介入"分开，`ApplyRecovery` 只把 `confirmed_applied` 的阶段状态写回。
+  `internal/codesaver/saver.go` 的 `persist` 现在会重试一次并把"记录不可信"单独落盘；
+  `internal/app/code_save_verify.go` 使用 `storage.CodeSaveStore.UpdateCodeSaveRecoveryResult`
+  以 `recovery_status` 为条件写回已确认阶段，核验失败降级为 `unverifiable` 结论而不是
+  返回错误。`internal/app/task_workflow_run.go` 新增 `checkCodeSaveRecovery`，在
+  `StartWorkflow` / `ResumeWorkflow` 之前拒绝存在未决外部副作用的请求；
+  `internal/app/code_save_recovery.go` 的 `CodeSaveRecoveryService` 在服务启动时列出
+  仍需人工核验的记录（只读 + 追加 `code_save.recovery_required` 事件），注册进
+  `internal/lifecycle`。证据：`tests/integration/local/codesaver/recovery_test.go`
+  （11 个用例，真实 SQLite + 正式迁移 + 真实 Git）、
+  `tests/integration/local/workflow/code_save_recovery_test.go`（4 个用例）、
+  `TestE2EIndeterminateDoesNotResumeWithoutVerification`、
+  `tests/unit/domain/code_save_resume_test.go`。
 - **单任务端到端验收**（P1-M5）：本地 `tests/integration/local/workflow/e2e_*_test.go`
   （18 个用例）+ 真实远程 `tests/integration/remote/workflow/e2e_*_test.go`。真实 SQLite + 正式迁移、真实统一启动入口（`app.TaskLaunchService`）与真实
   `app.ExecutionEnvironmentService` 四阶段准备、真实编排器/执行器/验证引擎/语义审查/
@@ -190,8 +219,11 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
   `attempts` 停在 `running`、`sessions` 停在 `running`/`starting`（`SessionService.Fail`
   无生产调用者）、`validation_runs` 停在 `pending`/`running`、Attempt 级 `code_fetches`
   残留、`container.state=unknown` 与"已创建但未关联任务"的孤儿容器。
-- **外部副作用的自动恢复入口**：`code verify` 目前只有 CLI 手工入口，
-  `recovery_required` 之后没有"核验并继续"的编排能力。
+- **外部副作用的自动恢复入口**：P2-M4 已交付恢复入口前置门控与启动扫描可发现性，
+  但 `code verify` 仍只有 CLI 手工入口，`recovery_required` 之后没有"核验并继续"的
+  自动编排能力。改用例覆盖仍属 P2-M5。
+- **merge 恢复的真实远程证据**：`docker.remote_enabled` 未启用，merge 恢复判定目前只有
+  本机真实 Git（bare 远程）证据。
 
 **待调查**：
 

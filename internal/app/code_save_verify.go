@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -40,13 +41,19 @@ type CodeSaveVerifyResult struct {
 // VerifyCodeSave 只读核验一次代码保存记录对应的真实仓库状态。
 //
 // 它不提交、不推送、不合并、不删除容器：核验的职责只是把"记录里是 pending"与
-// "Git 到底做了什么"分开，为人工决策提供依据。核验结论会写回记录的
-// recovery_status，除此之外不改动任何状态字段——尤其不会把 pending 改成 succeeded。
-// 写回以读取时的恢复结论为条件：核验期间记录若被其他执行推进，写入按冲突处理，
-// 不会用旧值覆盖新事实。
+// "Git 到底做了什么"分开，为人工决策提供依据。核验确认某个 Git 操作已经发生时，
+// 结论会连同该阶段的状态与提交 SHA 一起写回记录；确认未发生或无法确认时只写
+// recovery_status，绝不把 pending 伪造成 succeeded。
 //
-// 核验失败（容器不可访问、远程不可达）不会返回错误，而是返回 unverifiable 的
-// 结论：无法确认时必须保留不确定性，不能伪造成"操作没有发生"。
+// 写回以读取时的恢复结论为条件：核验期间记录若被其他执行推进，写入按冲突处理，
+// 不会用旧值覆盖新事实，调用方必须依据重新读取到的真实记录决定下一步。
+//
+// 错误分类（调用方据此判断恢复资格，不需要解析错误文本）：
+//   - 参数错误、记录不存在、容器登记不存在、容器不受管理：返回错误，核验没有开始；
+//   - 执行节点不可达、Docker 不可访问、Git 查询失败：不返回错误，而是给出
+//     unverifiable 结论——无法确认时必须保留不确定性，不能伪造成"操作没有发生"；
+//   - 结论写回失败或冲突：不返回错误，但 Persisted 为 false，Updated 是数据库中的
+//     真实记录，调用方不得把这次核验报告为恢复成功。
 func (s *ContainerService) VerifyCodeSave(
 	ctx context.Context,
 	request CodeSaveVerifyRequest,
@@ -102,17 +109,33 @@ func (s *ContainerService) VerifyCodeSave(
 		},
 	)
 	if verifyErr != nil {
-		return result, verifyErr
+		// 现场无法核验（节点不可达、Docker 不可访问、Git 查询失败）不得伪装成
+		// "操作没有发生"：这里把它降级为 unverifiable 结论，同时保留原始错误供调用方
+		// 记录诊断，但结论本身已经落盘，因此仍然可以走正常的核验写回路径。
+		result.Observation = domain.CodeSaveObservation{
+			ReadFailed: true,
+			ReadError:  errorSummary(verifyErr),
+		}
+		result.Decision = domain.DecideCodeSaveRecovery(*record, result.Observation)
+		s.debug(
+			ctx,
+			"代码保存核验无法取得可信现场",
+			slog.String("record", record.ID.String()),
+			slog.String("error", errorSummary(verifyErr)),
+		)
 	}
 	return s.persistCodeSaveRecovery(ctx, result, *record)
 }
 
 // persistCodeSaveRecovery 把核验结论写回记录。
 //
-// 写入是"只读核验的最后一公里"，必须同时满足三点：
+// 写入是"只读核验的最后一公里"，必须同时满足四点：
 //  1. 状态迁移先经领域状态机校验，已确认的事实不会因为一次查询失败被改写；
-//  2. 只写 recovery_status，不用整条记录覆盖读取之后可能已被推进的提交/推送/合并状态；
-//  3. 以读取时的恢复结论为条件写入，冲突时重新读取真实记录，绝不覆盖新事实。
+//  2. 已确认发生的阶段事实（阶段状态 + 提交 SHA）必须一起落盘：否则"已确认发生"
+//     只存在于返回值里，数据库仍停在 pending，恢复会反复要求核验同一现场；
+//  3. 不用整条记录覆盖读取之后可能已被推进的提交/推送/合并状态，也不改写与核验
+//     无关的字段（分支、容器、仓库地址、基线）；
+//  4. 以读取时的恢复结论为条件写入，冲突时重新读取真实记录，绝不覆盖新事实。
 //
 // 写入失败不会被伪造成成功：Persisted 保持 false，Updated 回落到数据库中的真实值。
 func (s *ContainerService) persistCodeSaveRecovery(
@@ -121,20 +144,14 @@ func (s *ContainerService) persistCodeSaveRecovery(
 	record domain.CodeSaveRecord,
 ) (CodeSaveVerifyResult, error) {
 	expected := record.RecoveryStatus
-	candidate := record
-	if err := candidate.MarkRecovery(result.Decision.Status, time.Now()); err != nil {
+	candidate, err := record.ApplyRecovery(result.Decision, time.Now())
+	if err != nil {
 		// 结论无法通过状态机时仍然返回判定结果：现场事实比记录更重要，
 		// 但不得据此认为恢复已经闭环。
 		return result, nil
 	}
-	err := s.store.UpdateCodeSaveRecovery(
-		ctx,
-		candidate.ID,
-		expected,
-		candidate.RecoveryStatus,
-		candidate.UpdatedAt,
-	)
-	if err != nil {
+	writeErr := s.store.UpdateCodeSaveRecoveryResult(ctx, candidate, expected)
+	if writeErr != nil {
 		result.Updated = *s.reloadCodeSaveRecord(ctx, record)
 		return result, nil
 	}
