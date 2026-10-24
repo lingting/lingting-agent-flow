@@ -91,6 +91,9 @@ func (s *launchTaskStore) UpdateStepIfStatus(
 }
 
 // GetActiveWorkflowRun 返回受控的未结束执行记录。
+//
+// activeRun 表示"仍有一个执行者持有有效执行权"：返回的记录必须是 running 且租约
+// 有效，否则它就不再是抢占判据——步骤占用收敛只保护真正在推进的执行。
 func (s *launchTaskStore) GetActiveWorkflowRun(
 	ctx context.Context,
 	taskID domain.ID,
@@ -100,7 +103,14 @@ func (s *launchTaskStore) GetActiveWorkflowRun(
 	if !s.activeRun {
 		return nil, storage.ErrNotFound
 	}
-	return &domain.WorkflowRun{ID: domain.NewID(), TaskID: taskID}, nil
+	expires := time.Now().UTC().Add(10 * time.Minute)
+	return &domain.WorkflowRun{
+		ID:             domain.NewID(),
+		TaskID:         taskID,
+		Status:         domain.WorkflowRunRunning,
+		WorkerID:       "worker-test",
+		LeaseExpiresAt: &expires,
+	}, nil
 }
 
 // AppendEvent 记录事件类型。

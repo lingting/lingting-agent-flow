@@ -275,6 +275,50 @@ func (s validationStore) ListValidationRunsByAttempt(
 	return runs, nil
 }
 
+// ListValidationRunsByStatus 返回全部处于指定流程状态的验证记录。
+//
+// 启动恢复用它定位"进程退出后仍停留在 pending / running"的残留验证：这类记录会
+// 永久阻塞同一尝试的新验证，必须被收敛为终态。
+func (s validationStore) ListValidationRunsByStatus(
+	ctx context.Context,
+	statuses []domain.ValidationRunStatus,
+) ([]domain.ValidationRun, error) {
+	if len(statuses) == 0 {
+		return []domain.ValidationRun{}, nil
+	}
+	placeholders := make([]string, 0, len(statuses))
+	args := make([]any, 0, len(statuses))
+	for _, status := range statuses {
+		if err := status.Validate(); err != nil {
+			return nil, err
+		}
+		placeholders = append(placeholders, "?")
+		args = append(args, string(status))
+	}
+	statement := `SELECT ` + validationRunColumns + ` FROM validation_runs
+		WHERE status IN (` + strings.Join(placeholders, ", ") + `)
+		ORDER BY created_at, rowid`
+	rows, err := s.q.QueryContext(ctx, statement, args...)
+	if err != nil {
+		return nil, wrapError("查询验证记录", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+	runs := make([]domain.ValidationRun, 0, 8)
+	for rows.Next() {
+		run, scanErr := scanValidationRun(rows)
+		if scanErr != nil {
+			return nil, wrapError("读取验证记录", scanErr)
+		}
+		runs = append(runs, *run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, wrapError("查询验证记录", err)
+	}
+	return runs, nil
+}
+
 // ListValidationRunsByStep 按创建时间返回某个步骤的全部验证记录。
 //
 // 步骤级查询用于"最新验证结果"：同一尝试下验证只追加，重试会创建新的尝试与新的

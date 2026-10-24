@@ -14,6 +14,7 @@ import (
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
+	"github.com/lingting/agentflow/internal/logging"
 	"github.com/lingting/agentflow/internal/sshclient"
 	"github.com/lingting/agentflow/internal/storage"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
@@ -159,6 +160,7 @@ type validationFixture struct {
 	outputRoot string
 	ctx        context.Context
 	workspace  *testkit.Workspace
+	logger     *logging.Logger
 }
 
 // newValidationFixture 在工作空间中准备完整的验证测试数据。
@@ -202,6 +204,10 @@ func newValidationFixture(t *testing.T, spec domain.ValidationSpec) *validationF
 	if err != nil {
 		t.Fatalf("读取尝试失败: %v", err)
 	}
+	logger, err := testkit.Logger(logging.LevelError)
+	if err != nil {
+		t.Fatalf("构造日志器失败: %v", err)
+	}
 	containers := &fakeCheckContainer{
 		running: true,
 		replies: map[string]checkReply{},
@@ -210,7 +216,7 @@ func newValidationFixture(t *testing.T, spec domain.ValidationSpec) *validationF
 		Store:      db,
 		Containers: containers,
 		OutputRoot: workspace.Dir("validations"),
-		Logger:     nil,
+		Logger:     logger.Slog(),
 		Now:        func() time.Time { return time.Now().UTC() },
 	})
 	if serviceErr != nil {
@@ -236,6 +242,7 @@ func newValidationFixture(t *testing.T, spec domain.ValidationSpec) *validationF
 		outputRoot: workspace.Path("validations"),
 		ctx:        ctx,
 		workspace:  workspace,
+		logger:     logger,
 	}
 }
 
@@ -1068,4 +1075,31 @@ func TestValidationArchivesOutputs(t *testing.T) {
 	if check.StdoutSummary != "标准输出内容" || check.StderrSummary != "标准错误内容" {
 		t.Fatalf("输出摘要不符: %+v", check)
 	}
+}
+
+// validationRun 读取一条验证记录。
+func (f *validationFixture) validationRun(t *testing.T, runID domain.ID) domain.ValidationRun {
+	t.Helper()
+	run, err := f.db.GetValidationRun(f.ctx, runID)
+	if err != nil {
+		t.Fatalf("读取验证记录失败: %v", err)
+	}
+	return *run
+}
+
+// startValidationService 启动验证服务并在用例结束时停止。
+func startValidationService(t *testing.T, service *app.ValidationService) {
+	t.Helper()
+	startCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := service.Start(startCtx); err != nil {
+		t.Fatalf("启动验证服务失败: %v", err)
+	}
+	t.Cleanup(func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer stopCancel()
+		if err := service.Stop(stopCtx); err != nil {
+			t.Errorf("停止验证服务失败: %v", err)
+		}
+	})
 }

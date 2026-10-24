@@ -4,6 +4,11 @@
 > 测试状态，逐项核对 `internal/`、`internal/storage/sqlite/migrations/` 与 `tests/` 得出。
 > 本文档只描述**当前已存在**的机制与**已核实**的缺口，不描述计划中的实现。
 > 每条结论都指向具体文件与函数；无法指向代码的推测一律标注为"待确认"。
+>
+> **P2-M2 更新（2026-10-24，基于 `master` HEAD `2a1bb0d`）**：B1、B2、B3、B5、B6 与
+> §5.8 的测试竞态已在 P2-M2 修复，相关段落标注为"P2-M2 修复（已完成）"，§3.4 与 §6.2
+> 的缺口表已按实际状态更新。B4（容器孤儿 / `unknown`）与 G14 仍未处理，属于 P2-M4/M5。
+> 本文其余描述（§1–§2 的机制与矩阵、§4 的边界说明）仍然成立。
 
 ## 0. 阅读约定
 
@@ -39,30 +44,39 @@ agentflow server（internal/cli/server.go:runServer）
                   3. app.StepExecutor.Start        # 只设置生命周期标志，无任何恢复
                   4. app.ValidationService.Start   # 只设置生命周期标志，无任何恢复
                   5. app.StepWorkflowService.Start # 只设置生命周期标志，无任何恢复
-                  6. app.TaskWorkflowService.Start
-                        → recoverUnfinished         # 未结束的 workflow_runs
-                        → recoverPlanGeneration     # 停留在 planning 的任务
-                        → recoverCancelling         # 停留在 cancelling 的任务
-                  7. app.TaskLaunchService.Start
-                        → recoverWorkspace          # 停留在 pending/running 的工作区初始化
-                        → RecoverStepOccupancy      # 停留在 running/developing/verifying 的步骤
+                  6. app.ExecutionResidueService.Start  # P2-M2 新增
+                        → 收敛残留 validation_runs（→ failed + verdict=failed）
+                        → 收敛残留 attempts（→ interrupted）
+                        → 收敛残留 sessions（→ interrupted，产物路径保留）
+                  7. app.TaskWorkflowService.Start
+                        → recoverUnfinished           # 未结束的 workflow_runs
+                        → recoverCancellationIntents  # 取消意图跨层补齐（P2-M2 新增）
+                        → recoverPlanGeneration       # 停留在 planning 的任务
+                        → recoverCancelling           # 停留在 cancelling 的任务
+                  8. app.TaskLaunchService.Start
+                        → recoverWorkspace            # 停留在 pending/running 的工作区初始化
+                        → RecoverStepOccupancy        # 停留在 running/developing/verifying 的步骤
           → startHTTP                         # 之后才开始接受新请求
 ```
 
 关键事实：
 
-- **恢复入口是否必然执行**：上述 2、6、7 号服务的恢复是 `Start` 的一部分，必然执行；
+- **恢复入口是否必然执行**：上述 2、6、7、8 号服务的恢复是 `Start` 的一部分，必然执行；
   但 3、4、5 号服务**没有任何启动恢复**，它们只在停止时收敛在途调用。
 - **失败传播**：`Manager.Start` 遇到任一服务 `Start` 返回错误即中止，并逆序 `Stop` 已启动的
   服务；`Server.startup` 返回错误，`Server.Run` 用 `errors.Join(ErrStartup, err, Stop(...))`
   收尾。因此 `TaskWorkflowService` / `TaskLaunchService` 的恢复失败会**阻止服务启动**。
 - **例外**：`HostValidationService.recoverPending` 的失败只写警告日志，不阻止启动
   （`internal/app/host_validation_service.go:135`）。与工作流恢复的"失败即停止启动"语义不一致。
-- **顺序副作用**：`TaskWorkflowService` 的恢复先于 `TaskLaunchService`，所以
-  `recoverUnfinished` 会先把 `running` 执行记录收敛为 `blocked`，之后
-  `RecoverStepOccupancy` 再判断"任务是否仍有未结束执行"。而
-  `workflowRunActivePredicate`（`internal/storage/sqlite/workflow_runs.go:21`）把
-  `blocked` 也算作未结束——这导致 §5.1（B1）记录的锁死缺陷。
+- **顺序副作用（P2-M2 已解除）**：`TaskWorkflowService` 的恢复先于
+  `TaskLaunchService`，所以 `recoverUnfinished` 会先把 `running` 执行记录收敛为
+  `blocked`，之后 `RecoverStepOccupancy` 再判断"任务是否仍有**有效执行权**"。
+  M1 当时记录的问题是 `workflowRunActivePredicate`
+  （`internal/storage/sqlite/workflow_runs.go`）把 `blocked` 也算作未结束，导致步骤占用
+  永远得不到收敛（§5.1 B1）。P2-M2 的修复**没有改动该谓词**（它仍正确表达"未结束记录"，
+  并被 `GetActiveWorkflowRun` / 部分唯一索引复用），而是把步骤占用收敛的判据改为
+  `domain.workflowRunOwnsExecution`（`running` + 租约有效）。两个概念从此分开：
+  "未结束记录"用于并发保护，"有效执行权"用于抢占判定。
 
 ### 1.2 状态分层与真相来源
 
@@ -398,18 +412,25 @@ agentflow server（internal/cli/server.go:runServer）
 
 ### 3.4 缺少恢复能力（无完整处理路径）
 
-| 缺口 | 证据 | 影响 |
-|---|---|---|
-| `attempts` 停在 `running` | 无任何收敛代码（`grep AttemptStatusRunning` 仅命中写入路径与 `finishAttempt` 的"非 running 则跳过"） | 尝试历史无法解释；无法判断"Agent 是否执行过" |
-| `sessions` 停在 `running`/`starting` | `SessionService.Fail`（`sessions.go:234`）**无生产调用者** | 收尾时 `sessionsPersisted` 恒为 false → 任务永久 `recovery_required` |
-| `validation_runs` 停在 `pending`/`running` | 无收敛代码；`BeginValidationRun` 的活跃验证查询（`validations.go:141`）会永久拒绝该 Attempt 的新验证 | 该 Attempt 永久无法再验证，只能换 Attempt |
-| Attempt 级 `code_fetches` 残留 | `ListInterruptedTaskWorkspaceInits` 只查 `task_workspace_initializations` | 中断记录永久停留，无收敛 |
+> **P2-M2 更新（2026-10-24）**：下表中 `attempts` / `sessions` / `validation_runs`
+> 三类残留与"任务层取消意图丢失"已在 P2-M2 补齐收敛路径，实现为
+> `app.ExecutionResidueService`（启动时按"任务是否仍有持有有效租约的执行者"判定）
+> 与 `TaskWorkflowService.recoverCancellationIntents`。本表其余条目仍然成立，
+> 属于 P2-M4/M5 范围。逐条结论见
+> [`P2-M2-interruption-semantics.md`](./P2-M2-interruption-semantics.md) §2.4–§2.6。
+
+| 缺口 | 证据 | 影响 | P2-M2 状态 |
+|---|---|---|---|
+| `attempts` 停在 `running` | 无任何收敛代码（`grep AttemptStatusRunning` 仅命中写入路径与 `finishAttempt` 的"非 running 则跳过"） | 尝试历史无法解释；无法判断"Agent 是否执行过" | **已修复**：收敛为 `interrupted`，`failure_stage = recover` |
+| `sessions` 停在 `running`/`starting` | `SessionService.Fail`（`sessions.go:234`）**无生产调用者** | 收尾时 `sessionsPersisted` 恒为 false → 任务永久 `recovery_required` | **已修复**：收敛为 `interrupted` + `run_status = failed`，产物路径与归档事实原样保留 |
+| `validation_runs` 停在 `pending`/`running` | 无收敛代码；`BeginValidationRun` 的活跃验证查询（`validations.go:141`）会永久拒绝该 Attempt 的新验证 | 该 Attempt 永久无法再验证，只能换 Attempt | **已修复**：收敛为 `failed` + `verdict = failed`，`error_detail` 说明中断来源 |
+| Attempt 级 `code_fetches` 残留 | `ListInterruptedTaskWorkspaceInits` 只查 `task_workspace_initializations` | 中断记录永久停留，无收敛 | 仍未修复（P2-M4/M5） |
 | `container.state=unknown` | `domain` 允许 unknown→running，但无调用方推进 | 容器状态不可信，且 `Launch` 会另建容器 |
 | 孤儿容器（创建成功、关联失败） | `recordOrphanContainer` 只写事件 | 下次 `Launch` 再建容器；孤儿永不回收 |
 | `uncertain` 工作区无只读核验入口 | 只有 `code verify` 覆盖代码保存 | 用户只能人工进容器判断 |
 | 归档失败无重做入口 | `sessionsPersisted` 只读 | `recovery_required` / `session_not_persisted` 后无出路 |
 | 步骤 `recovery_required` 无只读核验入口 | 无 | 用户只能直接重跑（有覆盖风险） |
-| 任务层取消意图丢失 | `recoverRun` 只收敛执行记录 | 任务仍可被重新推进，违反用户取消意图 |
+| ~~任务层取消意图丢失~~ | ~~`recoverRun` 只收敛执行记录~~ | **P2-M2 已修复**：取消入口双写任务层意图，`recoverCancellationIntents` 跨层补齐（B5） |
 
 ---
 
@@ -479,6 +500,16 @@ agentflow server（internal/cli/server.go:runServer）
   只能手工改数据库。
 - **建议修复边界**（留给 M2，不在 M1 实施）：`DecideStepOccupancyRecovery` 的输入语义应区分
   "正在推进的执行"与"已停止但未终结的执行"，或恢复顺序改为"先步骤、后执行记录"。
+- **P2-M2 修复（已完成）**：采用第一种方案。`domain.TaskLaunchStepOccupancyInput` 改为
+  携带执行记录本身与当前时刻，新增 `workflowRunOwnsExecution`：只有 `running` **且租约
+  有效**的记录才算"有执行者可能在推进"。`blocked` / `recovery_required` / 过期租约的
+  `running` / 超窗的 `pending` 都不再阻止步骤收敛。恢复顺序未改动，跨进程保护未放宽
+  （部分唯一索引与版本号条件更新保持原样）。证据：
+  `tests/integration/local/workflow/step_occupancy_test.go` 的
+  `TestStepOccupancyConvergesAfterRunBlocked`（完整锁死场景）、
+  `TestStepOccupancyKeepsLiveLeaseOwner`、`TestStepOccupancyConvergedTaskCanLaunch`
+  （收敛后正式入口可用）、`TestStepOccupancyConvergesOnceAcrossRestarts`、
+  `TestStepOccupancyReadFailureDoesNotConverge`。
 
 ### 5.2 B2（阻塞）验证流程残留使 Attempt 永久无法再验证
 
@@ -490,6 +521,12 @@ agentflow server（internal/cli/server.go:runServer）
 - **建议修复边界**：M2 增加"启动时把残留 `pending`/`running` 验证收敛为
   `failed`/`cancelled` + `verdict=inconclusive`"的正式入口，并复用
   `domain.DecideValidation` 的"流程未完成不得通过"规则。
+- **P2-M2 修复（已完成）**：实现为 `app.ExecutionResidueService.recoverValidationRuns`，
+  收敛为 `failed` + `verdict = failed`（`DecideValidation` 对非 `completed` 流程一律判
+  `failed`，因此不采用 `inconclusive`），`error_detail` 说明"进程退出时仍在活动状态"，
+  措辞刻意不使用任何暗示"检查未通过"的表述。证据：
+  `tests/unit/app/execution_residue_test.go` 的
+  `TestResidueConvergesValidationRunToFailed`（同时断言收敛后该 Attempt 可以重新验证）。
 
 ### 5.3 B3（阻塞）Attempt 与 Session 的 `running` 残留无收敛路径
 
@@ -499,6 +536,15 @@ agentflow server（internal/cli/server.go:runServer）
   执行记录无法解释"Agent 是否执行过"。
 - **建议修复边界**：M2 明确"残留 `running` 会话/尝试在启动时收敛为什么状态"，并补
   `SessionService.Fail` 的调用点（进程启动失败、工作目录不可用等路径）。
+- **P2-M2 修复（已完成）**：实现为 `app.ExecutionResidueService.recoverAttempts` /
+  `recoverSessions`。Attempt 收敛为 `interrupted`（`failure_stage = recover`），Session
+  收敛为 `interrupted` + `run_status = failed`，且**不删除**任何已有产物路径与归档事实。
+  判据是"任务是否仍有持有有效租约的执行者"，因此一个仍在运行的其他实例不会被抢占。
+  证据：`tests/unit/app/execution_residue_test.go` 的
+  `TestResidueConvergesAttemptToInterrupted`、
+  `TestResidueConvergesSessionToInterrupted`（断言路径与归档事实原样保留）、
+  `TestResidueKeepsLiveLeaseResidue`、`TestResidueConvergesResidueWithoutRun`、
+  `TestResidueKeepsTerminalRecords`、`TestResidueIsIdempotent`。
 
 ### 5.4 B4（高）容器孤儿与 `unknown` 状态无收敛
 
@@ -513,6 +559,16 @@ agentflow server（internal/cli/server.go:runServer）
   `tasks.status=cancelling`。
 - **后果**：崩溃点落在"取消请求已落库、任务尚未进入 `cancelling`"时，重启后任务仍是
   `developing`，可被 `StartWorkflow` 重新推进——用户取消意图丢失。
+- **P2-M2 修复（已完成）**：`CancelWorkflow` 在写执行记录之后立即调用
+  `recordTaskCancelIntent` 写任务层意图（缩小崩溃窗口）；启动恢复新增
+  `recoverCancellationIntents`，依据 `domain.DecideCancellationIntentRecovery` 与
+  `domain.DecideCancellationRecovery` 把"执行记录已取消、任务层未同步"的现场补齐。
+  不假设所有 `WorkflowRun.CancelRequested` 都必须把任务标为 `cancelled`：执行记录仍未
+  结束时不在此处改写任务状态。证据：
+  `tests/integration/local/workflow/cancel_intent_test.go` 的
+  `TestRecoverCancelIntentConvergesTask`、`TestRecoverCancelIntentBlocksNewWorkflow`、
+  `TestRecoverCancelIntentIsIdempotent`、`TestRecoverCancelIntentKeepsTerminalTask`、
+  `TestRecoverCancelIntentFailureBlocksStartup`。
 
 ### 5.6 B6（高）`workflow_runs` 租约只判定一次且无续租
 
@@ -522,6 +578,16 @@ agentflow server（internal/cli/server.go:runServer）
   （`step_executor.go:defaultStepExecutionTimeout`）。
 - **后果**：单步执行超过 10 分钟后，若另一进程启动，`recoverRun` 会认为租约过期并把仍在
   推进的记录收敛为 `blocked`——用 `revision` 条件只能阻止覆盖，不能阻止误判。
+- **P2-M2 修复（已完成）**：新增 `domain.WorkflowRun.RenewLease`（只允许 `running` +
+  同一 `worker_id` + 已有租约时延长）与 `storage.WorkflowRunLeaseStore.RenewWorkflowRunLease`
+  （只更新 `lease_expires_at` / `updated_at`，**不推进 `revision`**，避免与正常推进的写入
+  互相覆盖）。`TaskWorkflowService` 在推进期间按租约的 1/3 周期续租；续租失败视为失去
+  执行权，立即取消本次推进且**不写任何终态**（避免用过期执行者的本地对象覆盖真实记录）。
+  证据：`tests/unit/app/task_workflow_lease_test.go` 的
+  `TestWorkflowHeartbeatKeepsLeaseAlive`（单次调用跨越原始租约仍持有执行权）、
+  `TestWorkflowHeartbeatDoesNotReviveTerminalRun`、
+  `TestWorkflowRecoveryKeepsRenewedLease`（另一实例不抢占）、
+  `TestWorkflowExpiredLeaseAllowsRecovery`（真正退出的进程仍可被收敛）。
 
 ### 5.7 B7（中）归档语义不一致
 
@@ -532,9 +598,15 @@ agentflow server（internal/cli/server.go:runServer）
 
 ### 5.8 已知测试缺陷
 
-- `TestPlanGenerationInterruptedByShutdown`（`tests/integration/local/workflow/recovery_test.go:791`）
-  在干净工作区上约 40% 概率失败（`.steps/ROADMAP.md`、`.steps/P1-single-task-e2e.md` 已记录）。
-  **该窗口的测试证据当前不可靠**，M5 必须先修复该用例再声称"服务关闭中断已覆盖"。
+- ~~`TestPlanGenerationInterruptedByShutdown`（`tests/integration/local/workflow/recovery_test.go:791`）
+  在干净工作区上约 40% 概率失败~~ —— **P2-M2 已修复**。根因是替身 `duringCall` 用独立
+  goroutine 触发 `Stop`，而替身在取消传播到本次调用之前就可能返回结果，结论因此取决于
+  goroutine 调度顺序。修复方式：替身新增 `waitForCancel`，等本次调用的上下文真的被取消
+  后才返回，建立确定的先后关系（`-race` 下连续 15 次全部通过）。
+- 另发现并修复一处真实生产缺陷：`GetWorkflowStatus` 原先先读任务状态、后读执行记录，
+  一次正在完成的收尾会被读成"任务仍在 `saving`、执行记录已 `completed`"这种不可能同时
+  成立的组合（`tests/unit/httpapi` 的 `TestWorkflowAPILifecycle` 间歇失败）。读取顺序
+  改为"执行记录 → 任务 → 步骤"。
 
 ---
 
@@ -570,6 +642,38 @@ agentflow server（internal/cli/server.go:runServer）
 | 恢复不重放已完成步骤 / 计划变更拒绝恢复 | `task_workflow_test.go:TestWorkflowResumeSkipsCompletedSteps`、`TestWorkflowResumeRejectsPlanChange` |
 | 无代码保存能力不判成功 | `task_workflow_test.go:TestWorkflowDoesNotReportSuccessWithoutCodeSaver`、`e2e_indeterminate_test.go:TestE2EIndeterminateWithoutCodeSaver` |
 
+**P2-M2 新增覆盖（2026-10-24）**：
+
+| 场景 | 测试 |
+|---|---|
+| 步骤占用 × `blocked` 记录锁死被解除（B1） | `step_occupancy_test.go:TestStepOccupancyConvergesAfterRunBlocked` |
+| 有效执行权存在时不抢占（B1） | `step_occupancy_test.go:TestStepOccupancyKeepsLiveLeaseOwner` |
+| 收敛后正式入口可用（B1） | `step_occupancy_test.go:TestStepOccupancyConvergedTaskCanLaunch` |
+| 重复收敛只写一条事件（B1） | `step_occupancy_test.go:TestStepOccupancyConvergesOnceAcrossRestarts` |
+| 读取执行记录失败时不抢占（B1） | `step_occupancy_test.go:TestStepOccupancyReadFailureDoesNotConverge` |
+| 取消意图跨重启补齐任务层（B5） | `cancel_intent_test.go:TestRecoverCancelIntentConvergesTask` |
+| 收敛后拒绝启动新工作流（B5） | `cancel_intent_test.go:TestRecoverCancelIntentBlocksNewWorkflow` |
+| 重复恢复幂等（B5） | `cancel_intent_test.go:TestRecoverCancelIntentIsIdempotent` |
+| 已结束任务不被重新打开（B5） | `cancel_intent_test.go:TestRecoverCancelIntentKeepsTerminalTask` |
+| 补齐写入失败阻止启动（B5） | `cancel_intent_test.go:TestRecoverCancelIntentFailureBlocksStartup` |
+| 长调用跨越原始租约不丢执行权（B6） | `task_workflow_lease_test.go:TestWorkflowHeartbeatKeepsLeaseAlive` |
+| 终态记录不被续租复活（B6） | `task_workflow_lease_test.go:TestWorkflowHeartbeatDoesNotReviveTerminalRun` |
+| 续租后另一实例不抢占（B6） | `task_workflow_lease_test.go:TestWorkflowRecoveryKeepsRenewedLease` |
+| 真正退出的进程仍可被收敛（B6） | `task_workflow_lease_test.go:TestWorkflowExpiredLeaseAllowsRecovery` |
+| 残留 Attempt → `interrupted`（B3） | `execution_residue_test.go:TestResidueConvergesAttemptToInterrupted` |
+| 残留 Session → `interrupted` 且现场保留（B3） | `execution_residue_test.go:TestResidueConvergesSessionToInterrupted` |
+| 残留 ValidationRun → `failed` 且可重验（B2） | `execution_residue_test.go:TestResidueConvergesValidationRunToFailed` |
+| 有效执行权时不收敛残留 | `execution_residue_test.go:TestResidueKeepsLiveLeaseResidue` |
+| 没有执行记录的残留同样被收敛 | `execution_residue_test.go:TestResidueConvergesResidueWithoutRun` |
+| 已终结记录不被改写 | `execution_residue_test.go:TestResidueKeepsTerminalRecords` |
+| 重复收敛幂等 | `execution_residue_test.go:TestResidueIsIdempotent` |
+| 验证取消不判通过 | `validation_interruption_test.go:TestValidationCancelIsNotPassed` |
+| 验证超时不判通过 | `validation_interruption_test.go:TestValidationTimeoutIsNotPassed` |
+| 验证服务停止 ≠ 用户取消 | `validation_interruption_test.go:TestValidationServiceStopIsNotUserCancel` |
+| 中断后检查记为 skipped | `validation_interruption_test.go:TestValidationInterruptedChecksAreSkipped` |
+| 中断时不发起语义审查 | `validation_interruption_test.go:TestValidationInterruptionDoesNotCallValidator` |
+| 中断后尝试判定与验证结论一致 | `validation_interruption_test.go:TestValidationInterruptionKeepsAttemptConsistent` |
+
 ### 6.2 未覆盖的故障窗口（清单）
 
 | # | 故障窗口 | 现状 | 优先级 |
@@ -583,10 +687,10 @@ agentflow server（internal/cli/server.go:runServer）
 | G7 | 外部状态不可达、观测结果无法确认 | 代码保存有 3 个用例；**容器核验不可达无** | 高 |
 | G8 | 已确认成功的外部结果不被错误改写 | 有（`TestObserveConfirmsMergeApplied`、迟到结果用例）；**归档与工作区无** | 中 |
 | G9 | 恢复后不重复执行已成功副作用 | 代码保存有（`gitPushCount()==1`）；**Clone / 容器创建无计数器断言** | 高 |
-| G10 | `attempts` / `sessions` / `validation_runs` 的 `running` 残留 | **完全无用例，也没有实现** | 阻塞（B2/B3） |
-| G11 | 服务停止时在途验证/修复循环 | 有 `TestWorkflowStopCancelsInFlightRun`、`TestExecutorStopCancelsInFlightRun`；**验证引擎无对应用例** | 中 |
-| G12 | 任务层取消未收敛（B5） | **无用例** | 高 |
-| G13 | 租约过期误判（B6） | 只有"租约有效不被抢占"，**没有"长任务不被误判"用例** | 高 |
+| G10 | `attempts` / `sessions` / `validation_runs` 的 `running` 残留 | ~~完全无用例，也没有实现~~ → **P2-M2 已实现并覆盖**（`execution_residue_test.go`） | 已关闭 |
+| G11 | 服务停止时在途验证/修复循环 | 有 `TestWorkflowStopCancelsInFlightRun`、`TestExecutorStopCancelsInFlightRun`；~~验证引擎无对应用例~~ → **P2-M2 已补**（`validation_interruption_test.go`） | 已关闭 |
+| G12 | 任务层取消未收敛（B5） | ~~无用例~~ → **P2-M2 已实现并覆盖**（`cancel_intent_test.go`，5 个用例） | 已关闭 |
+| G13 | 租约过期误判（B6） | ~~只有"租约有效不被抢占"~~ → **P2-M2 已实现周期续租并覆盖**（`task_workflow_lease_test.go`，4 个用例） | 已关闭 |
 | G14 | 容器 `unknown` 状态收敛 | **无用例，也没有实现** | 高 |
 
 ### 6.3 证据强度说明
@@ -603,20 +707,27 @@ agentflow server（internal/cli/server.go:runServer）
 
 ## 7. 对 M2–M5 的依赖与调查优先级
 
-| 里程碑 | 依赖 M1 的结论 | 首要问题 |
-|---|---|---|
-| P2-M2（中断语义） | §2.14、§4.1、B1、B5、B6 | 1) 统一"用户取消 / 超时 / 服务停止 / 进程崩溃"在**每一层**（Task / WorkflowRun / Step / Attempt / Session / ValidationRun）的收敛目标；2) 修复 B1 的锁死；3) 让执行记录层取消生效时任务层必须同步收敛（B5）；4) 决定租约续期或改用心跳（B6） |
-| P2-M3（重试资格） | §2.6–2.8、§3.3、B2、B3 | 1) 定义"残留 `running`"的重试资格；2) 让 `validation_runs` / `attempts` / `sessions` 的残留有唯一收敛规则；3) 把修复循环的轮次计数从进程内计数改为持久化事实 |
+> **P2-M2 完成后的移交状态（2026-10-24）**：本表 P2-M2 行的 4 项问题已全部落地
+> （见 §5.1/§5.2/§5.3/§5.5/§5.6 的"P2-M2 修复"段落与
+> [`P2-M2-interruption-semantics.md`](./P2-M2-interruption-semantics.md)）。P2-M3 行的
+> 第 2 项（残留唯一收敛规则）已由 `app.ExecutionResidueService` 提供，但**重试资格**
+> 本身仍未定义——"收敛为 `interrupted`"不等于"允许自动重跑"，这仍是 M3 的核心工作。
+
+| 里程碑 | 依赖 M1 的结论 | 首要问题 | P2-M2 后状态 |
+|---|---|---|---|
+| P2-M2（中断语义） | §2.14、§4.1、B1、B5、B6 | 1) 统一"用户取消 / 超时 / 服务停止 / 进程崩溃"在**每一层**（Task / WorkflowRun / Step / Attempt / Session / ValidationRun）的收敛目标；2) 修复 B1 的锁死；3) 让执行记录层取消生效时任务层必须同步收敛（B5）；4) 决定租约续期或改用心跳（B6） | **已完成** |
+| P2-M3（重试资格） | §2.6–2.8、§3.3、B2、B3 | 1) 定义"残留 `running`"的重试资格；2) 让 `validation_runs` / `attempts` / `sessions` 的残留有唯一收敛规则；3) 把修复循环的轮次计数从进程内计数改为持久化事实 | 第 2 项已完成（`ExecutionResidueService`）；第 1、3 项待做 |
 | P2-M4（外部副作用） | §2.9–2.11、§3.2、§3.3 | 1) `VerifyCodeSave` 从"CLI 手工"升级为可编排的核验步骤（但仍需显式触发）；2) `unknown`/`conflict` 之后的用户决策路径；3) 补充"核验期间再次退出"的用例 |
 | P2-M5（恢复验收） | §6.1、§6.2 | 按 G1–G14 补齐用例，优先 G2/G4/G5/G9/G10/G12/G13；先修复 `TestPlanGenerationInterruptedByShutdown` 的竞态 |
 
 **调查优先级（按"解除最多后续依赖"排序）**：
 
-1. B1（步骤占用 × blocked 执行记录锁死）——不修，M2 的所有恢复语义都无法验证。
-2. B2/B3（`validation_runs` / `attempts` / `sessions` 残留）——决定 M3 的重试资格规则。
-3. B5（任务层取消未收敛）——直接违反用户意图，属正确性问题。
-4. B6（租约）——影响长任务的正确性判定。
-5. B4（容器孤儿/unknown）——影响环境准备阶段的可恢复性。
+1. ~~B1（步骤占用 × blocked 执行记录锁死）~~ —— **P2-M2 已修复**。
+2. ~~B2/B3（`validation_runs` / `attempts` / `sessions` 残留）~~ —— **P2-M2 已补齐收敛
+   路径**；"重试资格"仍归 M3。
+3. ~~B5（任务层取消未收敛）~~ —— **P2-M2 已修复**。
+4. ~~B6（租约）~~ —— **P2-M2 已修复**（周期续租）。
+5. B4（容器孤儿/unknown）——影响环境准备阶段的可恢复性，仍待处理（M4/M5）。
 6. B7 与 §2.12 的归档语义——影响收尾判定的一致性。
 
 ---

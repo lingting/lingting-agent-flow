@@ -391,6 +391,7 @@ type taskWorkflowFixture struct {
 	steps      []domain.Step
 	ctx        context.Context
 	workspace  *testkit.Workspace
+	logger     *logging.Logger
 	// now 是构造测试数据时使用的时间。
 	now time.Time
 }
@@ -429,6 +430,11 @@ type taskWorkflowOptions struct {
 	session func(session domain.Session) domain.Session
 	// hostStatus 覆盖执行节点校验状态，空值表示 normal。
 	hostStatus domain.ValidationStatus
+	// lease 覆盖执行权有效期，零值使用服务默认值。
+	//
+	// 短租约配合阻塞的闭环替身，可以在毫秒级完成"单次调用跨越租约"的确定性验证，
+	// 不需要长时间 Sleep。
+	lease time.Duration
 }
 
 // newTaskWorkflowFixture 在工作空间中准备一套可启动工作流的测试数据。
@@ -552,6 +558,9 @@ func newTaskWorkflowFixture(t *testing.T, options taskWorkflowOptions) *taskWork
 	if options.codeSaver {
 		serviceOptions.CodeSaver = codeSaver
 	}
+	if options.lease > 0 {
+		serviceOptions.Lease = options.lease
+	}
 	service, err := app.NewTaskWorkflowService(serviceOptions)
 	if err != nil {
 		t.Fatalf("构造工作流编排器失败: %v", err)
@@ -568,6 +577,7 @@ func newTaskWorkflowFixture(t *testing.T, options taskWorkflowOptions) *taskWork
 		steps:      steps,
 		ctx:        ctx,
 		workspace:  workspace,
+		logger:     logger,
 		now:        now,
 	}
 }
@@ -1408,14 +1418,14 @@ func TestWorkflowRecordsEvents(t *testing.T) {
 	}
 	waitTaskRunStatus(t, fixture.service, fixture.task.ID,
 		func(status domain.WorkflowRunStatus) bool { return status.IsTerminal() })
-	events, err := fixture.db.ListEventsByTask(fixture.ctx, fixture.task.ID, storage.EventFilter{})
-	if err != nil {
-		t.Fatalf("读取事件失败: %v", err)
-	}
-	seen := make(map[domain.EventType]bool, len(events))
-	for _, event := range events {
-		seen[event.Type] = true
-	}
+	// 终态先落盘、事件后追加：等待收尾事件出现，否则断言会与事件写入竞态。
+	seen := waitTaskWorkflowEvents(t, fixture, []domain.EventType{
+		domain.EventTypeWorkflowStarted,
+		domain.EventTypeStepStarted,
+		domain.EventTypeWorkflowStepPassed,
+		domain.EventTypeWorkflowCodeSaved,
+		domain.EventTypeWorkflowCompleted,
+	})
 	for _, expected := range []domain.EventType{
 		domain.EventTypeWorkflowStarted,
 		domain.EventTypeStepStarted,
@@ -1634,5 +1644,42 @@ func TestWorkflowCloseoutRequiresRecoveryOnUnconfirmedRecord(t *testing.T) {
 	}
 	if task.Status == domain.TaskStatusCompleted {
 		t.Fatal("记录写入未确认时任务不得标记为完成")
+	}
+}
+
+// waitTaskWorkflowEvents 轮询事件表直到出现全部期望的事件类型或超时。
+//
+// 事件在状态落盘之后追加，因此"执行记录已进入终态"并不等于"全部事件已写入"。
+// 用轮询代替固定 Sleep 使断言既确定又不引入等待时长假设。
+func waitTaskWorkflowEvents(
+	t *testing.T,
+	fixture *taskWorkflowFixture,
+	expected []domain.EventType,
+) map[domain.EventType]bool {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		events, err := fixture.db.ListEventsByTask(fixture.ctx, fixture.task.ID, storage.EventFilter{})
+		if err != nil {
+			t.Fatalf("读取事件失败: %v", err)
+		}
+		seen := make(map[domain.EventType]bool, len(events))
+		for _, event := range events {
+			seen[event.Type] = true
+		}
+		missing := false
+		for _, eventType := range expected {
+			if !seen[eventType] {
+				missing = true
+				break
+			}
+		}
+		if !missing {
+			return seen
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("等待事件超时，期望 %v，实际 %v", expected, seen)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

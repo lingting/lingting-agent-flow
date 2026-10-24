@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
+	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage"
@@ -207,6 +209,57 @@ func (s workflowRunStore) ListUnfinishedWorkflowRuns(
 		WHERE ` + workflowRunActivePredicate + `
 		ORDER BY updated_at ASC, rowid ASC`
 	return s.queryRuns(ctx, statement)
+}
+
+// RenewWorkflowRunLease 在"仍是同一个执行者且仍在 running"时延长租约。
+//
+// 条件更新的三个前置条件是续租的全部正确性依据：
+//   - status = 'running'：已停止、已取消或已完成的记录不得被后台心跳重新延长租约；
+//   - worker_id = ?：执行权已转移给其他进程时，原执行者必须认为自己的执行权已丢失；
+//   - lease_expires_at IS NOT NULL：没有租约的记录本来就不持有执行权。
+//
+// 只写 lease_expires_at 与 updated_at，不改状态、不推进 revision：续租不是一次
+// 状态迁移，推进版本号会让正常推进的写入因版本冲突而失败。
+func (s workflowRunStore) RenewWorkflowRunLease(
+	ctx context.Context,
+	request storage.WorkflowRunLeaseRenewRequest,
+) error {
+	if err := request.RunID.Validate(); err != nil {
+		return err
+	}
+	workerID := strings.TrimSpace(request.WorkerID)
+	if workerID == "" {
+		return wrapError(
+			"延长执行权",
+			errors.Join(storage.ErrInvalidData, errors.New("执行者标识不能为空")),
+		)
+	}
+	at := request.At
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	if request.LeaseExpiresAt.IsZero() || !request.LeaseExpiresAt.After(at) {
+		return wrapError(
+			"延长执行权",
+			errors.Join(storage.ErrInvalidData, errors.New("新的租约到期时间必须晚于当前时间")),
+		)
+	}
+	const statement = `UPDATE workflow_runs
+		SET lease_expires_at = ?, updated_at = ?
+		WHERE id = ? AND status = ? AND worker_id = ? AND lease_expires_at IS NOT NULL`
+	result, err := s.q.ExecContext(
+		ctx,
+		statement,
+		toMillis(request.LeaseExpiresAt),
+		toMillis(at),
+		toIDParam(request.RunID),
+		string(domain.WorkflowRunRunning),
+		workerID,
+	)
+	if err != nil {
+		return wrapError("延长执行权", err)
+	}
+	return ensureStatusAffected(result, "执行记录", request.RunID)
 }
 
 // queryRuns 执行查询并扫描全部执行记录。

@@ -267,10 +267,27 @@ func TestDecideStepOccupancyRecoveryOnlyConvergesIdleOccupancy(t *testing.T) {
 	t.Parallel()
 	task := launchTask(t)
 
+	now := time.Now().UTC()
+	liveLease := now.Add(10 * time.Minute)
+	expiredLease := now.Add(-time.Minute)
+	liveRun := &domain.WorkflowRun{
+		Status:         domain.WorkflowRunRunning,
+		WorkerID:       "worker-1",
+		LeaseExpiresAt: &liveLease,
+	}
+	expiredRun := &domain.WorkflowRun{
+		Status:         domain.WorkflowRunRunning,
+		WorkerID:       "worker-1",
+		LeaseExpiresAt: &expiredLease,
+	}
+	// blocked 记录已经由执行者主动停止：Stop 清空了 worker_id 与租约，
+	// 因此它不再持有执行权，不能阻止其残留步骤被收敛（B1 的修复点）。
+	blockedRun := &domain.WorkflowRun{Status: domain.WorkflowRunBlocked}
+
 	cases := []struct {
 		name      string
 		status    domain.StepStatus
-		activeRun bool
+		activeRun *domain.WorkflowRun
 		wantNeed  bool
 		wantNext  domain.StepStatus
 	}{
@@ -281,23 +298,37 @@ func TestDecideStepOccupancyRecoveryOnlyConvergesIdleOccupancy(t *testing.T) {
 			wantNext: domain.StepStatusPending,
 		},
 		{
-			name:     "执行中且没有未结束执行时需要收敛",
+			name:     "执行中且没有执行记录时需要收敛",
 			status:   domain.StepStatusRunning,
 			wantNeed: true,
 			wantNext: domain.StepStatusRecoveryRequired,
 		},
 		{
-			name:     "验证中且没有未结束执行时需要收敛",
+			name:     "验证中且没有执行记录时需要收敛",
 			status:   domain.StepStatusVerifying,
 			wantNeed: true,
 			wantNext: domain.StepStatusRecoveryRequired,
 		},
 		{
-			name:      "仍有未结束执行时不抢占",
+			name:      "仍有有效执行权时不抢占",
 			status:    domain.StepStatusDeveloping,
-			activeRun: true,
+			activeRun: liveRun,
 			wantNeed:  false,
 			wantNext:  domain.StepStatusDeveloping,
+		},
+		{
+			name:      "租约已过期时可以收敛",
+			status:    domain.StepStatusDeveloping,
+			activeRun: expiredRun,
+			wantNeed:  true,
+			wantNext:  domain.StepStatusRecoveryRequired,
+		},
+		{
+			name:      "blocked 记录不再持有执行权，可以收敛",
+			status:    domain.StepStatusVerifying,
+			activeRun: blockedRun,
+			wantNeed:  true,
+			wantNext:  domain.StepStatusRecoveryRequired,
 		},
 	}
 	for _, testCase := range cases {
@@ -307,8 +338,9 @@ func TestDecideStepOccupancyRecoveryOnlyConvergesIdleOccupancy(t *testing.T) {
 			step := launchStep(t, task.ID, 1, testCase.status)
 			needed, next := domain.DecideStepOccupancyRecovery(
 				domain.TaskLaunchStepOccupancyInput{
-					Step:              step,
-					ActiveWorkflowRun: testCase.activeRun,
+					Step:        step,
+					WorkflowRun: testCase.activeRun,
+					Now:         now,
 				},
 			)
 			if needed != testCase.wantNeed {

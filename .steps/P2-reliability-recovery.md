@@ -52,15 +52,23 @@ P2 主要补齐更系统的恢复语义与恢复验收。
   （迁移 `0019_code_save_recovery.sql`、`domain.DecideCodeSaveRecovery`）。
 - 超时/取消/服务关闭在单次 Agent 调用层面的区分（`isServiceStop`、
   `classifyStepExecutionRun`）。
+- **P2-M2 新增**：四类中断 × 六层状态的收敛语义成文并落地
+  （[`P2-M2-interruption-semantics.md`](./P2-M2-interruption-semantics.md)）。
+- **P2-M2 新增**：步骤占用收敛改为按"有效执行权"判定，解除与 `blocked`
+  执行记录的互相锁死（B1）。
+- **P2-M2 新增**：取消意图在任务层与执行记录层双写，并由启动恢复跨层补齐（B5）。
+- **P2-M2 新增**：`workflow_runs` 租约周期续期；续租失败即停止推进且不写终态（B6）。
+- **P2-M2 新增**：`attempts` / `sessions` / `validation_runs` 残留的启动收敛
+  （`app.ExecutionResidueService`，B2/B3）。
+- **P2-M2 新增**：验证引擎的取消 / 超时 / 服务停止独立用例与持久化断言。
 
 **已确认缺失（详见清单 §3.4、§5）**：
 
-- `attempts`、`sessions`、`validation_runs`、Attempt 级 `code_fetches`、`container.state=unknown`
-  五类残留**没有任何收敛路径**。`SessionService.Fail` 在生产代码中无调用者。
-- 代码保存恢复核验（`code verify`）**只有 CLI 手工入口**，不属于自动恢复流程。
+- Attempt 级 `code_fetches`、`container.state=unknown` 两类残留仍**没有收敛路径**
+  （B4 与 G14，属于 P2-M4/M5 范围）。
+- 代码保存恢复核验（`code verify`）**只有 CLI 手工入口**，不属于自动恢复流程（M4）。
 - 收尾阶段 `tasks.status=completed` 与 `workflow_runs.status=recovery_required` 可以同时成立，
-  没有"任务结论存疑"的表达。
-- 步骤占用残留与 `blocked` 执行记录互相锁死（清单 B1，阻塞）。
+  没有"任务结论存疑"的表达（M3/M4）。
 
 **待补**：
 
@@ -90,7 +98,7 @@ P2 主要补齐更系统的恢复语义与恢复验收。
 | ID | 名称 | 状态 | 依赖 |
 |---|---|---|---|
 | P2-M1 | 梳理所有阶段的状态持久化和恢复边界 | `completed` | P1 退出 |
-| P2-M2 | 明确超时、取消、中断、进程重启后的恢复语义 | `pending` | P2-M1 |
+| P2-M2 | 明确超时、取消、中断、进程重启后的恢复语义 | `completed` | P2-M1 |
 | P2-M3 | 明确修复次数上限、停止条件、重试资格和结果不确定处理规则 | `pending` | P2-M1 |
 | P2-M4 | 核验提交、推送、合并等外部副作用的恢复路径 | `pending` | P2-M2 |
 | P2-M5 | 补齐关键恢复场景的集成测试与恢复验收 | `pending` | P2-M2、P2-M3、P2-M4 |
@@ -157,20 +165,49 @@ P2 主要补齐更系统的恢复语义与恢复验收。
 ### P2-M2 明确超时、取消、中断、进程重启后的恢复语义
 
 - **ID**：`P2-M2`
-- **状态**：`pending`
+- **状态**：`completed`（2026-10-24，基于 `master` HEAD `2a1bb0d` 实施与核实）
 - **必要性**：四种中断若语义混淆，会误判用户意图或覆盖真实结果。
-- **当前证据**：单次 Agent 调用层面已区分超时、取消、服务关闭（`isServiceStop`、
-  `classifyStepExecutionRun`）；工作流层面已有 `interrupted`/`cancelled` 分类。
-  **但验证引擎侧没有对应的中断用例**，且跨层语义未统一（清单 §6.2 G11）。
+- **交付物**：[`P2-M2-interruption-semantics.md`](./P2-M2-interruption-semantics.md)
+  （四类中断的判定依据 + 六层状态 × 四类中断的完整收敛矩阵 + 跨层一致性规则）。
 - **前置依赖**：P2-M1（已完成）。
-- **M1 移交的具体问题**：
-  1. `blocked` 执行记录与步骤占用残留互相锁死（清单 B1）——不修，M2 的任何恢复语义都无法验证；
-  2. 执行记录层取消生效但任务层未收敛（清单 B5）；
-  3. 租约只判定一次、无续租，长任务会被误判（清单 B6）；
-  4. 需要为 Task / WorkflowRun / Step / Attempt / Session / ValidationRun 六层分别定义
-     "用户取消 / 超时 / 服务停止 / 进程崩溃"的收敛目标（清单 §2.14、§4.1）。
-- **目标结果**：统一语义定义与状态收敛规则，并落地到领域函数。
-- **完成定义**：四种中断在文档与代码中一致，且有测试区分。
+- **M1 移交问题的处理结果**：
+  1. **B1（已修复）**：步骤占用收敛的判据从"存在未结束执行记录"改为
+     "存在**仍持有有效执行权**的执行记录"。`domain.DecideStepOccupancyRecovery`
+     改为接收执行记录本身与当前时刻，由 `workflowRunOwnsExecution` 判定
+     （`running` 且租约有效）。`blocked` / `recovery_required` / 过期租约的
+     `running` 都不再阻止其残留步骤被收敛。跨进程保护未放宽：部分唯一索引与
+     版本号条件更新保持原样。
+  2. **B5（已修复）**：`CancelWorkflow` 在写执行记录之后立即写任务层取消意图
+     （`recordTaskCancelIntent`），把崩溃窗口压到最小；启动恢复新增
+     `recoverCancellationIntents`，依据 `domain.DecideCancellationIntentRecovery`
+     把"执行记录已取消、任务层未同步"的现场补齐到 `cancelled` 或
+     `recovery_required`。取消意图因此可以跨进程重启保留。
+  3. **B6（已修复）**：新增 `domain.WorkflowRun.RenewLease` 与
+     `storage.WorkflowRunLeaseStore.RenewWorkflowRunLease`（只改
+     `lease_expires_at`，不推进 `revision`），`TaskWorkflowService` 在推进期间
+     按租约的 1/3 周期续租。续租失败视为失去执行权：取消本次推进，且**不写任何
+     终态**（避免用过期执行者的本地对象覆盖真实记录）。
+  4. **六层语义（已完成）**：矩阵已成文并落地到领域函数
+     （`DecideStepOccupancyRecovery`、`DecideCancellationRecovery`、
+     `DecideCancellationIntentRecovery`、`DecideValidation`、`DecideStepCloseout`）。
+- **B2/B3 的处理（本次范围内）**：新增 `app.ExecutionResidueService`，在服务启动时
+  收敛残留的 `attempts`（→ `interrupted`）、`sessions`（→ `interrupted` +
+  `run_status = failed`，产物路径与归档事实原样保留）、`validation_runs`
+  （→ `failed` + `verdict = failed`，`error_detail` 说明中断来源）。判据是
+  "任务是否仍有持有有效租约的执行者"，只有确定没有执行者时才收敛。
+- **验证引擎中断语义（已补齐）**：新增取消 / 超时 / 服务停止的独立用例，断言流程
+  状态、结论与持久化记录，并区分"执行中断导致无法验证"与"确定性检查失败"。
+- **已修复的测试竞态**：`TestPlanGenerationInterruptedByShutdown` 的失败源于替身
+  在 `Stop` 传播到在途调用之前就返回结果，结论取决于 goroutine 调度顺序。修复方式
+  是给替身增加 `waitForCancel`（等到本次调用的上下文真的被取消后才返回），建立确定
+  的先后关系；`-race` 下连续 15 次全部通过。
+- **顺带修复的真实生产缺陷**：`GetWorkflowStatus` 原先先读任务状态、后读执行记录，
+  一次正在完成的收尾会被读成"任务仍在 `saving`、执行记录已 `completed`"这种不可能
+  同时成立的组合（`TestWorkflowAPILifecycle` 间歇失败）。读取顺序改为
+  "执行记录 → 任务 → 步骤"。
+- **完成定义**：四种中断在文档与代码中一致，且有测试区分 —— 已满足。
+- **不在本次范围（移交 P2-M3）**：跨进程持久化的修复轮次计数、统一的 retry
+  eligibility 框架、自动重放中断的 Attempt、`validation_feedbacks` 写入失败补偿。
 
 ### P2-M3 明确修复次数上限、停止条件、重试资格和结果不确定处理规则
 

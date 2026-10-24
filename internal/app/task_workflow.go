@@ -42,6 +42,12 @@ var (
 // 来源，否则"服务关闭"会被误读为"用户取消"。
 var errWorkflowCancelRequested = errors.New("app: 用户取消了工作流执行")
 
+// errWorkflowLeaseLost 是执行权丢失时的取消原因。
+//
+// 它与用户取消、服务停止都不同：本次推进必须立即停止，因为已经无法证明自己仍
+// 持有执行权，继续执行副作用会覆盖其他执行者或写入不可信的结果。
+var errWorkflowLeaseLost = errors.New("app: 工作流执行权已丢失")
+
 // 工作流编排器的默认参数。
 const (
 	// defaultWorkflowRunLease 是执行权（租约）的默认有效期。
@@ -59,6 +65,8 @@ const (
 	// 冲突更符合用户预期，超过时限仍如实返回状态冲突。恢复是显式用户操作，因此这里
 	// 允许比 HTTP 默认超时更长的等待。
 	resumeLockTimeout = 60 * time.Second
+	// minLeaseRenewInterval 是续租间隔的下限，避免可注入的极短租约产生过密的心跳。
+	minLeaseRenewInterval = 50 * time.Millisecond
 )
 
 // WorkflowTaskRepository 是编排器需要的任务读写能力。
@@ -99,6 +107,11 @@ type WorkflowRunRepository interface {
 	GetActiveWorkflowRun(ctx context.Context, taskID domain.ID) (*domain.WorkflowRun, error)
 	ListWorkflowRunsByTask(ctx context.Context, taskID domain.ID) ([]domain.WorkflowRun, error)
 	ListUnfinishedWorkflowRuns(ctx context.Context) ([]domain.WorkflowRun, error)
+	// RenewWorkflowRunLease 在"仍是同一个执行者且仍在 running"时延长租约。
+	//
+	// 它与 UpdateWorkflowRun 分开：续租不改状态、不推进版本号，因此不会与正常
+	// 推进的写入互相覆盖。
+	RenewWorkflowRunLease(ctx context.Context, request storage.WorkflowRunLeaseRenewRequest) error
 }
 
 // WorkflowHostRepository 是编排器需要的执行节点读取能力。
@@ -308,6 +321,11 @@ func (s *TaskWorkflowService) Start(ctx context.Context) error {
 	state.stopOnce = stop
 	state.mu.Unlock()
 	if err := s.recoverUnfinished(ctx); err != nil {
+		return err
+	}
+	// 取消意图的跨层协调紧跟在执行记录收敛之后：此时"是否还有未结束的执行"
+	// 才是可靠证据，任务层的取消意图也才能被安全补齐（B5）。
+	if err := s.recoverCancellationIntents(ctx); err != nil {
 		return err
 	}
 	// 计划生成的现场同样在启动时收敛：停留在 planning 的任务不能仅凭状态就再次

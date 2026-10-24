@@ -40,6 +40,11 @@ type agentReply struct {
 	//
 	// 它在独立 goroutine 中执行：调用方此时仍在 RunAgent 内部，同步等待会死锁。
 	duringCall func()
+	// waitForCancel 表示 RunAgent 必须等到本次调用的上下文被取消后才返回结果。
+	//
+	// 它把"中断发生在调用进行中"变成确定的先后关系：没有它，替身可能在 Stop
+	// 传播到本次调用之前就返回，使结论依赖 goroutine 调度顺序（约 40% 概率失败）。
+	waitForCancel bool
 }
 
 // fakeContainer 是容器核验与容器内 Agent 调用的替身。
@@ -94,6 +99,11 @@ func (f *fakeContainer) RunAgent(
 	f.mu.Unlock()
 	if reply.duringCall != nil {
 		go reply.duringCall()
+	}
+	if reply.waitForCancel {
+		// 等待真实取消传播到本次调用：结论因此由"取消已发生"这一事实决定，
+		// 而不是由 goroutine 调度顺序决定。
+		<-ctx.Done()
 	}
 	now := time.Now().UTC()
 	sessionID := domain.ID(request.SessionID)

@@ -339,3 +339,54 @@ func DecideCancellationRecovery(input CancellationRecoveryInput) TaskStatus {
 	}
 	return TaskStatusCancelled
 }
+
+// CancellationIntentInput 是一次"任务层尚未收敛的取消意图"所需的持久化事实。
+//
+// 它描述 B5 的故障窗口：执行记录层已经写入取消请求，但任务层还没有被推进到
+// cancelling（进程在两层写入之间退出）。
+type CancellationIntentInput struct {
+	// TaskCancelRequested 表示任务记录上已经记录取消请求。
+	//
+	// 已记录说明任务层已经收敛，不需要再次协调。
+	TaskCancelRequested bool
+	// RunCancelRequested 表示该任务最近一次执行记录已记录取消请求。
+	//
+	// 取消入口同时写任务层与执行记录层；只有执行记录层有记录而任务层没有时，
+	// 才说明上一次进程停在两次写入之间。
+	RunCancelRequested bool
+	// RunActive 表示执行记录仍未结束。
+	//
+	// 记录仍未结束时执行者可能还在推进，此时改写任务状态会覆盖在途执行的结论。
+	RunActive bool
+}
+
+// DecideCancellationIntentRecovery 依据持久化事实决定是否需要把取消意图同步到任务层。
+//
+// 规则（顺序固定）：
+//  1. 任务层已记录取消请求 → 不需要协调，返回 false；
+//  2. 执行记录层没有取消请求 → 没有需要同步的用户意图，返回 false；
+//  3. 执行记录仍未结束 → 不在此处收敛：执行者可能仍在推进，由执行记录自身的
+//     收敛流程负责，改写任务状态会覆盖在途结论，返回 false；
+//  4. 其余情况 → 需要把取消意图同步到任务层，返回 true。
+//
+// 该函数只回答"要不要协调"，不回答"协调成什么状态"：目标状态仍由
+// DecideCancellationRecovery 依据任务层事实计算，两处规则不重复。
+func DecideCancellationIntentRecovery(input CancellationIntentInput) bool {
+	if input.TaskCancelRequested {
+		return false
+	}
+	if !input.RunCancelRequested {
+		return false
+	}
+	if input.RunActive {
+		return false
+	}
+	return true
+}
+
+// CancellationIntentRecoverySummary 返回取消意图跨层同步时写入的固定摘要。
+//
+// 摘要必须说明"结论来自启动恢复"，否则用户无法区分自动收敛与真实执行结果。
+func CancellationIntentRecoverySummary() string {
+	return "上一次运行已记录取消请求，但任务状态未同步收敛；执行者已随进程退出，由启动恢复确认取消生效。"
+}

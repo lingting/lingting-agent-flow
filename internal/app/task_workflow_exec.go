@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
+	"github.com/lingting/agentflow/internal/storage"
 )
 
 // workflowExecution 是一次在途执行的可选参数。
@@ -180,6 +181,11 @@ func (s *TaskWorkflowService) drive(
 	unregister := s.cancels.register(run.TaskID.String(), cancelRun)
 	defer unregister()
 
+	// 续租在独立 goroutine 中周期性执行：单次 Agent 调用可能长达数十分钟，
+	// 一次性写入的租约会在调用尚未结束时过期，使另一个进程把仍在推进的执行
+	// 误判为已退出（B6）。停止续租的唯一途径是结束本次推进，因此 defer 是安全的。
+	stopHeartbeat := s.startLeaseHeartbeat(runCtx, cancelRun, run)
+	defer stopHeartbeat()
 	state := s.advance(runCtx, run, exec)
 	s.logger.InfoContext(
 		context.WithoutCancel(ctx),
@@ -191,6 +197,107 @@ func (s *TaskWorkflowService) drive(
 		slog.Int("completed_steps", state.CompletedSteps),
 		slog.Int("total_steps", state.TotalSteps),
 	)
+}
+
+// startLeaseHeartbeat 启动周期性续租，返回停止函数。
+//
+// 语义固定为：
+//   - 续租以"仍是同一个执行者、仍在 running"为条件，因此不会延长已停止、已取消
+//     或已完成的记录，也不会覆盖其他执行者的租约；
+//   - 续租失败（记录已进入终态、执行权已转移、数据库不可用）视为**失去执行权**：
+//     立即取消本次推进的上下文，让上层按真实原因收敛，而不是继续执行副作用；
+//   - 停止函数会等待续租 goroutine 退出，因此服务关闭后不会留下后台写入；
+//   - 进程崩溃时 goroutine 随进程消失，租约自然过期，其他服务仍可据此恢复。
+//
+// 续租间隔取租约时长的三分之一：这样即使连续两次续租失败，租约也还有余量，
+// 不会因为一次瞬时数据库错误就让另一个进程提前接管。
+func (s *TaskWorkflowService) startLeaseHeartbeat(
+	ctx context.Context,
+	cancel context.CancelCauseFunc,
+	run domain.WorkflowRun,
+) func() {
+	interval := s.leaseInterval()
+	if interval <= 0 {
+		return func() {}
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if !s.renewLease(ctx, run) {
+					cancel(errWorkflowLeaseLost)
+					return
+				}
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
+	}
+}
+
+// leaseInterval 返回续租间隔。
+func (s *TaskWorkflowService) leaseInterval() time.Duration {
+	if s.lease <= 0 {
+		return 0
+	}
+	interval := s.lease / 3
+	if interval < minLeaseRenewInterval {
+		interval = minLeaseRenewInterval
+	}
+	return interval
+}
+
+// renewLease 延长一次租约，返回是否仍然持有执行权。
+//
+// 续租成功说明本次执行仍然有权继续推进副作用；任何失败都必须让调用方停止推进：
+// 数据库不可用时继续执行会让结果无法落库，执行权已转移时继续执行会覆盖新执行者。
+func (s *TaskWorkflowService) renewLease(ctx context.Context, run domain.WorkflowRun) bool {
+	now := s.now()
+	renewal := run
+	if err := renewal.RenewLease(s.owner, s.lease, now); err != nil {
+		// 领域层拒绝续租说明本地状态已不满足执行权条件：不覆盖数据库，按失去执行权处理。
+		s.logger.WarnContext(
+			ctx,
+			"工作流执行权续租被拒绝",
+			slog.String("run_id", run.ID.String()),
+			slog.String("task_id", run.TaskID.String()),
+			slog.String("status", string(run.Status)),
+			slog.String("error", errorSummary(err)),
+		)
+		return false
+	}
+	expires := renewal.LeaseExpiresAt
+	if expires == nil {
+		return false
+	}
+	err := s.store.RenewWorkflowRunLease(ctx, storage.WorkflowRunLeaseRenewRequest{
+		RunID:          run.ID,
+		WorkerID:       s.owner,
+		LeaseExpiresAt: *expires,
+		At:             now,
+	})
+	if err != nil {
+		s.logger.WarnContext(
+			ctx,
+			"工作流执行权续租失败，停止推进",
+			slog.String("run_id", run.ID.String()),
+			slog.String("task_id", run.TaskID.String()),
+			slog.String("error", errorSummary(err)),
+		)
+		return false
+	}
+	return true
 }
 
 // advance 推进工作流直到出现终止条件。
@@ -205,7 +312,7 @@ func (s *TaskWorkflowService) advance(
 	writeCtx := context.WithoutCancel(ctx)
 	for {
 		if run.CancelRequested || ctx.Err() != nil {
-			return s.stopForCancel(writeCtx, run, ctx)
+			return s.stopForInterruption(writeCtx, run, ctx)
 		}
 		steps, err := s.loadSteps(writeCtx, run.TaskID)
 		if err != nil {
@@ -265,7 +372,7 @@ func (s *TaskWorkflowService) runStep(
 		// 协调器返回错误意味着本次没有产生真实执行（状态冲突、前置条件缺失、
 		// 目标不存在等）：错误必须如实记录，不能伪装成"执行后正常停止"。
 		if ctx.Err() != nil || run.CancelRequested || errors.Is(runErr, ErrWorkflowStopped) {
-			return s.stopForCancel(writeCtx, run, ctx), true
+			return s.stopForInterruption(writeCtx, run, ctx), true
 		}
 		return s.stopRun(writeCtx, run, domain.WorkflowRunBlocked, "step_not_executed", runErr), true
 	}
@@ -325,9 +432,12 @@ func (s *TaskWorkflowService) stopForStepResult(
 	switch {
 	case ctx.Err() != nil || run.CancelRequested ||
 		result.Outcome == domain.StepExecutionCancelled:
-		s.appendEvent(writeCtx, run.TaskID, &stepID, idPtr(result.AttemptID),
-			domain.EventTypeWorkflowCanceled, payload)
-		return s.stopForCancel(writeCtx, run, ctx)
+		if run.CancelRequested || result.Outcome == domain.StepExecutionCancelled ||
+			errors.Is(context.Cause(ctx), errWorkflowCancelRequested) {
+			s.appendEvent(writeCtx, run.TaskID, &stepID, idPtr(result.AttemptID),
+				domain.EventTypeWorkflowCanceled, payload)
+		}
+		return s.stopForInterruption(writeCtx, run, ctx)
 	case result.Repair.Class != "":
 		// 修复循环已经给出结构化停止类别：直接消费领域判定，不在这里重新推导。
 		class, status, eventType := repairStopMapping(result.Repair.Class)
@@ -556,6 +666,36 @@ func taskCompletionPath(current domain.TaskStatus) []domain.TaskStatus {
 			domain.TaskStatusSaving,
 		}
 	}
+}
+
+// stopForInterruption 依据真实中断来源收敛本次推进。
+//
+// 三种来源必须区分，否则诊断信息会把它们混成同一种结果：
+//   - 用户取消（`cancel_requested` 已落盘）→ 走 stopForCancel；
+//   - 执行权已丢失（续租失败）→ 不写任何终态：数据库里的记录已属于别的执行者，
+//     本次推进只停止，由真实持有者决定后续；
+//   - 服务关闭或调用方取消 → 收敛为 recovery_required，现场保留等待人工核验。
+//
+// 不把执行权丢失写成 cancelled / blocked：那会用过期执行者的本地对象覆盖真实记录，
+// 正是续租机制要阻止的覆盖。
+func (s *TaskWorkflowService) stopForInterruption(
+	writeCtx context.Context,
+	run domain.WorkflowRun,
+	ctx context.Context,
+) domain.WorkflowRun {
+	if run.CancelRequested || errors.Is(context.Cause(ctx), errWorkflowCancelRequested) {
+		return s.stopForCancel(writeCtx, run, ctx)
+	}
+	if errors.Is(context.Cause(ctx), errWorkflowLeaseLost) {
+		return run
+	}
+	return s.stopRun(
+		writeCtx,
+		run,
+		domain.WorkflowRunRecoveryRequired,
+		"worker_interrupted",
+		fmt.Errorf("%s", cancelCause(ctx)),
+	)
 }
 
 // stopForCancel 处理取消收敛。
@@ -958,6 +1098,8 @@ func cancelCause(ctx context.Context) string {
 	switch {
 	case cause == nil:
 		return "用户请求取消"
+	case errors.Is(cause, errWorkflowLeaseLost):
+		return "执行权已丢失，本次推进已停止"
 	case errors.Is(cause, ErrWorkflowStopped):
 		return "服务关闭导致中断"
 	case errors.Is(cause, errWorkflowCancelRequested):

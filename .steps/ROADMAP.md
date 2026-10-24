@@ -37,8 +37,20 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 ## 当前实现状态摘要（基于代码证据）
 
 > **当前阶段：P2 进行中**（P1 全部里程碑于 2026-10-23 完成；P2-M1 于 2026-10-23 完成，
-> P2-M2 起待启动）。P1 证据见 `P1-single-task-e2e.md` 的对应"完成记录"；P2-M1 证据见
-> `P2-M1-recovery-boundaries.md`。
+> P2-M2 于 2026-10-24 完成，P2-M3 起待启动）。P1 证据见 `P1-single-task-e2e.md` 的对应
+> "完成记录"；P2-M1 证据见 `P2-M1-recovery-boundaries.md`；P2-M2 证据见
+> `P2-M2-interruption-semantics.md`。
+>
+> P2-M2 的核实结论：四类中断（用户取消 / 单次超时 / 服务停止 / 进程崩溃）在
+> Task / WorkflowRun / Step / Attempt / Session / ValidationRun 六层的收敛目标已成文并
+> 落地到领域函数。同时修复了三个阻塞/高风险缺陷——B1（步骤占用与 `blocked` 执行记录
+> 互相锁死，判据改为"仍持有有效执行权"）、B5（取消意图跨层丢失，取消入口双写并由启动
+> 恢复补齐）、B6（租约只判定一次，改为按租约 1/3 周期续期，续租失败即停止推进且不写
+> 终态）。另新增 `app.ExecutionResidueService` 收敛 `attempts` / `sessions` /
+> `validation_runs` 的活动态残留（B2/B3），并补齐验证引擎的取消 / 超时 / 服务停止用例。
+> 核实中还修复了两处真实生产/测试缺陷：`GetWorkflowStatus` 的读取顺序会导致"任务
+> `saving` + 执行记录 `completed`"的撕裂快照；`TestPlanGenerationInterruptedByShutdown`
+> 的约 40% 失败源于替身与取消传播的调度竞态。
 >
 > P1-M4 的核实结论：修复闭环确实在生产调用链内并自然进入交付阶段；核实中修复了两处
 > 真实生产断点——(1) Developer 执行从不写入 Session 记录（`callAgent` 只 `Load` 而不
@@ -53,9 +65,9 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > 真实 `internal/codesaver` 落在真实 Git 仓库上（真实提交与真实推送）。
 >
 > **待调查事项（不阻塞 P1 已完成结论）**：
-> - `TestPlanGenerationInterruptedByShutdown` 在干净工作区上以约 40% 概率失败（测试内
->   `duringCall` 用 goroutine 触发 Stop，与取消传播存在竞态）。属既有测试缺陷，
->   待 P2（可靠性与恢复）阶段处理。
+> - ~~`TestPlanGenerationInterruptedByShutdown` 在干净工作区上以约 40% 概率失败~~ ——
+>   已在 P2-M2 修复：替身新增 `waitForCancel`，等本次调用的上下文真的被取消后才返回，
+>   建立确定的先后关系（`-race` 下连续 15 次全部通过）。
 > - 真实远程全路径已自动化并通过：`tests/integration/remote/workflow/e2e_*_test.go` 用真实
 >   SSH + 真实 Docker + 真实镜像构建 + 容器内真实 Git Clone + 容器内真实模型调用，逐阶段
 >   走通到代码保存。核实中修复了一处真实生产断点：`UpdateContainer` 不写 `docker_id`，

@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"time"
 )
 
 // TaskLaunchStage 是统一任务启动流程所处的阶段。
@@ -178,8 +179,13 @@ func DecideTaskLaunchNext(input TaskLaunchInput) (TaskLaunchStage, error) {
 type TaskLaunchStepOccupancyInput struct {
 	// Step 是步骤记录。
 	Step Step
-	// ActiveWorkflowRun 表示该步骤所属任务仍有未结束的工作流执行记录。
-	ActiveWorkflowRun bool
+	// WorkflowRun 是步骤所属任务当前"未结束"的工作流执行记录，没有时为空。
+	//
+	// 它只提供事实，不提供结论：调用方必须原样传入从数据库读到的记录，
+	// 不得在此处把"未结束"提前压缩成"仍有执行者"。
+	WorkflowRun *WorkflowRun
+	// Now 是判定执行权是否仍然有效的时刻。
+	Now time.Time
 }
 
 // DecideStepOccupancyRecovery 依据持久化事实判断被占用步骤是否需要收敛。
@@ -189,9 +195,14 @@ type TaskLaunchStepOccupancyInput struct {
 // 执行（NextStepToExecute 一律拒绝），使任务既无法推进也无法自动收敛。
 //
 // 规则（顺序固定）：
-//   - 步骤未被占用 → 不处理；
-//   - 所属任务仍有未结束的执行记录 → 执行者可能仍在推进，不抢占；
-//   - 其余情况 → 收敛为 recovery_required，等待人工核验现场。
+//  1. 步骤未被占用 → 不处理；
+//  2. 所属任务存在**仍持有有效执行权**的工作流执行记录 → 执行者可能仍在推进，不抢占；
+//  3. 其余情况 → 收敛为 recovery_required，等待人工核验现场。
+//
+// 第 2 条是 B1 的修复点：判据从"存在未结束记录"改为"存在仍有效的执行权"。
+// `blocked` / `recovery_required` / 租约已过期的 `running` / 超窗的 `pending`
+// 都不再持有执行权（`WorkflowRun.Stop` / `Fail` / `Cancel` / `Complete` 清空
+// worker_id 与租约），因此不能阻止其残留步骤被收敛。
 //
 // 该函数不重放任何 Agent 调用，也不删除容器：现场一律保留。
 func DecideStepOccupancyRecovery(input TaskLaunchStepOccupancyInput) (bool, StepStatus) {
@@ -200,10 +211,27 @@ func DecideStepOccupancyRecovery(input TaskLaunchStepOccupancyInput) (bool, Step
 	default:
 		return false, input.Step.Status
 	}
-	if input.ActiveWorkflowRun {
+	if workflowRunOwnsExecution(input.WorkflowRun, input.Now) {
 		return false, input.Step.Status
 	}
 	return true, StepStatusRecoveryRequired
+}
+
+// workflowRunOwnsExecution 判断一条执行记录在给定时刻是否仍持有执行权。
+//
+// 只有 `running` 且租约仍然有效的记录才算"有执行者可能在推进"：
+//   - 其他状态都已经由执行者主动停止或收敛，`worker_id` 与租约在迁移时被清空；
+//   - `running` 但租约已过期说明持有者没有续租，进程很可能已经退出。
+//
+// 该判定只读记录本身，不读数据库、不启动进程，因此可以被完整地单元测试。
+func workflowRunOwnsExecution(run *WorkflowRun, at time.Time) bool {
+	if run == nil {
+		return false
+	}
+	if run.Status != WorkflowRunRunning {
+		return false
+	}
+	return run.LeaseActive(at)
 }
 
 // StepOccupancyRecoverySummary 返回步骤占用收敛时写入的固定摘要。

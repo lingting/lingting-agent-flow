@@ -273,6 +273,14 @@ type AttemptStore interface {
 	//
 	// 只用于展示与预估，不能作为写入依据：写入必须使用 StartAttempt。
 	NextAttemptNumber(ctx context.Context, stepID domain.ID) (int, error)
+	// ListAttemptsByStatus 返回全部处于指定状态的尝试，按开始时间升序。
+	//
+	// 启动恢复用它定位"进程退出后仍停留在 running"的残留：这类记录没有任何执行者
+	// 会再推进，必须由恢复流程收敛。
+	ListAttemptsByStatus(
+		ctx context.Context,
+		statuses []domain.AttemptStatus,
+	) ([]domain.Attempt, error)
 }
 
 // StartAttemptRequest 是一次"开始执行尝试"的输入。
@@ -320,6 +328,13 @@ type SessionStore interface {
 	GetSession(ctx context.Context, id domain.ID) (*domain.Session, error)
 	ListSessionsByTask(ctx context.Context, taskID domain.ID) ([]domain.Session, error)
 	ListSessionsByAttempt(ctx context.Context, attemptID domain.ID) ([]domain.Session, error)
+	// ListSessionsByStatus 返回全部处于指定执行状态的会话，按创建时间升序。
+	//
+	// 启动恢复用它定位"进程退出后仍停留在 starting / running"的残留会话。
+	ListSessionsByStatus(
+		ctx context.Context,
+		statuses []domain.SessionStatus,
+	) ([]domain.Session, error)
 	// ListSessionPage 按创建时间稳定排序分页返回会话，并给出总数。
 	ListSessionPage(ctx context.Context, filter SessionFilter) (SessionPage, error)
 }
@@ -476,6 +491,14 @@ type ValidationStore interface {
 		ctx context.Context,
 		runID domain.ID,
 	) ([]domain.ValidationCheckResult, error)
+	// ListValidationRunsByStatus 返回全部处于指定流程状态的验证记录。
+	//
+	// 启动恢复用它定位"进程退出后仍停留在 pending / running"的残留验证：
+	// 这类记录会永久阻塞同一尝试的新验证，必须被收敛为终态。
+	ListValidationRunsByStatus(
+		ctx context.Context,
+		statuses []domain.ValidationRunStatus,
+	) ([]domain.ValidationRun, error)
 }
 
 // ValidationFeedbackStore 保存验证失败的结构化反馈。
@@ -688,6 +711,8 @@ type Tx interface {
 	StepExecutionStore
 	// WorkflowRunStore 提供任务级工作流执行记录的追加与推进。
 	WorkflowRunStore
+	// WorkflowRunLeaseStore 提供执行权的延长，与状态写入分离。
+	WorkflowRunLeaseStore
 }
 
 // Store 是持久化的统一入口。

@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-
+	"log/slog"
 	"strings"
 	"time"
 
@@ -346,6 +346,14 @@ func (s *TaskWorkflowService) CancelWorkflow(
 	if err != nil {
 		return workflowRunView(*run, s.CodeSaverAvailable()), err
 	}
+	// 取消意图必须在两层同时落盘：执行记录层表达"这一次编排要停止"，任务层表达
+	// "用户不再希望这个任务继续推进"。只写其中一层时，进程若在两次写入之间退出，
+	// 重启后就只能看到一半意图（B5）。
+	//
+	// 顺序固定为"先执行记录、后任务"：执行记录层是并发闸门，写入成功后其他进程
+	// 无法再启动新的编排；任务层写入失败时执行记录层的意图仍然有效，由启动恢复
+	// 的取消意图协调补齐（recoverCancellationIntents）。
+	s.recordTaskCancelIntent(ctx, task.ID)
 	s.appendEvent(ctx, task.ID, nil, nil, domain.EventTypeWorkflowCanceled, map[string]any{
 		"run_id": persisted.ID.String(),
 		"stage":  string(persisted.Stage),
@@ -355,10 +363,76 @@ func (s *TaskWorkflowService) CancelWorkflow(
 	return workflowRunView(persisted, s.CodeSaverAvailable()), nil
 }
 
+// recordTaskCancelIntent 把取消意图写入任务层。
+//
+// 它只记录意图（`cancel_requested`）并把任务推进到 cancelling，不伪造"已停止"：
+// 实际停止由执行者确认，最终 cancelled 由收敛流程写入。
+//
+// 写入失败不回滚执行记录层的取消请求，也不阻止取消信号传播：意图已经落在执行
+// 记录上，启动恢复会依据它补齐任务层。重复请求保持幂等，不改写取消请求时间。
+func (s *TaskWorkflowService) recordTaskCancelIntent(ctx context.Context, taskID domain.ID) {
+	task, err := s.store.GetTask(context.WithoutCancel(ctx), taskID)
+	if err != nil {
+		s.logger.WarnContext(
+			ctx,
+			"读取任务失败，取消意图只落在执行记录层",
+			slog.String("task_id", taskID.String()),
+			slog.String("error", errorSummary(err)),
+		)
+		return
+	}
+	if task.Status.IsTerminal() {
+		// 已结束的任务不再重新打开：它的终态比"取消意图"更晚、更权威。
+		return
+	}
+	now := s.now()
+	previous := task.Status
+	if !task.CancelRequested {
+		if err := task.RequestCancel(now); err != nil {
+			s.logger.WarnContext(
+				ctx,
+				"记录任务取消请求失败",
+				slog.String("task_id", taskID.String()),
+				slog.String("error", errorSummary(err)),
+			)
+			return
+		}
+	}
+	if task.Status != domain.TaskStatusCancelling {
+		if err := task.Transition(domain.TaskStatusCancelling, now); err != nil {
+			// 状态机不允许时只保留取消请求字段：不伪造"已进入取消流程"。
+			s.logger.WarnContext(
+				ctx,
+				"推进任务到 cancelling 被拒绝，仅记录取消请求",
+				slog.String("task_id", taskID.String()),
+				slog.String("status", string(previous)),
+				slog.String("error", errorSummary(err)),
+			)
+		}
+	}
+	if err := s.store.UpdateTaskIfStatus(
+		context.WithoutCancel(ctx),
+		*task,
+		[]domain.TaskStatus{previous},
+	); err != nil {
+		s.logger.WarnContext(
+			ctx,
+			"写入任务取消意图失败，等待启动恢复补齐",
+			slog.String("task_id", taskID.String()),
+			slog.String("error", errorSummary(err)),
+		)
+	}
+}
+
 // GetWorkflowStatus 返回任务当前的工作流进度。
 //
 // 优先返回未结束的执行记录；没有未结束记录时返回最近一次执行记录，使"上一次为什么
 // 停止"仍然可查询。任务从未启动过工作流时 HasRun 为 false，接口返回真实空状态。
+//
+// 读取顺序固定为"执行记录 → 步骤 → 任务"，不能反过来：收尾阶段先写任务终态、
+// 再写执行记录终态，若先读任务再读执行记录，一次正在完成的收尾会被读成
+// "任务仍在 saving、执行记录已 completed"这种不可能同时成立的组合。按此顺序
+// 读取时，看到的执行记录状态一定不新于随后读到的任务与步骤状态。
 func (s *TaskWorkflowService) GetWorkflowStatus(
 	ctx context.Context,
 	taskID string,
@@ -371,15 +445,6 @@ func (s *TaskWorkflowService) GetWorkflowStatus(
 	if err != nil {
 		return WorkflowStatusResult{}, err
 	}
-	steps, err := s.loadSteps(ctx, task.ID)
-	if err != nil {
-		return WorkflowStatusResult{}, err
-	}
-	result := WorkflowStatusResult{
-		TaskID:     task.ID,
-		TaskStatus: task.Status,
-		Steps:      workflowStepViews(steps),
-	}
 	run, err := s.store.GetActiveWorkflowRun(ctx, task.ID)
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return WorkflowStatusResult{}, fmt.Errorf("读取工作流执行记录失败: %w", err)
@@ -389,11 +454,27 @@ func (s *TaskWorkflowService) GetWorkflowStatus(
 		if listErr != nil {
 			return WorkflowStatusResult{}, fmt.Errorf("读取工作流执行记录失败: %w", listErr)
 		}
-		if len(runs) == 0 {
-			return result, nil
+		if len(runs) > 0 {
+			latest := runs[0]
+			run = &latest
 		}
-		latest := runs[0]
-		run = &latest
+	}
+	// 任务与步骤在读取执行记录之后读取：见方法注释中的顺序约束。
+	current, err := s.loadTask(ctx, task.ID)
+	if err != nil {
+		return WorkflowStatusResult{}, err
+	}
+	steps, err := s.loadSteps(ctx, current.ID)
+	if err != nil {
+		return WorkflowStatusResult{}, err
+	}
+	result := WorkflowStatusResult{
+		TaskID:     current.ID,
+		TaskStatus: current.Status,
+		Steps:      workflowStepViews(steps),
+	}
+	if run == nil {
+		return result, nil
 	}
 	result.HasRun = true
 	result.Run = workflowRunView(*run, s.CodeSaverAvailable())
@@ -586,6 +667,8 @@ const (
 	planRecoverySummary = "计划生成在服务退出时中断，无法确认是否真的调用过 Planner，需要人工核验"
 	// cancellingRecoverySummary 说明取消现场已由启动恢复收敛。
 	cancellingRecoverySummary = "取消请求在上一次运行中已记录，执行者随进程退出后由启动恢复确认停止"
+	// cancelRecoverySummary 说明执行记录层的取消已由启动恢复确认生效。
+	cancelRecoverySummary = "取消请求在上一次运行中已记录，执行者退出后确认停止"
 )
 
 // recoverPlanGeneration 在服务启动时处理停留在 planning 的任务。
@@ -845,7 +928,51 @@ func (s *TaskWorkflowService) recoverUnfinished(ctx context.Context) error {
 	return nil
 }
 
+// recoverCancellationIntents 在服务启动时把执行记录层的取消意图补齐到任务层。
+//
+// 它覆盖 B5 的故障窗口：取消入口先写执行记录、后写任务层，进程可能停在两次写入
+// 之间。此时执行记录已经被 recoverUnfinished 收敛为 cancelled，任务却仍是
+// developing 等状态，之后还能被 StartWorkflow 重新推进——用户取消意图就丢失了。
+//
+// 只处理"最近一次执行记录已记录取消请求、执行记录已不再未结束、任务层还没有
+// 取消请求"的任务：其余情况由 recoverRun 与 recoverCancelling 各自负责，避免
+// 两条恢复路径互相覆盖。
+//
+// 任一条任务收敛失败都让启动失败：取消意图没有落库时服务继续启动，会让用户以为
+// 取消已经生效。
+func (s *TaskWorkflowService) recoverCancellationIntents(ctx context.Context) error {
+	tasks, err := s.store.ListTasks(ctx, storage.TaskFilter{
+		ExcludeStatuses: []domain.TaskStatus{
+			domain.TaskStatusCompleted,
+			domain.TaskStatusCancelled,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("恢复取消意图失败: %w", err)
+	}
+	for _, task := range tasks {
+		if task.CancelRequested {
+			continue
+		}
+		runs, listErr := s.store.ListWorkflowRunsByTask(ctx, task.ID)
+		if listErr != nil {
+			return fmt.Errorf("恢复任务 %s 的取消意图失败: %w", task.ID, listErr)
+		}
+		if len(runs) == 0 || !runs[0].CancelRequested {
+			continue
+		}
+		if err := s.convergeCancelIntent(ctx, task.ID); err != nil {
+			return fmt.Errorf("恢复任务 %s 的取消意图失败: %w", task.ID, err)
+		}
+	}
+	return nil
+}
+
 // recoverRun 处理单条未结束的执行记录。
+//
+// 取消路径必须同时收敛任务层（B5）：取消入口先写执行记录、后写任务层，进程可能
+// 停在两次写入之间。执行记录层确认取消生效后，任务层的取消意图由
+// convergeCancelIntent 补齐；该补齐是幂等的，重复执行不会重复改写时间戳。
 func (s *TaskWorkflowService) recoverRun(
 	ctx context.Context,
 	run domain.WorkflowRun,
@@ -853,18 +980,20 @@ func (s *TaskWorkflowService) recoverRun(
 ) error {
 	switch run.Status {
 	case domain.WorkflowRunCancelRequested:
-		if err := run.Cancel("取消请求在上一次运行中已记录，执行者退出后确认停止", now); err != nil {
+		if err := run.Cancel(cancelRecoverySummary, now); err != nil {
 			return err
 		}
-		if _, err := s.persistRun(context.WithoutCancel(ctx), run); err != nil {
+		persisted, err := s.persistRun(context.WithoutCancel(ctx), run)
+		if err != nil {
 			return err
 		}
 		s.appendEvent(ctx, run.TaskID, nil, nil, domain.EventTypeWorkflowCompleted, map[string]any{
-			"run_id": run.ID.String(),
-			"status": string(run.Status),
+			"run_id": persisted.ID.String(),
+			"status": string(persisted.Status),
 			"reason": "服务启动时确认取消已生效",
 		})
-		return nil
+		// 取消请求可能已落库但任务层尚未同步（B5）：这里补齐任务层意图。
+		return s.convergeCancelIntent(ctx, persisted.TaskID)
 	case domain.WorkflowRunRunning:
 		if run.LeaseActive(now) {
 			// 租约仍然有效：可能有其他进程正在推进，不抢占也不改写。
@@ -914,6 +1043,103 @@ func (s *TaskWorkflowService) recoverRun(
 	default:
 		return nil
 	}
+}
+
+// convergeCancelIntent 把执行记录层的取消意图同步到任务层。
+//
+// 它处理 B5 的故障窗口：取消入口先写执行记录、后写任务层，进程可能停在两次写入
+// 之间，重启后任务仍处于 developing 等状态，看起来可以继续推进——用户取消意图
+// 就这样丢失了。
+//
+// 语义固定为：
+//   - 只有执行记录层已记录取消请求、任务层还没有时才会改写任务；
+//   - 目标状态由 domain.DecideCancellationRecovery 计算，本方法不复制第二套规则；
+//   - 写入使用状态前置条件；另一个进程已完成同一次收敛时按"已完成"处理，不重复
+//     写入事件；
+//   - 读取或写入失败必须返回错误：取消意图没有落库时不得报告取消已生效。
+func (s *TaskWorkflowService) convergeCancelIntent(
+	ctx context.Context,
+	taskID domain.ID,
+) error {
+	loaded, err := s.store.GetTask(context.WithoutCancel(ctx), taskID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			// 任务已不存在：没有需要同步的目标，执行记录层的结论仍然有效。
+			return nil
+		}
+		return fmt.Errorf("读取任务 %s 失败: %w", taskID, err)
+	}
+	task := *loaded
+	if task.Deleted() || task.Status.IsTerminal() {
+		// 已结束或已删除的任务不再被恢复流程重新打开。
+		return nil
+	}
+	activeRunID, runErr := s.activeRunID(context.WithoutCancel(ctx), task.ID)
+	if runErr != nil {
+		return fmt.Errorf("读取任务 %s 的未结束执行失败: %w", task.ID, runErr)
+	}
+	if !domain.DecideCancellationIntentRecovery(domain.CancellationIntentInput{
+		TaskCancelRequested: task.CancelRequested,
+		RunCancelRequested:  true,
+		RunActive:           activeRunID != "",
+	}) {
+		// 任务层已记录意图，或执行记录仍未结束：不在此处改写任务状态。
+		return nil
+	}
+	next := domain.DecideCancellationRecovery(domain.CancellationRecoveryInput{
+		CancelRequested: true,
+		ActiveRunID:     activeRunID,
+	})
+	previous := task.Status
+	recovered := task
+	if err := recovered.RequestCancel(s.now()); err != nil {
+		return fmt.Errorf("恢复任务 %s 的取消请求失败: %w", task.ID, err)
+	}
+	if next == domain.TaskStatusCancelled {
+		if err := recovered.Transition(domain.TaskStatusCancelling, s.now()); err != nil {
+			return fmt.Errorf("恢复任务 %s 的取消流程失败: %w", task.ID, err)
+		}
+		if err := recovered.Finish(
+			domain.TaskResultCancelled,
+			domain.CancellationIntentRecoverySummary(),
+			s.now(),
+		); err != nil {
+			return fmt.Errorf("恢复任务 %s 的取消结论失败: %w", task.ID, err)
+		}
+		if err := recovered.Transition(domain.TaskStatusCancelled, s.now()); err != nil {
+			return fmt.Errorf("恢复任务 %s 的取消终态失败: %w", task.ID, err)
+		}
+	} else {
+		if err := recovered.Transition(domain.TaskStatusRecoveryRequired, s.now()); err != nil {
+			return fmt.Errorf("恢复任务 %s 的取消现场失败: %w", task.ID, err)
+		}
+		recovered.FailureSummary = domain.CancellationIntentRecoverySummary()
+	}
+	updated, updateErr := s.writeRecoveredTask(
+		context.WithoutCancel(ctx),
+		recovered,
+		previous,
+	)
+	if updateErr != nil {
+		return fmt.Errorf("恢复任务 %s 的取消意图失败: 写入任务状态失败: %w", task.ID, updateErr)
+	}
+	if !updated {
+		// 另一个进程已经完成同一次收敛：不重复写入事件。
+		return nil
+	}
+	eventType := domain.EventTypeTaskCancelled
+	if next != domain.TaskStatusCancelled {
+		eventType = domain.EventTypeTaskRecoveryRequired
+	}
+	s.appendEvent(ctx, task.ID, nil, nil, eventType, map[string]any{
+		"stage":            "recover_cancel_intent",
+		"status":           string(next),
+		"previous":         string(previous),
+		"cancel_requested": true,
+		"active_workflow":  activeRunID != "",
+		"recovery_auto":    true,
+	})
+	return nil
 }
 
 // workflowRunView 把执行记录转换为对外表示。

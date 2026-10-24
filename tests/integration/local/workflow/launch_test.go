@@ -390,6 +390,44 @@ func (w *launchWorkspaceStub) RecoverInterrupted(ctx context.Context) error {
 //
 // workspace 为空表示本次运行不提供工作区初始化能力：用例据此验证"缺少能力时
 // 返回前置条件错误"而不是静默跳过。
+// workflowService 构造并启动一个任务级编排器实例。
+//
+// 它用于验证"编排器先收敛执行记录、启动服务再收敛步骤占用"的真实顺序：两个服务
+// 共享同一数据库，恢复结论必须由数据库事实决定。
+func (f *launchFixture) workflowService(t *testing.T) *app.TaskWorkflowService {
+	t.Helper()
+	service, err := app.NewTaskWorkflowService(app.TaskWorkflowOptions{
+		Store:      f.db,
+		Steps:      &fakeRunner{},
+		Containers: &fakeContainer{running: true},
+		Logger:     f.logger.Slog(),
+	})
+	if err != nil {
+		t.Fatalf("构造工作流编排器失败: %v", err)
+	}
+	if err := service.Start(f.ctx); err != nil {
+		t.Fatalf("启动工作流编排器失败: %v", err)
+	}
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if stopErr := service.Stop(stopCtx); stopErr != nil {
+			t.Errorf("停止工作流编排器失败: %v", stopErr)
+		}
+	})
+	return service
+}
+
+// events 读取任务事件。
+func (f *launchFixture) events(t *testing.T, taskID domain.ID) []domain.Event {
+	t.Helper()
+	events, err := f.db.ListEventsByTask(f.ctx, taskID, storage.EventFilter{})
+	if err != nil {
+		t.Fatalf("读取事件失败: %v", err)
+	}
+	return events
+}
+
 func (f *launchFixture) launchService(
 	t *testing.T,
 	environments app.TaskLaunchEnvironmentPort,
@@ -589,7 +627,10 @@ func TestRecoverStepOccupancyPersistsRecoveryRequired(t *testing.T) {
 	}
 }
 
-// TestRecoverStepOccupancyKeepsActiveRunOccupancy 校验未结束执行存在时不抢占。
+// TestRecoverStepOccupancyKeepsActiveRunOccupancy 校验仍有有效执行权时不抢占。
+//
+// 判据是"执行者仍持有有效租约"，不是"存在未结束记录"：pending / blocked /
+// recovery_required 记录都已经没有执行权，不能阻止其残留步骤被收敛（B1）。
 func TestRecoverStepOccupancyKeepsActiveRunOccupancy(t *testing.T) {
 	t.Parallel()
 	fixture := newLaunchFixture(t)
@@ -597,6 +638,9 @@ func TestRecoverStepOccupancyKeepsActiveRunOccupancy(t *testing.T) {
 	run, err := domain.NewWorkflowRun(fixture.task.ID, steps, fixture.now)
 	if err != nil {
 		t.Fatalf("构造执行记录失败: %v", err)
+	}
+	if err := run.Start("worker-live", time.Hour, fixture.now); err != nil {
+		t.Fatalf("登记执行权失败: %v", err)
 	}
 	if err := fixture.db.CreateWorkflowRun(fixture.ctx, run); err != nil {
 		t.Fatalf("写入执行记录失败: %v", err)

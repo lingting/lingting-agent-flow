@@ -26,24 +26,30 @@
 ## 当前阶段与当前里程碑
 
 - **当前阶段**：P2 进行中 —— 流程可靠性与恢复。
-- **上一个里程碑**：`P2-M1` —— 梳理所有阶段的状态持久化与恢复边界，状态 `completed`
+- **当前里程碑**：`P2-M3` —— 明确修复次数上限、停止条件、重试资格和结果不确定处理规则
+  （`pending`）。M1 为其列出 3 项移交问题；M2 已明确"中断语义已定义 ≠ 自动重试资格已
+  定义"，重试资格判定与跨进程轮次计数仍待 M3 实现。
+- **上一个里程碑**：`P2-M2` —— 明确超时、取消、中断、进程重启后的恢复语义，状态
+  `completed`（2026-10-24，基于 `master` HEAD `2a1bb0d` 实施与核实）。交付物为
+  [`P2-M2-interruption-semantics.md`](./P2-M2-interruption-semantics.md)：四类中断的
+  判定依据、六层状态 × 四类中断的收敛矩阵、跨层一致性规则。本次同时修复了 B1（步骤占用
+  与 `blocked` 执行记录互相锁死）、B5（取消意图跨层丢失）、B6（租约无续租），并新增
+  `app.ExecutionResidueService` 收敛 `attempts` / `sessions` / `validation_runs` 残留。
+- **更早里程碑**：`P2-M1` —— 梳理所有阶段的状态持久化与恢复边界，状态 `completed`
   （2026-10-23，基于 `master` HEAD `7a55dfe` 核实）。交付物为
   [`P2-M1-recovery-boundaries.md`](./P2-M1-recovery-boundaries.md)：14 个阶段的完整恢复边界
   矩阵、服务启动恢复的真实调用链（`HostValidationService` → `StepExecutor`/`Validation`/
   `StepWorkflow`（无恢复）→ `TaskWorkflowService` → `TaskLaunchService`）、
   自动恢复/用户触发/只读核验/只能安全停止/完全缺失五级分类、G1–G14 未覆盖故障窗口清单，
-  以及 6 个阻塞或高风险缺陷（B1–B6）与 1 个语义不一致（B7）。本里程碑**未修改生产代码**。
-- **更早里程碑**：`P1-M5` —— 完成单任务端到端验收，状态 `completed`（2026-10-23），本地
+  以及 6 个阻塞或高风险缺陷（B1–B6）与 1 个语义不一致（B7）。该里程碑**未修改生产代码**。
+  `P1-M5` —— 完成单任务端到端验收，状态 `completed`（2026-10-23），本地
   `tests/integration/local/workflow/e2e_*_test.go`（18 个用例）+ 真实远程
   `tests/integration/remote/workflow/e2e_*_test.go`，覆盖成功 / 修复 / 修复上限 / 无法确认
   四类终局。`P1-M4` —— 将修复闭环与代码保存、会话归档、任务收尾串联（核实中修复了
   Developer 会话从未写入数据库、收尾终态写入失败留下 `running` 残留两处生产断点）。
   `P1-M3` —— 有上限、可停止的验证失败修复与重新验证闭环。`P1-M2` —— Developer、
   确定性验证与 Validator Agent 的完整验证决策链。`P1-M1` —— 任务启动至计划生成的前置流程。
-- **当前里程碑**：`P2-M2` —— 明确超时、取消、中断、进程重启后的恢复语义（`pending`）。
-  M1 已为其列出 4 项具体移交问题：B1 锁死、B5 任务层取消未收敛、B6 租约无续租、
-  以及需要为六层状态分别定义四类中断的收敛目标。
-- **下一步**：按"下一步工作的选择规则"进入 P2-M2。P1 遗留的真实缺口是私有仓库 Git 凭据
+- **下一步**：按"下一步工作的选择规则"进入 P2-M3。P1 遗留的真实缺口是私有仓库 Git 凭据
   支持（`source.GitCredentialProvider` / `codesaver.GitCredentialProvider` 无实现），
   记录在 `ROADMAP.md` 的"尚未实现"。
 
@@ -59,6 +65,7 @@
 | [`P1-single-task-e2e.md`](./P1-single-task-e2e.md) | P1：单任务完整开发闭环（当前优先，最详细） |
 | [`P2-reliability-recovery.md`](./P2-reliability-recovery.md) | P2：流程可靠性与恢复 |
 | [`P2-M1-recovery-boundaries.md`](./P2-M1-recovery-boundaries.md) | P2-M1：全链路状态持久化与恢复边界清单（14 阶段矩阵、启动恢复调用链、缺陷与测试缺口） |
+| [`P2-M2-interruption-semantics.md`](./P2-M2-interruption-semantics.md) | P2-M2：四类中断 × 六层状态的收敛语义矩阵与跨层一致性规则 |
 | [`P3-multi-task-scheduling.md`](./P3-multi-task-scheduling.md) | P3：多任务执行与调度 |
 | [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md) | P4：产品操作体验与针对性优化 |
 

@@ -46,14 +46,16 @@ func (s *TaskLaunchService) recoverTaskStepOccupancy(
 	if err != nil {
 		return fmt.Errorf("恢复任务 %s 的步骤占用失败: %w", taskID, err)
 	}
-	active, err := s.taskHasActiveRun(ctx, taskID)
+	run, err := s.activeWorkflowRun(ctx, taskID)
 	if err != nil {
 		return fmt.Errorf("恢复任务 %s 的步骤占用失败: %w", taskID, err)
 	}
+	now := s.now()
 	for _, step := range steps {
 		needed, next := domain.DecideStepOccupancyRecovery(domain.TaskLaunchStepOccupancyInput{
-			Step:              step,
-			ActiveWorkflowRun: active,
+			Step:        step,
+			WorkflowRun: run,
+			Now:         now,
 		})
 		if !needed {
 			continue
@@ -70,19 +72,24 @@ func (s *TaskLaunchService) recoverTaskStepOccupancy(
 	return nil
 }
 
-// taskHasActiveRun 判断任务是否仍有未结束的工作流执行记录。
-func (s *TaskLaunchService) taskHasActiveRun(
+// activeWorkflowRun 返回任务当前未结束的工作流执行记录，没有时返回 nil。
+//
+// 它返回的是**记录本身**而不是布尔值：步骤占用收敛必须区分"仍有执行者持有有效
+// 执行权"与"记录未结束但执行者已经停止"，把这一步压缩成布尔值正是 B1 锁死的根因。
+//
+// 读取失败不能被当作"没有未结束记录"：那会让恢复在没有证据的情况下抢占步骤占用。
+func (s *TaskLaunchService) activeWorkflowRun(
 	ctx context.Context,
 	taskID domain.ID,
-) (bool, error) {
-	_, err := s.store.GetActiveWorkflowRun(ctx, taskID)
+) (*domain.WorkflowRun, error) {
+	run, err := s.store.GetActiveWorkflowRun(ctx, taskID)
 	if err == nil {
-		return true, nil
+		return run, nil
 	}
 	if errors.Is(err, storage.ErrNotFound) {
-		return false, nil
+		return nil, nil
 	}
-	return false, err
+	return nil, err
 }
 
 // recoverStepOccupancy 把一个被占用的步骤收敛为需要人工核验。

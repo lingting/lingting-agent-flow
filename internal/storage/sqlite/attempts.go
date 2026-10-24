@@ -301,6 +301,50 @@ func (s attemptStore) ListAttemptsByStep(
 	return attempts, nil
 }
 
+// ListAttemptsByStatus 返回全部处于指定状态的尝试，按开始时间升序。
+//
+// 查询只读，结果按 (started_at, id) 稳定排序：重复执行得到一致顺序，恢复过程因此
+// 可复现，也不会因为行顺序抖动而漏读。
+func (s attemptStore) ListAttemptsByStatus(
+	ctx context.Context,
+	statuses []domain.AttemptStatus,
+) ([]domain.Attempt, error) {
+	if len(statuses) == 0 {
+		return []domain.Attempt{}, nil
+	}
+	placeholders := make([]string, 0, len(statuses))
+	args := make([]any, 0, len(statuses))
+	for _, status := range statuses {
+		if err := status.Validate(); err != nil {
+			return nil, err
+		}
+		placeholders = append(placeholders, "?")
+		args = append(args, string(status))
+	}
+	statement := `SELECT ` + attemptColumns + ` FROM attempts
+		WHERE status IN (` + strings.Join(placeholders, ", ") + `)
+		ORDER BY started_at, id`
+	rows, err := s.q.QueryContext(ctx, statement, args...)
+	if err != nil {
+		return nil, wrapError("查询执行尝试", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+	attempts := make([]domain.Attempt, 0, 8)
+	for rows.Next() {
+		attempt, scanErr := scanAttempt(rows)
+		if scanErr != nil {
+			return nil, wrapError("读取执行尝试", scanErr)
+		}
+		attempts = append(attempts, *attempt)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, wrapError("查询执行尝试", err)
+	}
+	return attempts, nil
+}
+
 // ListAttemptPage 按尝试序号稳定排序分页返回步骤的尝试。
 //
 // 排序键是 (attempt_number, id)：attempt_number 在同一步骤内唯一，附加 id 使排序

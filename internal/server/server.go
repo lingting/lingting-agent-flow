@@ -167,6 +167,11 @@ type Server struct {
 	taskWorkflow *app.TaskWorkflowService
 	// taskLaunch 是统一任务启动服务，为空时不提供启动接口。
 	taskLaunch *app.TaskLaunchService
+	// residue 收敛进程退出后残留在活动状态的 Attempt / Session / ValidationRun。
+	//
+	// 它必须在下层服务（步骤执行、验证引擎）之后启动、在上层编排器之前启动：
+	// 先把"没有执行者"的残留收敛掉，编排器与启动恢复才能读到可信的现场。
+	residue *app.ExecutionResidueService
 	// codeInitialize 是代码初始化协调器，为空时不提供初始化接口。
 	codeInitialize *app.CodeInitializeService
 	requireWeb     bool
@@ -181,6 +186,11 @@ type Server struct {
 	serveErr        chan error
 	cancel          context.CancelFunc
 	shutdownTimeout time.Duration
+
+	// addrMu 保护 address 与 boundAddr：HTTP 服务在 Run 的 goroutine 里写入实际
+	// 监听地址，而 Addr 会被外部（测试、日志、健康检查）并发读取。没有它时
+	// `go test -race` 会报 Run 与 Addr 之间的数据竞争。
+	addrMu sync.RWMutex
 
 	stopOnce sync.Once
 	stopErr  error
@@ -245,7 +255,9 @@ func (s *Server) Run(ctx context.Context, load ConfigLoader) error {
 	}
 	s.cfg = cfg
 	s.shutdownTimeout = cfg.Server.ShutdownTimeout()
+	s.addrMu.Lock()
 	s.address = resolveAddress(cfg, s.address)
+	s.addrMu.Unlock()
 
 	runCtx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
@@ -328,6 +340,18 @@ func (s *Server) openDatabase(ctx context.Context) error {
 		}
 		s.taskWorkflow = orchestrator
 	}
+	if s.stepExecutor != nil {
+		// 残留收敛依赖已打开的数据库：它在步骤执行与验证引擎之后构造，
+		// 因此可以在两者启动之后、编排器启动之前收敛它们的残留。
+		residue, residueErr := app.NewExecutionResidueService(app.ExecutionResidueOptions{
+			Store:  store,
+			Logger: s.logger,
+		})
+		if residueErr != nil {
+			return fmt.Errorf("初始化残留收敛服务失败: %w", residueErr)
+		}
+		s.residue = residue
+	}
 	if s.taskLaunchFactory != nil && s.taskWorkflow != nil {
 		// 统一启动服务只串联既有能力：环境准备、计划生成与工作流编排都在它们
 		// 各自的服务里实现，启动服务不重复实现任何一步。
@@ -390,6 +414,11 @@ func (s *Server) startServices(ctx context.Context) error {
 	if s.stepWorkflow != nil {
 		// 闭环协调器依赖步骤执行与验证引擎，注册顺序因此在下层服务之后。
 		services = append(services, s.stepWorkflow)
+	}
+	if s.residue != nil {
+		// 残留收敛必须在下层服务启动之后、编排器启动之前执行：先把没有执行者的
+		// Attempt / Session / ValidationRun 收敛掉，编排器才能读到可信现场。
+		services = append(services, s.residue)
 	}
 	if s.taskWorkflow != nil {
 		// 任务级编排器注册在最后：它依赖单步骤闭环，停止顺序因此自动反过来，
@@ -536,7 +565,9 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		return fmt.Errorf("HTTP 服务监听失败: %s: %w", s.address, err)
 	}
 	s.web = web
+	s.addrMu.Lock()
 	s.boundAddr = listener.Addr().String()
+	s.addrMu.Unlock()
 	s.serveErr = make(chan error, 1)
 	go func() {
 		s.serveErr <- web.Serve(ctx, listener)
@@ -623,6 +654,8 @@ func (s *Server) waitServe() error {
 //
 // 配置端口为 0 时实际端口由系统分配，这里返回真实地址，便于测试与日志定位。
 func (s *Server) Addr() string {
+	s.addrMu.RLock()
+	defer s.addrMu.RUnlock()
 	if s.boundAddr != "" {
 		return s.boundAddr
 	}

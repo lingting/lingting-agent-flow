@@ -796,10 +796,15 @@ func TestPlanGenerationInterruptedByShutdown(t *testing.T) {
 	containers := &fakeContainer{running: true}
 	service := fixture.mustStartService(t, nil, containers, nil)
 	// 在 Planner 调用期间停止服务：模拟进程关闭中断在途调用。
+	//
+	// waitForCancel 让替身一直等到本次调用的上下文被取消后才返回，从而把
+	// "中断发生在调用进行中"变成确定的先后关系：没有它，替身可能在 Stop 传播到
+	// 本次调用之前就返回结果，结论便取决于 goroutine 调度顺序。
 	containers.setReplies(agentReply{
-		status:   agent.RunCancelled,
-		failure:  "服务关闭取消在途调用",
-		exitCode: -1,
+		status:        agent.RunCancelled,
+		failure:       "服务关闭取消在途调用",
+		exitCode:      -1,
+		waitForCancel: true,
 		duringCall: func() {
 			stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()

@@ -207,6 +207,31 @@ func (s sessionStore) ListSessionsByAttempt(
 	return s.querySessions(ctx, statement, toIDParam(attemptID))
 }
 
+// ListSessionsByStatus 返回全部处于指定执行状态的会话，按创建时间升序。
+//
+// 查询只读，结果按 (created_at, rowid) 稳定排序，使重复恢复得到一致顺序。
+func (s sessionStore) ListSessionsByStatus(
+	ctx context.Context,
+	statuses []domain.SessionStatus,
+) ([]domain.Session, error) {
+	if len(statuses) == 0 {
+		return []domain.Session{}, nil
+	}
+	placeholders := make([]string, 0, len(statuses))
+	args := make([]any, 0, len(statuses))
+	for _, status := range statuses {
+		if err := status.Validate(); err != nil {
+			return nil, err
+		}
+		placeholders = append(placeholders, "?")
+		args = append(args, string(status))
+	}
+	statement := `SELECT ` + sessionColumns + ` FROM sessions
+		WHERE status IN (` + strings.Join(placeholders, ", ") + `)
+		ORDER BY created_at, rowid`
+	return s.querySessions(ctx, statement, args...)
+}
+
 // ListSessionPage 按创建时间稳定排序分页返回会话。
 //
 // 排序键是 (created_at, rowid)：同一毫秒内创建的多个会话仍有确定顺序，分页不会
