@@ -265,6 +265,12 @@ type Task struct {
 	LeaseOwner string `json:"lease_owner,omitempty"`
 	// LeaseExpiresAt 是租约到期时间，过期后允许其他执行者接管。
 	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
+	// LeaseEpoch 是领取代次：每次建立新的领取时由数据库原子递增。
+	//
+	// 它是任务级 fencing 的持久化依据：只有 (LeaseOwner, LeaseEpoch) 同时匹配的
+	// 执行者才能续租、释放或写入执行期状态，旧代次的迟到写入一律被拒绝。代次由
+	// 存储层在领取时分配，不接受调用方传入。
+	LeaseEpoch int64 `json:"lease_epoch"`
 	// DeletedAt 是逻辑删除时间，空值表示未被删除。
 	//
 	// 删除只标记时间，任务行与其历史记录永久保留，不做物理删除，也不级联删除。
@@ -345,6 +351,9 @@ func (t Task) Validate() error {
 	}
 	if t.LeaseOwner != "" && t.LeaseExpiresAt == nil {
 		return invalidField("Task", "lease_expires_at", "持有租约时必须记录到期时间")
+	}
+	if t.LeaseEpoch < 0 {
+		return invalidField("Task", "lease_epoch", "领取代次不能为负数")
 	}
 	return nil
 }

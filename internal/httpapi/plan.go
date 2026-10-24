@@ -66,7 +66,7 @@ type PlanStepResponse struct {
 // 该入口是同步的：只有计划写入数据库或失败收敛完成后才写出响应。计划本身已由服务层
 // 持久化，因此即使响应写入失败，计划与任务状态也不会丢失。
 func (rt *router) servePlan(w http.ResponseWriter, r *http.Request) {
-	handler := newWorkflowHandler(rt.workflow, rt.logger)
+	handler := newWorkflowHandler(rt.workflow, rt.taskLeases, rt.logger)
 	if handler == nil {
 		writeError(
 			w,
@@ -103,6 +103,14 @@ func (h *workflowHandler) plan(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, r, err)
 		return
 	}
+	// 计划生成会真实调用 Planner：显式入口同样必须经过统一领取。
+	grant, release, err := h.claimForWorkflow(r, taskID, domain.ExplicitPlanningStatuses())
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	defer release()
+	request.Grant = grant
 	result, err := h.workflow.GeneratePlan(r.Context(), request)
 	if err != nil {
 		// 失败结果仍包含可用的诊断信息（会话、阶段、真实任务状态），但接口必须以

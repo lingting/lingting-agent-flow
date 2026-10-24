@@ -87,6 +87,70 @@ func (s *startAPITaskStore) GetActiveWorkflowRun(
 	return &domain.WorkflowRun{ID: domain.NewID(), TaskID: taskID}, nil
 }
 
+// AcquireTaskLease 记录一次领取并返回代次 1。
+//
+// 受控存储不模拟并发竞争：它只保证启动流程拿到的租约身份与任务记录一致。
+func (s *startAPITaskStore) AcquireTaskLease(
+	ctx context.Context,
+	request storage.TaskLeaseRequest,
+) (domain.TaskLeaseHandle, error) {
+	s.task.LeaseOwner = request.Owner
+	s.task.LeaseEpoch = 1
+	expires := request.At.Add(request.TTL)
+	s.task.LeaseExpiresAt = &expires
+	return domain.TaskLeaseHandle{
+		TaskID: request.TaskID,
+		Owner:  request.Owner,
+		Epoch:  1,
+	}, nil
+}
+
+// ReleaseTaskLease 清除受控记录上的租约。
+func (s *startAPITaskStore) ReleaseTaskLease(
+	ctx context.Context,
+	handle domain.TaskLeaseHandle,
+	at time.Time,
+) (bool, error) {
+	if s.task.LeaseOwner != handle.Owner || s.task.LeaseEpoch != handle.Epoch {
+		return false, storage.ErrConflict
+	}
+	s.task.LeaseOwner = ""
+	s.task.LeaseExpiresAt = nil
+	return true, nil
+}
+
+// RenewTaskLease 延长受控记录上的租约。
+func (s *startAPITaskStore) RenewTaskLease(
+	ctx context.Context,
+	request storage.TaskLeaseRenewRequest,
+) error {
+	if s.task.LeaseOwner != request.Handle.Owner || s.task.LeaseEpoch != request.Handle.Epoch {
+		return storage.ErrConflict
+	}
+	expires := request.At.Add(request.TTL)
+	s.task.LeaseExpiresAt = &expires
+	return nil
+}
+
+// UpdateTaskLeaseGuard 忽略写入：受控存储不模拟执行权转移。
+func (s *startAPITaskStore) UpdateTaskLeaseGuard(
+	ctx context.Context,
+	task domain.Task,
+	expected []domain.TaskStatus,
+	handle domain.TaskLeaseHandle,
+) error {
+	s.task = task
+	return nil
+}
+
+// AppendTaskLeaseEvent 忽略租约事件写入。
+func (s *startAPITaskStore) AppendTaskLeaseEvent(
+	ctx context.Context,
+	event domain.Event,
+) (domain.Event, error) {
+	return event, nil
+}
+
 // AppendEvent 忽略事件写入。
 func (s *startAPITaskStore) AppendEvent(
 	ctx context.Context,
@@ -258,11 +322,13 @@ func newStartAPIFixture(t *testing.T, store *startAPITaskStore) *startAPIFixture
 		t.Fatalf("构造日志器失败: %v", err)
 	}
 	workspace := &startAPIWorkspace{}
+	leases := newStartAPILeases(t, store)
 	service, err := app.NewTaskLaunchService(app.TaskLaunchOptions{
 		Store:      store,
 		Containers: &startAPIContainers{usable: true},
 		Workspace:  workspace,
 		Workflow:   &startAPIWorkflow{},
+		Leases:     leases,
 	})
 	if err != nil {
 		t.Fatalf("构造启动服务失败: %v", err)
@@ -278,6 +344,7 @@ func newStartAPIFixture(t *testing.T, store *startAPITaskStore) *startAPIFixture
 	return &startAPIFixture{
 		handler: httpapi.NewHandler(httpapi.Deps{
 			TaskLaunch: service,
+			TaskLeases: leases,
 			Logger:     logger.Slog(),
 		}),
 		store:     store,
@@ -494,11 +561,14 @@ func TestStartAPIMapsPrerequisiteError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造日志器失败: %v", err)
 	}
+	store := &startAPITaskStore{task: task}
+	leases := newStartAPILeases(t, store)
 	service, err := app.NewTaskLaunchService(app.TaskLaunchOptions{
-		Store: &startAPITaskStore{task: task},
+		Store: store,
 		// 容器核验失败：无法确认容器是否可用，属于前置条件缺失。
 		Containers: &startAPIContainers{err: errors.New("远程节点不可达")},
 		Workflow:   &startAPIWorkflow{},
+		Leases:     leases,
 	})
 	if err != nil {
 		t.Fatalf("构造启动服务失败: %v", err)
@@ -511,7 +581,11 @@ func TestStartAPIMapsPrerequisiteError(t *testing.T) {
 			t.Errorf("停止启动服务失败: %v", stopErr)
 		}
 	})
-	handler := httpapi.NewHandler(httpapi.Deps{TaskLaunch: service, Logger: logger.Slog()})
+	handler := httpapi.NewHandler(httpapi.Deps{
+		TaskLaunch: service,
+		TaskLeases: leases,
+		Logger:     logger.Slog(),
+	})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		httpapi.PathTasks+"/"+task.ID.String()+"/start",
@@ -554,4 +628,14 @@ func startAPIStep(t *testing.T, taskID domain.ID) domain.Step {
 		t.Fatalf("构造步骤失败: %v", err)
 	}
 	return step
+}
+
+// newStartAPILeases 构造基于受控存储的任务租约服务。
+func newStartAPILeases(t *testing.T, store *startAPITaskStore) *app.TaskLeaseService {
+	t.Helper()
+	leases, err := app.NewTaskLeaseService(app.TaskLeaseOptions{Store: store})
+	if err != nil {
+		t.Fatalf("构造任务租约服务失败: %v", err)
+	}
+	return leases
 }

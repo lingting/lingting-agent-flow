@@ -76,6 +76,38 @@ func (s *launchTaskStore) UpdateTaskIfStatus(
 	return nil
 }
 
+// AcquireTaskLease 记录一次领取并返回代次 1。
+//
+// 受控存储不模拟并发竞争：它只保证启动流程拿到的租约身份与任务记录一致。
+func (s *launchTaskStore) AcquireTaskLease(
+	ctx context.Context,
+	request storage.TaskLeaseRequest,
+) (domain.TaskLeaseHandle, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.task.LeaseOwner = request.Owner
+	s.task.LeaseEpoch = 1
+	expires := request.At.Add(request.TTL)
+	s.task.LeaseExpiresAt = &expires
+	return domain.TaskLeaseHandle{TaskID: request.TaskID, Owner: request.Owner, Epoch: 1}, nil
+}
+
+// ReleaseTaskLease 清除受控记录上的租约。
+func (s *launchTaskStore) ReleaseTaskLease(
+	ctx context.Context,
+	handle domain.TaskLeaseHandle,
+	at time.Time,
+) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.task.LeaseOwner != handle.Owner || s.task.LeaseEpoch != handle.Epoch {
+		return false, storage.ErrConflict
+	}
+	s.task.LeaseOwner = ""
+	s.task.LeaseExpiresAt = nil
+	return true, nil
+}
+
 // UpdateStepIfStatus 记录步骤写入并更新当前记录。
 func (s *launchTaskStore) UpdateStepIfStatus(
 	ctx context.Context,

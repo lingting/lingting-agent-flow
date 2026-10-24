@@ -59,6 +59,12 @@ type TaskLaunchRequest struct {
 	ValidationTimeout time.Duration
 	// PlanTimeout 是本次 Planner 调用的超时，零值使用任务配置或服务默认值。
 	PlanTimeout time.Duration
+	// Grant 是本次启动的任务执行权凭据。
+	//
+	// 它只能由任务领取产生（TaskLeaseService.Claim）：启动流程会创建容器、初始化
+	// 工作区、调用 Planner 并建立工作流执行，全部属于有副作用的阶段，因此必须在
+	// 持有任务执行权时进行。接口层不得接受调用方构造的 owner / epoch。
+	Grant WorkflowExecutionGrant
 }
 
 // TaskLaunchResult 是一次统一启动的结果。
@@ -107,6 +113,20 @@ type TaskLaunchResult struct {
 type TaskLaunchStore interface {
 	GetTask(ctx context.Context, id domain.ID) (*domain.Task, error)
 	ListStepsByTask(ctx context.Context, taskID domain.ID) ([]domain.Step, error)
+	// AcquireTaskLease 以原子条件更新领取任务租约。
+	//
+	// 调用方未提供执行权凭据时由启动服务自行领取：任务租约仍是唯一所有权令牌，
+	// 只是由服务本身成为领取者。
+	AcquireTaskLease(
+		ctx context.Context,
+		request storage.TaskLeaseRequest,
+	) (domain.TaskLeaseHandle, error)
+	// ReleaseTaskLease 释放本次领取持有的任务租约。
+	ReleaseTaskLease(
+		ctx context.Context,
+		handle domain.TaskLeaseHandle,
+		at time.Time,
+	) (bool, error)
 	UpdateTaskIfStatus(ctx context.Context, task domain.Task, expected []domain.TaskStatus) error
 	UpdateStepIfStatus(ctx context.Context, step domain.Step, expected []domain.StepStatus) error
 	GetActiveWorkflowRun(ctx context.Context, taskID domain.ID) (*domain.WorkflowRun, error)
@@ -165,6 +185,19 @@ type TaskLaunchWorkspacePort interface {
 	RecoverInterrupted(ctx context.Context) error
 }
 
+// TaskLaunchLeasePort 是启动流程对任务租约续期能力的需求。
+//
+// 启动阶段可能持续数十分钟（创建容器、初始化工作区、生成计划），期间必须周期性
+// 续租，否则任务会在准备过程中被其他执行者接管。为空表示本次运行不提供续租能力：
+// 此时启动流程只在阶段边界核验执行权，长阶段可能因租约自然过期而失去执行权，
+// 因此生产接线必须提供该能力。
+type TaskLaunchLeasePort interface {
+	// Renew 以 owner + epoch 为条件延长任务租约。
+	Renew(ctx context.Context, handle domain.TaskLeaseHandle) error
+	// RenewInterval 返回建议的续租间隔。
+	RenewInterval() time.Duration
+}
+
 // TaskLaunchOptions 是构造统一启动服务的输入。
 type TaskLaunchOptions struct {
 	// Store 是持久化入口，必填。
@@ -180,6 +213,8 @@ type TaskLaunchOptions struct {
 	Planner TaskLaunchPlanPort
 	// Workflow 提供工作流启动能力。
 	Workflow TaskLaunchWorkflowPort
+	// Leases 提供任务租约续期能力。
+	Leases TaskLaunchLeasePort
 	// Workspace 提供任务级工作区初始化能力。
 	//
 	// 为空表示本次运行不提供工作区初始化：判定需要初始化时启动流程返回前置条件
@@ -207,6 +242,7 @@ type TaskLaunchService struct {
 	planner      TaskLaunchPlanPort
 	workspace    TaskLaunchWorkspacePort
 	workflow     TaskLaunchWorkflowPort
+	leases       TaskLaunchLeasePort
 	logger       *slog.Logger
 	now          func() time.Time
 
@@ -239,6 +275,7 @@ func NewTaskLaunchService(options TaskLaunchOptions) (*TaskLaunchService, error)
 		planner:      options.Planner,
 		workspace:    options.Workspace,
 		workflow:     options.Workflow,
+		leases:       options.Leases,
 		logger:       logger,
 		now:          now,
 	}, nil

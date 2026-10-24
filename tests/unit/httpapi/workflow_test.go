@@ -328,10 +328,15 @@ func newTaskWorkflowAPIFixture(t *testing.T, stepCount int) *taskWorkflowAPIFixt
 	if err != nil {
 		t.Fatalf("构造任务服务失败: %v", err)
 	}
+	leases, err := app.NewTaskLeaseService(app.TaskLeaseOptions{Store: db})
+	if err != nil {
+		t.Fatalf("构造任务租约服务失败: %v", err)
+	}
 	handler := httpapi.NewHandler(httpapi.Deps{
-		Tasks:    tasks,
-		Workflow: service,
-		Logger:   logger.Slog(),
+		Tasks:      tasks,
+		Workflow:   service,
+		TaskLeases: leases,
+		Logger:     logger.Slog(),
 	})
 	return &taskWorkflowAPIFixture{
 		db:       db,
@@ -402,9 +407,10 @@ func (f *taskWorkflowAPIFixture) waitSettled(t *testing.T) httpapi.WorkflowStatu
 			switch last.Run.Status {
 			case "completed":
 				// 收尾的写入顺序是"先执行记录、后任务"：执行记录写成 completed 之后，
-				// 任务的成功终态才写入。任务仍在推进说明第二步还没落盘，需要继续等待。
-				if last.TaskStatus != string(domain.TaskStatusVerifying) &&
-					last.TaskStatus != string(domain.TaskStatusSaving) {
+				// 任务的成功终态才写入。任务尚未进入终态说明第二步还没落盘，需要继续
+				// 等待——判定条件是"任务已到终态"，而不是枚举若干个中间状态：收尾会把
+				// 任务从 planned 依次推进到 developing / verifying / saving / completed。
+				if domain.TaskStatus(last.TaskStatus).IsTerminal() {
 					return last
 				}
 			case "cancelled", "failed", "blocked", "recovery_required":

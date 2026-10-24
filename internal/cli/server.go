@@ -198,6 +198,7 @@ func runServer(cmd *cobra.Command, a *app.App, configPath, address string, requi
 			cfg *config.Config,
 			workflow *app.TaskWorkflowService,
 			steps *app.StepWorkflowService,
+			leases *app.TaskLeaseService,
 		) (*app.TaskLaunchService, error) {
 			sshService, sshErr := app.NewSSHService(store, a.Logger(), sshOptionsFrom(cfg))
 			if sshErr != nil {
@@ -253,6 +254,21 @@ func runServer(cmd *cobra.Command, a *app.App, configPath, address string, requi
 				Workspace: workspace,
 				Workflow:  workflow,
 				Logger:    a.Logger().Slog(),
+			})
+		},
+		TaskSchedulerFactory: func(
+			store storage.Store,
+			cfg *config.Config,
+			leases *app.TaskLeaseService,
+			launch *app.TaskLaunchService,
+		) (*app.TaskScheduler, error) {
+			return app.NewTaskScheduler(app.TaskSchedulerOptions{
+				Store:  store,
+				Leases: leases,
+				Launch: launch,
+				// 并发上限复用既有配置：不新增第二套并发配置。
+				MaxConcurrentTasks: cfg.Scheduler.MaxConcurrentTasks,
+				Logger:             a.Logger().Slog(),
 			})
 		},
 		SystemInfo:   a.SystemInfo,

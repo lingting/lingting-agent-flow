@@ -26,12 +26,26 @@
 ## 当前阶段与当前里程碑
 
 - **当前阶段**：P3 进行中 —— 多任务执行与调度。
-- **当前里程碑**：`P3-M1` —— 明确任务队列、领取和调度的业务语义，状态 `completed`
+- **当前里程碑**：`P3-M2` —— 实现有界并发和任务生命周期协调，状态 `completed`
+  （2026-10-25，基于 `master` HEAD `d8a0fdd` 之后的工作区核实与实施）。交付物为
+  [`P3-M2-bounded-concurrency.md`](./P3-M2-bounded-concurrency.md)。核心改动：
+  任务租约的持久化 fencing（`tasks.lease_epoch`，迁移 `0024_task_lease_epoch.sql`；
+  `AcquireTaskLease` 原子递增代次并回读、`RenewTaskLease` / `ReleaseTaskLease` /
+  `UpdateTaskLeaseGuard` 以 `owner + epoch` 为条件）；统一所有权
+  （`app.WorkflowExecutionGrant`，`WorkflowRun.WorkerID` 取自任务租约 owner，心跳同时
+  续租两者）；有界并发调度器 `app.TaskScheduler`（复用 `domain.DecideTaskQueueAdmission` /
+  `SortTaskQueueOrderKeys` / `DecideTaskSlotState`，只调用既有 `TaskLaunchService.Launch`，
+  复用 `cfg.Scheduler.MaxConcurrentTasks`）；四个显式执行入口（`start` / `plan` /
+  `execute-workflow` / `resume-workflow`）统一先领取任务租约。
+  测试证据：`tests/unit/domain/task_lease_test.go`、
+  `tests/integration/local/scheduler/lease_store_test.go`（9 个用例，真实 SQLite +
+  多独立连接并发领取）、`tests/integration/local/scheduler/scheduler_test.go`
+  （12 个用例，真实 SQLite + 正式迁移 + 真实调度器）。
+- **更早里程碑**：`P3-M1` —— 明确任务队列、领取和调度的业务语义，状态 `completed`
   （2026-10-25，基于 `master` HEAD `6e6d8b2` 之后的工作区核实与实施）。交付物为
   [`P3-M1-task-queue-semantics.md`](./P3-M1-task-queue-semantics.md) 与
   `internal/domain/task_queue.go`（队列准入、排序、领取仲裁、执行权 fencing、交接、
   调度名额归属的纯领域规则）+ `tests/unit/domain/task_queue_test.go`（30 个用例）。
-  **未修改任何生产执行流程、存储层或接口**；数据库原子领取与有界并发留给 `P3-M2`。
 - **更早里程碑**：`P2-M5` —— 补齐关键恢复场景的集成测试与恢复验收，状态
   `completed`（2026-10-25，基于 `master` HEAD `40460d4` 实施与核实）。
 - **更早里程碑**：`P2-M4` —— 核验提交、推送、合并等外部副作用的恢复路径，状态
@@ -88,15 +102,15 @@
   `0023_code_fetch_active_unique.sql`、`VerifyCodeSave` 在容器缺失时降级为
   `unverifiable` 并落盘、新增 HTTP `verify-code-save` 与 `resume-eligibility`
   （CLI `task resume-status`）、`ensureNoPendingContainer` 阻止创建第二个容器。
-- **下一步**：`P3-M2` —— 实现有界并发和任务生命周期协调。入口依据是
-  [`P3-M1-task-queue-semantics.md`](./P3-M1-task-queue-semantics.md) §9.3 的接口契约与
-  §4.5 的存储层验收项 S1–S7：原子领取必须显式传 `Statuses: []{queued}`、
-  `ReleaseTaskLease` 必须补 `RowsAffected` 检查、需要评估 `lease_epoch` 栅栏、
-  并需用真实 SQLite + 并发 goroutine 验证"只有一个领取成功"。
-  P3-M1 的交接事项：`failed` 任务目前没有任何用户显式重试入口（状态机允许
-  `failed → preparing` / `planning`，但无生产调用方与接口）；任务租约与
-  `WorkflowRun` 租约的 owner 目前完全无关（前者未接线，后者由
-  `TaskWorkflowService.owner` 生成），P3-M2 必须把任务租约定义为唯一令牌。
+- **下一步**：`P3-M3` —— 明确执行环境、工作区、Session 和资源之间的隔离规则。
+  P3-M2 已落地的前提见
+  [`P3-M2-bounded-concurrency.md`](./P3-M2-bounded-concurrency.md) §8 与
+  [`P3-multi-task-scheduling.md`](./P3-multi-task-scheduling.md) 的"下一步入口"。
+  P3-M2 的交接事项：并发上限是**进程级**（跨进程全局配额需要数据库仲裁）；
+  `StepExecutor` 的任务终态写入仍是状态条件写（无租约栅栏）；
+  服务停止保留的租约依赖 TTL 自然过期（物理收敛属 P3-M4）；
+  `failed` 任务仍无用户显式重试入口，需要独立的里程碑与接口契约；
+  轮询扫描（默认 1s）是可接受的取舍。
   P2-M5 的交接事项：真实远程 Docker 上的容器残留与 merge 恢复仍缺证据（需在真实远程
   环境注入 `unknown` / 孤儿现场）；遗留的 `completed` + `recovery_required` 只被报告、
   不被自动修复（`completed` 是终态，若要回退需先审计全部读取方）；`0023` 迁移在已有
@@ -121,6 +135,7 @@
 | [`P2-M5-closeout-protocol.md`](./P2-M5-closeout-protocol.md) | P2-M5：任务收尾一致性协议（写入顺序、栅栏、恢复入口、遗留不一致的只读报告） |
 | [`P3-multi-task-scheduling.md`](./P3-multi-task-scheduling.md) | P3：多任务执行与调度 |
 | [`P3-M1-task-queue-semantics.md`](./P3-M1-task-queue-semantics.md) | P3-M1：任务队列、领取、调度名额与执行权交接契约（准入/排序/仲裁/fencing/名额，含存储层验收项 S1–S7） |
+| [`P3-M2-bounded-concurrency.md`](./P3-M2-bounded-concurrency.md) | P3-M2：任务租约 fencing（`lease_epoch`）、统一所有权、有界并发调度器与生命周期集成 |
 | [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md) | P4：产品操作体验与针对性优化 |
 
 ## 下一步工作的选择规则

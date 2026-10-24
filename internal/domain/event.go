@@ -67,6 +67,13 @@ const (
 	// 服务启动扫描到"仍有结果不明的外部 Git 副作用"时追加：它只记录现场与需要的
 	// 动作，不推进任务状态，也不重放 commit / push / merge。
 	EventTypeCodeSaveRecoveryRequired EventType = "code_save.recovery_required"
+	// 任务租约领取与释放事件。
+	//
+	// 它们记录"谁在哪一代次、什么时刻取得了任务执行权、以及何时释放"。领取事件与
+	// 租约写入在同一事务内完成，因此不会出现"有效租约但没有审计痕迹"的现场；
+	// 释放事件在租约释放成功后追加，用于追溯名额释放。
+	EventTypeTaskClaimed  EventType = "task.claimed"
+	EventTypeTaskReleased EventType = "task.lease_released"
 )
 
 // knownEventTypes 是当前受支持的事件类型集合。
@@ -109,6 +116,8 @@ var knownEventTypes = []EventType{
 	EventTypeRepairRound,
 	EventTypeRepairCycleOpened,
 	EventTypeCodeSaveRecoveryRequired,
+	EventTypeTaskClaimed,
+	EventTypeTaskReleased,
 }
 
 // Validate 校验事件类型是否受支持。

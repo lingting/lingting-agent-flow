@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -71,7 +72,7 @@ type StartTaskResponse struct {
 // 该入口是同步的：只有容器准备、计划生成与工作流启动三件事都得出真实结论后才写出
 // 响应。工作流本身在受生命周期管理的后台推进，因此调用方不能把 202 当作"已完成"。
 func (rt *router) serveTaskLaunch(w http.ResponseWriter, r *http.Request) {
-	handler := newTaskLaunchHandler(rt.taskLaunch, rt.logger)
+	handler := newTaskLaunchHandler(rt.taskLaunch, rt.taskLeases, rt.logger)
 	if handler == nil {
 		writeError(
 			w,
@@ -89,18 +90,23 @@ func (rt *router) serveTaskLaunch(w http.ResponseWriter, r *http.Request) {
 // taskLaunchHandler 处理统一任务启动接口。
 type taskLaunchHandler struct {
 	launch *app.TaskLaunchService
+	leases *app.TaskLeaseService
 	logger *slog.Logger
 }
 
 // newTaskLaunchHandler 构造统一启动接口处理器，服务未初始化时返回 nil。
+//
+// 租约服务是必需依赖：没有任务租约就无法证明调用方持有该任务的执行权，启动流程
+// 会创建容器与调用 Planner，不能在没有所有权的情况下执行。
 func newTaskLaunchHandler(
 	launch *app.TaskLaunchService,
+	leases *app.TaskLeaseService,
 	logger *slog.Logger,
 ) *taskLaunchHandler {
-	if launch == nil {
+	if launch == nil || leases == nil {
 		return nil
 	}
-	return &taskLaunchHandler{launch: launch, logger: logger}
+	return &taskLaunchHandler{launch: launch, leases: leases, logger: logger}
 }
 
 // start 处理一次统一启动请求。
@@ -125,7 +131,42 @@ func (h *taskLaunchHandler) start(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, r, err)
 		return
 	}
+	// 显式启动入口同样必须经过统一领取：任务租约是唯一所有权令牌，用户操作不能
+	// 绕过它，否则调度器与人工操作会同时推进同一任务。
+	claim, err := h.leases.Claim(r.Context(), app.TaskClaimRequest{
+		TaskID: domain.ID(taskID),
+		Owner:  taskLaunchOwner(),
+		// 集合由领域层派生（与 CheckTaskLaunchStart 一致但**不含 failed**）：
+		// failed 的重试需要用户显式入口，不由启动接口隐式承担。
+		Statuses: domain.ExplicitLaunchStatuses(),
+	})
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	// 只有工作流没有接手时才由本入口释放租约：工作流启动后任务租约由编排器在
+	// 执行阶段继续持有，提前释放会让收尾的条件写入失去执行权。
+	handedOff := false
+	defer func() {
+		if handedOff {
+			return
+		}
+		// 释放使用未取消的上下文：请求中断不应让一次真实领取长期占用名额。
+		releaseCtx := context.WithoutCancel(r.Context())
+		if releaseErr := h.leases.Release(releaseCtx, claim.Handle); releaseErr != nil {
+			h.logger.WarnContext(
+				releaseCtx,
+				"启动结束后释放任务租约失败，名额将受租约有效期约束",
+				"task_id", taskID,
+				"error", releaseErr.Error(),
+			)
+		}
+	}()
+	request.Grant = app.WorkflowExecutionGrant{Lease: claim.Handle, TTL: h.leases.TTL()}
 	result, err := h.launch.Launch(r.Context(), request)
+	if err == nil && result.WorkflowStarted {
+		handedOff = true
+	}
 	if err != nil {
 		// 失败结果仍携带可用的诊断信息（阶段、真实任务状态、已建容器），但接口必须
 		// 以错误响应结束：未启动工作流时返回 200 会让调用方误以为任务已在执行。
@@ -273,4 +314,12 @@ func (h *taskLaunchHandler) writeError(w http.ResponseWriter, r *http.Request, e
 func isTaskLaunchPath(path string) bool {
 	_, ok := actionTaskID(path, startSegment)
 	return ok
+}
+
+// taskLaunchOwner 生成一次显式启动的领取者标识。
+//
+// 每次请求都使用独立标识：owner 只用于区分"这一次领取"与"另一次领取"，代次由
+// 数据库分配，因此不需要在 owner 中编码任务或用户信息。
+func taskLaunchOwner() string {
+	return "launch-" + domain.NewID().String()
 }

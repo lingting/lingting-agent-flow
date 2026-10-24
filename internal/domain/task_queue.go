@@ -538,3 +538,83 @@ func DecideTaskSlotState(input TaskSlotInput) TaskSlotState {
 		return TaskSlotIndeterminate
 	}
 }
+
+// 显式入口的可领取状态集合。
+//
+// 自动调度与显式入口的区别在于"谁表达了推进意图"：自动调度只领取 queued，而用户
+// 显式启动、生成计划、启动或恢复工作流时，任务可能停在进程中断留下的中间状态。
+// 这些集合因此是"允许显式推进"的状态，而**不含 failed**：失败任务的重新开始属于
+// 独立的用户显式重试入口，不由这些接口隐式承担。
+//
+// 三个集合都由状态机派生，不另建映射：新增状态或修改迁移时只需改状态机一处。
+
+// AllowsExplicitLaunch 判断任务状态是否允许用户显式发起统一启动。
+func (s TaskStatus) AllowsExplicitLaunch() bool {
+	return s.CanStart() && s != TaskStatusFailed
+}
+
+// AllowsExplicitPlanning 判断任务状态是否允许用户显式生成计划。
+func (s TaskStatus) AllowsExplicitPlanning() bool {
+	return s.CanStartPlanning() && s != TaskStatusFailed
+}
+
+// AllowsExplicitWorkflowStart 判断任务状态是否允许用户显式启动或恢复工作流。
+//
+// 复用 AllowsStepExecution：工作流只能从允许推进步骤的状态开始。
+func (s TaskStatus) AllowsExplicitWorkflowStart() bool {
+	return s.AllowsStepExecution()
+}
+
+// allTaskStatuses 是状态机中定义的全部任务状态。
+func allTaskStatuses() []TaskStatus {
+	return []TaskStatus{
+		TaskStatusQueued,
+		TaskStatusPreparing,
+		TaskStatusPlanning,
+		TaskStatusPlanned,
+		TaskStatusDeveloping,
+		TaskStatusVerifying,
+		TaskStatusSaving,
+		TaskStatusCancelling,
+		TaskStatusRetrying,
+		TaskStatusPaused,
+		TaskStatusCompleted,
+		TaskStatusFailed,
+		TaskStatusCancelled,
+		TaskStatusRecoveryRequired,
+	}
+}
+
+// ExplicitLaunchStatuses 返回用户显式启动允许领取的任务状态集合。
+func ExplicitLaunchStatuses() []TaskStatus {
+	return filterTaskStatuses(TaskStatus.AllowsExplicitLaunch)
+}
+
+// ExplicitPlanningStatuses 返回用户显式生成计划允许领取的任务状态集合。
+func ExplicitPlanningStatuses() []TaskStatus {
+	return filterTaskStatuses(TaskStatus.AllowsExplicitPlanning)
+}
+
+// ExplicitWorkflowStatuses 返回用户显式启动或恢复工作流允许领取的任务状态集合。
+func ExplicitWorkflowStatuses() []TaskStatus {
+	return filterTaskStatuses(TaskStatus.AllowsExplicitWorkflowStart)
+}
+
+// AutomaticSchedulingStatuses 返回自动调度允许领取的任务状态集合。
+//
+// 它只有一个取值：调度器不得使用任何更宽的集合，否则 failed / paused /
+// recovery_required 的任务会被自动重放。
+func AutomaticSchedulingStatuses() []TaskStatus {
+	return filterTaskStatuses(TaskStatus.AllowsAutomaticScheduling)
+}
+
+// filterTaskStatuses 按判定函数过滤全部任务状态。
+func filterTaskStatuses(allow func(TaskStatus) bool) []TaskStatus {
+	statuses := make([]TaskStatus, 0, 4)
+	for _, status := range allTaskStatuses() {
+		if allow(status) {
+			statuses = append(statuses, status)
+		}
+	}
+	return statuses
+}

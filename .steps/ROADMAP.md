@@ -43,10 +43,25 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > **当前阶段：P3 进行中 —— 多任务执行与调度**（P1 全部里程碑于 2026-10-23 完成；
 > P2-M1 于 2026-10-23 完成，P2-M2 于 2026-10-24 完成，P2-M3 于 2026-10-24 完成，
 > P2-M4 于 2026-10-25 完成，P2-M5 于 2026-10-25 完成；
-> **P3-M1 于 2026-10-25 完成**）。P1 证据见
+> **P3-M1 于 2026-10-25 完成，P3-M2 于 2026-10-25 完成**）。P1 证据见
 > `P1-single-task-e2e.md` 的对应"完成记录"；P2-M1 证据见
 > `P2-M1-recovery-boundaries.md`；P2-M2 证据见 `P2-M2-interruption-semantics.md`；
 > P2-M3 与 P2-M4 证据见 `P2-reliability-recovery.md` 的对应里程碑详情。
+>
+> P3-M2 的核实结论：本轮把 P3-M1 的契约落到运行时——`AcquireTaskLease` 成为生产
+> 调用路径（`app.TaskScheduler` 显式传 `queued` 集合）、`ReleaseTaskLease` 补上
+> `RowsAffected` 判定并改为按 `owner + epoch` 释放、新增迁移 `0024` 的
+> `tasks.lease_epoch` 作为任务级 fencing、任务租约与 `WorkflowRun` 租约合并为同一
+> owner（`app.WorkflowExecutionGrant`）、有界并发调度器
+> （`app.TaskScheduler`，复用 `cfg.Scheduler.MaxConcurrentTasks`）注册进
+> `internal/lifecycle`。交付物为
+> `internal/domain/task_lease.go`、`internal/app/{task_lease,task_workflow_lease,
+> task_scheduler}.go` 与 `P3-M2-bounded-concurrency.md`；测试证据为
+> `tests/unit/domain/task_lease_test.go`、
+> `tests/integration/local/scheduler/lease_store_test.go`（9 个用例，多独立连接并发领取）
+> 与 `tests/integration/local/scheduler/scheduler_test.go`（12 个用例，真实调度器）。
+> 明确保留的边界：并发上限是**进程级**；`StepExecutor` 入口尚未接入租约栅栏；
+> 服务停止保留的租约依赖 TTL 自然过期；`failed` 任务仍无显式重试入口。
 >
 > P3-M1 的核实结论：本轮把队列语义写成唯一契约，并核实了三处容易被误判为"已有能力"
 > 的事实——(1) `TaskStatus.CanStart()` 会为 7 个状态返回 `true`（含 `failed` /
@@ -57,7 +72,8 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > 领取。交付物为 `internal/domain/task_queue.go`（准入 / 排序 / 领取仲裁 / fencing /
 > 交接 / 名额归属的纯领域规则）、`tests/unit/domain/task_queue_test.go`（30 个用例）与
 > `P3-M1-task-queue-semantics.md`。**未修改任何生产执行流程、存储层或接口**；
-> 数据库原子领取、有界并发与 `lease_epoch` 栅栏列为 P3-M2 的验收项 S1–S7。
+> 数据库原子领取、有界并发与 `lease_epoch` 栅栏列为 P3-M2 的验收项 S1–S7，
+> 已在 P3-M2 全部落地（见上）。
 >
 > P2-M5 的核实结论：本轮审查发现并修复了 **3 个阻塞级**与 **4 个高风险**恢复缺陷——
 > C1（任务卡在 `verifying`/`saving` 后既不能启动也不能恢复）、C2（收尾先写任务后写
@@ -235,7 +251,8 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
   租约；名额 `DecideTaskSlotState` 用六态区分"占名额"与"可自动领取"，把
   `indeterminate`（租约失效但结论不明）与 `awaiting_human`（失败/暂停/待核验）分开，
   避免把结果不确定当作普通失败立即重试。证据：`tests/unit/domain/task_queue_test.go`
-  （30 个用例）。**数据库原子领取与并发保证未实现、未验证**，列为 P3-M2 验收项 S1–S7。
+  （30 个用例）。**数据库原子领取与并发保证**已由 P3-M2 实现并验证（迁移 `0024` 的
+  `lease_epoch` 栅栏 + `tests/integration/local/scheduler/lease_store_test.go`）。
 - **修复后交付与任务收尾闭环**（P1-M4）：`internal/app/task_workflow_exec.go` 的
   `finalize` → `saveCode` → `sessionsPersisted` → `applyCloseout` 顺序执行，收尾结论只由
   `domain.DecideWorkflowCloseout` 计算。核实中修复两处真实断点：
@@ -250,16 +267,18 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 
 **尚未实现**：
 
-- **多任务调度队列、有界并发与任务领取的运行时实现**：P3-M1 只交付领域契约
-  （`internal/domain/task_queue.go`）与文档，**没有**实现调度循环、有界并发执行器、
-  容量控制器或调度器重启接管。已核实的缺口：`AcquireTaskLease` / `ReleaseTaskLease`
-  无任何生产调用方；`ReleaseTaskLease` 不检查 `RowsAffected`；`UpdateTaskIfStatus`
-  不含租约条件，因此没有任务级 fencing；任务租约与 `WorkflowRun` 租约的 owner 完全
-  无关。以上全部列为 P3-M2 的验收项 S1–S7（见
-  [`P3-M1-task-queue-semantics.md`](./P3-M1-task-queue-semantics.md) §4.5）。
+- **跨任务的隔离与回收规则**（P3-M3）：容器、工作区、Session 与共享缓存在多任务
+  并发下的隔离边界尚未成文，名额上限与单节点容器数量的对应关系、缓存卷与镜像争用
+  规则也未定义。P3-M2 已落地进程级并发上限与任务级租约栅栏，但它们不是隔离规则。
+- **调度器重启后的接管策略**（P3-M4）：`running` 记录的租约过期收敛、进程崩溃残留的
+  接管、`StepExecutor` 入口的租约栅栏统一，都需要在 P3-M4 定义。
+- **跨进程的全局容量配额**：P3-M2 的并发上限基于数据库事实但只在本进程内生效；
+  多进程共享同一数据库时总量可能短暂超过上限，全局配额需要数据库仲裁。
 - **`failed` 任务的用户显式重试入口**：状态机允许 `failed → preparing` / `planning`，
-  但没有任何生产调用方，HTTP 与 CLI 也没有对应接口。P3-M1 记录为未决问题，由 P3-M2
-  决定入口形态。
+  但没有任何生产调用方，HTTP 与 CLI 也没有对应接口。P3-M2 审计后决定**不**在调度器
+  中隐式承担（见
+  [`P3-M2-bounded-concurrency.md`](./P3-M2-bounded-concurrency.md) §6）；安全重试需要
+  独立的里程碑与接口契约。
 - 私有仓库的 Git 凭据支持：`source.GitCredentialProvider` 与 `codesaver.GitCredentialProvider`
   均无实现，真实链路上私有仓库必然失败（已记录的架构决策，需凭据存储设计与安全评审）。
 - **~~五类执行残留的收敛路径~~**（P2-M1 记录，见 `P2-M1-recovery-boundaries.md` §3.4）：
@@ -371,4 +390,5 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - [P2-M5-closeout-protocol.md](./P2-M5-closeout-protocol.md)
 - [P3-multi-task-scheduling.md](./P3-multi-task-scheduling.md)
 - [P3-M1-task-queue-semantics.md](./P3-M1-task-queue-semantics.md)
+- [P3-M2-bounded-concurrency.md](./P3-M2-bounded-concurrency.md)
 - [P4-product-experience-optimization.md](./P4-product-experience-optimization.md)

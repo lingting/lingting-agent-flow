@@ -296,6 +296,22 @@ func (s *deliveryStore) UpdateTaskIfStatus(
 	return s.TaskWorkflowStore.UpdateTaskIfStatus(ctx, task, expected)
 }
 
+// UpdateTaskLeaseGuard 与 UpdateTaskIfStatus 记录同一份写入顺序。
+//
+// 收尾的成功终态写入经过租约栅栏接口，顺序不变量因此必须在两个入口上都成立。
+func (s *deliveryStore) UpdateTaskLeaseGuard(
+	ctx context.Context,
+	task domain.Task,
+	expected []domain.TaskStatus,
+	handle domain.TaskLeaseHandle,
+) error {
+	s.writes = append(s.writes, "task:"+string(task.Status))
+	if s.failTaskUpdateStatus != "" && task.Status == s.failTaskUpdateStatus {
+		return errors.New("任务状态写入失败")
+	}
+	return s.TaskWorkflowStore.UpdateTaskLeaseGuard(ctx, task, expected, handle)
+}
+
 // writeOrder 返回写入顺序的快照。
 func (s *deliveryStore) writeOrder() []string {
 	return append([]string(nil), s.writes...)

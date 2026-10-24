@@ -1176,12 +1176,18 @@ func TestWorkflowCancelIsIdempotent(t *testing.T) {
 	waitTaskWorkflowStatus(t, fixture.service, fixture.task.ID, func(result app.WorkflowStatusResult) bool {
 		return result.Run.CurrentStepID != nil
 	})
-	if _, err := fixture.service.CancelWorkflow(fixture.ctx, fixture.task.ID.String()); err != nil {
+	cancelled, err := fixture.service.CancelWorkflow(fixture.ctx, fixture.task.ID.String())
+	if err != nil {
 		t.Fatalf("请求取消失败: %v", err)
 	}
-	run, err := fixture.db.GetActiveWorkflowRun(fixture.ctx, fixture.task.ID)
+	// 按标识读取，而不是按"未结束执行"读取：取消可能已经收敛为终态，此时不存在
+	// 未结束执行记录，用 GetActiveWorkflowRun 会把一次正常收敛误报成读取失败。
+	run, err := fixture.db.GetWorkflowRun(fixture.ctx, cancelled.RunID)
 	if err != nil {
 		t.Fatalf("读取执行记录失败: %v", err)
+	}
+	if run.CancelRequestedAt == nil {
+		t.Fatal("取消请求必须记录时间")
 	}
 	firstAt := *run.CancelRequestedAt
 	if _, err := fixture.service.CancelWorkflow(fixture.ctx, fixture.task.ID.String()); err != nil {

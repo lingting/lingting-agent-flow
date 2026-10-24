@@ -169,6 +169,38 @@ type TaskWorkflowStore interface {
 	WithTx(ctx context.Context, fn func(ctx context.Context, tx storage.Tx) error) error
 	// AppendEvent 追加任务事件。
 	AppendEvent(ctx context.Context, event domain.Event) (domain.Event, error)
+	// AcquireTaskLease 以原子条件更新领取任务租约。
+	//
+	// 服务在调用方未提供执行权凭据时用它自行领取：任务租约仍是唯一所有权令牌，
+	// 只是由服务本身成为领取者，而不是另立一套 owner。
+	AcquireTaskLease(
+		ctx context.Context,
+		request storage.TaskLeaseRequest,
+	) (domain.TaskLeaseHandle, error)
+	// RenewTaskLease 以 owner + epoch 为条件延长任务租约。
+	//
+	// 编排器的心跳必须同时维持任务租约与工作流租约：任何一方失去执行权都要停止
+	// 推进，不能继续依赖另一方仍然有效的租约运行。
+	RenewTaskLease(ctx context.Context, request storage.TaskLeaseRenewRequest) error
+	// ReleaseTaskLease 释放本次领取持有的任务租约。
+	//
+	// 终止场景必须显式释放并检查结果：没有释放任何记录时返回 storage.ErrConflict，
+	// 调用方不得据此认为名额已经空出。
+	ReleaseTaskLease(
+		ctx context.Context,
+		handle domain.TaskLeaseHandle,
+		at time.Time,
+	) (bool, error)
+	// UpdateTaskLeaseGuard 在仍持有任务执行权时写入任务状态。
+	//
+	// 执行期的状态写入必须经过它：条件包含 status、lease_owner 与 lease_epoch，
+	// 旧代次的迟到写入因此被拒绝。
+	UpdateTaskLeaseGuard(
+		ctx context.Context,
+		task domain.Task,
+		expected []domain.TaskStatus,
+		handle domain.TaskLeaseHandle,
+	) error
 	// ListCodeSaveRecordsByTask 按任务列出代码保存记录，最新的在前。
 	//
 	// 恢复推进前必须据此判断是否还存在结果不明的外部 Git 副作用：数据库中的

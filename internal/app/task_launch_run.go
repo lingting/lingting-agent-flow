@@ -65,6 +65,50 @@ func (s *TaskLaunchService) Launch(
 		Stage:     domain.TaskLaunchStageValidate,
 		StartedAt: s.now(),
 	}
+	// 调用方未提供执行权凭据时由服务自行领取：任务租约仍是唯一所有权令牌，
+	// 只是领取者变成服务本身，而不是另立一套 owner。
+	grant, refreshed, releaseGrant, grantErr := s.ensureGrant(runCtx, task, request.Grant)
+	if grantErr != nil {
+		return s.failLaunch(result, domain.TaskLaunchStageValidate, grantErr)
+	}
+	task = refreshed
+	request.Grant = grant
+	// 启动成功时租约由工作流在执行阶段继续持有，失败时立即释放，避免占住名额。
+	releaseOwnGrant := true
+	defer func() {
+		if releaseOwnGrant {
+			releaseGrant()
+		}
+	}()
+	if err := request.Grant.Validate(); err != nil {
+		return s.failLaunch(result, domain.TaskLaunchStageValidate, fmt.Errorf(
+			"%w: %w",
+			ErrTaskLaunchPrerequisite,
+			err,
+		))
+	}
+	if request.Grant.Lease.TaskID != task.ID {
+		return s.failLaunch(result, domain.TaskLaunchStageValidate, fmt.Errorf(
+			"%w: 执行权属于任务 %s，与目标任务 %s 不一致",
+			ErrTaskLaunchPrerequisite,
+			request.Grant.Lease.TaskID,
+			task.ID,
+		))
+	}
+	if !domain.TaskHoldsLease(task, request.Grant.Lease, s.now()) {
+		return s.failLaunch(result, domain.TaskLaunchStageValidate, fmt.Errorf(
+			"%w: 任务 %s 的执行权不属于本次领取（owner %s，代次 %d）",
+			ErrTaskLaunchConflict,
+			task.ID,
+			request.Grant.Lease.Owner,
+			request.Grant.Lease.Epoch,
+		))
+	}
+	// 启动阶段可能持续数十分钟：在整段流程中维持任务租约，否则任务会在准备过程中
+	// 被其他执行者接管，而本地流程仍在远程执行副作用。
+	stopHeartbeat := s.startLeaseHeartbeat(runCtx, request.Grant)
+	defer stopHeartbeat()
+
 	input, err := s.loadLaunchInput(runCtx, task)
 	if err != nil {
 		return s.failLaunch(result, domain.TaskLaunchStageValidate, err)
@@ -121,7 +165,13 @@ func (s *TaskLaunchService) Launch(
 		fallthrough
 	case domain.TaskLaunchStagePlan:
 		if needsPlan {
-			planResult, planErr := s.planTask(runCtx, task.ID, prompt, request.PlanTimeout)
+			planResult, planErr := s.planTask(
+				runCtx,
+				task.ID,
+				prompt,
+				request.PlanTimeout,
+				request.Grant,
+			)
 			result.Stage = domain.TaskLaunchStagePlan
 			result.PlanSteps = planResult.Steps
 			result.PlanPersisted = planResult.Persisted
@@ -141,6 +191,7 @@ func (s *TaskLaunchService) Launch(
 			prompt,
 			request.Timeout,
 			request.ValidationTimeout,
+			request.Grant,
 		)
 		result.Stage = domain.TaskLaunchStageWorkflow
 		result.Run = run
@@ -148,6 +199,8 @@ func (s *TaskLaunchService) Launch(
 		if startErr != nil {
 			return s.failLaunch(result, domain.TaskLaunchStageWorkflow, startErr)
 		}
+		// 工作流已经接手任务租约：启动流程不再释放它。
+		releaseOwnGrant = false
 	default:
 		return s.failLaunch(
 			result,
@@ -364,6 +417,7 @@ func (s *TaskLaunchService) planTask(
 	taskID domain.ID,
 	prompt string,
 	timeout time.Duration,
+	grant WorkflowExecutionGrant,
 ) (PlanGenerationResult, error) {
 	if s.planner == nil {
 		return PlanGenerationResult{}, fmt.Errorf(
@@ -376,6 +430,7 @@ func (s *TaskLaunchService) planTask(
 		TaskID:  taskID.String(),
 		Prompt:  prompt,
 		Timeout: timeout,
+		Grant:   grant,
 	})
 	if err != nil {
 		return result, fmt.Errorf("%w: %w", ErrTaskLaunchFailed, err)
@@ -389,6 +444,7 @@ func (s *TaskLaunchService) startWorkflow(
 	taskID domain.ID,
 	prompt string,
 	timeout, validationTimeout time.Duration,
+	grant WorkflowExecutionGrant,
 ) (WorkflowRunView, error) {
 	if s.workflow == nil {
 		return WorkflowRunView{}, fmt.Errorf(
@@ -402,6 +458,7 @@ func (s *TaskLaunchService) startWorkflow(
 		Prompt:            prompt,
 		Timeout:           timeout,
 		ValidationTimeout: validationTimeout,
+		Grant:             grant,
 	})
 	if err != nil {
 		return run, fmt.Errorf("%w: %w", ErrTaskLaunchFailed, err)
@@ -486,4 +543,124 @@ func (s *TaskLaunchService) ensureNoPendingContainer(
 		)
 	}
 	return nil
+}
+
+// startLeaseHeartbeat 在启动期间周期性续租任务租约，返回停止函数。
+//
+// 续租失败只记录日志并取消启动上下文：本地流程立即停止推进，由上层按真实阶段
+// 收敛。未提供续租能力时返回空停止函数——此时执行权在阶段边界仍会被核验，但长
+// 阶段可能因租约自然过期而失去执行权，因此生产接线必须提供该能力。
+func (s *TaskLaunchService) startLeaseHeartbeat(
+	ctx context.Context,
+	grant WorkflowExecutionGrant,
+) func() {
+	if s.leases == nil {
+		return func() {}
+	}
+	interval := s.leases.RenewInterval()
+	if interval <= 0 {
+		return func() {}
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := s.leases.Renew(ctx, grant.Lease); err != nil {
+					s.logger.WarnContext(
+						ctx,
+						"启动阶段任务租约续期失败",
+						slog.String("task_id", grant.Lease.TaskID.String()),
+						slog.String("error", errorSummary(err)),
+					)
+					return
+				}
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
+	}
+}
+
+// ensureGrant 返回本次启动使用的执行权凭据。
+//
+// 调用方未提供凭据时由启动服务自行领取；提供了凭据时不做任何领取，避免一次启动
+// 产生两个 owner。返回的 release 只在凭据由本方法领取时真正释放租约。
+func (s *TaskLaunchService) ensureGrant(
+	ctx context.Context,
+	task domain.Task,
+	grant WorkflowExecutionGrant,
+) (WorkflowExecutionGrant, domain.Task, func(), error) {
+	if grant.Lease.TaskID != "" {
+		return grant, task, func() {}, nil
+	}
+	handle, err := s.store.AcquireTaskLease(ctx, storage.TaskLeaseRequest{
+		TaskID:   task.ID,
+		Owner:    "launch-" + domain.NewID().String(),
+		TTL:      s.leaseTTL(),
+		Statuses: domain.ExplicitLaunchStatuses(),
+		At:       s.now(),
+	})
+	if err != nil {
+		if errors.Is(err, storage.ErrConflict) {
+			return WorkflowExecutionGrant{}, task, nil, fmt.Errorf(
+				"%w: 任务 %s 已被其他执行者持有",
+				ErrTaskLaunchConflict,
+				task.ID,
+			)
+		}
+		return WorkflowExecutionGrant{}, task, nil, fmt.Errorf("领取任务租约失败: %w", err)
+	}
+	// 重新读取任务：租约刚由本方法写入，调用方手上的快照还没有 owner / epoch，
+	// 用它做执行权判定会误判为"不持有"。
+	refreshed, loadErr := s.loadTask(ctx, task.ID)
+	if loadErr != nil {
+		_, releaseErr := s.store.ReleaseTaskLease(context.WithoutCancel(ctx), handle, s.now())
+		if releaseErr != nil {
+			s.logger.WarnContext(
+				ctx,
+				"读取任务失败后释放任务租约失败",
+				slog.String("task_id", task.ID.String()),
+				slog.String("error", errorSummary(releaseErr)),
+			)
+		}
+		return WorkflowExecutionGrant{}, task, nil, loadErr
+	}
+	task = refreshed
+	acquired := WorkflowExecutionGrant{Lease: handle, TTL: s.leaseTTL()}
+	release := func() {
+		releaseCtx := context.WithoutCancel(ctx)
+		_, releaseErr := s.store.ReleaseTaskLease(releaseCtx, handle, s.now())
+		if releaseErr != nil {
+			s.logger.WarnContext(
+				releaseCtx,
+				"释放启动流程自行领取的任务租约失败，名额将受租约有效期约束",
+				slog.String("task_id", task.ID.String()),
+				slog.String("error", errorSummary(releaseErr)),
+			)
+		}
+	}
+	return acquired, task, release, nil
+}
+
+// leaseTTL 返回启动流程使用的租约有效期。
+//
+// 它来自租约服务的建议值：未提供续租能力时取默认有效期，避免无限期占用名额。
+func (s *TaskLaunchService) leaseTTL() time.Duration {
+	if s.leases != nil {
+		if ttl := s.leases.RenewInterval() * 3; ttl > 0 {
+			return ttl
+		}
+	}
+	return defaultTaskLeaseTTL
 }

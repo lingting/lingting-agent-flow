@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -120,7 +121,7 @@ type WorkflowStatusResponse struct {
 // {taskID}/resume-workflow 与 {taskID}/workflow；其余形状返回 false，由任务处理器
 // 给出各自的 404 与 405 语义。
 func (rt *router) serveWorkflow(w http.ResponseWriter, r *http.Request) {
-	handler := newWorkflowHandler(rt.workflow, rt.logger)
+	handler := newWorkflowHandler(rt.workflow, rt.taskLeases, rt.logger)
 	if handler == nil {
 		writeError(
 			w,
@@ -149,18 +150,23 @@ func (rt *router) serveWorkflow(w http.ResponseWriter, r *http.Request) {
 // workflowHandler 处理工作流相关接口。
 type workflowHandler struct {
 	workflow *app.TaskWorkflowService
+	leases   *app.TaskLeaseService
 	logger   *slog.Logger
 }
 
 // newWorkflowHandler 构造工作流接口处理器，服务未初始化时返回 nil。
+//
+// 租约服务是启动与恢复的必需依赖：没有任务租约就无法证明调用方持有该任务的执行权，
+// 而这两个动作都会真实调用 Agent 与 Git。
 func newWorkflowHandler(
 	workflow *app.TaskWorkflowService,
+	leases *app.TaskLeaseService,
 	logger *slog.Logger,
 ) *workflowHandler {
-	if workflow == nil {
+	if workflow == nil || leases == nil {
 		return nil
 	}
-	return &workflowHandler{workflow: workflow, logger: logger}
+	return &workflowHandler{workflow: workflow, leases: leases, logger: logger}
 }
 
 // start 处理 POST /api/v1/tasks/{taskID}/execute-workflow。
@@ -188,11 +194,25 @@ func (h *workflowHandler) start(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, r, err)
 		return
 	}
+	grant, release, err := h.claimForWorkflow(r, taskID, domain.ExplicitWorkflowStatuses())
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	// 启动成功后执行权交给后台编排：它在推进期间续租，并在结束时释放。
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			release()
+		}
+	}()
+	request.Grant = grant
 	result, err := h.workflow.StartWorkflow(r.Context(), request)
 	if err != nil {
 		h.writeError(w, r, err)
 		return
 	}
+	handedOff = true
 	writeJSON(w, r, h.logger, http.StatusAccepted, workflowRunResponse(result))
 }
 
@@ -239,11 +259,24 @@ func (h *workflowHandler) resume(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, r, err)
 		return
 	}
+	grant, release, err := h.claimForWorkflow(r, taskID, domain.ExplicitWorkflowStatuses())
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			release()
+		}
+	}()
+	request.Grant = grant
 	result, err := h.workflow.ResumeWorkflow(r.Context(), request)
 	if err != nil {
 		h.writeError(w, r, err)
 		return
 	}
+	handedOff = true
 	writeJSON(w, r, h.logger, http.StatusAccepted, workflowRunResponse(result))
 }
 
@@ -483,4 +516,36 @@ func statusTaskID(path string) (string, bool) {
 		return "", false
 	}
 	return segments[0], true
+}
+
+// claimForWorkflow 为一次显式工作流操作领取任务执行权。
+//
+// 它把"用户显式操作"与"调度器自动领取"统一到同一条所有权约束下：两种入口都必须
+// 先取得任务租约，因此不存在两套互不相干的所有者。返回的 release 在操作结束时
+// 释放租约，释放失败只记录日志（名额受租约有效期约束，不会被永久占用）。
+func (h *workflowHandler) claimForWorkflow(
+	r *http.Request,
+	taskID string,
+	statuses []domain.TaskStatus,
+) (app.WorkflowExecutionGrant, func(), error) {
+	claim, err := h.leases.Claim(r.Context(), app.TaskClaimRequest{
+		TaskID:   domain.ID(taskID),
+		Owner:    "workflow-" + domain.NewID().String(),
+		Statuses: statuses,
+	})
+	if err != nil {
+		return app.WorkflowExecutionGrant{}, nil, err
+	}
+	release := func() {
+		releaseCtx := context.WithoutCancel(r.Context())
+		if releaseErr := h.leases.Release(releaseCtx, claim.Handle); releaseErr != nil {
+			h.logger.WarnContext(
+				releaseCtx,
+				"工作流操作结束后释放任务租约失败，名额将受租约有效期约束",
+				"task_id", taskID,
+				"error", releaseErr.Error(),
+			)
+		}
+	}
+	return app.WorkflowExecutionGrant{Lease: claim.Handle, TTL: h.leases.TTL()}, release, nil
 }

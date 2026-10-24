@@ -38,6 +38,11 @@ type GeneratePlanRequest struct {
 	Prompt string
 	// Timeout 是本次 Planner 调用的超时时间，零值使用任务配置或服务默认值。
 	Timeout time.Duration
+	// Grant 是本次执行的任务执行权凭据。
+	//
+	// 计划生成会创建 Session 并调用 Planner，属于真实副作用，因此必须在持有任务
+	// 执行权时进行；凭据只能由任务领取产生。
+	Grant WorkflowExecutionGrant
 }
 
 // PlanGenerationResult 是一次计划生成的结果。
@@ -121,6 +126,24 @@ func (s *TaskWorkflowService) GeneratePlan(
 	if err := s.checkContainerReady(ctx, task); err != nil {
 		return PlanGenerationResult{}, err
 	}
+	grant, refreshed, releaseGrant, grantErr := s.ensureGrant(
+		ctx,
+		task,
+		request.Grant,
+		planClaimStatuses(),
+	)
+	if grantErr != nil {
+		return PlanGenerationResult{}, grantErr
+	}
+	task = refreshed
+	// 计划生成是同步操作：无论成功失败都在返回时释放本次自行领取的租约。
+	// 调用方提供了凭据时 releaseGrant 为空操作，释放责任属于凭据持有者。
+	defer releaseGrant()
+	request.Grant = grant
+	// 计划生成会真实调用 Planner：没有有效的任务执行权就不得开始。
+	if err := s.checkTaskOwnership(task, request.Grant); err != nil {
+		return PlanGenerationResult{}, err
+	}
 	role, err := s.loadPlannerRole(ctx, task)
 	if err != nil {
 		return PlanGenerationResult{}, err
@@ -150,7 +173,7 @@ func (s *TaskWorkflowService) GeneratePlan(
 
 	// 进入 planning 必须落库：写入失败时不调用 Planner，避免出现"真实调用过但
 	// 数据库里没有任何痕迹"的情况。
-	planning, err := s.beginPlanning(runCtx, task)
+	planning, err := s.beginPlanning(runCtx, task, request.Grant)
 	if err != nil {
 		return PlanGenerationResult{}, err
 	}
@@ -384,12 +407,19 @@ func (s *TaskWorkflowService) loadDeveloperRole(
 func (s *TaskWorkflowService) beginPlanning(
 	ctx context.Context,
 	task domain.Task,
+	grant WorkflowExecutionGrant,
 ) (domain.Task, error) {
 	previous := task.Status
 	if err := task.Transition(domain.TaskStatusPlanning, s.now()); err != nil {
 		return task, fmt.Errorf("%w: %w", ErrWorkflowConflict, err)
 	}
-	if err := s.store.UpdateTaskIfStatus(ctx, task, []domain.TaskStatus{previous}); err != nil {
+	// 写入附带 owner + epoch 条件：执行权在规划开始前被接管时，这条迁移不会生效。
+	if err := s.store.UpdateTaskLeaseGuard(
+		ctx,
+		task,
+		[]domain.TaskStatus{previous},
+		grant.Lease,
+	); err != nil {
 		if errors.Is(err, storage.ErrConflict) {
 			return task, fmt.Errorf(
 				"%w: 任务 %s 的状态已变更，无法开始计划生成",

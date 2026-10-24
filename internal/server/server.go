@@ -92,6 +92,16 @@ type Options struct {
 		cfg *config.Config,
 		steps *app.StepWorkflowService,
 	) (*app.TaskWorkflowService, error)
+	// TaskSchedulerFactory 在数据库打开后构造任务调度器。
+	//
+	// 调度器依赖数据库、任务租约与统一启动服务，因此必须在它们之后构造；返回 nil
+	// 表示本次运行不提供自动调度，此时 queued 任务只能由用户显式启动。
+	TaskSchedulerFactory func(
+		store storage.Store,
+		cfg *config.Config,
+		leases *app.TaskLeaseService,
+		launch *app.TaskLaunchService,
+	) (*app.TaskScheduler, error)
 	// TaskLaunchFactory 在数据库打开后构造统一任务启动服务。
 	//
 	// 启动服务复用已有的环境准备、计划生成与工作流编排能力，因此必须在它们之后
@@ -102,6 +112,7 @@ type Options struct {
 		cfg *config.Config,
 		workflow *app.TaskWorkflowService,
 		steps *app.StepWorkflowService,
+		leases *app.TaskLeaseService,
 	) (*app.TaskLaunchService, error)
 	// StepExecutorFactory 在数据库打开后构造单步骤执行协调器。
 	//
@@ -139,7 +150,15 @@ type Server struct {
 		cfg *config.Config,
 		workflow *app.TaskWorkflowService,
 		steps *app.StepWorkflowService,
+		leases *app.TaskLeaseService,
 	) (*app.TaskLaunchService, error)
+	// taskSchedulerFactory 在数据库打开后构造任务调度器。
+	taskSchedulerFactory func(
+		store storage.Store,
+		cfg *config.Config,
+		leases *app.TaskLeaseService,
+		launch *app.TaskLaunchService,
+	) (*app.TaskScheduler, error)
 	// validationFactory 在数据库打开后构造确定性验证引擎。
 	validationFactory func(store storage.Store, cfg *config.Config) (*app.ValidationService, error)
 	// codeInitializeFactory 在数据库打开后构造代码初始化协调器。
@@ -167,6 +186,12 @@ type Server struct {
 	taskWorkflow *app.TaskWorkflowService
 	// taskLaunch 是统一任务启动服务，为空时不提供启动接口。
 	taskLaunch *app.TaskLaunchService
+	// taskLeases 是任务租约服务，为启动、工作流与调度器提供统一执行权。
+	//
+	// 它在数据库打开后构造，是"任务租约是唯一所有权令牌"的唯一来源。
+	taskLeases *app.TaskLeaseService
+	// scheduler 是有界并发任务调度器，为空时不自动领取 queued 任务。
+	scheduler *app.TaskScheduler
 	// containerRecovery 收敛状态不明的容器记录并报告孤儿容器。
 	//
 	// 它只做只读观测与条件写入，不创建、启动、删除或接管容器。
@@ -244,6 +269,7 @@ func New(options Options) (*Server, error) {
 		stepExecutorFactory:   options.StepExecutorFactory,
 		taskWorkflowFactory:   options.TaskWorkflowFactory,
 		taskLaunchFactory:     options.TaskLaunchFactory,
+		taskSchedulerFactory:  options.TaskSchedulerFactory,
 		validationFactory:     options.ValidationFactory,
 		codeInitializeFactory: options.CodeInitializeFactory,
 		systemInfo:            options.SystemInfo,
@@ -417,6 +443,16 @@ func (s *Server) openDatabase(ctx context.Context) error {
 		return fmt.Errorf("初始化代码保存恢复扫描服务失败: %w", recoveryErr)
 	}
 	s.codeSaveRecovery = codeSaveRecovery
+	// 任务租约服务是启动、工作流与调度器的共同依赖：它必须在这些服务之前构造，
+	// 因为"任务租约是唯一所有权令牌"要求所有执行入口使用同一份租约能力。
+	leases, leaseErr := app.NewTaskLeaseService(app.TaskLeaseOptions{
+		Store:  store,
+		Logger: s.logger,
+	})
+	if leaseErr != nil {
+		return fmt.Errorf("初始化任务租约服务失败: %w", leaseErr)
+	}
+	s.taskLeases = leases
 	if s.taskLaunchFactory != nil && s.taskWorkflow != nil {
 		// 统一启动服务只串联既有能力：环境准备、计划生成与工作流编排都在它们
 		// 各自的服务里实现，启动服务不重复实现任何一步。
@@ -425,11 +461,20 @@ func (s *Server) openDatabase(ctx context.Context) error {
 			s.cfg,
 			s.taskWorkflow,
 			s.stepWorkflow,
+			leases,
 		)
 		if launchErr != nil {
 			return fmt.Errorf("初始化任务启动服务失败: %w", launchErr)
 		}
 		s.taskLaunch = launcher
+	}
+	if s.taskSchedulerFactory != nil && s.taskLaunch != nil {
+		// 调度器在启动服务之后构造：它只调用既有启动流程，不重复实现任何阶段。
+		scheduler, schedulerErr := s.taskSchedulerFactory(store, s.cfg, leases, s.taskLaunch)
+		if schedulerErr != nil {
+			return fmt.Errorf("初始化任务调度器失败: %w", schedulerErr)
+		}
+		s.scheduler = scheduler
 	}
 	if s.codeInitializeFactory != nil {
 		initializer, initErr := s.codeInitializeFactory(store, s.cfg)
@@ -504,6 +549,11 @@ func (s *Server) startServices(ctx context.Context) error {
 		// 统一启动服务注册在编排器之后：它依赖编排器，停止顺序因此反过来，
 		// 先停止新的启动请求，再让下层服务收敛在途工作。
 		services = append(services, s.taskLaunch)
+	}
+	if s.scheduler != nil {
+		// 调度器注册在最后：它依赖数据库、任务租约与统一启动服务，因此启动顺序
+		// 自然排在恢复与前置收敛之后，停止顺序反转为"先停止新分派"。
+		services = append(services, s.scheduler)
 	}
 	if s.codeSaveRecovery != nil {
 		// 代码保存恢复扫描放在最后注册：它只读记录并追加事件，因此不需要在下层
@@ -645,6 +695,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		StepWorkflow:      s.stepWorkflow,
 		Workflow:          s.taskWorkflow,
 		TaskLaunch:        s.taskLaunch,
+		TaskLeases:        s.taskLeases,
 		Containers:        s.containerService,
 		ResumeEligibility: s.resumeEligibility,
 		CodeInitialize:    s.codeInitialize,

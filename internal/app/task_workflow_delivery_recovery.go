@@ -103,7 +103,9 @@ func (s *TaskWorkflowService) completeStalledTask(
 	run domain.WorkflowRun,
 	result domain.TaskCloseoutRecoveryDecision,
 ) error {
-	updated, err := s.completeTask(context.WithoutCancel(ctx), task)
+	// 恢复补齐没有在途执行者：执行记录已经是终态且 WorkerID 已被清空，因此只能用
+	// 状态条件写入。调用方已确认"执行记录 completed + 证据重算通过"，不重放任何副作用。
+	updated, err := s.completeTask(context.WithoutCancel(ctx), task, nil)
 	if err != nil {
 		if errors.Is(err, storage.ErrConflict) {
 			// 其他执行者已经推进了任务：不是失败，也不重复写事件。

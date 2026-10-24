@@ -204,13 +204,18 @@ func newPlanAPIFixture(t *testing.T, finalText string) *planAPIFixture {
 	if err != nil {
 		t.Fatalf("构造任务服务失败: %v", err)
 	}
+	leases, err := app.NewTaskLeaseService(app.TaskLeaseOptions{Store: db})
+	if err != nil {
+		t.Fatalf("构造任务租约服务失败: %v", err)
+	}
 	return &planAPIFixture{
 		db:      db,
 		service: service,
 		handler: httpapi.NewHandler(httpapi.Deps{
-			Tasks:    tasks,
-			Workflow: service,
-			Logger:   logger.Slog(),
+			Tasks:      tasks,
+			Workflow:   service,
+			TaskLeases: leases,
+			Logger:     logger.Slog(),
 		}),
 		task: task,
 		ctx:  ctx,

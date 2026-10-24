@@ -20,6 +20,11 @@ type workflowExecution struct {
 	validationTimeout time.Duration
 	// resumed 表示本次是恢复而不是首次启动，仅用于日志与事件区分。
 	resumed bool
+	// grant 是本次执行的任务执行权凭据。
+	//
+	// 它让工作流执行租约成为任务租约在执行阶段的续期视图：心跳同时续租两者，
+	// 任何一方失效都立即停止推进。
+	grant WorkflowExecutionGrant
 }
 
 // cancelRegistry 记录在途工作流的取消函数，使取消请求能传播到实际执行。
@@ -184,9 +189,24 @@ func (s *TaskWorkflowService) drive(
 	// 续租在独立 goroutine 中周期性执行：单次 Agent 调用可能长达数十分钟，
 	// 一次性写入的租约会在调用尚未结束时过期，使另一个进程把仍在推进的执行
 	// 误判为已退出（B6）。停止续租的唯一途径是结束本次推进，因此 defer 是安全的。
-	stopHeartbeat := s.startLeaseHeartbeat(runCtx, cancelRun, run)
+	stopHeartbeat := s.startLeaseHeartbeat(runCtx, cancelRun, run, exec.grant)
 	defer stopHeartbeat()
 	state := s.advance(runCtx, run, exec)
+	// 工作流结束后释放任务租约：名额只在真正执行期间被占用，任务进入 blocked /
+	// recovery_required 时也必须释放，否则它会被自己的租约挡在候选池之外直到过期。
+	//
+	// 释放使用未取消的上下文并核对 owner + epoch：若执行权已被接管，释放会返回冲突
+	// 并只记录日志，不会误删新持有者的租约。
+	releaseCtx := context.WithoutCancel(ctx)
+	if releaseErr := s.releaseTaskLease(releaseCtx, exec.grant, taskLeaseReleaseReason(state)); releaseErr != nil {
+		s.logger.WarnContext(
+			releaseCtx,
+			"工作流结束后释放任务租约失败，名额将受租约有效期约束",
+			slog.String("task_id", state.TaskID.String()),
+			slog.String("status", string(state.Status)),
+			slog.String("error", errorSummary(releaseErr)),
+		)
+	}
 	s.logger.InfoContext(
 		context.WithoutCancel(ctx),
 		"任务级工作流执行已结束",
@@ -215,6 +235,7 @@ func (s *TaskWorkflowService) startLeaseHeartbeat(
 	ctx context.Context,
 	cancel context.CancelCauseFunc,
 	run domain.WorkflowRun,
+	grant WorkflowExecutionGrant,
 ) func() {
 	interval := s.leaseInterval()
 	if interval <= 0 {
@@ -233,6 +254,19 @@ func (s *TaskWorkflowService) startLeaseHeartbeat(
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				// 任务租约与工作流租约必须同时维持：只续其中一方会让"任务已被
+				// 接管、执行记录仍显示有效"的两套所有权重新出现。
+				if err := s.renewTaskLease(ctx, grant); err != nil {
+					s.logger.WarnContext(
+						ctx,
+						"任务租约续期失败，停止工作流推进",
+						slog.String("run_id", run.ID.String()),
+						slog.String("task_id", run.TaskID.String()),
+						slog.String("error", errorSummary(err)),
+					)
+					cancel(errWorkflowLeaseLost)
+					return
+				}
 				if !s.renewLease(ctx, run) {
 					cancel(errWorkflowLeaseLost)
 					return
@@ -265,7 +299,7 @@ func (s *TaskWorkflowService) leaseInterval() time.Duration {
 func (s *TaskWorkflowService) renewLease(ctx context.Context, run domain.WorkflowRun) bool {
 	now := s.now()
 	renewal := run
-	if err := renewal.RenewLease(s.owner, s.lease, now); err != nil {
+	if err := renewal.RenewLease(run.WorkerID, s.lease, now); err != nil {
 		// 领域层拒绝续租说明本地状态已不满足执行权条件：不覆盖数据库，按失去执行权处理。
 		s.logger.WarnContext(
 			ctx,
@@ -283,7 +317,7 @@ func (s *TaskWorkflowService) renewLease(ctx context.Context, run domain.Workflo
 	}
 	err := s.store.RenewWorkflowRunLease(ctx, storage.WorkflowRunLeaseRenewRequest{
 		RunID:          run.ID,
-		WorkerID:       s.owner,
+		WorkerID:       run.WorkerID,
 		LeaseExpiresAt: *expires,
 		At:             now,
 	})
@@ -324,7 +358,7 @@ func (s *TaskWorkflowService) advance(
 			return s.stopRun(writeCtx, run, domain.WorkflowRunBlocked, "step_not_executable", nextErr)
 		}
 		if !ok {
-			return s.finalize(writeCtx, run, steps)
+			return s.finalize(writeCtx, run, steps, exec.grant)
 		}
 		next, stop := s.runStep(ctx, writeCtx, run, step, exec)
 		run = next
@@ -516,6 +550,7 @@ func (s *TaskWorkflowService) finalize(
 	writeCtx context.Context,
 	run domain.WorkflowRun,
 	steps []domain.Step,
+	grant WorkflowExecutionGrant,
 ) domain.WorkflowRun {
 	if err := run.SetStage(domain.WorkflowStageFinalize, nil, nil, s.now()); err != nil {
 		return s.failRun(writeCtx, run, "finalize", err)
@@ -552,7 +587,7 @@ func (s *TaskWorkflowService) finalize(
 		errorClass = "code_saver_unavailable"
 		summary = "本服务未提供代码保存能力，任务不能判定为完整成功"
 	}
-	return s.applyCloseout(writeCtx, run, task, decision, errorClass, summary)
+	return s.applyCloseout(writeCtx, run, task, decision, errorClass, summary, grant)
 }
 
 // applyCloseout 写入收尾结论与任务状态。
@@ -562,6 +597,7 @@ func (s *TaskWorkflowService) applyCloseout(
 	task domain.Task,
 	decision domain.WorkflowCloseoutDecision,
 	errorClass, summary string,
+	grant WorkflowExecutionGrant,
 ) domain.WorkflowRun {
 	payload := map[string]any{
 		"run_id":          run.ID.String(),
@@ -594,7 +630,7 @@ func (s *TaskWorkflowService) applyCloseout(
 		// 不能对外宣布完成，也不能把 running 残留当成已收尾留在库里。
 		return s.stopUnpersistedCloseout(writeCtx, run, persistErr)
 	}
-	updated, err := s.completeTask(writeCtx, task)
+	updated, err := s.completeTask(writeCtx, task, &grant)
 	if err != nil {
 		// 执行记录已经确认完成，任务状态写入失败：如实收敛为需要人工核验。
 		// 该路径不再改写执行记录（它已是终态），由启动恢复按持久化证据补齐。
@@ -680,6 +716,7 @@ func (s *TaskWorkflowService) markTaskRecoveryRequired(
 func (s *TaskWorkflowService) completeTask(
 	ctx context.Context,
 	task domain.Task,
+	grant *WorkflowExecutionGrant,
 ) (domain.Task, error) {
 	now := s.now()
 	for _, next := range taskCompletionPath(task.Status) {
@@ -687,7 +724,9 @@ func (s *TaskWorkflowService) completeTask(
 		if err := task.Transition(next, now); err != nil {
 			return task, fmt.Errorf("推进任务状态到 %s 失败: %w", next, err)
 		}
-		if err := s.store.UpdateTaskIfStatus(ctx, task, []domain.TaskStatus{previous}); err != nil {
+		// 成功终态的每一步都必须附带任务执行权条件：旧代次的迟到写入不得把任务
+		// 写成 completed，也不得清除新领取者写入的取消意图。
+		if err := s.writeTask(ctx, task, []domain.TaskStatus{previous}, grant); err != nil {
 			return task, fmt.Errorf("写入任务状态失败: %w", err)
 		}
 	}
@@ -705,7 +744,7 @@ func (s *TaskWorkflowService) completeTask(
 	if err := task.SetCurrentStep(nil); err != nil {
 		return task, err
 	}
-	if err := s.store.UpdateTaskIfStatus(ctx, task, []domain.TaskStatus{previous}); err != nil {
+	if err := s.writeTask(ctx, task, []domain.TaskStatus{previous}, grant); err != nil {
 		return task, fmt.Errorf("写入任务状态失败: %w", err)
 	}
 	return task, nil
@@ -1203,4 +1242,24 @@ func idPtr(id domain.ID) *domain.ID {
 	}
 	value := id
 	return &value
+}
+
+// taskLeaseReleaseReason 返回任务租约释放原因。
+//
+// 原因只用于事件追溯：它不参与任何业务判定，也不能替代真实状态。
+func taskLeaseReleaseReason(state domain.WorkflowRun) string {
+	switch state.Status {
+	case domain.WorkflowRunCompleted:
+		return "workflow_completed"
+	case domain.WorkflowRunCancelled:
+		return "workflow_cancelled"
+	case domain.WorkflowRunFailed:
+		return "workflow_failed"
+	case domain.WorkflowRunBlocked:
+		return "workflow_blocked"
+	case domain.WorkflowRunRecoveryRequired:
+		return "workflow_recovery_required"
+	default:
+		return "workflow_stopped"
+	}
 }

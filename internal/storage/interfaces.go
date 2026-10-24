@@ -170,13 +170,46 @@ type TaskStore interface {
 		expected []domain.TaskStatus,
 		at time.Time,
 	) error
-	// AcquireTaskLease 以原子条件更新领取任务租约。
+	// AcquireTaskLease 以原子条件更新领取任务租约，并返回本次领取的身份。
 	//
-	// 只有任务处于允许开始的状态、且当前租约为空或已过期时才成功；
-	// 否则返回 storage.ErrConflict，保证同一任务不会被两个执行者同时推进。
-	AcquireTaskLease(ctx context.Context, request TaskLeaseRequest) error
-	// ReleaseTaskLease 释放由 owner 持有的租约，其他持有者的租约不会被清除。
-	ReleaseTaskLease(ctx context.Context, id domain.ID, owner string, at time.Time) error
+	// 条件同时覆盖"未被删除""状态属于请求中的集合""租约空闲 / 已过期 / 已由同一
+	// owner 持有"，由单条 UPDATE 判定，因此并发领取最多只有一个成功；其余返回
+	// storage.ErrConflict。领取成功时领取代次在同一语句内原子递增。
+	//
+	// Statuses 必须显式给出：空集合返回 storage.ErrInvalidData，不再回退到包含
+	// failed / paused / recovery_required 的默认集合。
+	AcquireTaskLease(
+		ctx context.Context,
+		request TaskLeaseRequest,
+	) (domain.TaskLeaseHandle, error)
+	// RenewTaskLease 以 owner + epoch 为条件延长租约。
+	//
+	// 租约已过期、已被接管或任务已被删除时返回 storage.ErrConflict：调用方必须按
+	// "执行权已丢失"停止推进，不得用迟到续期恢复所有权。
+	RenewTaskLease(ctx context.Context, request TaskLeaseRenewRequest) error
+	// ReleaseTaskLease 释放由指定租约身份持有的租约。
+	//
+	// 返回 false 表示没有命中任何记录（owner 或代次不匹配、租约已被接管），此时
+	// 同时返回 storage.ErrConflict：调用方不得把"没释放任何东西"当成释放成功。
+	ReleaseTaskLease(
+		ctx context.Context,
+		handle domain.TaskLeaseHandle,
+		at time.Time,
+	) (bool, error)
+	// UpdateTaskLeaseGuard 在任务仍由 handle 持有且状态属于 expected 时写入任务。
+	//
+	// 它是执行期状态写入的栅栏：条件包含 status、lease_owner 与 lease_epoch，
+	// 因此旧代次的迟到写入无法覆盖新领取者的记录。
+	UpdateTaskLeaseGuard(
+		ctx context.Context,
+		task domain.Task,
+		expected []domain.TaskStatus,
+		handle domain.TaskLeaseHandle,
+	) error
+	// AppendTaskLeaseEvent 在一个事务内追加领取或释放事件。
+	//
+	// 事件写入失败时整体回滚，避免留下"有效租约但没有审计痕迹"的现场。
+	AppendTaskLeaseEvent(ctx context.Context, event domain.Event) (domain.Event, error)
 }
 
 // TaskLeaseRequest 是一次任务租约领取请求。
@@ -187,9 +220,22 @@ type TaskLeaseRequest struct {
 	Owner string
 	// TTL 是租约有效期，必须大于 0。
 	TTL time.Duration
-	// Statuses 是允许领取的状态集合，为空表示只允许可开始的状态。
+	// Statuses 是允许领取的状态集合，必须显式给出。
+	//
+	// 空集合返回 storage.ErrInvalidData：默认集合会包含 failed / paused /
+	// recovery_required，使自动调度绕过 P2 的核验门控。
 	Statuses []domain.TaskStatus
 	// At 是领取时间，零值使用当前时间。
+	At time.Time
+}
+
+// TaskLeaseRenewRequest 是一次任务租约续期请求。
+type TaskLeaseRenewRequest struct {
+	// Handle 是本次领取的身份，必须来自成功的 AcquireTaskLease。
+	Handle domain.TaskLeaseHandle
+	// TTL 是新的租约有效期，必须大于 0。
+	TTL time.Duration
+	// At 是续期时间，零值使用当前时间。
 	At time.Time
 }
 

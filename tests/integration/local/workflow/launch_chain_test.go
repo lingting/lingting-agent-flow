@@ -19,6 +19,7 @@ import (
 	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/source"
+	"github.com/lingting/agentflow/internal/storage/sqlite"
 	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
@@ -167,9 +168,14 @@ func (c *chainContainers) calls() (inspect, fetch, agentCalls int) {
 type chainWorkflowStub struct {
 	mu    sync.Mutex
 	calls int
+	// store 用于在启动后释放任务租约，模拟"工作流已经结束"。
+	//
+	// 真实编排器在执行期间持有租约并在结束时释放；替身没有后台推进，因此必须在这里
+	// 释放，否则任务会被自己的租约挡住，无法验证重复启动的幂等行为。
+	store *sqlite.DB
 }
 
-// StartWorkflow 记录调用并返回一条运行中的执行记录。
+// StartWorkflow 记录调用、释放任务租约并返回一条运行中的执行记录。
 func (w *chainWorkflowStub) StartWorkflow(
 	ctx context.Context,
 	request app.StartWorkflowRequest,
@@ -177,6 +183,11 @@ func (w *chainWorkflowStub) StartWorkflow(
 	w.mu.Lock()
 	w.calls++
 	w.mu.Unlock()
+	if w.store != nil && request.Grant.Lease.TaskID != "" {
+		if _, err := w.store.ReleaseTaskLease(ctx, request.Grant.Lease, time.Now().UTC()); err != nil {
+			return app.WorkflowRunView{}, err
+		}
+	}
 	return app.WorkflowRunView{
 		RunID:  domain.NewID(),
 		TaskID: domain.ID(request.TaskID),
@@ -283,7 +294,7 @@ func TestLaunchChainReachesPlannedWithPersistedPlan(t *testing.T) {
 	fixture := newLaunchFixture(t)
 	fixture.attachContainer(t, chainContainerID)
 	containers := &chainContainers{running: true, finalText: chainPlanJSON}
-	workflowPort := &chainWorkflowStub{}
+	workflowPort := &chainWorkflowStub{store: fixture.db}
 	services := fixture.newChainServices(t, containers, workflowPort)
 
 	result, err := services.launch.Launch(fixture.ctx, app.TaskLaunchRequest{
@@ -367,7 +378,7 @@ func TestLaunchChainIsIdempotentOnRepeat(t *testing.T) {
 	fixture := newLaunchFixture(t)
 	fixture.attachContainer(t, chainContainerID)
 	containers := &chainContainers{running: true, finalText: chainPlanJSON}
-	workflowPort := &chainWorkflowStub{}
+	workflowPort := &chainWorkflowStub{store: fixture.db}
 	services := fixture.newChainServices(t, containers, workflowPort)
 
 	first, err := services.launch.Launch(fixture.ctx, app.TaskLaunchRequest{
@@ -427,7 +438,7 @@ func TestLaunchChainStopsOnWorkspaceFailure(t *testing.T) {
 		Op:     "git clone",
 		Detail: "无法访问代码仓库",
 	}
-	workflowPort := &chainWorkflowStub{}
+	workflowPort := &chainWorkflowStub{store: fixture.db}
 	services := fixture.newChainServices(t, containers, workflowPort)
 
 	result, err := services.launch.Launch(fixture.ctx, app.TaskLaunchRequest{
@@ -497,7 +508,7 @@ func TestLaunchChainRejectsUncertainWorkspaceWithoutReplay(t *testing.T) {
 	}
 
 	containers := &chainContainers{running: true, finalText: chainPlanJSON}
-	workflowPort := &chainWorkflowStub{}
+	workflowPort := &chainWorkflowStub{store: fixture.db}
 	services := fixture.newChainServices(t, containers, workflowPort)
 
 	_, err := services.launch.Launch(fixture.ctx, app.TaskLaunchRequest{
