@@ -25,10 +25,16 @@
 
 ## 当前阶段与当前里程碑
 
-- **当前阶段**：P2 已完成 —— 流程可靠性与恢复；下一步进入 P3（多任务执行与调度）。
-- **当前里程碑**：`P2-M5` —— 补齐关键恢复场景的集成测试与恢复验收，状态
+- **当前阶段**：P3 进行中 —— 多任务执行与调度。
+- **当前里程碑**：`P3-M1` —— 明确任务队列、领取和调度的业务语义，状态 `completed`
+  （2026-10-25，基于 `master` HEAD `6e6d8b2` 之后的工作区核实与实施）。交付物为
+  [`P3-M1-task-queue-semantics.md`](./P3-M1-task-queue-semantics.md) 与
+  `internal/domain/task_queue.go`（队列准入、排序、领取仲裁、执行权 fencing、交接、
+  调度名额归属的纯领域规则）+ `tests/unit/domain/task_queue_test.go`（30 个用例）。
+  **未修改任何生产执行流程、存储层或接口**；数据库原子领取与有界并发留给 `P3-M2`。
+- **更早里程碑**：`P2-M5` —— 补齐关键恢复场景的集成测试与恢复验收，状态
   `completed`（2026-10-25，基于 `master` HEAD `40460d4` 实施与核实）。
-- **上一个里程碑**：`P2-M4` —— 核验提交、推送、合并等外部副作用的恢复路径，状态
+- **更早里程碑**：`P2-M4` —— 核验提交、推送、合并等外部副作用的恢复路径，状态
   `completed`（2026-10-25，基于 `master` HEAD `168fd2f` 实施）。交付内容：修复 8 个
   真实故障窗口——不可信标记落盘（`codesaver.Session.flagUnconfirmed`）、HEAD 归因改为
   依据第一父（`CodeSaveObservation.HeadParentCommit`）、已确认阶段状态条件写回
@@ -82,7 +88,15 @@
   `0023_code_fetch_active_unique.sql`、`VerifyCodeSave` 在容器缺失时降级为
   `unverifiable` 并落盘、新增 HTTP `verify-code-save` 与 `resume-eligibility`
   （CLI `task resume-status`）、`ensureNoPendingContainer` 阻止创建第二个容器。
-- **下一步**：按"下一步工作的选择规则"进入 P3（多任务执行与调度）。
+- **下一步**：`P3-M2` —— 实现有界并发和任务生命周期协调。入口依据是
+  [`P3-M1-task-queue-semantics.md`](./P3-M1-task-queue-semantics.md) §9.3 的接口契约与
+  §4.5 的存储层验收项 S1–S7：原子领取必须显式传 `Statuses: []{queued}`、
+  `ReleaseTaskLease` 必须补 `RowsAffected` 检查、需要评估 `lease_epoch` 栅栏、
+  并需用真实 SQLite + 并发 goroutine 验证"只有一个领取成功"。
+  P3-M1 的交接事项：`failed` 任务目前没有任何用户显式重试入口（状态机允许
+  `failed → preparing` / `planning`，但无生产调用方与接口）；任务租约与
+  `WorkflowRun` 租约的 owner 目前完全无关（前者未接线，后者由
+  `TaskWorkflowService.owner` 生成），P3-M2 必须把任务租约定义为唯一令牌。
   P2-M5 的交接事项：真实远程 Docker 上的容器残留与 merge 恢复仍缺证据（需在真实远程
   环境注入 `unknown` / 孤儿现场）；遗留的 `completed` + `recovery_required` 只被报告、
   不被自动修复（`completed` 是终态，若要回退需先审计全部读取方）；`0023` 迁移在已有
@@ -106,6 +120,7 @@
 | [`P2-M2-interruption-semantics.md`](./P2-M2-interruption-semantics.md) | P2-M2：四类中断 × 六层状态的收敛语义矩阵与跨层一致性规则 |
 | [`P2-M5-closeout-protocol.md`](./P2-M5-closeout-protocol.md) | P2-M5：任务收尾一致性协议（写入顺序、栅栏、恢复入口、遗留不一致的只读报告） |
 | [`P3-multi-task-scheduling.md`](./P3-multi-task-scheduling.md) | P3：多任务执行与调度 |
+| [`P3-M1-task-queue-semantics.md`](./P3-M1-task-queue-semantics.md) | P3-M1：任务队列、领取、调度名额与执行权交接契约（准入/排序/仲裁/fencing/名额，含存储层验收项 S1–S7） |
 | [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md) | P4：产品操作体验与针对性优化 |
 
 ## 下一步工作的选择规则

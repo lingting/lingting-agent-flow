@@ -40,12 +40,24 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 
 ## 当前实现状态摘要（基于代码证据）
 
-> **当前阶段：P2 已完成，待进入 P3**（P1 全部里程碑于 2026-10-23 完成；P2-M1 于 2026-10-23 完成，
-> P2-M2 于 2026-10-24 完成，P2-M3 于 2026-10-24 完成，P2-M4 于 2026-10-25 完成，
-> **P2-M5 于 2026-10-25 完成**）。P1 证据见
+> **当前阶段：P3 进行中 —— 多任务执行与调度**（P1 全部里程碑于 2026-10-23 完成；
+> P2-M1 于 2026-10-23 完成，P2-M2 于 2026-10-24 完成，P2-M3 于 2026-10-24 完成，
+> P2-M4 于 2026-10-25 完成，P2-M5 于 2026-10-25 完成；
+> **P3-M1 于 2026-10-25 完成**）。P1 证据见
 > `P1-single-task-e2e.md` 的对应"完成记录"；P2-M1 证据见
 > `P2-M1-recovery-boundaries.md`；P2-M2 证据见 `P2-M2-interruption-semantics.md`；
 > P2-M3 与 P2-M4 证据见 `P2-reliability-recovery.md` 的对应里程碑详情。
+>
+> P3-M1 的核实结论：本轮把队列语义写成唯一契约，并核实了三处容易被误判为"已有能力"
+> 的事实——(1) `TaskStatus.CanStart()` 会为 7 个状态返回 `true`（含 `failed` /
+> `paused` / `recovery_required`），**不能**直接作为队列准入规则；(2)
+> `Task.LeaseOwner` / `LeaseExpiresAt` 两列与 `AcquireTaskLease` / `ReleaseTaskLease`
+> 已实现，但**全仓库无任何生产调用方**，不构成"领取安全"的证据；(3)
+> `UpdateTaskIfStatus` 的条件只有 `status IN (...)`，**不含租约条件**，不足以支持原子
+> 领取。交付物为 `internal/domain/task_queue.go`（准入 / 排序 / 领取仲裁 / fencing /
+> 交接 / 名额归属的纯领域规则）、`tests/unit/domain/task_queue_test.go`（30 个用例）与
+> `P3-M1-task-queue-semantics.md`。**未修改任何生产执行流程、存储层或接口**；
+> 数据库原子领取、有界并发与 `lease_epoch` 栅栏列为 P3-M2 的验收项 S1–S7。
 >
 > P2-M5 的核实结论：本轮审查发现并修复了 **3 个阻塞级**与 **4 个高风险**恢复缺陷——
 > C1（任务卡在 `verifying`/`saving` 后既不能启动也不能恢复）、C2（收尾先写任务后写
@@ -213,6 +225,17 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
   Docker 与容器内 Pi 进程。四类终局：成功（`completed`，代码真实推送、全部会话已归档）、
   验证失败后修复重验成功、修复达到上限（`blocked`/`attempts_exhausted`，历史全部保留）、
   结果无法确认（`recovery_required`，不重放外部副作用）。
+- **任务队列、领取与调度名额的领域契约**（P3-M1）：`internal/domain/task_queue.go` 把
+  "谁可以被调度""谁排在前面""谁真正拿到执行权""谁还持有执行权""谁占用一个名额"写成
+  纯函数。准入 `DecideTaskQueueAdmission` 只接受 `queued`（`AllowsAutomaticScheduling`），
+  并复用 `CheckTaskLaunchStart` 与 `DecideTaskCodeSaveResume` 两个既有门控；排序
+  `CompareTaskQueueOrder` 固定为 `Priority.Rank` → 任务创建时间 FIFO → 任务标识，
+  并明确任务列表的 `created_at DESC` 不可复用；领取仲裁 `DecideTaskClaim` 与 fencing
+  `TaskHoldsExecution` 分离；交接 `DecideTaskExecutionHandover` 要求执行者必须持有任务
+  租约；名额 `DecideTaskSlotState` 用六态区分"占名额"与"可自动领取"，把
+  `indeterminate`（租约失效但结论不明）与 `awaiting_human`（失败/暂停/待核验）分开，
+  避免把结果不确定当作普通失败立即重试。证据：`tests/unit/domain/task_queue_test.go`
+  （30 个用例）。**数据库原子领取与并发保证未实现、未验证**，列为 P3-M2 验收项 S1–S7。
 - **修复后交付与任务收尾闭环**（P1-M4）：`internal/app/task_workflow_exec.go` 的
   `finalize` → `saveCode` → `sessionsPersisted` → `applyCloseout` 顺序执行，收尾结论只由
   `domain.DecideWorkflowCloseout` 计算。核实中修复两处真实断点：
@@ -227,7 +250,16 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 
 **尚未实现**：
 
-- 多任务调度队列、有界并发与任务领取。
+- **多任务调度队列、有界并发与任务领取的运行时实现**：P3-M1 只交付领域契约
+  （`internal/domain/task_queue.go`）与文档，**没有**实现调度循环、有界并发执行器、
+  容量控制器或调度器重启接管。已核实的缺口：`AcquireTaskLease` / `ReleaseTaskLease`
+  无任何生产调用方；`ReleaseTaskLease` 不检查 `RowsAffected`；`UpdateTaskIfStatus`
+  不含租约条件，因此没有任务级 fencing；任务租约与 `WorkflowRun` 租约的 owner 完全
+  无关。以上全部列为 P3-M2 的验收项 S1–S7（见
+  [`P3-M1-task-queue-semantics.md`](./P3-M1-task-queue-semantics.md) §4.5）。
+- **`failed` 任务的用户显式重试入口**：状态机允许 `failed → preparing` / `planning`，
+  但没有任何生产调用方，HTTP 与 CLI 也没有对应接口。P3-M1 记录为未决问题，由 P3-M2
+  决定入口形态。
 - 私有仓库的 Git 凭据支持：`source.GitCredentialProvider` 与 `codesaver.GitCredentialProvider`
   均无实现，真实链路上私有仓库必然失败（已记录的架构决策，需凭据存储设计与安全评审）。
 - **~~五类执行残留的收敛路径~~**（P2-M1 记录，见 `P2-M1-recovery-boundaries.md` §3.4）：
@@ -338,4 +370,5 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - [P2-M1-recovery-boundaries.md](./P2-M1-recovery-boundaries.md)
 - [P2-M5-closeout-protocol.md](./P2-M5-closeout-protocol.md)
 - [P3-multi-task-scheduling.md](./P3-multi-task-scheduling.md)
+- [P3-M1-task-queue-semantics.md](./P3-M1-task-queue-semantics.md)
 - [P4-product-experience-optimization.md](./P4-product-experience-optimization.md)

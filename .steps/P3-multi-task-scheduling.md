@@ -35,10 +35,14 @@ AgentFlow 只能一次处理一个任务，无法成为可用的编排器。
 - `workflow_runs` 的 `idx_workflow_runs_active_task` 部分唯一索引（迁移 `0018`）与租约
   （`WorkerID` / `LeaseExpiresAt`）——这是未来调度一致性的基础。
 - 后台服务通过 `internal/lifecycle` 统一注册、启动、停止。
+- **P3-M1**：任务队列、领取、调度名额与执行权交接的领域契约
+  （`internal/domain/task_queue.go`）。详见
+  [`P3-M1-task-queue-semantics.md`](./P3-M1-task-queue-semantics.md)。
 
 **尚未实现**：
 
-- 任务队列、任务领取与调度器的业务语义。
+- 任务队列与领取的**运行时实现**：调度循环、原子领取接线、租约释放与 fencing 落地。
+  P3-M1 只交付领域契约；`AcquireTaskLease` / `ReleaseTaskLease` 目前仍无生产调用方。
 - 有界并发与多任务生命周期协调。
 - 跨任务的资源隔离与回收规则落地（当前只有单任务内的容器/Session 隔离）。
 - 调度器重启后的任务接管与恢复。
@@ -63,7 +67,7 @@ AgentFlow 只能一次处理一个任务，无法成为可用的编排器。
 
 | ID | 名称 | 状态 | 依赖 |
 |---|---|---|---|
-| P3-M1 | 明确任务队列、领取和调度的业务语义 | `pending` | P2 退出 |
+| P3-M1 | 明确任务队列、领取和调度的业务语义 | `completed` | P2 退出 |
 | P3-M2 | 实现有界并发和任务生命周期协调 | `pending` | P3-M1 |
 | P3-M3 | 明确执行环境、工作区、Session 和资源之间的隔离规则 | `pending` | P3-M1 |
 | P3-M4 | 处理任务取消、失败、恢复和调度器重启 | `pending` | P3-M2、P3-M3 |
@@ -86,8 +90,25 @@ AgentFlow 只能一次处理一个任务，无法成为可用的编排器。
 
 ## 下一步选择规则
 
-先 M1（队列与调度语义，解除后续依赖），再 M2/M3（并发协调与隔离），再 M4（取消/失败/
-重启），最后 M5（并发验收）。
+**下一步入口：P3-M2（实现有界并发和任务生命周期协调）。**
+
+顺序固定：M1 已完成 → **M2/M3**（并发协调与隔离）→ M4（取消/失败/重启）→ M5（并发验收）。
+
+P3-M2 的入口依据是
+[`P3-M1-task-queue-semantics.md`](./P3-M1-task-queue-semantics.md) 的 §9.3 接口契约与
+§4.5 存储层验收项 S1–S7，具体必须完成：
+
+1. `AcquireTaskLease` 显式传 `Statuses: []{TaskStatusQueued}`（不得依赖默认值，
+   默认值含 `failed` / `paused` / `recovery_required`）。
+2. `ReleaseTaskLease` 补 `RowsAffected` 检查。
+3. 评估并落地任务级 fencing（`lease_epoch` 或等效），使旧持有者的迟到写入被拒绝。
+4. 把任务租约定义为唯一令牌，`WorkflowRun` 租约是它的续期视图（两者必须同一 owner）。
+5. 有界并发：可配置名额上限 + 基于 `DecideTaskSlotState` 的名额占用统计。
+6. 调度器作为 `internal/lifecycle` 后台服务，`Stop` 时取消在途领取并释放租约。
+7. 真实 SQLite + 并发 goroutine 验证"只有一个领取成功"（S6）。
+
+**P3-M1 的交接事项**：`failed` 任务目前没有任何用户显式重试入口（状态机允许
+`failed → preparing` / `planning`，但无生产调用方与接口），P3-M2 必须先决定入口形态。
 
 ---
 
@@ -99,12 +120,30 @@ AgentFlow 只能一次处理一个任务，无法成为可用的编排器。
 ### P3-M1 明确任务队列、领取和调度的业务语义
 
 - **ID**：`P3-M1`
-- **状态**：`pending`
+- **状态**：`completed`（2026-10-25，基于 `master` HEAD `6e6d8b2` 之后的工作区核实与实施）
 - **必要性**：没有明确语义，调度会退化为"随意并发"，破坏状态正确性。
-- **当前证据**：单任务工作流已有租约与部分唯一索引；无队列/领取语义。
+- **当前证据（核实结论）**：
+  - `TaskStatus.CanStart()` 会为 7 个状态返回 `true`（含 `failed` / `paused` /
+    `recovery_required`），**不能**直接当作队列准入规则。
+  - `Task.LeaseOwner` / `LeaseExpiresAt` 两列与 `AcquireTaskLease` /
+    `ReleaseTaskLease` 已实现，但**全仓库无任何生产调用方**——不是"已有领取安全"的证据。
+  - `UpdateTaskIfStatus` 的条件只有 `status IN (...)`，**不含租约条件**，不足以支持原子领取。
+  - `ReleaseTaskLease` 不检查 `RowsAffected`，无法区分"释放成功"与"没释放任何东西"。
+  - 任务租约与 `WorkflowRun` 租约的 owner 完全无关（后者由
+    `TaskWorkflowService.owner` 生成），两套所有权互不约束。
 - **前置依赖**：P2 退出。
 - **目标结果**：成文的任务入队、领取、调度、并发上限语义。
 - **完成定义**：语义在领域层定义，调度与恢复都引用它。
+- **交付物**：
+  - [`P3-M1-task-queue-semantics.md`](./P3-M1-task-queue-semantics.md)（完整契约文档）
+  - `internal/domain/task_queue.go`：`AllowsAutomaticScheduling`、
+    `DecideTaskQueueAdmission`、`NewTaskQueueOrderKey` / `CompareTaskQueueOrder` /
+    `SortTaskQueueOrderKeys`、`DecideTaskClaim`、`TaskHoldsExecution`、
+    `DecideTaskExecutionHandover`、`DecideTaskSlotState` 与 `TaskQueueRejection`
+  - `tests/unit/domain/task_queue_test.go`（30 个用例）
+- **明确未做**：调度循环、有界并发执行器、容量控制器、调度器重启接管；未修改任何
+  生产执行流程、存储层或 HTTP / CLI 接口。
+- **移交 P3-M2**：存储层原子领取验收项 S1–S7（见契约文档 §4.5）。
 
 ### P3-M2 实现有界并发和任务生命周期协调
 
