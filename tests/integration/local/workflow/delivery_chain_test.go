@@ -272,6 +272,33 @@ type deliveryStore struct {
 	// 它用于构造"阶段写入与任务状态写入都成功，只有最终收尾记录写不进去"的现场：
 	// 若让所有写入都失败，编排器在启动阶段就报错，根本走不到收尾。
 	failUpdateWhenStatus domain.WorkflowRunStatus
+	// failTaskUpdateStatus 非空时只让写入该目标状态的任务更新失败。
+	//
+	// 它用于构造"执行记录已确认完成、任务状态写入失败"的现场，验证收尾顺序把
+	// 执行记录当作栅栏后不会再伪造任务成功。
+	failTaskUpdateStatus domain.TaskStatus
+	// writes 记录执行记录与任务状态的写入顺序。
+	//
+	// 断言写入顺序是"先执行记录、后任务"，这是收尾协议的核心不变量。
+	writes []string
+}
+
+// UpdateTaskIfStatus 在配置了目标状态时返回错误，并记录写入顺序。
+func (s *deliveryStore) UpdateTaskIfStatus(
+	ctx context.Context,
+	task domain.Task,
+	expected []domain.TaskStatus,
+) error {
+	s.writes = append(s.writes, "task:"+string(task.Status))
+	if s.failTaskUpdateStatus != "" && task.Status == s.failTaskUpdateStatus {
+		return errors.New("任务状态写入失败")
+	}
+	return s.TaskWorkflowStore.UpdateTaskIfStatus(ctx, task, expected)
+}
+
+// writeOrder 返回写入顺序的快照。
+func (s *deliveryStore) writeOrder() []string {
+	return append([]string(nil), s.writes...)
 }
 
 // ListSessionsByTask 在配置了替身时返回替身结果。
@@ -296,6 +323,7 @@ func (s *deliveryStore) UpdateWorkflowRun(
 	ctx context.Context,
 	run domain.WorkflowRun,
 ) error {
+	s.writes = append(s.writes, "run:"+string(run.Status))
 	if s.updateRunErr != nil {
 		return s.updateRunErr
 	}
@@ -346,6 +374,8 @@ type deliveryOptions struct {
 	sessions []domain.Session
 	// containerRunning 覆盖容器运行状态，默认 true。
 	containerStopped bool
+	// failTaskUpdateStatus 只让写入该目标状态的任务更新失败。
+	failTaskUpdateStatus domain.TaskStatus
 }
 
 // newDeliveryFixture 在工作空间中准备一套可执行完整交付链路的测试数据。
@@ -516,9 +546,10 @@ func (f *deliveryFixture) assemble(t *testing.T, options deliveryOptions) {
 	}
 	f.stepFlow = stepFlow
 	store := &deliveryStore{
-		TaskWorkflowStore: f.db,
-		sessionErr:        options.sessionErr,
-		sessions:          options.sessions,
+		TaskWorkflowStore:    f.db,
+		sessionErr:           options.sessionErr,
+		sessions:             options.sessions,
+		failTaskUpdateStatus: options.failTaskUpdateStatus,
 	}
 	f.store = store
 	codeSaver := &deliveryCodeSaver{record: options.codeSaveRecord, err: options.codeSaveErr}
@@ -589,7 +620,15 @@ func (f *deliveryFixture) settle(t *testing.T) app.WorkflowStatusResult {
 		}
 		last = result
 		if result.HasRun && deliverySettled(result.Run.Status) {
-			return result
+			// 收尾的写入顺序是"先执行记录、后任务"：执行记录写成 completed 之后，
+			// 任务的成功终态才写入。只有这一步追加等待，因为它是协议规定的必然后续；
+			// 停止类结论不会改写任务，因此不能在这里等任务状态变化。
+			// 任务仍在推进（verifying / saving）说明收尾的第二半步还没落盘；
+			// 一旦任务离开活动状态（已完成或已收敛为待核验），现场就稳定了。
+			if result.Run.Status != domain.WorkflowRunCompleted ||
+				!result.TaskStatus.IsActive() {
+				return result
+			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -1337,4 +1376,35 @@ func deliverySettled(status domain.WorkflowRunStatus) bool {
 		return true
 	}
 	return status == domain.WorkflowRunBlocked || status == domain.WorkflowRunRecoveryRequired
+}
+
+// restartWorkflow 停止并重新构造编排器，模拟服务重启后的启动恢复。
+//
+// 它复用同一份数据库与同一组装配，因此恢复读到的就是真实持久化事实；已启动的
+// 依赖服务保持运行，只有编排器本身被重建。
+func (f *deliveryFixture) restartWorkflow(t *testing.T) *app.TaskWorkflowService {
+	t.Helper()
+	stopCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := f.workflow.Stop(stopCtx); err != nil {
+		t.Fatalf("停止编排器失败: %v", err)
+	}
+	workflow, err := app.NewTaskWorkflowService(app.TaskWorkflowOptions{
+		Store:      f.store,
+		Steps:      f.stepFlow,
+		Containers: f.containers,
+		CodeSaver:  f.codeSaver,
+		Sessions:   f.sessions,
+		Logger:     f.logger.Slog(),
+	})
+	if err != nil {
+		t.Fatalf("重新构造编排器失败: %v", err)
+	}
+	startCtx, startCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer startCancel()
+	if err := workflow.Start(startCtx); err != nil {
+		t.Fatalf("重新启动编排器失败: %v", err)
+	}
+	f.workflow = workflow
+	return workflow
 }

@@ -40,6 +40,7 @@ func newTaskCommand(a *app.App) *cobra.Command {
 	command.AddCommand(newTaskListCommand(a))
 	command.AddCommand(newTaskCancelCommand(a))
 	command.AddCommand(newTaskReopenStepCommand(a))
+	command.AddCommand(newTaskResumeStatusCommand(a))
 	return command
 }
 
@@ -48,7 +49,9 @@ func newTaskCommand(a *app.App) *cobra.Command {
 // 命令层只持有任务管理服务：任务执行由 agentflow server 内的任务级工作流编排器
 // 负责，CLI 不装配 SSH、容器、Pi 与代码保存能力。
 type taskServices struct {
-	tasks *app.TaskService
+	tasks      *app.TaskService
+	containers *app.ContainerService
+	store      storage.Store
 }
 
 // withTaskServices 加载配置并构造任务管理服务。
@@ -71,7 +74,11 @@ func withTaskServices(
 		if err != nil {
 			return err
 		}
-		return run(ctx, taskServices{tasks: tasks})
+		return run(ctx, taskServices{
+			tasks:      tasks,
+			containers: services.containers,
+			store:      services.store,
+		})
 	})
 }
 
@@ -803,5 +810,96 @@ func printOpenRepairCycle(a *app.App, result workflowAPIOpenRepairCycle) error {
 		"注意: 该操作只重置修复预算，不执行开发调用，也不代表验证会通过",
 	}
 	_, err := fmt.Fprintln(a.Stdout(), strings.Join(lines, newlineSeparator))
+	return err
+}
+
+// newTaskResumeStatusCommand 构建 task resume-status 子命令。
+//
+// 它回答"这个任务现在能不能继续、为什么不能、下一步该做什么"。此前这些信息分散在
+// resume-workflow 的错误信息与 code status 的输出里，用户必须自己拼接。
+func newTaskResumeStatusCommand(a *app.App) *cobra.Command {
+	var hostID string
+	command := &cobra.Command{
+		Use:   "resume-status <task-id>",
+		Short: "查询任务能否继续推进，以及不能继续时的下一步操作",
+		Long: "只读查询：不推进工作流、不执行代码保存核验、不修改任何记录。\n" +
+			"结论复用工作流与代码保存的既有判定规则，输出阻塞分类与可直接执行的下一步命令。",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return withTaskServices(
+				cmd.Context(),
+				a,
+				hostConfigPath(cmd),
+				credentialFlags{},
+				hostID,
+				func(ctx context.Context, services taskServices) error {
+					eligibility, newErr := app.NewResumeEligibilityService(
+						app.ResumeEligibilityOptions{
+							Store:      services.store,
+							Containers: services.containers,
+						},
+					)
+					if newErr != nil {
+						return newErr
+					}
+					result, getErr := eligibility.Get(ctx, args[0])
+					if printErr := printResumeEligibility(a, result); printErr != nil {
+						return printErr
+					}
+					return getErr
+				},
+			)
+		},
+	}
+	command.Flags().StringVar(&hostID, "host", "", "执行节点标识，用于收集 SSH 凭据")
+	return command
+}
+
+// printResumeEligibility 输出续跑资格结论。
+func printResumeEligibility(a *app.App, result app.ResumeEligibility) error {
+	if result.TaskID.IsEmpty() {
+		return nil
+	}
+	lines := []string{
+		"任务: " + result.TaskID.String(),
+		"任务状态: " + string(result.TaskStatus),
+	}
+	if result.Run != nil {
+		lines = append(lines,
+			"执行记录: "+result.Run.RunID.String()+" ("+string(result.Run.Status)+")",
+		)
+		if result.Run.ErrorClass != "" {
+			lines = append(lines, "停止分类: "+result.Run.ErrorClass)
+		}
+	} else {
+		lines = append(lines, "执行记录: 无")
+	}
+	if result.CanResume {
+		lines = append(lines, "能否继续: 可以")
+	} else {
+		lines = append(lines, "能否继续: 不可以")
+		lines = append(lines, "阻塞项: "+strings.Join(result.Blocking, ", "))
+	}
+	lines = append(lines, "代码保存结论: "+string(result.CodeSave.Action)+
+		"（"+result.CodeSave.Summary+"）")
+	if len(result.CodeSaveRecords) > 0 {
+		lines = append(lines, "需要处理的代码保存记录:")
+		for _, record := range result.CodeSaveRecords {
+			lines = append(lines, "  - "+record.ID.String()+
+				" 提交="+record.CommitStatus.String()+
+				" 推送="+record.PushStatus.String()+
+				" 合并="+record.MergeStatus.String()+
+				" 记录可信="+record.PersistStatus.Normalized().String()+
+				" 核验="+record.RecoveryStatus.String())
+		}
+	}
+	if len(result.NextActions) > 0 {
+		lines = append(lines, "下一步:")
+		for _, action := range result.NextActions {
+			lines = append(lines, "  - "+action)
+		}
+	}
+	lines = append(lines, "说明: "+result.Summary)
+	_, err := fmt.Fprintln(a.Stdout(), strings.Join(lines, "\n"))
 	return err
 }

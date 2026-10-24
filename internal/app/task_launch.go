@@ -122,6 +122,10 @@ type TaskLaunchStore interface {
 		ctx context.Context,
 		taskID string,
 	) ([]domain.TaskWorkspaceInitRecord, error)
+	// ListContainers 返回容器登记记录，用于"不创建第二个容器"的判定。
+	//
+	// 启动流程只读它：旧容器只能由用户显式 delete / detach，启动不会替用户处置。
+	ListContainers(ctx context.Context, filter domain.ContainerFilter) ([]domain.Container, error)
 }
 
 // TaskLaunchEnvironmentPort 是启动流程对环境准备能力的需求。

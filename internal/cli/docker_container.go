@@ -122,11 +122,14 @@ func newContainerCreateCommand(a *app.App) *cobra.Command {
 // newContainerListCommand 构建 docker container list 子命令。
 func newContainerListCommand(a *app.App) *cobra.Command {
 	var machine string
+	var taskFilter string
 	var includeDetached bool
+	var orphans bool
 	command := &cobra.Command{
 		Use:   "list",
 		Short: "列出受 AgentFlow 管理的容器",
 		Long: "默认只列出仍在自动管理范围内的容器；--include-detached 同时显示已脱离管理的容器。\n" +
+			"--task 按任务过滤，--orphans 只列出「登记了任务关联但不是该任务当前容器」的现场。\n" +
 			"该命令只读取本机登记记录，不连接远程机器。",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -136,7 +139,9 @@ func newContainerListCommand(a *app.App) *cobra.Command {
 			) error {
 				containers, err := service.ListContainers(ctx, app.ListContainersRequest{
 					MachineID:       machine,
+					TaskID:          taskFilter,
 					IncludeDetached: includeDetached,
+					Orphans:         orphans,
 				})
 				if err != nil {
 					return err
@@ -172,7 +177,14 @@ func newContainerListCommand(a *app.App) *cobra.Command {
 		},
 	}
 	command.Flags().StringVar(&machine, "machine", "", "只列出指定执行节点的容器")
+	command.Flags().StringVar(&taskFilter, "task", "", "只列出登记了该任务关联的容器")
 	command.Flags().BoolVar(&includeDetached, "include-detached", false, "同时列出已脱离管理的容器")
+	command.Flags().BoolVar(
+		&orphans,
+		"orphans",
+		false,
+		"只列出登记了任务关联但未被该任务引用的容器（孤儿容器）",
+	)
 	return command
 }
 

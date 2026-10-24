@@ -34,6 +34,10 @@ type launchTaskStore struct {
 	events []domain.EventType
 	// workspaceRecords 是受控的工作区初始化记录集合。
 	workspaceRecords []domain.TaskWorkspaceInitRecord
+	// containers 是受控的容器登记记录集合。
+	//
+	// 空集合表示该任务没有需要先处置的旧容器；非空时启动流程拒绝创建新容器。
+	containers []domain.Container
 }
 
 // GetTask 返回当前任务记录。
@@ -152,6 +156,19 @@ func (s *launchTaskStore) ListTaskWorkspaceInitsByTask(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]domain.TaskWorkspaceInitRecord(nil), s.workspaceRecords...), nil
+}
+
+// ListContainers 返回受控的容器登记记录。
+//
+// 默认返回空集合，表示该任务没有需要先处置的旧容器；用例可以设置
+// containers 构造"仍有未处置容器"的现场。
+func (s *launchTaskStore) ListContainers(
+	ctx context.Context,
+	filter domain.ContainerFilter,
+) ([]domain.Container, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]domain.Container(nil), s.containers...), nil
 }
 
 // launchEnvironment 是环境准备的替身。

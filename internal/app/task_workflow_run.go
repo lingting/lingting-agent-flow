@@ -435,10 +435,13 @@ func (s *TaskWorkflowService) recordTaskCancelIntent(ctx context.Context, taskID
 // 优先返回未结束的执行记录；没有未结束记录时返回最近一次执行记录，使"上一次为什么
 // 停止"仍然可查询。任务从未启动过工作流时 HasRun 为 false，接口返回真实空状态。
 //
-// 读取顺序固定为"执行记录 → 步骤 → 任务"，不能反过来：收尾阶段先写任务终态、
-// 再写执行记录终态，若先读任务再读执行记录，一次正在完成的收尾会被读成
-// "任务仍在 saving、执行记录已 completed"这种不可能同时成立的组合。按此顺序
-// 读取时，看到的执行记录状态一定不新于随后读到的任务与步骤状态。
+// 读取顺序固定为"执行记录 → 步骤 → 任务"。收尾的写入顺序是"先执行记录、后任务"
+// （执行记录的条件写入是栅栏），因此一次正在完成的收尾可能被读成"执行记录已
+// completed、任务仍在 saving"——这是收尾协议下**合法**的中间状态，不是矛盾。
+//
+// 关键是调用方不得由执行记录的状态推断任务是否成功：任务结论只能看 task_status
+// 与 final_result，或看派生的 closeout 字段（confirmed / pending / unconfirmed /
+// inconsistent）。
 func (s *TaskWorkflowService) GetWorkflowStatus(
 	ctx context.Context,
 	taskID string,

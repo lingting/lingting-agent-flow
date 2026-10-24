@@ -40,6 +40,12 @@ type Deps struct {
 	CodeInitialize *app.CodeInitializeService
 	// TaskLaunch 是统一任务启动服务，为空时启动接口返回服务不可用。
 	TaskLaunch *app.TaskLaunchService
+	// Containers 是容器服务，提供代码保存的只读核验能力。
+	//
+	// 为空时核验接口返回服务不可用，而不是伪造"核验已通过"。
+	Containers *app.ContainerService
+	// ResumeEligibility 计算任务的续跑资格，为空时该接口返回服务不可用。
+	ResumeEligibility *app.ResumeEligibilityService
 	// Logger 是日志器，为空时使用 slog.Default。
 	Logger *slog.Logger
 }
@@ -54,17 +60,19 @@ func NewHandler(deps Deps) http.Handler {
 		logger = slog.Default()
 	}
 	router := &router{
-		health:     deps.Health,
-		systemInfo: deps.SystemInfo,
-		tasks:      newTaskHandler(deps.Tasks, logger),
-		hosts:      newHostHandler(deps.Hosts, logger),
-		executions: newExecutionHandler(deps.ExecutionRecords, logger),
-		stepExec:   newStepExecutionHandler(deps.StepExecutor, deps.StepWorkflow, logger),
-		workflow:   deps.Workflow,
-		validation: newValidationHandler(deps.Validation, logger),
-		codeInit:   newCodeInitializeHandler(deps.CodeInitialize, logger),
-		taskLaunch: deps.TaskLaunch,
-		logger:     logger,
+		health:            deps.Health,
+		systemInfo:        deps.SystemInfo,
+		tasks:             newTaskHandler(deps.Tasks, logger),
+		hosts:             newHostHandler(deps.Hosts, logger),
+		executions:        newExecutionHandler(deps.ExecutionRecords, logger),
+		stepExec:          newStepExecutionHandler(deps.StepExecutor, deps.StepWorkflow, logger),
+		workflow:          deps.Workflow,
+		validation:        newValidationHandler(deps.Validation, logger),
+		codeInit:          newCodeInitializeHandler(deps.CodeInitialize, logger),
+		taskLaunch:        deps.TaskLaunch,
+		containers:        deps.Containers,
+		resumeEligibility: deps.ResumeEligibility,
+		logger:            logger,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(PathHealth, router.healthHandler)
@@ -81,17 +89,19 @@ func NewHandler(deps Deps) http.Handler {
 
 // router 持有 API 处理器依赖。
 type router struct {
-	health     *app.HealthService
-	systemInfo func() app.SystemInfo
-	tasks      *taskHandler
-	hosts      *hostHandler
-	executions *executionHandler
-	stepExec   *stepExecutionHandler
-	workflow   *app.TaskWorkflowService
-	validation *validationHandler
-	codeInit   *codeInitializeHandler
-	taskLaunch *app.TaskLaunchService
-	logger     *slog.Logger
+	health            *app.HealthService
+	systemInfo        func() app.SystemInfo
+	tasks             *taskHandler
+	hosts             *hostHandler
+	executions        *executionHandler
+	stepExec          *stepExecutionHandler
+	workflow          *app.TaskWorkflowService
+	validation        *validationHandler
+	codeInit          *codeInitializeHandler
+	taskLaunch        *app.TaskLaunchService
+	containers        *app.ContainerService
+	resumeEligibility *app.ResumeEligibilityService
+	logger            *slog.Logger
 }
 
 // tasksHandler 分发任务集合路径与单任务路径的请求。
@@ -154,6 +164,12 @@ func (rt *router) tasksHandler(w http.ResponseWriter, r *http.Request) {
 	// 否则它们会被当作未知子路径返回 404。
 	// 计划生成与工作流动作同样挂在单任务路径之下，必须先于任务处理器判定。
 
+	// 代码保存核验与续跑资格同样挂在单任务路径之下：续跑资格是只读查询，
+	// 核验是幂等的只读动作，两者都必须先于任务处理器判定。
+	if isCodeRecoveryPath(r.URL.Path) {
+		rt.serveCodeRecovery(w, r)
+		return
+	}
 	if matchActionPath(r.URL.Path, planSegment) {
 		rt.servePlan(w, r)
 		return

@@ -52,6 +52,10 @@ type Options struct {
 	CodeInitialize *app.CodeInitializeService
 	// TaskLaunch 是统一任务启动服务，为空时启动接口报告服务不可用。
 	TaskLaunch *app.TaskLaunchService
+	// Containers 是容器服务，提供代码保存的只读核验能力，为空时核验接口报告服务不可用。
+	Containers *app.ContainerService
+	// ResumeEligibility 计算任务的续跑资格，为空时该接口报告服务不可用。
+	ResumeEligibility *app.ResumeEligibilityService
 	// Files 是前端静态资源文件系统，为空时使用嵌入资源。
 	Files fs.FS
 	// RequireWebUI 为 true 时，缺少前端构建产物将导致构造失败。
@@ -90,18 +94,20 @@ func New(options Options) (*Server, error) {
 		timeout = DefaultShutdownTimeout
 	}
 	api := httpapi.NewHandler(httpapi.Deps{
-		Health:           options.Health,
-		SystemInfo:       options.SystemInfo,
-		Tasks:            options.Tasks,
-		Hosts:            options.Hosts,
-		ExecutionRecords: options.ExecutionRecords,
-		StepExecutor:     options.StepExecutor,
-		Validation:       options.Validation,
-		StepWorkflow:     options.StepWorkflow,
-		Workflow:         options.Workflow,
-		CodeInitialize:   options.CodeInitialize,
-		TaskLaunch:       options.TaskLaunch,
-		Logger:           logger,
+		Health:            options.Health,
+		SystemInfo:        options.SystemInfo,
+		Tasks:             options.Tasks,
+		Hosts:             options.Hosts,
+		ExecutionRecords:  options.ExecutionRecords,
+		StepExecutor:      options.StepExecutor,
+		Validation:        options.Validation,
+		StepWorkflow:      options.StepWorkflow,
+		Workflow:          options.Workflow,
+		CodeInitialize:    options.CodeInitialize,
+		TaskLaunch:        options.TaskLaunch,
+		Containers:        options.Containers,
+		ResumeEligibility: options.ResumeEligibility,
+		Logger:            logger,
 	})
 	web, err := buildWebHandler(options.Files, options.RequireWebUI, logger)
 	if err != nil {

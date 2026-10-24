@@ -17,8 +17,12 @@ import (
 type ListContainersRequest struct {
 	// MachineID 限制所属执行节点，空值表示不限制。
 	MachineID string
+	// TaskID 限制登记记录关联的任务，空值表示不限制。
+	TaskID string
 	// IncludeDetached 表示包含已脱离管理的容器。
 	IncludeDetached bool
+	// Orphans 表示只返回"登记了任务关联但未被该任务引用"的容器。
+	Orphans bool
 }
 
 // ListContainers 返回容器登记记录。
@@ -26,13 +30,23 @@ func (s *ContainerService) ListContainers(
 	ctx context.Context,
 	request ListContainersRequest,
 ) ([]domain.Container, error) {
-	filter := domain.ContainerFilter{IncludeDetached: request.IncludeDetached}
+	filter := domain.ContainerFilter{
+		IncludeDetached: request.IncludeDetached,
+		Orphans:         request.Orphans,
+	}
 	if strings.TrimSpace(request.MachineID) != "" {
 		host, err := s.loadHost(ctx, request.MachineID)
 		if err != nil {
 			return nil, err
 		}
 		filter.HostID = host.ID
+	}
+	if raw := strings.TrimSpace(request.TaskID); raw != "" {
+		taskID := domain.ID(raw)
+		if err := taskID.Validate(); err != nil {
+			return nil, fmt.Errorf("查询容器记录失败: %w", err)
+		}
+		filter.TaskID = &taskID
 	}
 	containers, err := s.store.ListContainers(ctx, filter)
 	if err != nil {

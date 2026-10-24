@@ -87,6 +87,14 @@ type ExecutionEnvironmentContainerPort interface {
 	LoadHost(ctx context.Context, hostID string) (domain.ExecutionHost, error)
 }
 
+// ExecutionEnvironmentContainerRecordStore 是执行环境服务对容器登记记录的读取需求。
+//
+// 它只用于"创建新容器之前确认任务没有未处置旧容器"这一条只读判定：
+// 执行环境不修改容器记录，处置仍由 ContainerService 完成。
+type ExecutionEnvironmentContainerRecordStore interface {
+	ListContainers(ctx context.Context, filter domain.ContainerFilter) ([]domain.Container, error)
+}
+
 // ExecutionEnvironmentTaskStore 是执行环境服务对任务记录的读写需求。
 type ExecutionEnvironmentTaskStore interface {
 	GetTask(ctx context.Context, id domain.ID) (*domain.Task, error)
@@ -118,6 +126,10 @@ type ExecutionEnvironmentOptions struct {
 	//
 	// 该字段只用于测试注入受控替身：生产代码始终使用真实存储。
 	Tasks ExecutionEnvironmentTaskStore
+	// ContainerRecords 覆盖容器登记记录读取能力，为空时使用环境服务的存储。
+	//
+	// 该字段只用于测试注入受控替身，并用于验证"不创建第二个容器"的判定。
+	ContainerRecords ExecutionEnvironmentContainerRecordStore
 	// Logger 是日志器，可为空。
 	Logger *logging.Logger
 }
@@ -134,10 +146,11 @@ type ExecutionEnvironmentOptions struct {
 // ContainerService、EnvironmentService 与 docker.Runner 负责。因此 Task Service、
 // Pi Runner 与 Validator 都不需要接触 Docker CLI。
 type ExecutionEnvironmentService struct {
-	images     ExecutionEnvironmentImagePort
-	containers ExecutionEnvironmentContainerPort
-	tasks      ExecutionEnvironmentTaskStore
-	logger     *logging.Logger
+	images           ExecutionEnvironmentImagePort
+	containers       ExecutionEnvironmentContainerPort
+	tasks            ExecutionEnvironmentTaskStore
+	containerRecords ExecutionEnvironmentContainerRecordStore
+	logger           *logging.Logger
 }
 
 // NewExecutionEnvironmentService 构造远程 Docker 执行环境服务。
@@ -151,10 +164,11 @@ func NewExecutionEnvironmentService(
 		return nil, fmt.Errorf("执行环境服务初始化失败: 容器服务不能为空")
 	}
 	service := &ExecutionEnvironmentService{
-		images:     options.Images,
-		containers: options.ContainerPort,
-		tasks:      options.Tasks,
-		logger:     options.Logger,
+		images:           options.Images,
+		containers:       options.ContainerPort,
+		tasks:            options.Tasks,
+		containerRecords: options.ContainerRecords,
+		logger:           options.Logger,
 	}
 	if service.images == nil {
 		service.images = environmentImagePort{service: options.Environments}
@@ -163,12 +177,31 @@ func NewExecutionEnvironmentService(
 		service.containers = containerServicePort{service: options.Containers}
 	}
 	if service.tasks == nil {
-		if options.Environments.store == nil {
+		store := environmentStore(options.Environments)
+		if store == nil {
 			return nil, fmt.Errorf("执行环境服务初始化失败: 存储不能为空")
 		}
-		service.tasks = taskStorePort{store: options.Environments.store}
+		service.tasks = taskStorePort{store: store}
+	}
+	if service.containerRecords == nil {
+		if store := environmentStore(options.Environments); store != nil {
+			service.containerRecords = containerRecordStorePort{store: store}
+		}
+		// 存储缺失时保持为空：调用方（真实服务）总能拿到存储，测试可以显式注入
+		// 受控替身；两者都缺失时跳过"旧容器"判定，由容器核验阶段报出更具体的错误。
 	}
 	return service, nil
+}
+
+// environmentStore 安全地取出环境服务的存储。
+//
+// EnvironmentService 通过嵌入的 *remoteDockerService 暴露 store，嵌入指针为空时
+// 直接访问会 panic；这里把它收敛成一次判空，避免构造阶段出现空指针崩溃。
+func environmentStore(service *EnvironmentService) storage.Store {
+	if service == nil || service.remoteDockerService == nil {
+		return nil
+	}
+	return service.store
 }
 
 // containerServicePort 把 ContainerService 适配为执行环境的容器端口。
@@ -273,10 +306,24 @@ func (p taskStorePort) AppendEvent(
 	return p.store.AppendEvent(ctx, event)
 }
 
+// containerRecordStorePort 把 storage.Store 适配为容器登记记录只读端口。
+type containerRecordStorePort struct {
+	store storage.Store
+}
+
+// ListContainers 按筛选条件读取容器登记记录。
+func (p containerRecordStorePort) ListContainers(
+	ctx context.Context,
+	filter domain.ContainerFilter,
+) ([]domain.Container, error) {
+	return p.store.ListContainers(ctx, filter)
+}
+
 // 编译期确认适配器满足执行环境契约。
 var _ execenv.Provider = (*ExecutionEnvironmentService)(nil)
 var _ ExecutionEnvironmentContainerPort = containerServicePort{}
 var _ ExecutionEnvironmentTaskStore = taskStorePort{}
+var _ ExecutionEnvironmentContainerRecordStore = containerRecordStorePort{}
 
 // Kind 返回该服务实现的执行环境类型。
 func (s *ExecutionEnvironmentService) Kind() execenv.Kind {

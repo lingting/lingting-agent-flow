@@ -10,7 +10,9 @@
 > P2-M1 已在 HEAD `7a55dfe` 之后按实际核实与文档改动更新（结论见
 > [`P2-M1-recovery-boundaries.md`](./P2-M1-recovery-boundaries.md)）；
 > P2-M3 已在 HEAD `2a1bb0d` 之后按实际实施更新（结论见
-> [`P2-reliability-recovery.md`](./P2-reliability-recovery.md) 的 M3 详情）。
+> [`P2-reliability-recovery.md`](./P2-reliability-recovery.md) 的 M3 详情）；
+> P2-M4 已在 HEAD `168fd2f` 之后、P2-M5 已在 HEAD `40460d4` 之后按实际实施更新
+> （结论见同一文件的 M4 / M5 详情）。
 
 ## 项目最终业务目标
 
@@ -38,11 +40,24 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 
 ## 当前实现状态摘要（基于代码证据）
 
-> **当前阶段：P2 进行中**（P1 全部里程碑于 2026-10-23 完成；P2-M1 于 2026-10-23 完成，
-> P2-M2 于 2026-10-24 完成，P2-M3 于 2026-10-24 完成，P2-M4 于 2026-10-25 完成）。P1 证据见
+> **当前阶段：P2 已完成，待进入 P3**（P1 全部里程碑于 2026-10-23 完成；P2-M1 于 2026-10-23 完成，
+> P2-M2 于 2026-10-24 完成，P2-M3 于 2026-10-24 完成，P2-M4 于 2026-10-25 完成，
+> **P2-M5 于 2026-10-25 完成**）。P1 证据见
 > `P1-single-task-e2e.md` 的对应"完成记录"；P2-M1 证据见
 > `P2-M1-recovery-boundaries.md`；P2-M2 证据见 `P2-M2-interruption-semantics.md`；
 > P2-M3 与 P2-M4 证据见 `P2-reliability-recovery.md` 的对应里程碑详情。
+>
+> P2-M5 的核实结论：本轮审查发现并修复了 **3 个阻塞级**与 **4 个高风险**恢复缺陷——
+> C1（任务卡在 `verifying`/`saving` 后既不能启动也不能恢复）、C2（收尾先写任务后写
+> 执行记录，`completed` 又是终态，导致收尾失败不可恢复）、C3（丢失执行权仍可写任务
+> 成功）、H1（`container.state=unknown` 死胡同）、H2（容器不可用即新建第二个容器）、
+> H3（`code_fetches` 无活跃唯一约束与收敛路径）、H4（工作区恢复的冲突分支是死代码）。
+> 修复方式：收尾写入顺序改为"先执行记录、后任务"并用条件写入做栅栏；新增
+> `recoverStalledDelivery` 收敛停滞任务；新增 `app.ContainerRecoveryService` 与
+> `app.CodeFetchRecoveryService`；`VerifyCodeSave` 在容器缺失时降级为 `unverifiable`
+> 并落盘；任务 API 新增 `final_result` / `closeout` 让"结论存疑"可被看到。
+> 证据：`tests/integration/local/{workflow,execenv,fetcher}/` 的新增用例与
+> `go test -count=1 ./tests/...` → 1885 passed / 0 failed。
 >
 > P2-M4 的核实结论：外部副作用的恢复此前有三类真实断点——(1) "记录写入失败"只标记在内存
 > 记录上，数据库停留在看似可信的 `pending`，重启后无法区分"没发生"与"已发生但没记下来"；
@@ -215,15 +230,16 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - 多任务调度队列、有界并发与任务领取。
 - 私有仓库的 Git 凭据支持：`source.GitCredentialProvider` 与 `codesaver.GitCredentialProvider`
   均无实现，真实链路上私有仓库必然失败（已记录的架构决策，需凭据存储设计与安全评审）。
-- **五类执行残留的收敛路径**（P2-M1 核实，见 `P2-M1-recovery-boundaries.md` §3.4）：
-  `attempts` 停在 `running`、`sessions` 停在 `running`/`starting`（`SessionService.Fail`
-  无生产调用者）、`validation_runs` 停在 `pending`/`running`、Attempt 级 `code_fetches`
-  残留、`container.state=unknown` 与"已创建但未关联任务"的孤儿容器。
-- **外部副作用的自动恢复入口**：P2-M4 已交付恢复入口前置门控与启动扫描可发现性，
-  但 `code verify` 仍只有 CLI 手工入口，`recovery_required` 之后没有"核验并继续"的
-  自动编排能力。改用例覆盖仍属 P2-M5。
-- **merge 恢复的真实远程证据**：`docker.remote_enabled` 未启用，merge 恢复判定目前只有
-  本机真实 Git（bare 远程）证据。
+- **~~五类执行残留的收敛路径~~**（P2-M1 记录，见 `P2-M1-recovery-boundaries.md` §3.4）：
+  `attempts` / `sessions` / `validation_runs` 已在 P2-M2 收敛；Attempt 级 `code_fetches`
+  与 `container.state=unknown`、孤儿容器已在 **P2-M5** 收敛。
+- **外部副作用的自动恢复入口**：P2-M4 交付前置门控与启动扫描，P2-M5 补齐了
+  HTTP `verify-code-save` 入口与 `resume-eligibility` 查询（CLI `task resume-status`），
+  使用户能拿到"哪条记录、下一步做什么"。**仍不自动重放**：核验与恢复推进都需要用户
+  显式触发，这是刻意保留的边界。
+- **容器残留与 merge 恢复的真实远程证据**：P2-M5 的容器 `unknown` / 孤儿收敛与 merge
+  恢复判定只有本地受控端口 + 本机真实 Git 的证据，缺少真实远程 Docker 上的现场注入。
+  P2 退出条件据此仍需在真实远程环境复核这一类行为。
 
 **待调查**：
 
@@ -320,5 +336,6 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - [P1-single-task-e2e.md](./P1-single-task-e2e.md)
 - [P2-reliability-recovery.md](./P2-reliability-recovery.md)
 - [P2-M1-recovery-boundaries.md](./P2-M1-recovery-boundaries.md)
+- [P2-M5-closeout-protocol.md](./P2-M5-closeout-protocol.md)
 - [P3-multi-task-scheduling.md](./P3-multi-task-scheduling.md)
 - [P4-product-experience-optimization.md](./P4-product-experience-optimization.md)

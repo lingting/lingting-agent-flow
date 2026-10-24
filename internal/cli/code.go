@@ -32,6 +32,7 @@ func newCodeCommand(a *app.App) *cobra.Command {
 	command.AddCommand(newCodeMergeCommand(a))
 	command.AddCommand(newCodeStatusCommand(a))
 	command.AddCommand(newCodeVerifyCommand(a))
+	command.AddCommand(newCodeFetchVerifyCommand(a))
 	command.PersistentFlags().String(
 		"config",
 		"",

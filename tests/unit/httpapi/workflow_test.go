@@ -400,7 +400,14 @@ func (f *taskWorkflowAPIFixture) waitSettled(t *testing.T) httpapi.WorkflowStatu
 		polls++
 		if last.HasRun && last.Run != nil {
 			switch last.Run.Status {
-			case "completed", "cancelled", "failed", "blocked", "recovery_required":
+			case "completed":
+				// 收尾的写入顺序是"先执行记录、后任务"：执行记录写成 completed 之后，
+				// 任务的成功终态才写入。任务仍在推进说明第二步还没落盘，需要继续等待。
+				if last.TaskStatus != string(domain.TaskStatusVerifying) &&
+					last.TaskStatus != string(domain.TaskStatusSaving) {
+					return last
+				}
+			case "cancelled", "failed", "blocked", "recovery_required":
 				return last
 			}
 		}

@@ -333,8 +333,17 @@ func (s *TaskWorkflowService) Start(ctx context.Context) error {
 	if err := s.recoverCancellationIntents(ctx); err != nil {
 		return err
 	}
-	// 计划生成的现场同样在启动时收敛：停留在 planning 的任务不能仅凭状态就再次
-	// 调用 Planner，必须先按持久化事实判断上一轮到底走到哪一步。
+	// 收尾停滞现场必须在执行记录收敛之后处理：此时"执行记录是否已完成"才是
+	// 可靠证据，任务能否收口只能据此决定。它排在计划生成之前，因为停滞在
+	// verifying / saving 的任务不涉及计划生成。
+	if err := s.recoverStalledDelivery(ctx); err != nil {
+		return err
+	}
+	// 遗留的不一致现场只做只读报告：completed 是任务终态，恢复不得改写它，
+	// 但必须让用户看见"任务被标记为成功、执行记录却没有确认完成"的现场。
+	if err := s.reportCloseoutInconsistencies(ctx); err != nil {
+		return err
+	}
 	if err := s.recoverPlanGeneration(ctx); err != nil {
 		return err
 	}

@@ -124,6 +124,14 @@ func (s *startAPITaskStore) ListTaskWorkspaceInitsByTask(
 	}, nil
 }
 
+// ListContainers 返回空集合，表示该任务没有需要先处置的旧容器。
+func (s *startAPITaskStore) ListContainers(
+	ctx context.Context,
+	filter domain.ContainerFilter,
+) ([]domain.Container, error) {
+	return nil, nil
+}
+
 // startAPIWorkspace 是任务级工作区初始化的替身。
 //
 // 默认报告"已就绪"，使既有用例继续覆盖计划与工作流阶段。

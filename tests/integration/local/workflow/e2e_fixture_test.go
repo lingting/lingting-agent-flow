@@ -595,7 +595,15 @@ func (f *e2eFixture) settle(t *testing.T) app.WorkflowStatusResult {
 		}
 		last = result
 		if result.HasRun && e2eSettled(result.Run.Status) {
-			return result
+			// 收尾的写入顺序是"先执行记录、后任务"：执行记录写成 completed 之后，
+			// 任务的成功终态才写入。只有这一步追加等待，因为它是协议规定的必然后续；
+			// 停止类结论不会改写任务，因此不能在这里等任务状态变化。
+			// 任务仍在推进（verifying / saving）说明收尾的第二半步还没落盘；
+			// 一旦任务离开活动状态（已完成或已收敛为待核验），现场就稳定了。
+			if result.Run.Status != domain.WorkflowRunCompleted ||
+				!result.TaskStatus.IsActive() {
+				return result
+			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

@@ -550,10 +550,20 @@ func DockerStateRemovedOrUnknown(current DockerContainerState) DockerContainerSt
 type ContainerFilter struct {
 	// HostID 限制容器所属节点。
 	HostID ID
+	// TaskID 限制容器登记记录关联的任务。
+	//
+	// 它用于"按任务查找该任务的容器代次"：任务记录的 container_id 只保存当前
+	// 一代，历史代次（重新开始时被 detach 或删除的容器）只能从这里查到。
+	TaskID *ID
 	// States 限制管理状态，为空表示不限制。
 	States []ContainerState
 	// IncludeDetached 表示是否包含已脱离管理的容器。
 	IncludeDetached bool
+	// Orphans 表示只返回"登记了任务关联但未被该任务引用"的容器。
+	//
+	// 孤儿容器是"创建成功、写回任务失败"的现场：它属于某个任务，却不是该任务
+	// 当前使用的容器。这类记录必须可被发现，但不得被自动删除或重新关联。
+	Orphans bool
 	// Limit 限制返回条数，小于等于 0 表示不限制。
 	Limit int
 }

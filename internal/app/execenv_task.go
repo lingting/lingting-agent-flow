@@ -70,6 +70,12 @@ func (s *ExecutionEnvironmentService) PrepareForTask(
 		}
 		versionNumber = parsed
 	}
+	// 创建新容器之前必须确认任务没有仍受管理的旧容器记录：容器停止、状态不明或
+	// 残留（孤儿）时直接建第二个容器，会让第一代容器变成永远不会被回收的孤儿，
+	// 同时把两代容器的工作区混进同一条任务链。旧容器只能由用户显式 delete / detach。
+	if err := s.ensureNoPendingContainer(ctx, task); err != nil {
+		return execenv.Prepared{}, err
+	}
 	spec := execenv.PrepareSpec{
 		HostID:               task.HostID.String(),
 		Environment:          task.Config.Environment,
@@ -240,4 +246,77 @@ func (s *ExecutionEnvironmentService) recordOrphanContainer(
 			slog.String("error", errorSummary(appendErr)),
 		)
 	}
+}
+
+// ensureNoPendingContainer 确认任务没有仍受管理的旧容器记录。
+//
+// 允许创建新容器的唯一前提是"任务没有任何可能存在的容器"，或那些容器已被
+// 显式处置（detached / removed）。其余情况必须先由用户处置旧容器：
+//   - 停止的容器：它的工作区可能仍保存着未推送的代码，直接丢弃会覆盖现场；
+//   - 状态不明（unknown / creating）的容器：远程可能仍然存在，新容器会让两代
+//     容器同时存在，任务关联只能指向其中一个；
+//   - 孤儿容器（登记了任务关联但未被任务引用）：它的工作区状态未知。
+//
+// 判定只读：本方法不修改任何状态，也不执行远程操作。
+func (s *ExecutionEnvironmentService) ensureNoPendingContainer(
+	ctx context.Context,
+	task domain.Task,
+) error {
+	blocking, err := s.pendingContainerRecords(ctx, task)
+	if err != nil {
+		return err
+	}
+	if len(blocking) == 0 {
+		return nil
+	}
+	first := blocking[0]
+	return fmt.Errorf(
+		"%w: 任务 %s 仍有未处置的容器记录 %s（状态 %s），"+
+			"请先执行 agentflow docker container inspect %s 核验现场，"+
+			"再显式 delete 或 detach 后再重新准备执行环境",
+		execenv.ErrStateUncertain,
+		task.ID,
+		first.ID,
+		first.State,
+		first.ID,
+	)
+}
+
+// pendingContainerRecords 返回阻止创建新容器的容器记录。
+//
+// 它把"任务当前使用的容器"与"登记了任务关联但未被引用的容器"一并纳入判断，
+// 因为两者都可能是真实存在的现场。
+func (s *ExecutionEnvironmentService) pendingContainerRecords(
+	ctx context.Context,
+	task domain.Task,
+) ([]domain.Container, error) {
+	if s.containerRecords == nil {
+		// 无容器查询能力时不做该判定：调用方仍会在容器核验阶段得到更具体的错误。
+		return nil, nil
+	}
+	current := strings.TrimSpace(task.ContainerID)
+	pending := make([]domain.Container, 0, 2)
+	records, err := s.containerRecords.ListContainers(ctx, domain.ContainerFilter{
+		TaskID: &task.ID,
+		// 只关心仍可能存在的容器：已删除与已脱离管理的容器不阻止新容器。
+		IncludeDetached: false,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("读取任务 %s 的容器记录失败: %w", task.ID, err)
+	}
+	for _, container := range records {
+		if container.State == domain.ContainerStateRemoved ||
+			container.State == domain.ContainerStateDetached ||
+			container.Detached {
+			continue
+		}
+		if current != "" && container.ID.String() == current {
+			// 任务当前使用的容器由调用方的可用性判定负责：它不可用时同样不允许
+			// 直接新建，因此一并视为阻止项。
+			pending = append(pending, container)
+			continue
+		}
+		pending = append(pending, container)
+	}
+	return pending, nil
 }

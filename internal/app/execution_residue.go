@@ -131,11 +131,24 @@ func (s *ExecutionResidueService) Stop(ctx context.Context) error {
 // Session 残留（进程在创建 WorkflowRun 之前就退出），它们没有任何执行者，必须被
 // 收敛。用"不在集合里"表达"可以收敛"，覆盖了这两种情况。
 func (s *ExecutionResidueService) liveTasks(ctx context.Context) (map[domain.ID]struct{}, error) {
-	runs, err := s.store.ListUnfinishedWorkflowRuns(ctx)
+	return liveExecutionTasks(ctx, s.store, s.now())
+}
+
+// liveExecutionTasks 返回"仍有执行者持有有效执行权"的任务标识集合。
+//
+// 它是"能否安全收敛残留"的唯一判据来源，供所有残留收敛入口复用：
+// ExecutionResidueService 用它收敛 Attempt / Session / ValidationRun，
+// CodeFetchRecoveryService 用它收敛 Attempt 级代码获取记录。两处各写一套判定会让
+// "任务是否还有执行者"出现第二种解释，进而导致一个服务抢占另一个服务正在处理的现场。
+func liveExecutionTasks(
+	ctx context.Context,
+	store unfinishedWorkflowRunLister,
+	now time.Time,
+) (map[domain.ID]struct{}, error) {
+	runs, err := store.ListUnfinishedWorkflowRuns(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("读取未结束执行记录失败: %w", err)
 	}
-	now := s.now()
 	live := make(map[domain.ID]struct{}, len(runs))
 	for _, run := range runs {
 		if run.Status != domain.WorkflowRunRunning {
@@ -148,6 +161,11 @@ func (s *ExecutionResidueService) liveTasks(ctx context.Context) (map[domain.ID]
 		live[run.TaskID] = struct{}{}
 	}
 	return live, nil
+}
+
+// unfinishedWorkflowRunLister 是读取未结束执行记录的最小存储能力。
+type unfinishedWorkflowRunLister interface {
+	ListUnfinishedWorkflowRuns(ctx context.Context) ([]domain.WorkflowRun, error)
 }
 
 // recoverValidationRuns 收敛残留的验证记录。

@@ -3,9 +3,11 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 
 	"github.com/lingting/agentflow/internal/domain"
+	"github.com/lingting/agentflow/internal/storage"
 )
 
 // containerColumns 是容器表的完整列顺序。
@@ -51,15 +53,62 @@ func (s containerStore) UpdateContainer(ctx context.Context, container domain.Co
 	if err := container.Validate(); err != nil {
 		return err
 	}
-	const statement = `
+	statement := `
 UPDATE containers SET
 	docker_id = ?, state = ?, docker_state = ?, started_at = ?, finished_at = ?,
 	end_reason = ?, detached = ?, detached_at = ?, synced_at = ?,
 	error_summary = ?, updated_at = ?
 WHERE id = ?`
-	result, err := s.q.ExecContext(
-		ctx,
-		statement,
+	result, err := s.q.ExecContext(ctx, statement, containerUpdateArgs(container)...)
+	if err != nil {
+		return wrapError("更新容器记录", err)
+	}
+	return ensureAffected(result, "容器", container.ID)
+}
+
+// UpdateContainerIfState 在数据库中的管理状态仍属于 expected 时写入容器记录。
+//
+// 恢复与收敛路径必须使用本方法：两个实例同时核验同一容器时，只有先完成写入的一方
+// 生效，后者按 storage.ErrConflict 返回并重新读取真实记录，而不是用本地副本覆盖
+// 已经收敛的结论。
+func (s containerStore) UpdateContainerIfState(
+	ctx context.Context,
+	container domain.Container,
+	expected []domain.ContainerState,
+) error {
+	if err := container.Validate(); err != nil {
+		return err
+	}
+	if len(expected) == 0 {
+		return wrapError(
+			"条件更新容器记录",
+			errors.Join(storage.ErrInvalidData, errors.New("期望状态集合不能为空")),
+		)
+	}
+	conditions := make([]string, 0, len(expected))
+	args := containerUpdateArgs(container)
+	for _, state := range expected {
+		conditions = append(conditions, "?")
+		args = append(args, state.String())
+	}
+	statement := `
+UPDATE containers SET
+	docker_id = ?, state = ?, docker_state = ?, started_at = ?, finished_at = ?,
+	end_reason = ?, detached = ?, detached_at = ?, synced_at = ?,
+	error_summary = ?, updated_at = ?
+WHERE id = ? AND state IN (` + strings.Join(conditions, ", ") + `)`
+	result, err := s.q.ExecContext(ctx, statement, args...)
+	if err != nil {
+		return wrapError("条件更新容器记录", err)
+	}
+	return ensureStatusAffected(result, "容器", container.ID)
+}
+
+// containerUpdateArgs 构造更新容器的参数列表。
+//
+// 顺序必须与 UpdateContainer / UpdateContainerIfState 的 SET 子句完全一致。
+func containerUpdateArgs(container domain.Container) []any {
+	return []any{
 		nullIfBlank(container.DockerID),
 		container.State.String(),
 		container.DockerState.String(),
@@ -72,11 +121,7 @@ WHERE id = ?`
 		nullIfBlank(container.ErrorSummary),
 		toMillis(container.UpdatedAt),
 		toIDParam(container.ID),
-	)
-	if err != nil {
-		return wrapError("更新容器记录", err)
 	}
-	return ensureAffected(result, "容器", container.ID)
 }
 
 // containerArgs 构造写入容器的参数列表。
@@ -147,11 +192,15 @@ func (s containerStore) ListContainers(
 ) ([]domain.Container, error) {
 	var builder strings.Builder
 	builder.WriteString(`SELECT ` + containerColumns + ` FROM containers`)
-	conditions := make([]string, 0, 3)
+	conditions := make([]string, 0, 4)
 	args := make([]any, 0, 8)
 	if !filter.HostID.IsEmpty() {
 		conditions = append(conditions, `host_id = ?`)
 		args = append(args, filter.HostID.String())
+	}
+	if filter.TaskID != nil {
+		conditions = append(conditions, `task_id = ?`)
+		args = append(args, filter.TaskID.String())
 	}
 	if len(filter.States) > 0 {
 		conditions = append(conditions, `state IN (`+placeholders(len(filter.States))+`)`)
@@ -161,6 +210,13 @@ func (s containerStore) ListContainers(
 	}
 	if !filter.IncludeDetached {
 		conditions = append(conditions, `detached = 0`)
+	}
+	if filter.Orphans {
+		// 孤儿容器的判据只表达"登记了任务关联，但不是该任务当前使用的容器"：
+		// 它既不推断容器是否可用，也不决定如何处置，避免在查询层混入业务规则。
+		conditions = append(conditions, `task_id IS NOT NULL AND NOT EXISTS (
+			SELECT 1 FROM tasks WHERE tasks.id = containers.task_id
+				AND tasks.container_id = containers.id)`)
 	}
 	appendConditions(&builder, conditions)
 	builder.WriteString(` ORDER BY created_at, id`)

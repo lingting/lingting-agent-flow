@@ -3,9 +3,11 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 
 	"github.com/lingting/agentflow/internal/domain"
+	"github.com/lingting/agentflow/internal/storage"
 )
 
 // taskWorkspaceInitColumns 是任务级工作区初始化记录表的完整列顺序。
@@ -49,16 +51,65 @@ func (s taskWorkspaceInitStore) UpdateTaskWorkspaceInit(
 	if err := record.Validate(); err != nil {
 		return err
 	}
-	const statement = `
+	statement := `
 UPDATE task_workspace_initializations SET
 	container_id = ?, docker_id = ?, source_type = ?, repository = ?, work_dir = ?,
 	base_branch = ?, base_selection = ?, base_commit = ?, task_branch = ?,
 	task_branch_source = ?, commit_sha = ?, status = ?, stage = ?, error_code = ?,
 	error_summary = ?, started_at = ?, finished_at = ?, updated_at = ?
 WHERE id = ?`
-	result, err := s.q.ExecContext(
-		ctx,
-		statement,
+	result, err := s.q.ExecContext(ctx, statement, taskWorkspaceInitUpdateArgs(record)...)
+	if err != nil {
+		return wrapError("更新工作区初始化记录", err)
+	}
+	return ensureAffected(result, "工作区初始化记录", record.ID)
+}
+
+// UpdateTaskWorkspaceInitIfStatus 在数据库中的状态仍属于 expected 时写入记录。
+//
+// 恢复与收敛路径必须使用本方法：`pending` / `running` 的记录可能被多个实例同时
+// 观测，只有先完成写入的一方生效，后者按 storage.ErrConflict 返回并重新读取真实
+// 记录。此前的无条件更新会让"冲突按已完成处理"的分支变成死代码，后写入者会覆盖
+// 已经收敛的结论。
+func (s taskWorkspaceInitStore) UpdateTaskWorkspaceInitIfStatus(
+	ctx context.Context,
+	record domain.TaskWorkspaceInitRecord,
+	expected []domain.TaskWorkspaceInitStatus,
+) error {
+	if err := record.Validate(); err != nil {
+		return err
+	}
+	if len(expected) == 0 {
+		return wrapError(
+			"条件更新工作区初始化记录",
+			errors.Join(storage.ErrInvalidData, errors.New("期望状态集合不能为空")),
+		)
+	}
+	conditions := make([]string, 0, len(expected))
+	args := taskWorkspaceInitUpdateArgs(record)
+	for _, status := range expected {
+		conditions = append(conditions, "?")
+		args = append(args, status.String())
+	}
+	statement := `
+UPDATE task_workspace_initializations SET
+	container_id = ?, docker_id = ?, source_type = ?, repository = ?, work_dir = ?,
+	base_branch = ?, base_selection = ?, base_commit = ?, task_branch = ?,
+	task_branch_source = ?, commit_sha = ?, status = ?, stage = ?, error_code = ?,
+	error_summary = ?, started_at = ?, finished_at = ?, updated_at = ?
+WHERE id = ? AND status IN (` + strings.Join(conditions, ", ") + `)`
+	result, err := s.q.ExecContext(ctx, statement, args...)
+	if err != nil {
+		return wrapError("条件更新工作区初始化记录", err)
+	}
+	return ensureStatusAffected(result, "工作区初始化记录", record.ID)
+}
+
+// taskWorkspaceInitUpdateArgs 构造更新记录时的参数列表。
+//
+// 顺序必须与 UpdateTaskWorkspaceInit / UpdateTaskWorkspaceInitIfStatus 的 SET 子句一致。
+func taskWorkspaceInitUpdateArgs(record domain.TaskWorkspaceInitRecord) []any {
+	return []any{
 		record.ContainerID,
 		nullIfBlank(record.DockerID),
 		record.SourceType.String(),
@@ -78,11 +129,7 @@ WHERE id = ?`
 		toMillisPtr(record.FinishedAt),
 		toMillis(record.UpdatedAt),
 		toIDParam(record.ID),
-	)
-	if err != nil {
-		return wrapError("更新工作区初始化记录", err)
 	}
-	return ensureAffected(result, "工作区初始化记录", record.ID)
 }
 
 // taskWorkspaceInitArgs 构造写入记录时的参数列表。

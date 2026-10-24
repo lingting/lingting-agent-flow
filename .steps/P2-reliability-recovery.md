@@ -2,6 +2,7 @@
 
 > 撰写依据：`master` HEAD `7a55dfe` 的真实代码与测试状态；P2-M1 已按实际核实更新。
 > 完整恢复边界矩阵见 [`P2-M1-recovery-boundaries.md`](./P2-M1-recovery-boundaries.md)，
+> 任务收尾一致性协议见 [`P2-M5-closeout-protocol.md`](./P2-M5-closeout-protocol.md)，
 > 本文档只保留阶段目标、里程碑边界与移交结论。
 
 ## 阶段目标
@@ -108,7 +109,7 @@ P2 主要补齐更系统的恢复语义与恢复验收。
 | P2-M2 | 明确超时、取消、中断、进程重启后的恢复语义 | `completed` | P2-M1 |
 | P2-M3 | 明确修复次数上限、停止条件、重试资格和结果不确定处理规则 | `completed` | P2-M1 |
 | P2-M4 | 核验提交、推送、合并等外部副作用的恢复路径 | `completed` | P2-M2 |
-| P2-M5 | 补齐关键恢复场景的集成测试与恢复验收 | `pending` | P2-M2、P2-M3、P2-M4 |
+| P2-M5 | 补齐关键恢复场景的集成测试与恢复验收 | `completed` | P2-M2、P2-M3、P2-M4 |
 
 ## 阶段退出条件
 
@@ -380,7 +381,8 @@ P2 主要补齐更系统的恢复语义与恢复验收。
 ### P2-M5 补齐关键恢复场景的集成测试与恢复验收
 
 - **ID**：`P2-M5`
-- **状态**：`pending`
+- **状态**：`completed`（2026-10-25，基于 `master` HEAD `40460d4` 实施与核实；
+  真实远程 merge / 容器残留证据仍缺，见文末"剩余风险"）
 - **必要性**：恢复语义必须靠真实持久化事实验证，不能只靠方法返回值。
 - **当前证据**：`tests/integration/local/workflow/recovery_test.go`（11 个用例）、
   `tests/integration/local/codesaver/`（4 个恢复用例，真实 Git）、
@@ -398,3 +400,176 @@ P2 主要补齐更系统的恢复语义与恢复验收。
   见 `ROADMAP.md`），否则"服务关闭中断"这一窗口的测试证据不可靠。
 - **目标结果**：覆盖矩阵与集成测试证据，结果如实区分通过/失败/跳过/未执行。
 - **完成定义**：关键恢复场景均有可复核的测试产物与结论。
+
+#### 实施前审查发现的生产缺陷（均已修复）
+
+审查基于 `master` HEAD `40460d4` 的真实代码，逐项核对 `internal/app`、`internal/domain`、
+`internal/storage/sqlite`、`internal/server/server.go` 与 `tests/`。发现 **3 个阻塞级**与
+**4 个高风险**缺陷，其中 C1、C3、H2、H4 此前未被任何文档记录。
+
+| ID | 级别 | 缺陷 | 证据（修复前） |
+|---|---|---|---|
+| C1 | 阻塞 | 任务停在 `verifying` / `saving` 后**永久无法继续**：这两个状态既不在 `CheckTaskLaunchStart` 的准入集合，也不在 `TaskStatus.AllowsStepExecution`，而 `recoverUnfinished` 只收敛执行记录、不改写任务 | `internal/domain/task_launch.go`、`internal/domain/step_execution.go`、`internal/app/task_workflow_run.go` |
+| C2 | 阻塞 | 收尾顺序先写任务后写执行记录，且 `completed` 是终态 → 收尾失败**不可恢复**，留下"任务成功 + 执行记录需核验" | `internal/app/task_workflow_exec.go` `applyCloseout` |
+| C3 | 阻塞 | 丢失执行权的执行者仍可写 `tasks.completed`：`completeTask` 使用 `context.WithoutCancel`，写入前不再检查租约 | 同上 |
+| H1 | 高 | `container.state=unknown` 是死胡同：`markUnknown` 写入后无任何调用方推进 | `internal/app/containers.go`、`internal/domain/container.go` |
+| H2 | 高 | 容器不可用即无条件新建第二个容器（停止 / 未知 / 孤儿都触发） | `internal/app/task_launch_run.go`、`internal/app/execenv_task.go` |
+| H3 | 高 | `code_fetches` 无活跃唯一约束、无收敛路径、无状态前置条件更新 | `migrations/0015_code_fetches.sql`、`internal/storage/sqlite/code_fetches.go` |
+| H4 | 高 | `UpdateTaskWorkspaceInit` 是 `WHERE id = ?`，使恢复里的 `errors.Is(err, storage.ErrConflict)` 分支成为死代码 | `internal/storage/sqlite/task_workspace_inits.go`、`internal/app/task_workspace_recovery.go` |
+
+另有一处分类缺陷：`internal/app/execenv.go` 的 `isContainerMissing` 把
+`docker.CodeOwnershipMismatch` 也算"容器不存在"，`releaseDelete` 据此返回"按删除成功处理"。
+
+#### M5-1 收尾一致性
+
+- **收尾协议**（`internal/app/task_workflow_exec.go` `applyCloseout`）：写入顺序改为
+  **先执行记录、后任务**，执行记录的条件写入（`revision` 前置条件）作为栅栏：
+  - 栅栏失败（版本冲突 / 租约已转移 / 数据库不可用）→ **不再写任务成功终态**，
+    直接收敛执行记录并返回，C3 由此消除；
+  - 栅栏通过后任务写入失败 → 只可能留下 `run=completed` + `task=recovery_required`
+    （"未完成"），由新增的 `markTaskRecoveryRequired` 与启动恢复补齐，绝不伪造成功。
+- **`stopUnpersistedCloseout`** 语义收窄为"仅处理执行记录终态写入失败"，
+  不再承担"任务已被写成 completed 的善后"这一不可能的职责。
+- **启动恢复新增 `recoverStalledDelivery`**（`internal/app/task_workflow_delivery_recovery.go`）：
+  读取 `tasks.status ∈ {verifying, saving}`，按 `domain.DecideTaskCloseoutRecovery`
+  收敛——执行记录已完成且证据重算通过则补齐成功终态，否则写 `recovery_required`
+  （`closeout_evidence_missing` / `closeout_interrupted`）。C1 由此消除。
+- **只读报告 `reportCloseoutInconsistencies`**：对 `completed` 任务与最近执行记录做
+  `domain.DecideTaskCloseoutView` 判定，不一致时追加 `task.recovery_required` 事件
+  （`stage=closeout_reconcile`）并告警，**不改写终态**（`completed` 仍是终态）。
+- **对外表达**：`domain.DecideTaskCloseoutView` 派生 `confirmed` / `pending` /
+  `unconfirmed` / `inconsistent` / `cancelled`；`TaskResponse` 新增 `final_result`、
+  `closeout`、`closeout_summary`，任务列表、详情、创建与取消响应统一输出。
+  此前 API 根本不输出 `final_result`，调用方无法判断"结论存疑"。
+
+#### M5-2 尝试级代码获取残留
+
+- 迁移 `0023_code_fetch_active_unique.sql`：`code_fetches` 新增部分唯一索引
+  `idx_code_fetch_active_attempt`（同一 Attempt 最多一条活动记录），与
+  `task_workspace_initializations` 同构。脚本内写明升级前排重 SQL 与处置原则。
+- `domain.DecideCodeFetchRecovery` / `DecideCodeFetchResume` / `DecideCodeFetchVerification`
+  统一定义"何时收敛为 uncertain、何时禁止重放、何时可收敛为终态"。
+- `app.CodeFetchRecoveryService`（启动扫描，注册在 `ExecutionResidue` 之后、
+  `TaskWorkflow` 之前）：把无执行者的 `pending` / `running` 收敛为 `uncertain`，
+  写入带状态前置条件，冲突视为他人已收敛。
+- `app.CodeFetchVerifyService` + CLI `agentflow code fetch-verify --record <id>`：
+  **只读**探测（目录是否存在、是否为 Git 仓库、当前分支、HEAD），事实充分时才收敛；
+  绝不 Clone / checkout / reset。domain 新增 `CodeFetchRecord.MarkVerifiedSucceeded`，
+  避免核验路径臆造基础分支信息。
+- `CodeInitializeService` 新增两条前置门控：
+  - `checkResumeEligible`：该 Attempt 存在 `uncertain` 记录时返回
+    `ErrCodeInitRecoveryRequired`（412），存在活动记录时返回 `ErrCodeInitConflict`（409）；
+  - `requireTaskWorkspaceReady`：尝试级与任务级共用 `/workspace/project`，因此尝试级
+    必须排在任务级之后，没有成功记录时如实拒绝而不是猜测可以安全初始化。
+- `liveExecutionTasks` 从 `ExecutionResidueService.liveTasks` 中抽出，供残留收敛与
+  代码获取收敛共用同一份"是否仍有执行者"判定。
+
+#### M5-3 容器 `unknown` 与孤儿容器
+
+- `domain.ContainerObservationClass`（running / stopped / absent / ownership_mismatch /
+  unreachable / incomplete）与 `domain.DecideContainerRecovery` 定义收敛规则；
+  `app.ClassifyContainerObservation` 只用 `docker.ErrorCodeOf` 映射，不解析错误文本。
+- `app.ContainerRecoveryService`（注册在 `HostValidation` 之后）：
+  - `creating` / `unknown` → 只读观测后条件写入（running / stopped / removed）；
+  - 所有权不匹配、无法访问、记录不完整 → 保持 `unknown` 并标记需要人工介入
+    （**不删除**，节点离线不让启动失败，与 `HostValidationService` 口径一致）；
+  - 孤儿容器（`ContainerFilter.Orphans`，实现为"登记了任务关联但不是该任务当前容器"）
+    只追加 `recover_container_orphan` 事件，不删除、不重新关联；
+  - 写入使用新增的 `UpdateContainerIfState`，冲突保留他人结论。
+- 阻止第二个容器：`TaskLaunchService.ensureNoPendingContainer` 与
+  `ExecutionEnvironmentService.ensureNoPendingContainer` 在创建新容器前检查该任务是否
+  还有未处置的容器（非 `removed` / `detached`），有则返回前置条件错误并给出可执行动作。
+  H2 由此消除。
+- `ContainerFilter` 新增 `TaskID` / `Orphans`；CLI `docker container list` 新增
+  `--task` / `--orphans`。
+
+#### M5-4 代码保存核验后的衔接
+
+- 修复 F2：`VerifyCodeSave` 在**容器登记记录缺失**（`storage.ErrNotFound` 之外）、
+  已删除、已脱离管理时，降级为 `unverifiable` 并**落盘**（`degradeCodeSaveUnverifiable`），
+  不再直接返回错误。此前该路径使记录永远停在 `pending`，恢复无出路。
+- 新增 `app.ResumeEligibilityService` + HTTP `GET /api/v1/tasks/{id}/resume-eligibility`
+  + CLI `agentflow task resume-status <task-id>`：只读回答"能否继续 / 为什么不能 /
+  下一步做什么"，`next_actions` 直接给出 `agentflow code verify --record <id>`；
+  判定复用 `domain.DecideTaskCodeSaveResume` 与既有容器前置校验，不新增第二套规则。
+- 新增 HTTP `POST /api/v1/tasks/{taskID}/code-saves/{recordID}/verify-code-save`：
+  与 CLI `code verify` 完全同语义（只读、幂等），五个事实分别输出
+  （record / observation / decision / persisted / updated）。
+- 不做自动核验、不自动 resume、不重放 commit / push / merge。
+
+#### 数据库与装配变更
+
+- 迁移 `0023_code_fetch_active_unique.sql`（schema 版本 22 → 23）。
+- `storage`：`CodeFetchStore` 新增 `UpdateCodeFetchRecordIfStatus` /
+  `ListInterruptedCodeFetchRecords`；`TaskWorkspaceInitStore` 新增
+  `UpdateTaskWorkspaceInitIfStatus`；`ContainerStore` 新增 `UpdateContainerIfState`。
+- 服务注册顺序（`internal/server/server.go`）：
+  `HostValidation → ContainerRecovery → StepExecutor → Validation → StepWorkflow →
+  ExecutionResidue → CodeFetchRecovery → TaskWorkflow → TaskLaunch → CodeSaveRecovery`；
+  停止顺序自动反向。
+
+#### 测试证据
+
+新增用例（全部使用真实 SQLite、正式迁移与生产入口）：
+
+- `tests/unit/domain/code_fetch_recovery_test.go`（8 个用例）：收敛目标、终态不改写、
+  有执行者不抢占、续跑资格三态与优先级、只读核验的收敛边界（表驱动）。
+- `tests/unit/domain/task_closeout_test.go`（5 个用例）：收尾闭环派生组合（8 种）、
+  停滞收敛（5 种，含"仍有执行权不抢占"）、非收尾状态不处理、不一致说明可读。
+- `tests/unit/container/container_recovery_test.go`（5 个用例）：已确认观测的三种收敛、
+  高风险观测必须人工、终态不触碰、非法观测值/非法目标被拒绝。
+- `tests/unit/store/recovery_conditional_test.go`（6 个用例）：三类条件更新的冲突拒绝与
+  冲突不改库、中断查询只返回活动记录、`0023` 唯一约束生效、按任务/孤儿筛选。
+- `tests/integration/local/workflow/closeout_consistency_test.go`（6 个用例）：
+  写入顺序为"执行记录 → 任务"、任务写入失败不伪造成功、执行记录写入失败不写任务成功、
+  重启收敛 `saving` 停滞、证据齐备补齐成功终态、遗留不一致只报告不改写。
+- `tests/integration/local/workflow/code_save_resume_test.go`（6 个用例）：
+  `unverifiable` 阻止推进、续跑资格给出记录标识、已收敛放行、容器不可运行分类、
+  容器缺失降级为 `unverifiable` 并落盘、记录不存在仍返回参数错误。
+- `tests/integration/local/execenv/container_recovery_test.go`（9 个用例）：
+  unknown→running / absent→removed / 不可达保留 unknown / 所有权不匹配不处置 /
+  detached 不被触碰 / 重复收敛幂等且只写一条事件 / 孤儿只报告不删除 /
+  写入失败阻止启动 / 并发冲突保留新结论。
+- `tests/integration/local/fetcher/code_fetch_recovery_test.go`（9 个用例）：
+  pending / running 收敛为 uncertain / 有租约不抢占 / 重复收敛幂等 /
+  写入失败阻止启动 / 并发保留成功结论 / 不确定现场阻止重新初始化 /
+  只读核验的四个收敛边界（并断言不执行 clone/checkout/reset/rm/clean）。
+
+同时按新协议修正了既有用例的等待条件（收尾"先执行记录、后任务"是合法中间状态）：
+`delivery_chain_test.go` 的 `settle`、`e2e_fixture_test.go` 的 `settle`、
+`tests/unit/app/task_workflow_test.go` 的 `waitTaskRunStatus`、
+`tests/unit/httpapi/workflow_test.go` 的 `waitSettled`。
+
+#### 真实执行的测试命令与结果（2026-10-25）
+
+- `gofmt -l internal cmd tests` → 无输出；`go vet ./...` → 无问题；`go build ./...` → 通过。
+- `go test -count=1 ./tests/...` → 退出码 0，**1885 passed / 0 failed / 0 skipped**
+  （45 packages）。本机 `tests/config/{ssh,docker,pi}.yml` 早已启用，因此该命令包含真实
+  SSH / Docker / Pi 用例且全部通过。
+- `go test -count=1 -race ./tests/integration/local/workflow/
+  ./tests/integration/local/fetcher/ ./tests/integration/local/execenv/` → 退出码 0，
+  170 passed。
+- `go test -count=1 -race ./tests/unit/domain/ ./tests/unit/container/
+  ./tests/unit/store/ ./tests/unit/app/ ./tests/unit/httpapi/` → 退出码 0，1131 passed。
+- 测试产物保留在 `os.TempDir()/lingting-agent-flow-tests/` 下的随机目录，
+  例如 `C:\Users\lingting\AppData\Local\Temp\lingting-agent-flow-tests\workflow-3751921440`；
+  `testkit.Main` 同时在基目录写入 `latest-run.txt`。
+
+#### 剩余风险与移交
+
+- **真实远程 Docker 的容器残留证据仍缺**：容器 `unknown` 收敛、孤儿发现、
+  `merge` 恢复的判定都只在本地受控端口上验证过。真实远程用例需
+  `docker.remote_enabled` + `ssh.enable`，且必须有构造出 `unknown` / 孤儿现场的时机，
+  当前测试没有这样的注入点。**不得把本地用例当作真实远程验收。**
+- **遗留 `completed` + `recovery_required` 无法自动修复**：`completed` 是终态，
+  本轮只做发现与报告（事件 + 告警 + 派生 `inconsistent`）。若要自动修复，必须先决策
+  "允许 completed 回退"并审计全部读取方（`IsTerminal` / `IsFinished` / `IsActive` /
+  `CanStart` / `AllowsStepExecution`、任务 API、前端状态映射、删除判定）。
+- **`0023` 迁移在已有重复活动 `code_fetches` 的库上会失败**：脚本内已给出排查 SQL 与
+  处置原则（不得为通过迁移删除历史）。
+- **孤儿容器是否允许自动补关联**：本轮决定**不自动**（只报告），因为其工作区状态未知。
+- **`HostValidationService.recoverPending` 仍只记日志**，与工作流恢复"失败即阻止启动"
+  口径不同；本轮未扩大范围，保留该记录。
+- **完成定义**：收尾一致性、代码获取残留、容器 unknown / 孤儿、核验后续跑四条主线均有
+  代码、真实调用链与集成测试证据；P2 退出条件第 5 条由不成立转为成立。
+  **P2 达到退出条件**，可进入 P3（多任务调度）。

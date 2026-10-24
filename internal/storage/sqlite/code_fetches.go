@@ -3,9 +3,11 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 
 	"github.com/lingting/agentflow/internal/domain"
+	"github.com/lingting/agentflow/internal/storage"
 )
 
 // codeFetchColumns 是代码初始化记录表的完整列顺序。
@@ -49,16 +51,64 @@ func (s codeFetchStore) UpdateCodeFetchRecord(
 	if err := record.Validate(); err != nil {
 		return err
 	}
-	const statement = `
+	statement := `
 UPDATE code_fetches SET
 	project_id = ?, source_type = ?, repository = ?, work_dir = ?, container_id = ?,
 	docker_id = ?, base_branch = ?, base_selection = ?, base_commit = ?,
 	task_branch = ?, task_branch_source = ?, commit_sha = ?, status = ?, stage = ?,
 	error_code = ?, error_summary = ?, started_at = ?, finished_at = ?, updated_at = ?
 WHERE id = ?`
-	result, err := s.q.ExecContext(
-		ctx,
-		statement,
+	result, err := s.q.ExecContext(ctx, statement, codeFetchUpdateArgs(record)...)
+	if err != nil {
+		return wrapError("更新代码初始化记录", err)
+	}
+	return ensureAffected(result, "代码初始化记录", record.ID)
+}
+
+// UpdateCodeFetchRecordIfStatus 在数据库中的状态仍属于 expected 时写入记录。
+//
+// 恢复与收敛路径必须使用本方法：`pending` / `running` 的记录可能同时被多个实例
+// 观测，只有先完成写入的一方生效，后者按 storage.ErrConflict 返回并重新读取真实
+// 记录，避免用本地副本覆盖已经收敛的结论（例如覆盖掉迟到的 succeeded）。
+func (s codeFetchStore) UpdateCodeFetchRecordIfStatus(
+	ctx context.Context,
+	record domain.CodeFetchRecord,
+	expected []domain.CodeFetchStatus,
+) error {
+	if err := record.Validate(); err != nil {
+		return err
+	}
+	if len(expected) == 0 {
+		return wrapError(
+			"条件更新代码初始化记录",
+			errors.Join(storage.ErrInvalidData, errors.New("期望状态集合不能为空")),
+		)
+	}
+	conditions := make([]string, 0, len(expected))
+	args := codeFetchUpdateArgs(record)
+	for _, status := range expected {
+		conditions = append(conditions, "?")
+		args = append(args, status.String())
+	}
+	statement := `
+UPDATE code_fetches SET
+	project_id = ?, source_type = ?, repository = ?, work_dir = ?, container_id = ?,
+	docker_id = ?, base_branch = ?, base_selection = ?, base_commit = ?,
+	task_branch = ?, task_branch_source = ?, commit_sha = ?, status = ?, stage = ?,
+	error_code = ?, error_summary = ?, started_at = ?, finished_at = ?, updated_at = ?
+WHERE id = ? AND status IN (` + strings.Join(conditions, ", ") + `)`
+	result, err := s.q.ExecContext(ctx, statement, args...)
+	if err != nil {
+		return wrapError("条件更新代码初始化记录", err)
+	}
+	return ensureStatusAffected(result, "代码初始化记录", record.ID)
+}
+
+// codeFetchUpdateArgs 构造更新代码初始化记录时的参数列表。
+//
+// 顺序必须与 UpdateCodeFetchRecord / UpdateCodeFetchRecordIfStatus 的 SET 子句一致。
+func codeFetchUpdateArgs(record domain.CodeFetchRecord) []any {
+	return []any{
 		nullIfBlank(record.ProjectID),
 		record.SourceType.String(),
 		nullIfBlank(record.Repository),
@@ -79,11 +129,7 @@ WHERE id = ?`
 		toMillisPtr(record.FinishedAt),
 		toMillis(record.UpdatedAt),
 		toIDParam(record.ID),
-	)
-	if err != nil {
-		return wrapError("更新代码初始化记录", err)
 	}
-	return ensureAffected(result, "代码初始化记录", record.ID)
 }
 
 // codeFetchArgs 构造写入代码初始化记录时的参数列表。
@@ -148,8 +194,43 @@ func (s codeFetchStore) ListCodeFetchRecordsByTask(
 	return s.list(ctx, "task_id", taskID)
 }
 
-// list 按给定列查询代码初始化记录。
+// ListInterruptedCodeFetchRecords 返回仍停留在 pending / running 的记录。
 //
+// 它只按状态过滤，不做任何推断：调用方据此把中断现场收敛为 uncertain，不重放
+// 任何容器内 Git 操作。与任务级工作区初始化不同，code_fetches 记录带 Attempt
+// 归属，因此"是否仍有执行者"必须由调用方按任务执行权判定，查询层不承担该规则。
+func (s codeFetchStore) ListInterruptedCodeFetchRecords(
+	ctx context.Context,
+) ([]domain.CodeFetchRecord, error) {
+	statement := `SELECT ` + codeFetchColumns + ` FROM code_fetches
+		WHERE status IN (?, ?)
+		ORDER BY created_at ASC, id ASC`
+	rows, err := s.q.QueryContext(
+		ctx,
+		statement,
+		domain.CodeFetchStatusPending.String(),
+		domain.CodeFetchStatusRunning.String(),
+	)
+	if err != nil {
+		return nil, wrapError("查询中断的代码初始化记录", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+	records := make([]domain.CodeFetchRecord, 0, 4)
+	for rows.Next() {
+		record, scanErr := scanCodeFetchRecord(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, wrapError("查询中断的代码初始化记录", err)
+	}
+	return records, nil
+}
+
 // 列名来自本文件内的固定常量，用户输入只通过参数绑定传入。
 func (s codeFetchStore) list(
 	ctx context.Context,

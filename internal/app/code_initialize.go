@@ -32,6 +32,11 @@ var (
 	//
 	// 它携带失败阶段与脱敏原因，调用方据此返回"执行失败"而不是把它当成内部错误。
 	ErrCodeInitFailed = errors.New("app: 代码初始化未成功")
+	// ErrCodeInitRecoveryRequired 表示该尝试存在结果不确定的代码获取现场。
+	//
+	// 它必须先经只读核验收敛，不能通过重新初始化覆盖：重放 Clone 会掩盖
+	// "代码可能已经就位"的事实，也无法解释上一次到底做到哪一步。
+	ErrCodeInitRecoveryRequired = errors.New("app: 代码初始化现场需要先核验")
 	// ErrCodeInitNotPersisted 表示初始化已执行但结果未能可靠持久化。
 	//
 	// 它绝不能被报告为"代码已就绪"：结论再正确，没有可靠保存也不能当作可用证据。
@@ -117,6 +122,14 @@ type CodeInitializeStore interface {
 	GetContainer(ctx context.Context, id domain.ID) (*domain.Container, error)
 	GetExecutionHost(ctx context.Context, id domain.ID) (*domain.ExecutionHost, error)
 	AppendEvent(ctx context.Context, event domain.Event) (domain.Event, error)
+	// ListTaskWorkspaceInitsByTask 返回任务级工作区初始化记录，最新的在前。
+	//
+	// 尝试级初始化必须看到它：两个入口共用同一个容器内工作目录，尝试级在没有
+	// 任务级就绪记录时 Clone 会与任务级初始化争抢同一份现场。
+	ListTaskWorkspaceInitsByTask(
+		ctx context.Context,
+		taskID string,
+	) ([]domain.TaskWorkspaceInitRecord, error)
 	storage.CodeFetchStore
 }
 
@@ -248,6 +261,9 @@ func (s *CodeInitializeService) Initialize(
 	if err != nil {
 		return CodeInitResult{}, err
 	}
+	if err := s.requireTaskWorkspaceReady(ctx, task, container); err != nil {
+		return CodeInitResult{}, err
+	}
 	release, acquired := s.running.acquire(attempt.ID)
 	if !acquired {
 		return CodeInitResult{}, fmt.Errorf(
@@ -258,6 +274,9 @@ func (s *CodeInitializeService) Initialize(
 	}
 	defer release()
 
+	if err := s.checkResumeEligible(ctx, attempt); err != nil {
+		return CodeInitResult{}, err
+	}
 	if reused, found, reuseErr := s.reuseInitialized(ctx, task, step, attempt, container, workDir); found {
 		return reused, reuseErr
 	}
@@ -669,6 +688,80 @@ func (s *CodeInitializeService) requireContainer(
 		)
 	}
 	return container, nil
+}
+
+// requireTaskWorkspaceReady 确认任务在当前容器上的工作区已经由任务级初始化就绪。
+//
+// 尝试级初始化与任务级初始化共用同一个容器内工作目录（默认 /workspace/project）。
+// 任务级初始化尚未成功时，一次尝试级 Clone 会与它争抢同一份现场：TaskWorkspaceService
+// 会因为"目标目录非空"失败，而尝试级会因为"目录被清空"覆盖它。因此尝试级必须排在
+// 任务级之后，并对"没有成功记录"这一事实如实拒绝，而不是猜测可以安全初始化。
+//
+// 已就绪（succeeded / skipped）之外的任何状态都拒绝：
+//   - 没有记录：任务级还没初始化，调用顺序不对；
+//   - uncertain / 进行中：任务级现场未确认，先核验它再说；
+//   - 失败的记录：任务级初始化失败本身就是需要处置的原因。
+func (s *CodeInitializeService) requireTaskWorkspaceReady(
+	ctx context.Context,
+	task domain.Task,
+	container domain.Container,
+) error {
+	records, err := s.store.ListTaskWorkspaceInitsByTask(ctx, task.ID.String())
+	if err != nil {
+		return fmt.Errorf("%w: 读取任务级工作区初始化记录失败: %w", ErrCodeInitPrerequisite, err)
+	}
+	for _, record := range records {
+		if strings.TrimSpace(record.ContainerID) != container.ID.String() {
+			// 旧容器上的记录不适用于当前容器代次。
+			continue
+		}
+		if record.Succeeded() {
+			return nil
+		}
+		return fmt.Errorf(
+			"%w: 任务 %s 在容器 %s 上的工作区初始化状态为 %s，"+
+				"请先核验或完成任务级工作区初始化后再初始化尝试",
+			ErrCodeInitPrerequisite,
+			task.ID,
+			container.ID,
+			record.Status,
+		)
+	}
+	return fmt.Errorf(
+		"%w: 任务 %s 在容器 %s 上还没有任务级工作区初始化记录；"+
+			"尝试级代码初始化与任务级共用同一目录，必须先完成任务级初始化",
+		ErrCodeInitPrerequisite,
+		task.ID,
+		container.ID,
+	)
+}
+
+// checkResumeEligible 判断该 Attempt 是否可以开始一次新的代码获取。
+//
+// 残留的活动记录与不确定记录都会阻止重新初始化：`pending` / `running` 说明另一次
+// 初始化可能仍在进行，`uncertain` 说明上次结果无法确认。两者都不允许被"再来一次"
+// 掩盖，否则会在容器内产生第二次 Git 操作。
+//
+// 判定规则集中在 domain.DecideCodeFetchResume，本方法不复制第二套规则。
+func (s *CodeInitializeService) checkResumeEligible(
+	ctx context.Context,
+	attempt domain.Attempt,
+) error {
+	records, err := s.store.ListCodeFetchRecordsByAttempt(ctx, attempt.ID.String())
+	if err != nil {
+		return fmt.Errorf("%w: 读取代码初始化记录失败: %w", ErrCodeInitPrerequisite, err)
+	}
+	decision := domain.DecideCodeFetchResume(records)
+	switch decision.Action {
+	case domain.CodeFetchResumeProceed:
+		return nil
+	case domain.CodeFetchResumeBlocked:
+		return fmt.Errorf("%w: %s: %s；请先执行 agentflow code fetch-verify --record <记录标识>",
+			ErrCodeInitRecoveryRequired, decision.ErrorClass, decision.Summary)
+	default:
+		return fmt.Errorf("%w: %s: %s",
+			ErrCodeInitConflict, decision.ErrorClass, decision.Summary)
+	}
 }
 
 // ensureHostUsable 校验执行节点是否允许执行真实远程操作。

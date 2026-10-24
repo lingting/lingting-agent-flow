@@ -643,6 +643,15 @@ type ContainerStore interface {
 	// GetContainerByName 按节点与容器名称查询，用于恢复远程操作后的状态。
 	GetContainerByName(ctx context.Context, hostID domain.ID, name string) (*domain.Container, error)
 	ListContainers(ctx context.Context, filter domain.ContainerFilter) ([]domain.Container, error)
+	// UpdateContainerIfState 在数据库中的管理状态仍属于 expected 时写入容器记录。
+	//
+	// 恢复与收敛路径必须使用本方法：影响行数为 0 说明状态已被其他执行者推进，
+	// 按 storage.ErrConflict 返回，调用方必须重新读取真实记录而不是覆盖新结论。
+	UpdateContainerIfState(
+		ctx context.Context,
+		container domain.Container,
+		expected []domain.ContainerState,
+	) error
 }
 
 // CodeSaveStore 保存代码保存操作的记录。
@@ -695,6 +704,15 @@ type CodeFetchStore interface {
 	//
 	// 已进入终态的记录不会被重新打开：调用方必须先读取当前状态再经状态机判定。
 	UpdateCodeFetchRecord(ctx context.Context, record domain.CodeFetchRecord) error
+	// UpdateCodeFetchRecordIfStatus 在数据库中的状态仍属于 expected 时写入记录。
+	//
+	// 恢复与收敛路径必须使用本方法：影响行数为 0 说明状态已被其他执行者推进，
+	// 按 storage.ErrConflict 返回，调用方必须重新读取真实记录而不是覆盖新结论。
+	UpdateCodeFetchRecordIfStatus(
+		ctx context.Context,
+		record domain.CodeFetchRecord,
+		expected []domain.CodeFetchStatus,
+	) error
 	GetCodeFetchRecord(ctx context.Context, id domain.ID) (*domain.CodeFetchRecord, error)
 	// ListCodeFetchRecordsByAttempt 按尝试列出记录，最新的在前。
 	ListCodeFetchRecordsByAttempt(
@@ -703,6 +721,11 @@ type CodeFetchStore interface {
 	) ([]domain.CodeFetchRecord, error)
 	// ListCodeFetchRecordsByTask 按任务列出记录，最新的在前。
 	ListCodeFetchRecordsByTask(ctx context.Context, taskID string) ([]domain.CodeFetchRecord, error)
+	// ListInterruptedCodeFetchRecords 返回仍停留在 pending / running 的记录。
+	//
+	// 启动恢复用它定位"进程退出后仍处于活动状态"的初始化现场，不重放任何容器内
+	// Git 操作；是否仍有执行者由调用方按任务执行权判定。
+	ListInterruptedCodeFetchRecords(ctx context.Context) ([]domain.CodeFetchRecord, error)
 }
 
 // TaskWorkspaceInitStore 保存任务级工作区初始化（容器内代码获取 + 任务分支准备）的记录。
@@ -719,6 +742,15 @@ type TaskWorkspaceInitStore interface {
 	//
 	// 已进入终态的记录不会被重新打开：调用方必须先读取当前状态再经状态机判定。
 	UpdateTaskWorkspaceInit(ctx context.Context, record domain.TaskWorkspaceInitRecord) error
+	// UpdateTaskWorkspaceInitIfStatus 在数据库中的状态仍属于 expected 时写入记录。
+	//
+	// 恢复与收敛路径必须使用本方法：影响行数为 0 说明状态已被其他执行者推进，
+	// 按 storage.ErrConflict 返回，调用方必须重新读取真实记录而不是覆盖新结论。
+	UpdateTaskWorkspaceInitIfStatus(
+		ctx context.Context,
+		record domain.TaskWorkspaceInitRecord,
+		expected []domain.TaskWorkspaceInitStatus,
+	) error
 	GetTaskWorkspaceInit(
 		ctx context.Context,
 		id domain.ID,

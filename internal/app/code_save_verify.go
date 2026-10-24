@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/lingting/agentflow/internal/codesaver"
 	"github.com/lingting/agentflow/internal/domain"
+	"github.com/lingting/agentflow/internal/storage"
 )
 
 // CodeSaveVerifyRequest 是一次只读恢复核验的输入。
@@ -49,9 +51,10 @@ type CodeSaveVerifyResult struct {
 // 不会用旧值覆盖新事实，调用方必须依据重新读取到的真实记录决定下一步。
 //
 // 错误分类（调用方据此判断恢复资格，不需要解析错误文本）：
-//   - 参数错误、记录不存在、容器登记不存在、容器不受管理：返回错误，核验没有开始；
-//   - 执行节点不可达、Docker 不可访问、Git 查询失败：不返回错误，而是给出
-//     unverifiable 结论——无法确认时必须保留不确定性，不能伪造成"操作没有发生"；
+//   - 参数错误、记录不存在、容器登记记录不存在：返回错误，核验没有开始；
+//   - 容器已删除、已脱离管理、执行节点不可达、Docker 不可访问、Git 查询失败：
+//     不返回错误，而是给出 unverifiable 结论并落盘——无法确认时必须保留不确定性，
+//     不能伪造成"操作没有发生"，也不能让记录永远停在 pending 使恢复无出路；
 //   - 结论写回失败或冲突：不返回错误，但 Persisted 为 false，Updated 是数据库中的
 //     真实记录，调用方不得把这次核验报告为恢复成功。
 func (s *ContainerService) VerifyCodeSave(
@@ -73,10 +76,13 @@ func (s *ContainerService) VerifyCodeSave(
 	}
 	container, err := s.loadContainer(ctx, containerID)
 	if err != nil {
-		return result, err
+		return s.degradeCodeSaveUnverifiable(ctx, result, *record, err)
 	}
 	if err := ensureManaged(container); err != nil {
-		return result, fmt.Errorf("核验代码保存记录失败: %w", err)
+		// 容器已删除、已脱离管理或状态不可用时，核验无法进行，但结论必须落盘：
+		// 不落盘会让记录永远停在 pending，恢复只能反复要求核验同一现场，
+		// 用户也就永远无法判断"这条副作用到底做了没有"。
+		return s.degradeCodeSaveUnverifiable(ctx, result, *record, err)
 	}
 	verifyErr := s.withRemoteDocker(
 		ctx,
@@ -125,6 +131,36 @@ func (s *ContainerService) VerifyCodeSave(
 		)
 	}
 	return s.persistCodeSaveRecovery(ctx, result, *record)
+}
+
+// degradeCodeSaveUnverifiable 把"无法开始核验"的现场降级为 unverifiable 结论并落盘。
+//
+// 它覆盖"目标记录或容器登记记录不存在"之外的全部前置失败：容器已删除、已脱离管理、
+// 容器登记记录不可读。这些情况下本次核验没有取得任何可信事实，因此结论只能是
+// unverifiable，而不是"操作没有发生"。
+//
+// 记录或容器登记记录本身不存在时仍返回错误：那是参数错误，不是现场不可核验。
+func (s *ContainerService) degradeCodeSaveUnverifiable(
+	ctx context.Context,
+	result CodeSaveVerifyResult,
+	record domain.CodeSaveRecord,
+	cause error,
+) (CodeSaveVerifyResult, error) {
+	if errors.Is(cause, storage.ErrNotFound) {
+		return result, fmt.Errorf("核验代码保存记录失败: %w", cause)
+	}
+	result.Observation = domain.CodeSaveObservation{
+		ReadFailed: true,
+		ReadError:  errorSummary(cause),
+	}
+	result.Decision = domain.DecideCodeSaveRecovery(record, result.Observation)
+	s.debug(
+		ctx,
+		"代码保存核验无法取得可信现场，结论降级为 unverifiable",
+		slog.String("record", record.ID.String()),
+		slog.String("error", errorSummary(cause)),
+	)
+	return s.persistCodeSaveRecovery(ctx, result, record)
 }
 
 // persistCodeSaveRecovery 把核验结论写回记录。

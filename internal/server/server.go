@@ -167,6 +167,15 @@ type Server struct {
 	taskWorkflow *app.TaskWorkflowService
 	// taskLaunch 是统一任务启动服务，为空时不提供启动接口。
 	taskLaunch *app.TaskLaunchService
+	// containerRecovery 收敛状态不明的容器记录并报告孤儿容器。
+	//
+	// 它只做只读观测与条件写入，不创建、启动、删除或接管容器。
+	containerRecovery *app.ContainerRecoveryService
+	// codeFetchRecovery 收敛进程退出后仍处于活动状态的尝试级代码获取记录。
+	//
+	// 它在残留收敛之后、编排器之前启动：先把没有执行者的代码获取现场收敛为
+	// uncertain，编排器与启动流程才不会在未知现场上重放 Clone。
+	codeFetchRecovery *app.CodeFetchRecoveryService
 	// residue 收敛进程退出后残留在活动状态的 Attempt / Session / ValidationRun。
 	//
 	// 它必须在下层服务（步骤执行、验证引擎）之后启动、在上层编排器之前启动：
@@ -178,10 +187,14 @@ type Server struct {
 	codeSaveRecovery *app.CodeSaveRecoveryService
 	// codeInitialize 是代码初始化协调器，为空时不提供初始化接口。
 	codeInitialize *app.CodeInitializeService
-	requireWeb     bool
-	logger         *slog.Logger
-	report         func(message string)
-	manager        *lifecycle.Manager
+	// containerService 提供代码保存的只读核验能力，为空时核验接口返回 503。
+	containerService *app.ContainerService
+	// resumeEligibility 计算任务续跑资格，为空时该接口返回 503。
+	resumeEligibility *app.ResumeEligibilityService
+	requireWeb        bool
+	logger            *slog.Logger
+	report            func(message string)
+	manager           *lifecycle.Manager
 
 	boundAddr       string
 	cfg             *config.Config
@@ -358,6 +371,42 @@ func (s *Server) openDatabase(ctx context.Context) error {
 		}
 		s.residue = residue
 	}
+	// 容器残留收敛只依赖已打开的数据库与容器观测能力：它找出状态不明与孤儿
+	// 容器，只读观测后条件写入，不做任何破坏性处置。
+	observation, observationErr := s.containerObservation()
+	s.containerService = observation
+	if observation != nil {
+		// 续跑资格查询复用同一份容器核验能力：它只读判定，不推进任何状态。
+		eligibility, eligibilityErr := app.NewResumeEligibilityService(
+			app.ResumeEligibilityOptions{Store: store, Containers: observation},
+		)
+		if eligibilityErr != nil {
+			return fmt.Errorf("初始化续跑资格服务失败: %w", eligibilityErr)
+		}
+		s.resumeEligibility = eligibility
+	}
+	if observationErr != nil {
+		return fmt.Errorf("初始化容器残留收敛服务失败: %w", observationErr)
+	}
+	containerRecovery, containerErr := app.NewContainerRecoveryService(app.ContainerRecoveryOptions{
+		Store:      store,
+		Containers: observation,
+		Logger:     s.logger,
+	})
+	if containerErr != nil {
+		return fmt.Errorf("初始化容器残留收敛服务失败: %w", containerErr)
+	}
+	s.containerRecovery = containerRecovery
+	// 尝试级代码获取残留收敛只依赖已打开的数据库：启动时把没有执行者的
+	// pending / running 记录收敛为 uncertain，不重放任何容器内 Git 操作。
+	codeFetchRecovery, fetchErr := app.NewCodeFetchRecoveryService(app.CodeFetchRecoveryOptions{
+		Store:  store,
+		Logger: s.logger,
+	})
+	if fetchErr != nil {
+		return fmt.Errorf("初始化代码获取残留收敛服务失败: %w", fetchErr)
+	}
+	s.codeFetchRecovery = codeFetchRecovery
 	// 代码保存恢复扫描只依赖已打开的数据库：它在编排器构造之后建立，启动时
 	// 找出仍有未决 Git 副作用的记录并写入事件，不重放任何外部操作。
 	codeSaveRecovery, recoveryErr := app.NewCodeSaveRecoveryService(app.CodeSaveRecoveryOptions{
@@ -431,10 +480,20 @@ func (s *Server) startServices(ctx context.Context) error {
 		// 闭环协调器依赖步骤执行与验证引擎，注册顺序因此在下层服务之后。
 		services = append(services, s.stepWorkflow)
 	}
+	if s.containerRecovery != nil {
+		// 容器残留收敛放在步骤执行之前：容器状态不明时，任何依赖容器的执行都不应
+		// 在"可能已经不存在的容器"上开始。
+		services = append(services, s.containerRecovery)
+	}
 	if s.residue != nil {
 		// 残留收敛必须在下层服务启动之后、编排器启动之前执行：先把没有执行者的
 		// Attempt / Session / ValidationRun 收敛掉，编排器才能读到可信现场。
 		services = append(services, s.residue)
+	}
+	if s.codeFetchRecovery != nil {
+		// 代码获取残留同样必须在编排器之前收敛：残留记录会阻止同一 Attempt 再次
+		// 初始化，若编排器先启动，用户会在无法解释的冲突里反复重试。
+		services = append(services, s.codeFetchRecovery)
 	}
 	if s.taskWorkflow != nil {
 		// 任务级编排器注册在最后：它依赖单步骤闭环，停止顺序因此自动反过来，
@@ -501,6 +560,21 @@ func (s *Server) hostService() (*app.ExecutionHostService, error) {
 	return hosts, nil
 }
 
+// containerObservation 返回容器残留收敛使用的只读观测能力。
+//
+// 缺少 SSH 能力或数据库时返回 nil：收敛服务仍会报告残留，但不改变任何记录，
+// 而不是退化成"用本地登记记录推断远程状态"。
+func (s *Server) containerObservation() (*app.ContainerService, error) {
+	if s.store == nil || s.ssh == nil {
+		return nil, nil
+	}
+	return app.NewContainerService(app.DockerServiceOptions{
+		SSH:    s.ssh,
+		Store:  s.store,
+		Logger: s.loggerWrapper(),
+	})
+}
+
 // hostValidationService 构造后台环境预检服务并接入执行节点服务。
 //
 // SSH 服务缺失时无法执行预检，此时返回 nil：执行节点接口仍然可用，
@@ -560,22 +634,24 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		return err
 	}
 	web, err := httpserver.New(httpserver.Options{
-		Address:          s.address,
-		Health:           app.NewHealthService(s.store),
-		SystemInfo:       s.systemInfo,
-		Tasks:            tasks,
-		Hosts:            s.hosts,
-		ExecutionRecords: s.executionRecords,
-		StepExecutor:     s.stepExecutor,
-		Validation:       s.validationEngine,
-		StepWorkflow:     s.stepWorkflow,
-		Workflow:         s.taskWorkflow,
-		TaskLaunch:       s.taskLaunch,
-		CodeInitialize:   s.codeInitialize,
-		RequireWebUI:     s.requireWeb,
-		ShutdownTimeout:  s.shutdownTimeout,
-		Report:           s.report,
-		Logger:           s.logger,
+		Address:           s.address,
+		Health:            app.NewHealthService(s.store),
+		SystemInfo:        s.systemInfo,
+		Tasks:             tasks,
+		Hosts:             s.hosts,
+		ExecutionRecords:  s.executionRecords,
+		StepExecutor:      s.stepExecutor,
+		Validation:        s.validationEngine,
+		StepWorkflow:      s.stepWorkflow,
+		Workflow:          s.taskWorkflow,
+		TaskLaunch:        s.taskLaunch,
+		Containers:        s.containerService,
+		ResumeEligibility: s.resumeEligibility,
+		CodeInitialize:    s.codeInitialize,
+		RequireWebUI:      s.requireWeb,
+		ShutdownTimeout:   s.shutdownTimeout,
+		Report:            s.report,
+		Logger:            s.logger,
 	})
 	if err != nil {
 		return err

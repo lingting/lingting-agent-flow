@@ -7,7 +7,12 @@
 >
 > **P2-M2 更新（2026-10-24，基于 `master` HEAD `2a1bb0d`）**：B1、B2、B3、B5、B6 与
 > §5.8 的测试竞态已在 P2-M2 修复，相关段落标注为"P2-M2 修复（已完成）"，§3.4 与 §6.2
-> 的缺口表已按实际状态更新。B4（容器孤儿 / `unknown`）与 G14 仍未处理，属于 P2-M4/M5。
+> 的缺口表已按实际状态更新。
+>
+> **P2-M5 更新（2026-10-25，基于 `master` HEAD `40460d4`）**：B4（容器 `unknown` / 孤儿）
+> 与 G1–G9 / G14 已在 P2-M5 修复并有集成测试证据，新增 G15–G17 三个窗口（任务卡在
+> `verifying`/`saving`、收尾跨表不一致、丢失执行权仍写任务成功）同样已修复。§2.3 补齐
+> 了 Attempt 级 `code_fetches` 的恢复边界，§3.4 与 §6.2 已按实际状态重写，§5.4 标为已修复。
 > 本文其余描述（§1–§2 的机制与矩阵、§4 的边界说明）仍然成立。
 
 ## 0. 阅读约定
@@ -191,7 +196,7 @@ agentflow server（internal/cli/server.go:runServer）
 | 当前收敛行为 | `pending`/`running` → `uncertain` + 固定摘要，**不重放**任何代码获取；随后 `DecideTaskWorkspaceNext` 对 `uncertain` 返回错误，`Launch` 停在 workspace 阶段 |
 | 重试安全性 | 重放 clone 会覆盖可能已就绪的工作区，**禁止**自动重试（已正确实现） |
 | 证据与测试 | `tests/integration/local/workflow/launch_test.go`（`TestWorkspaceInterruptedConvergesToUncertain`、`TestWorkspaceInitializationPersistsAcrossRestart`、`TestLaunchStopsAtWorkspaceStageWhenUncertain`）、`launch_chain_test.go`（`TestLaunchChainRejectsUncertainWorkspaceWithoutReplay`）、`tests/unit/domain/task_workspace_test.go`（`TestDecideTaskWorkspaceRecovery`）、`tests/unit/app/task_workspace_test.go`（`TestRecoverInterruptedConvergesToUncertain`、`TestRecoverInterruptedKeepsTerminalRecords`） |
-| 剩余缺口 | 1) `uncertain` 之后**没有只读核验入口**（不像代码保存有 `code verify`），用户只能人工进容器确认；2) Attempt 级 `code_fetches` 停在 `pending`/`running` 时**没有任何收敛路径**（`ListInterruptedTaskWorkspaceInits` 只查 `task_workspace_initializations`）；3) `uncertain` 之后的合法收敛方式未定义（`TaskWorkspaceInitStatus` 允许 uncertain→succeeded/failed，但无调用方） |
+| 剩余缺口 | **P2-M5 更新**：1) Attempt 级 `code_fetches` 已有收敛路径（`app.CodeFetchRecoveryService`，把无执行者的 `pending`/`running` 收敛为 `uncertain`）与只读核验入口（`code fetch-verify --record <id>`，`app.CodeFetchVerifyService`）；2) `0023_code_fetch_active_unique.sql` 为 `code_fetches` 加了"同一 Attempt 最多一条活动记录"的部分唯一索引；3) 尝试级初始化新增 `requireTaskWorkspaceReady` 前置门控，避免与任务级初始化争抢同一容器内目录；4) 任务级 `uncertain` 仍**没有**只读核验入口（`code fetch-verify` 只覆盖 Attempt 级），任务级只能人工进容器确认——这是本轮刻意保留的边界 |
 
 ### 2.4 Planner 调用与计划持久化
 
@@ -351,7 +356,7 @@ agentflow server（internal/cli/server.go:runServer）
 | 当前收敛行为 | 收尾结论只由 `domain.DecideWorkflowCloseout` 计算；顺序固定为 steps → code_save_unconfirmed → code_save_indeterminate → code_save_failed → session_not_persisted → completed |
 | 重试安全性 | 收尾可重入（`ResumeWorkflow`），但 `blocked`/`recovery_required` 的恢复需要用户显式发起 |
 | 证据与测试 | `tests/integration/local/workflow/delivery_chain_test.go`（`TestDeliveryChainKeepsTaskCompletedWhenCloseoutFails`、`TestDeliveryChainStopsWithoutCodeSaver`）、`e2e_indeterminate_test.go`（`TestE2EIndeterminateCloseoutWriteFails`）、`tests/unit/domain/workflow_run_test.go`（`TestDecideWorkflowCloseout`）、`tests/unit/app/task_workflow_test.go`（`TestWorkflowDoesNotReportSuccessWithoutCodeSaver`） |
-| 剩余缺口 | 1) **Task 与 WorkflowRun 状态可以不一致**：`completeTask` 先于 `run.Complete` 写入，收尾失败时任务可能是 `completed` 而执行记录是 `recovery_required`（`TestDeliveryChainKeepsTaskCompletedWhenCloseoutFails` 明确断言了该现场）。没有"回退任务状态"或"标记任务结论存疑"的机制，管理接口会把该任务当作成功任务展示；2) `blocked` / `recovery_required` 执行记录永久保留，任务页面只能靠 `resume-workflow` 单条推进 |
+| 剩余缺口 | **P2-M5 更新**：1) 收尾写入顺序改为"**先执行记录、后任务**"，执行记录的条件写入作为栅栏：栅栏失败绝不写任务成功终态，栅栏通过后任务写入失败只会留下 `run=completed` + `task=recovery_required`（"未完成"）；2) 新增 `domain.DecideTaskCloseoutView` 派生 `confirmed`/`pending`/`unconfirmed`/`inconsistent`/`cancelled`，任务 API 新增 `final_result` / `closeout` / `closeout_summary`，管理接口不再把结论存疑的任务当作确定成功；3) 新增 `recoverStalledDelivery` 收敛卡在 `verifying`/`saving` 的任务（G15）；4) `reportCloseoutInconsistencies` 只读报告遗留的 `completed` + `recovery_required` 现场（不改写终态）；5) 仍未变：`blocked` / `recovery_required` 执行记录永久保留，恢复入口仍是 `resume-workflow` |
 
 ### 2.14 取消、超时、服务停止与进程重启跨越的中断场景
 
@@ -424,10 +429,10 @@ agentflow server（internal/cli/server.go:runServer）
 | `attempts` 停在 `running` | 无任何收敛代码（`grep AttemptStatusRunning` 仅命中写入路径与 `finishAttempt` 的"非 running 则跳过"） | 尝试历史无法解释；无法判断"Agent 是否执行过" | **已修复**：收敛为 `interrupted`，`failure_stage = recover` |
 | `sessions` 停在 `running`/`starting` | `SessionService.Fail`（`sessions.go:234`）**无生产调用者** | 收尾时 `sessionsPersisted` 恒为 false → 任务永久 `recovery_required` | **已修复**：收敛为 `interrupted` + `run_status = failed`，产物路径与归档事实原样保留 |
 | `validation_runs` 停在 `pending`/`running` | 无收敛代码；`BeginValidationRun` 的活跃验证查询（`validations.go:141`）会永久拒绝该 Attempt 的新验证 | 该 Attempt 永久无法再验证，只能换 Attempt | **已修复**：收敛为 `failed` + `verdict = failed`，`error_detail` 说明中断来源 |
-| Attempt 级 `code_fetches` 残留 | `ListInterruptedTaskWorkspaceInits` 只查 `task_workspace_initializations` | 中断记录永久停留，无收敛 | 仍未修复（P2-M4/M5） |
-| `container.state=unknown` | `domain` 允许 unknown→running，但无调用方推进 | 容器状态不可信，且 `Launch` 会另建容器 |
-| 孤儿容器（创建成功、关联失败） | `recordOrphanContainer` 只写事件 | 下次 `Launch` 再建容器；孤儿永不回收 |
-| `uncertain` 工作区无只读核验入口 | 只有 `code verify` 覆盖代码保存 | 用户只能人工进容器判断 |
+| Attempt 级 `code_fetches` 残留 | ~~`ListInterruptedTaskWorkspaceInits` 只查 `task_workspace_initializations`~~ | 中断记录永久停留，无收敛 | **P2-M5 已修复**：`app.CodeFetchRecoveryService` 收敛为 `uncertain`（有执行者时不抢占），并提供只读核验入口 |
+| `container.state=unknown` | ~~`domain` 允许 unknown→running，但无调用方推进~~ | 容器状态不可信，且 `Launch` 会另建容器 | **P2-M5 已修复**：`app.ContainerRecoveryService` 按 `domain.DecideContainerRecovery` 条件收敛；`TaskLaunchService` / `ExecutionEnvironmentService` 拒绝在未处置旧容器时新建 |
+| 孤儿容器（创建成功、关联失败） | ~~`recordOrphanContainer` 只写事件~~ | 下次 `Launch` 再建容器；孤儿永不回收 | **P2-M5 已修复**：`ContainerFilter.Orphans` + `recover_container_orphan` 事件使孤儿可发现；只报告、不删除、不自动重新关联 |
+| `uncertain` 工作区无只读核验入口 | ~~只有 `code verify` 覆盖代码保存~~ | 用户只能人工进容器判断 | **P2-M5 部分修复**：Attempt 级有 `code fetch-verify`；任务级仍是人工核验（刻意保留） |
 | 归档失败无重做入口 | `sessionsPersisted` 只读 | `recovery_required` / `session_not_persisted` 后无出路 |
 | 步骤 `recovery_required` 无只读核验入口 | 无 | 用户只能直接重跑（有覆盖风险） |
 | ~~任务层取消意图丢失~~ | ~~`recoverRun` 只收敛执行记录~~ | **P2-M2 已修复**：取消入口双写任务层意图，`recoverCancellationIntents` 跨层补齐（B5） |
@@ -546,11 +551,21 @@ agentflow server（internal/cli/server.go:runServer）
   `TestResidueKeepsLiveLeaseResidue`、`TestResidueConvergesResidueWithoutRun`、
   `TestResidueKeepsTerminalRecords`、`TestResidueIsIdempotent`。
 
-### 5.4 B4（高）容器孤儿与 `unknown` 状态无收敛
+### 5.4 B4（高）容器孤儿与 `unknown` 状态无收敛（P2-M5 修复）
 
 - **证据**：`attachContainerToTask` 冲突时只写事件（`internal/app/execenv_task.go:recordOrphanContainer`）；
   `ContainerStateUnknown` 无调用方推进。
 - **后果**：下次 `Launch` 创建第二个容器；孤儿容器永不回收。
+- **P2-M5 修复（已完成）**：新增 `app.ContainerRecoveryService` 与
+  `domain.DecideContainerRecovery`，把 `creating` / `unknown` 按只读观测条件收敛为
+  running / stopped / removed，所有权不匹配与不可达一律保留 `unknown` 并要求人工介入。
+  孤儿容器通过 `domain.ContainerFilter.Orphans`（登记了任务关联但不是该任务当前容器）
+  被发现，只追加事件、不删除、不自动重新关联。`TaskLaunchService.ensureNoPendingContainer`
+  与 `ExecutionEnvironmentService.ensureNoPendingContainer` 使"仍有未处置容器时不得新建"
+  成为前置条件，从而阻止第二个容器。证据：
+  `tests/integration/local/execenv/container_recovery_test.go`（9 个用例）、
+  `tests/unit/container/container_recovery_test.go`（5 个用例）、
+  `tests/unit/store/recovery_conditional_test.go` 中的 `TestContainerFilterByTaskAndOrphans`。
 
 ### 5.5 B5（高）执行记录层取消生效但任务层未收敛
 
@@ -678,20 +693,23 @@ agentflow server（internal/cli/server.go:runServer）
 
 | # | 故障窗口 | 现状 | 优先级 |
 |---|---|---|---|
-| G1 | 外部操作执行前退出（容器创建前、Clone 前、commit 前） | 有间接覆盖（失败路径测试），但**没有"进程退出"语义的用例** | 中 |
-| G2 | 外部操作已成功但结果尚未写入（容器创建成功/关联失败） | 容器孤儿**无用例**；代码保存有 1 个真实 Git 用例 | 高 |
-| G3 | 恢复读取失败 | 计划/取消/未结束执行已有；**工作区与步骤占用无** | 中 |
-| G4 | 恢复写入失败 | 计划/取消/未结束执行已有；**步骤占用与工作区收敛无** | 高 |
-| G5 | 恢复执行期间再次退出 | **完全无用例** | 高 |
-| G6 | 恢复过程并发/重复执行 | 仅计划生成有 `TestConcurrentRecoveryConvergesOnce`；**步骤占用与工作区无** | 中 |
-| G7 | 外部状态不可达、观测结果无法确认 | 代码保存有 3 个用例；**容器核验不可达无** | 高 |
-| G8 | 已确认成功的外部结果不被错误改写 | 有（`TestObserveConfirmsMergeApplied`、迟到结果用例）；**归档与工作区无** | 中 |
-| G9 | 恢复后不重复执行已成功副作用 | 代码保存有（`gitPushCount()==1`）；**Clone / 容器创建无计数器断言** | 高 |
-| G10 | `attempts` / `sessions` / `validation_runs` 的 `running` 残留 | ~~完全无用例，也没有实现~~ → **P2-M2 已实现并覆盖**（`execution_residue_test.go`） | 已关闭 |
-| G11 | 服务停止时在途验证/修复循环 | 有 `TestWorkflowStopCancelsInFlightRun`、`TestExecutorStopCancelsInFlightRun`；~~验证引擎无对应用例~~ → **P2-M2 已补**（`validation_interruption_test.go`） | 已关闭 |
-| G12 | 任务层取消未收敛（B5） | ~~无用例~~ → **P2-M2 已实现并覆盖**（`cancel_intent_test.go`，5 个用例） | 已关闭 |
-| G13 | 租约过期误判（B6） | ~~只有"租约有效不被抢占"~~ → **P2-M2 已实现周期续租并覆盖**（`task_workflow_lease_test.go`，4 个用例） | 已关闭 |
-| G14 | 容器 `unknown` 状态收敛 | **无用例，也没有实现** | 高 |
+| G1 | 外部操作执行前退出（容器创建前、Clone 前、commit 前） | **P2-M5 已覆盖**：`TestCloseoutRunWriteFailsBeforeTaskWrite`（收尾栅栏前失败）、`TestContainerRecoveryWriteFailureBlocksStartup`、`TestCodeFetchRecoveryFailureBlocksStartup`、"写入失败阻止启动"三条 | 已关闭 |
+| G2 | 外部操作已成功但结果尚未写入（容器创建成功/关联失败） | **P2-M5 已覆盖**：容器侧由 `TestContainerRecoveryReportsOrphanWithoutDeleting` 与 `TestContainerRecoveryConvergesUnknownToRunning` 覆盖；代码保存侧由 M4 的真实 Git 用例覆盖 | 已关闭 |
+| G3 | 恢复读取失败 | **P2-M5 已覆盖**：`TestContainerRecoveryWriteFailureBlocksStartup`、`TestCodeFetchRecoveryFailureBlocksStartup`；工作区与步骤占用沿用 M2 用例 | 已关闭 |
+| G4 | 恢复写入失败 | **P2-M5 已覆盖**：`TestUpdateCodeFetchRecordIfStatusRejectsStaleStatus`、`TestUpdateTaskWorkspaceInitIfStatusRejectsStaleStatus`、`TestUpdateContainerIfStateRejectsStaleState`（三类条件更新的冲突拒绝），使恢复里的 `ErrConflict` 分支不再是死代码 | 已关闭 |
+| G5 | 恢复执行期间再次退出 | **P2-M5 已覆盖**：`TestContainerRecoveryIsIdempotentAcrossRestarts`、`TestCodeFetchRecoveryIsIdempotentAcrossRestart`（连续两次启动收敛，第二次扫描不到活动记录，事件不重复） | 已关闭 |
+| G6 | 恢复过程并发/重复执行 | **P2-M5 已覆盖**：`TestContainerRecoveryConflictKeepsNewerRecord`、`TestCodeFetchRecoveryConcurrentInstancesKeepNewerRecord`（并发写入的结论被保留，不覆盖成 `unknown` / `uncertain`） | 已关闭 |
+| G7 | 外部状态不可达、观测结果无法确认 | **P2-M5 已覆盖**：`TestContainerRecoveryKeepsUnknownWhenUnreachable`、`TestContainerRecoveryOwnershipMismatchNeedsManual`、`TestCodeFetchVerifyConvergesOnlyWithConclusiveFacts`（核验失败保持不确定）、`TestVerifyCodeSaveDegradesWhenContainerMissing` | 已关闭 |
+| G8 | 已确认成功的外部结果不被错误改写 | **P2-M5 补充**：`TestContainerRecoveryKeepsDetachedUntouched`、`TestRestartCompletesTaskFromCompletedRun`（执行记录不被重复改写）；归档侧沿用 M1 记录的遗留缺口 | 已关闭（归档除外） |
+| G9 | 恢复后不重复执行已成功副作用 | **P2-M5 已覆盖**：`TestCodeFetchInitRejectedWhileRecordUncertain`（拒绝时记录数不变）、`TestCodeFetchVerifyConvergesOnlyWithConclusiveFacts` 断言核验不执行 clone/checkout/reset/rm/clean；容器侧由 `TestLaunchRefusesSecondContainerWhenExistingNotUsable` 系列的 `ensureNoPendingContainer` 前置门控保证 | 已关闭 |
+| G10 | `attempts` / `sessions` / `validation_runs` 的 `running` 残留 | **P2-M2 已实现并覆盖**（`execution_residue_test.go`） | 已关闭 |
+| G11 | 服务停止时在途验证/修复循环 | **P2-M2 已补**（`validation_interruption_test.go`） | 已关闭 |
+| G12 | 任务层取消未收敛（B5） | **P2-M2 已实现并覆盖**（`cancel_intent_test.go`，5 个用例） | 已关闭 |
+| G13 | 租约过期误判（B6） | **P2-M2 已实现周期续租并覆盖**（`task_workflow_lease_test.go`，4 个用例） | 已关闭 |
+| G14 | 容器 `unknown` 状态收敛 | **P2-M5 已实现并覆盖**：`app.ContainerRecoveryService` + `domain.DecideContainerRecovery`；`TestContainerRecoveryConvergesUnknownToRunning` / `...ConvergesAbsentToRemoved` / `...KeepsUnknownWhenUnreachable` / `...OwnershipMismatchNeedsManual` | 已关闭 |
+| G15（新增） | 任务卡在 `verifying` / `saving` 后永久无法继续（既不能 Launch 也不能 Resume） | **P2-M5 已实现并覆盖**：`app.recoverStalledDelivery` + `domain.DecideTaskCloseoutRecovery`；`TestRestartConvergesTaskStuckInSaving`（收敛为 `recovery_required` 后 `StartWorkflow` 不再被状态拒绝）、`TestRestartCompletesTaskFromCompletedRun`（证据齐备时补齐成功终态） | 已关闭 |
+| G16（新增） | 收尾跨表不一致（任务 `completed` + 执行记录 `recovery_required`） | **P2-M5 已修复协议并覆盖**：写入顺序改为"先执行记录、后任务"；`TestCloseoutWritesRunBeforeTask`（顺序断言）、`TestCloseoutTaskWriteFailsAfterRunCompleted`（任务写入失败不伪造成功）、`TestRestartFlagsLegacyCompletedWithRecoveryRun`（遗留现场只报告不改写） | 已关闭 |
+| G17（新增） | 丢失执行权的执行者仍写任务成功终态 | **P2-M5 已修复并覆盖**：执行记录的条件写入（`revision` 前置条件）作为栅栏，冲突即放弃写任务；`TestCloseoutRunWriteFailsBeforeTaskWrite`、`tests/unit/app/task_workflow_lease_test.go` 的续租失败用例 | 已关闭 |
 
 ### 6.3 证据强度说明
 
@@ -700,8 +718,10 @@ agentflow server（internal/cli/server.go:runServer）
   本地恢复证据来源。
 - `tests/integration/remote/workflow/e2e_*_test.go` 有真实远程证据，但只覆盖成功路径与
   代码保存，**不覆盖任何中断/恢复场景**。
-- 上表 G1–G14 全部属于"实现存在或缺失"与"行为已被测试证明"之间的差距，不能据现有测试
-  声称这些窗口已闭环。
+- **P2-M5 更新**：G1–G9、G14 与新增的 G15–G17 已有真实 SQLite + 生产入口的集成测试证据，
+  分别落在 `tests/integration/local/{workflow,execenv,fetcher}/`。仍未闭环的是**真实远程
+  Docker** 上的容器 `unknown` / 孤儿现场与 `merge` 恢复：本地用例使用受控端口，不能替代
+  真实远程验收。
 
 ---
 
@@ -729,7 +749,7 @@ agentflow server（internal/cli/server.go:runServer）
 | P2-M2（中断语义） | §2.14、§4.1、B1、B5、B6 | 1) 统一"用户取消 / 超时 / 服务停止 / 进程崩溃"在**每一层**（Task / WorkflowRun / Step / Attempt / Session / ValidationRun）的收敛目标；2) 修复 B1 的锁死；3) 让执行记录层取消生效时任务层必须同步收敛（B5）；4) 决定租约续期或改用心跳（B6） | **已完成** |
 | P2-M3（重试资格） | §2.6–2.8、§3.3、B2、B3 | 1) 定义"残留 `running`"的重试资格；2) 让 `validation_runs` / `attempts` / `sessions` 的残留有唯一收敛规则；3) 把修复循环的轮次计数从进程内计数改为持久化事实 | **已完成**（1 → `domain.DecideRepairStart`；2 → `ExecutionResidueService`；3 → `repair_cycles` + `attempts.budget_scope*`） |
 | P2-M4（外部副作用） | §2.9–2.11、§3.2、§3.3 | 1) `VerifyCodeSave` 从"CLI 手工"升级为可编排的核验步骤（但仍需显式触发）；2) `unknown`/`conflict` 之后的用户决策路径；3) 补充"核验期间再次退出"的用例 |
-| P2-M5（恢复验收） | §6.1、§6.2 | 按 G1–G14 补齐用例，优先 G2/G4/G5/G9/G10/G12/G13；先修复 `TestPlanGenerationInterruptedByShutdown` 的竞态 |
+| P2-M5（恢复验收） | §6.1、§6.2 | 按 G1–G17 补齐用例，并修复审查中发现的 C1/C2/C3 与 H1–H4 | **已完成**（见 `P2-reliability-recovery.md` 的 M5 详情） |
 
 **调查优先级（按"解除最多后续依赖"排序）**：
 

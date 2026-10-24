@@ -98,6 +98,54 @@ func (e *codeInitAPIExecutor) FetchSourceWith(
 	return fetched, nil
 }
 
+// seedCodeInitAPIWorkspace 写入一条任务级工作区已就绪的记录。
+func seedCodeInitAPIWorkspace(
+	t *testing.T,
+	db *sqlite.DB,
+	task domain.Task,
+	attempt domain.Attempt,
+	now time.Time,
+) {
+	t.Helper()
+	ctx := context.Background()
+	containerID := ""
+	if task.ContainerID != "" {
+		containerID = task.ContainerID
+	}
+	record, err := domain.NewTaskWorkspaceInitRecord(
+		domain.NewID(),
+		task.ID.String(),
+		containerID,
+		"docker-"+containerID,
+		domain.CodeSourceGit,
+		domain.DefaultContainerWorkDir,
+		now,
+	)
+	if err != nil {
+		t.Fatalf("构造任务级工作区记录失败: %v", err)
+	}
+	if err := db.CreateTaskWorkspaceInit(ctx, record); err != nil {
+		t.Fatalf("写入任务级工作区记录失败: %v", err)
+	}
+	if err := record.MarkRunning(domain.CodeFetchStageClone, now); err != nil {
+		t.Fatalf("标记任务级工作区运行失败: %v", err)
+	}
+	if err := record.MarkSucceeded(
+		"main",
+		domain.GitBranchSelectionExplicit,
+		codeInitAPIBaseSHA,
+		domain.TaskBranchSourceNew.String(),
+		codeInitAPIHeadSHA,
+		now,
+	); err != nil {
+		t.Fatalf("标记任务级工作区成功失败: %v", err)
+	}
+	if err := db.UpdateTaskWorkspaceInit(ctx, record); err != nil {
+		t.Fatalf("更新任务级工作区记录失败: %v", err)
+	}
+	_ = attempt
+}
+
 // codeInitAPIFixture 是代码初始化接口测试的固定装置。
 type codeInitAPIFixture struct {
 	handler http.Handler
@@ -183,6 +231,8 @@ func newCodeInitAPIFixture(t *testing.T) *codeInitAPIFixture {
 	if err != nil {
 		t.Fatalf("创建执行尝试失败: %v", err)
 	}
+	// 尝试级初始化必须排在任务级工作区初始化之后：两者共用同一个容器内工作目录。
+	seedCodeInitAPIWorkspace(t, db, task, attempt, now)
 	exec := &codeInitAPIExecutor{running: true, attemptID: attempt.ID}
 	service, err := app.NewCodeInitializeService(app.CodeInitializeOptions{
 		Store:      db,

@@ -752,7 +752,15 @@ func waitTaskRunStatus(
 ) app.WorkflowStatusResult {
 	t.Helper()
 	return waitTaskWorkflowStatus(t, service, taskID, func(result app.WorkflowStatusResult) bool {
-		return accept(result.Run.Status)
+		if !accept(result.Run.Status) {
+			return false
+		}
+		// 收尾的写入顺序是"先执行记录、后任务"：执行记录写成 completed 之后，任务的
+		// 成功终态才写入。任务仍在推进说明第二步还没落盘，需要继续等待。
+		if result.Run.Status == domain.WorkflowRunCompleted {
+			return !result.TaskStatus.IsActive()
+		}
+		return true
 	})
 }
 

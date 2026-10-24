@@ -200,6 +200,9 @@ func newCodeInitFixture(t *testing.T) *codeInitFixture {
 	if err != nil {
 		t.Fatalf("创建执行尝试失败: %v", err)
 	}
+	// 尝试级初始化必须排在任务级工作区初始化之后：两者共用同一个容器内工作目录。
+	// 这里写入一条任务级成功记录，使前置条件成立，用例才能验证各自的语义。
+	seedTaskWorkspaceReady(t, db, task, now)
 	containers := &codeInitContainers{running: true, attemptID: attempt.ID}
 	service, err := app.NewCodeInitializeService(app.CodeInitializeOptions{
 		Store:      db,
@@ -217,6 +220,48 @@ func newCodeInitFixture(t *testing.T) *codeInitFixture {
 		step:       step,
 		attempt:    attempt,
 		host:       host,
+	}
+}
+
+// seedTaskWorkspaceReady 写入一条任务级工作区已就绪的记录。
+func seedTaskWorkspaceReady(
+	t *testing.T,
+	db *sqlite.DB,
+	task domain.Task,
+	now time.Time,
+) {
+	t.Helper()
+	ctx := context.Background()
+	record, err := domain.NewTaskWorkspaceInitRecord(
+		domain.NewID(),
+		task.ID.String(),
+		codeInitContainerID,
+		codeInitDockerID,
+		domain.CodeSourceGit,
+		domain.DefaultContainerWorkDir,
+		now,
+	)
+	if err != nil {
+		t.Fatalf("构造任务级工作区记录失败: %v", err)
+	}
+	if err := db.CreateTaskWorkspaceInit(ctx, record); err != nil {
+		t.Fatalf("写入任务级工作区记录失败: %v", err)
+	}
+	if err := record.MarkRunning(domain.CodeFetchStageClone, now); err != nil {
+		t.Fatalf("标记任务级工作区运行失败: %v", err)
+	}
+	if err := record.MarkSucceeded(
+		"main",
+		domain.GitBranchSelectionExplicit,
+		codeInitBaseSHA,
+		domain.TaskBranchSourceNew.String(),
+		codeInitHeadSHA,
+		now,
+	); err != nil {
+		t.Fatalf("标记任务级工作区成功失败: %v", err)
+	}
+	if err := db.UpdateTaskWorkspaceInit(ctx, record); err != nil {
+		t.Fatalf("更新任务级工作区记录失败: %v", err)
 	}
 }
 

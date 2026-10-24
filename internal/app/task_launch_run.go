@@ -302,6 +302,12 @@ func (s *TaskLaunchService) prepareContainer(
 			task.ID,
 		)
 	}
+	// 创建新容器之前确认任务没有未处置的旧容器：容器停止或状态不明时直接建
+	// 第二个容器，会让第一代容器变成永远无法回收的孤儿。旧容器只能由用户显式
+	// delete 或 detach，启动流程不替用户处置现场。
+	if err := s.ensureNoPendingContainer(ctx, task); err != nil {
+		return preparedContainer{}, err
+	}
 	prepared, err := s.environments.PrepareForTask(ctx, TaskEnvironmentRequest{
 		TaskID: task.ID.String(),
 	})
@@ -435,4 +441,49 @@ func (s *TaskLaunchService) failLaunch(
 		slog.String("error", summary),
 	)
 	return result, cause
+}
+
+// ensureNoPendingContainer 确认任务没有仍受管理的旧容器记录。
+//
+// 启动只允许在"任务没有任何可能存在的容器"或"旧容器已被显式处置"时创建新容器：
+//   - 停止的容器：工作区可能仍保存未推送的代码；
+//   - 状态不明（unknown / creating）的容器：远程可能仍然存在，两代容器会让任务
+//     关联只能指向其中一个；
+//   - 孤儿容器（登记了任务关联但未被任务引用）：工作区状态未知。
+//
+// 判定只读：本方法不修改状态，也不执行远程操作。读取失败同样阻止创建：
+// 无法判断是否存在旧容器时新建容器会制造无法解释的孤儿。
+func (s *TaskLaunchService) ensureNoPendingContainer(
+	ctx context.Context,
+	task domain.Task,
+) error {
+	records, err := s.store.ListContainers(ctx, domain.ContainerFilter{
+		TaskID: &task.ID,
+	})
+	if err != nil {
+		return fmt.Errorf(
+			"%w: 读取任务 %s 的容器记录失败: %w",
+			ErrTaskLaunchPrerequisite,
+			task.ID,
+			err,
+		)
+	}
+	for _, container := range records {
+		if container.State == domain.ContainerStateRemoved ||
+			container.State == domain.ContainerStateDetached ||
+			container.Detached {
+			continue
+		}
+		return fmt.Errorf(
+			"%w: 任务 %s 仍有未处置的容器记录 %s（状态 %s）；"+
+				"请先执行 agentflow docker container inspect %s 核验现场，"+
+				"再显式 delete 或 detach 后重新启动",
+			ErrTaskLaunchPrerequisite,
+			task.ID,
+			container.ID,
+			container.State,
+			container.ID,
+		)
+	}
+	return nil
 }

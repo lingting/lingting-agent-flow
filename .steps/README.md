@@ -25,8 +25,9 @@
 
 ## 当前阶段与当前里程碑
 
-- **当前阶段**：P2 进行中 —— 流程可靠性与恢复。
-- **当前里程碑**：`P2-M5` —— 补齐关键恢复场景的集成测试与恢复验收（`pending`）。
+- **当前阶段**：P2 已完成 —— 流程可靠性与恢复；下一步进入 P3（多任务执行与调度）。
+- **当前里程碑**：`P2-M5` —— 补齐关键恢复场景的集成测试与恢复验收，状态
+  `completed`（2026-10-25，基于 `master` HEAD `40460d4` 实施与核实）。
 - **上一个里程碑**：`P2-M4` —— 核验提交、推送、合并等外部副作用的恢复路径，状态
   `completed`（2026-10-25，基于 `master` HEAD `168fd2f` 实施）。交付内容：修复 8 个
   真实故障窗口——不可信标记落盘（`codesaver.Session.flagUnconfirmed`）、HEAD 归因改为
@@ -71,13 +72,21 @@
   Developer 会话从未写入数据库、收尾终态写入失败留下 `running` 残留两处生产断点）。
   `P1-M3` —— 有上限、可停止的验证失败修复与重新验证闭环。`P1-M2` —— Developer、
   确定性验证与 Validator Agent 的完整验证决策链。`P1-M1` —— 任务启动至计划生成的前置流程。
-- **下一步**：按"下一步工作的选择规则"进入 P2-M5（关键恢复场景的集成测试与恢复验收）。
-  P2-M4 的交接事项：merge 恢复仍缺真实远程 Docker 证据（依赖 `docker.remote_enabled`）；
-  "核验并继续"的自动编排入口尚未实现，恢复仍需用户显式执行 `agentflow code verify`
-  后再次请求恢复；容器已删除时核验只能得到 `unverifiable`，无自动出路；
-  `code_fetches` 与 `container.state=unknown` 两类残留仍没有收敛路径（B4/G14）；
-  "任务结论存疑"（`tasks.completed` 与 `workflow_runs.recovery_required` 同时成立）
-  仍没有专门表达。
+- **P2-M5 交付内容**：修复 3 个阻塞级 + 4 个高风险恢复缺陷——收尾写入顺序改为
+  "先执行记录、后任务"并用条件写入做栅栏（`applyCloseout`）、启动恢复新增
+  `recoverStalledDelivery` 收敛停滞在 `verifying`/`saving` 的任务、新增
+  `domain.DecideTaskCloseoutView` 让任务 API 输出 `final_result` / `closeout`
+  （`confirmed`/`pending`/`unconfirmed`/`inconsistent`）、新增
+  `app.ContainerRecoveryService`（容器 `unknown` 与孤儿容器收敛 / 报告）与
+  `app.CodeFetchRecoveryService`（Attempt 级 `code_fetches` 残留收敛）、迁移
+  `0023_code_fetch_active_unique.sql`、`VerifyCodeSave` 在容器缺失时降级为
+  `unverifiable` 并落盘、新增 HTTP `verify-code-save` 与 `resume-eligibility`
+  （CLI `task resume-status`）、`ensureNoPendingContainer` 阻止创建第二个容器。
+- **下一步**：按"下一步工作的选择规则"进入 P3（多任务执行与调度）。
+  P2-M5 的交接事项：真实远程 Docker 上的容器残留与 merge 恢复仍缺证据（需在真实远程
+  环境注入 `unknown` / 孤儿现场）；遗留的 `completed` + `recovery_required` 只被报告、
+  不被自动修复（`completed` 是终态，若要回退需先审计全部读取方）；`0023` 迁移在已有
+  重复活动 `code_fetches` 的库上会失败并有排查说明；孤儿容器不自动补关联。
   P1 遗留的真实缺口是私有仓库 Git 凭据支持
   （`source.GitCredentialProvider` / `codesaver.GitCredentialProvider` 无实现），
   记录在 `ROADMAP.md` 的"尚未实现"。
@@ -95,6 +104,7 @@
 | [`P2-reliability-recovery.md`](./P2-reliability-recovery.md) | P2：流程可靠性与恢复 |
 | [`P2-M1-recovery-boundaries.md`](./P2-M1-recovery-boundaries.md) | P2-M1：全链路状态持久化与恢复边界清单（14 阶段矩阵、启动恢复调用链、缺陷与测试缺口） |
 | [`P2-M2-interruption-semantics.md`](./P2-M2-interruption-semantics.md) | P2-M2：四类中断 × 六层状态的收敛语义矩阵与跨层一致性规则 |
+| [`P2-M5-closeout-protocol.md`](./P2-M5-closeout-protocol.md) | P2-M5：任务收尾一致性协议（写入顺序、栅栏、恢复入口、遗留不一致的只读报告） |
 | [`P3-multi-task-scheduling.md`](./P3-multi-task-scheduling.md) | P3：多任务执行与调度 |
 | [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md) | P4：产品操作体验与针对性优化 |
 

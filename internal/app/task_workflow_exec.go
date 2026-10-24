@@ -578,13 +578,12 @@ func (s *TaskWorkflowService) applyCloseout(
 		}
 		return s.stopWithEvent(writeCtx, run, decision.Status, errorClass, summary, eventType, payload)
 	}
-	// 只有全部必需条件满足时才把任务推进到成功终态。
-	updated, err := s.completeTask(writeCtx, task)
-	if err != nil {
-		return s.stopWithEvent(writeCtx, run, domain.WorkflowRunRecoveryRequired,
-			"task_completion_failed", "任务收尾写入失败: "+errorSummary(err),
-			domain.EventTypeWorkflowRecovery, payload)
-	}
+	// 收尾写入顺序固定为"执行记录 → 任务"，执行记录的条件写入是栅栏：
+	//   - 写入失败说明本次执行已经失去执行权（版本冲突、租约已转移）或数据库不可用，
+	//     此时绝不能继续写任务成功终态，否则会在没有执行权的情况下伪造任务成功；
+	//   - 写入成功后才允许推进任务，此时任务写入失败只会留下
+	//     "执行记录 completed + 任务 recovery_required"，即"未完成"，
+	//     由启动恢复的收尾停滞入口补齐，不会伪造成功。
 	if err := run.Complete(summary, s.now()); err != nil {
 		return s.stopRun(writeCtx, run, domain.WorkflowRunRecoveryRequired, "closeout_failed", err)
 	}
@@ -595,9 +594,83 @@ func (s *TaskWorkflowService) applyCloseout(
 		// 不能对外宣布完成，也不能把 running 残留当成已收尾留在库里。
 		return s.stopUnpersistedCloseout(writeCtx, run, persistErr)
 	}
+	updated, err := s.completeTask(writeCtx, task)
+	if err != nil {
+		// 执行记录已经确认完成，任务状态写入失败：如实收敛为需要人工核验。
+		// 该路径不再改写执行记录（它已是终态），由启动恢复按持久化证据补齐。
+		s.appendEvent(writeCtx, run.TaskID, nil, nil, domain.EventTypeWorkflowRecovery, map[string]any{
+			"run_id":      persisted.ID.String(),
+			"status":      string(domain.WorkflowRunCompleted),
+			"error_class": domain.CloseoutClassTaskCompletionFailed,
+			"summary":     "执行记录已确认完成，任务状态写入失败: " + errorSummary(err),
+		})
+		s.markTaskRecoveryRequired(writeCtx, task, domain.CloseoutClassTaskCompletionFailed,
+			"执行记录已确认完成，但任务状态写入失败: "+errorSummary(err))
+		return persisted
+	}
 	payload["task_status"] = string(updated.Status)
 	s.appendEvent(writeCtx, run.TaskID, nil, nil, domain.EventTypeWorkflowCompleted, payload)
 	return persisted
+}
+
+// markTaskRecoveryRequired 把任务收敛为需要人工核验。
+//
+// 它只用于"执行记录已经确认完成、但任务状态写入失败"的场景：此时不能再把任务
+// 声明为成功，也不能让任务停留在 saving / verifying 这种既不能启动也不能恢复的
+// 中间状态。写入失败只记录日志，由启动恢复的收尾停滞入口再次收敛。
+func (s *TaskWorkflowService) markTaskRecoveryRequired(
+	ctx context.Context,
+	task domain.Task,
+	errorClass, summary string,
+) {
+	current, err := s.store.GetTask(context.WithoutCancel(ctx), task.ID)
+	if err != nil {
+		s.logger.WarnContext(
+			ctx,
+			"任务收尾失败后无法重新读取任务，保留原状态等待启动恢复",
+			slog.String("task_id", task.ID.String()),
+			slog.String("error", errorSummary(err)),
+		)
+		return
+	}
+	recovered := *current
+	if recovered.Status.IsTerminal() {
+		// 其他执行者已经把任务收敛到终态：不覆盖。
+		return
+	}
+	if recovered.Status != domain.TaskStatusRecoveryRequired {
+		previous := recovered.Status
+		if transitionErr := recovered.Transition(domain.TaskStatusRecoveryRequired, s.now()); transitionErr != nil {
+			s.logger.WarnContext(
+				ctx,
+				"任务收尾失败后无法收敛为需要人工核验",
+				slog.String("task_id", task.ID.String()),
+				slog.String("status", string(previous)),
+				slog.String("error", errorSummary(transitionErr)),
+			)
+			return
+		}
+		if updateErr := s.store.UpdateTaskIfStatus(
+			context.WithoutCancel(ctx),
+			recovered,
+			[]domain.TaskStatus{previous},
+		); updateErr != nil {
+			s.logger.WarnContext(
+				ctx,
+				"任务收尾失败后写入需要人工核验状态失败",
+				slog.String("task_id", task.ID.String()),
+				slog.String("error", errorSummary(updateErr)),
+			)
+			return
+		}
+	}
+	recovered.FailureSummary = summary
+	s.appendEvent(context.WithoutCancel(ctx), task.ID, nil, nil,
+		domain.EventTypeTaskRecoveryRequired, map[string]any{
+			"stage":       "closeout",
+			"error_class": errorClass,
+			"summary":     summary,
+		})
 }
 
 // completeTask 把任务推进到成功终态。
@@ -783,14 +856,17 @@ func (s *TaskWorkflowService) cancelTask(ctx context.Context, taskID domain.ID) 
 	}
 }
 
-// stopUnpersistedCloseout 处理"收尾结论没能写成 completed"的现场。
+// stopUnpersistedCloseout 处理"执行记录的完成结论没能落盘"的现场。
 //
-// 只有在全部收尾条件满足、任务已经推进到 completed，而执行记录的终态写入失败时
-// 才会走到这里。此时内存副本已经进入终态，任何状态机迁移都会被拒绝，因此不能再用
-// 本地对象覆盖数据库：
+// 只有在全部收尾条件满足、`run.Complete` 已经在内存副本上成功，而执行记录的终态
+// 写入失败时才会走到这里。此时内存副本已经进入终态，任何状态机迁移都会被拒绝，
+// 因此不能再用本地对象覆盖数据库：
 //   - 先重新读取数据库中的真实记录，把停止状态写在真实值之上；
 //   - 该写入同样失败时保留 running 现场并记录日志，由启动恢复按租约过期收敛；
 //   - 任何情况下都不写 "工作流已完成" 事件。
+//
+// 注意：调用本方法时任务**尚未**被推进到成功终态（收尾顺序已改为"先执行记录、
+// 后任务"），因此这里不需要、也不允许回退任务状态。
 func (s *TaskWorkflowService) stopUnpersistedCloseout(
 	ctx context.Context,
 	run domain.WorkflowRun,

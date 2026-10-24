@@ -441,6 +441,40 @@ func (r *CodeFetchRecord) MarkSkipped(commitSHA string, at time.Time) error {
 	return r.Validate()
 }
 
+// MarkVerifiedSucceeded 记录"只读核验确认代码已经就位"。
+//
+// 它与 MarkSucceeded 的差别在于证据来源：真实获取路径能给出基础分支与分支来源，
+// 而只读核验只能看到工作区当前状态。因此这里要求工作区处于任务分支且 HEAD 可读，
+// 但允许基础分支信息缺失——缺失时保留原值，不臆造。
+//
+// 该方法的语义边界与 MarkSucceeded 一致：记录的代码必须真的可核验，否则不得置为成功。
+func (r *CodeFetchRecord) MarkVerifiedSucceeded(
+	taskBranch, commitSHA string,
+	at time.Time,
+) error {
+	if r == nil {
+		return invalidField("CodeFetch", "", "实体为空")
+	}
+	if err := codeFetchStatusMachine.validate(string(r.Status), string(CodeFetchStatusSucceeded)); err != nil {
+		return err
+	}
+	if err := ValidateTaskBranchForTask(r.TaskID, taskBranch); err != nil {
+		return err
+	}
+	if err := ValidateGitCommitSHA("commit_sha", commitSHA); err != nil {
+		return err
+	}
+	now := normalizeTime(at)
+	r.Status = CodeFetchStatusSucceeded
+	r.CommitSHA = strings.TrimSpace(commitSHA)
+	r.Stage = CodeFetchStageVerify
+	r.ErrorCode = ""
+	r.ErrorSummary = ""
+	r.FinishedAt = &now
+	r.UpdatedAt = now
+	return r.Validate()
+}
+
 // MarkFailed 记录失败阶段、错误类别与脱敏摘要。
 //
 // 失败摘要由调用方保证已脱敏：本方法只做长度裁剪，不会识别其中的敏感内容。

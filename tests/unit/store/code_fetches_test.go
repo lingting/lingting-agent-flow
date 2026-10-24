@@ -143,7 +143,24 @@ func TestCodeFetchRecordsListedPerAttempt(t *testing.T) {
 	first := newCodeFetchRecord(t, "task-c", "attempt-c")
 	second := newCodeFetchRecord(t, "task-c", "attempt-c")
 	other := newCodeFetchRecord(t, "task-c", "attempt-other")
-	for _, record := range []domain.CodeFetchRecord{first, second, other} {
+	if err := db.CreateCodeFetchRecord(ctx, first); err != nil {
+		t.Fatalf("写入代码初始化记录失败: %v", err)
+	}
+	// 0023 的活动唯一索引要求同一尝试同时只有一条活动记录：先把第一条收敛为
+	// 终态，才能写入第二次尝试的历史记录（记录只追加，不走覆盖）。
+	if err := first.MarkFailed(
+		domain.CodeFetchStatusFailed,
+		domain.CodeFetchStageClone,
+		"clone_failed",
+		"仓库不可访问",
+		time.Now().UTC(),
+	); err != nil {
+		t.Fatalf("标记失败失败: %v", err)
+	}
+	if err := db.UpdateCodeFetchRecord(ctx, first); err != nil {
+		t.Fatalf("更新代码初始化记录失败: %v", err)
+	}
+	for _, record := range []domain.CodeFetchRecord{second, other} {
 		if err := db.CreateCodeFetchRecord(ctx, record); err != nil {
 			t.Fatalf("写入代码初始化记录失败: %v", err)
 		}

@@ -47,6 +47,20 @@ type TaskResponse struct {
 	// 它与 StatusTerminal 的差别在 failed：失败任务可以显式重试，因此不是终态，
 	// 但它的执行已经停止，管理接口允许删除、拒绝再次取消。
 	StatusFinished bool `json:"status_finished"`
+	// FinalResult 是任务的最终结论。
+	//
+	// 它与 Status 不同：状态表达"处在哪个业务阶段"，结论表达"这次执行的结果是什么"。
+	// 两者都可能为空，缺失时不得由状态推断结论。
+	FinalResult string `json:"final_result,omitempty"`
+	// Closeout 是派生的收尾闭环结论：confirmed / pending / unconfirmed /
+	// inconsistent / cancelled。
+	//
+	// 它解决的是一个真实问题：任务状态可能是 completed（成功终态的写入先于执行记录
+	// 的收尾写入），而执行记录仍是 recovery_required。此时调用方不能把该任务当作
+	// 确定成功，必须依据这个字段判断。
+	Closeout string `json:"closeout"`
+	// CloseoutSummary 是收尾闭环结论的可读说明。
+	CloseoutSummary string `json:"closeout_summary,omitempty"`
 	// ProjectID 是关联项目标识，未关联时为空字符串。
 	ProjectID         string     `json:"project_id"`
 	CancelRequested   bool       `json:"cancel_requested"`
@@ -141,12 +155,17 @@ func (h *taskHandler) create(w http.ResponseWriter, r *http.Request) {
 		h.writeServiceError(w, r, err)
 		return
 	}
+	closeouts, err := h.tasks.TaskCloseoutViews(r.Context(), []domain.Task{task})
+	if err != nil {
+		h.writeServiceError(w, r, err)
+		return
+	}
 	writeJSON(
 		w,
 		r,
 		h.logger,
 		http.StatusCreated,
-		taskResponse(task, name, description),
+		taskResponseWithCloseout(task, name, description, closeouts[task.ID]),
 	)
 }
 
@@ -188,12 +207,28 @@ func (h *taskHandler) detail(w http.ResponseWriter, r *http.Request, taskID stri
 		h.writeServiceError(w, r, err)
 		return
 	}
-	name, description, err := h.taskNameAndDescription(r.Context(), task)
+	response, err := h.taskResponseWithDerivedCloseout(r.Context(), task)
 	if err != nil {
 		h.writeServiceError(w, r, err)
 		return
 	}
-	writeJSON(w, r, h.logger, http.StatusOK, taskResponse(task, name, description))
+	writeJSON(w, r, h.logger, http.StatusOK, response)
+}
+
+// taskResponseWithDerivedCloseout 读取执行记录后转换单个任务表示。
+func (h *taskHandler) taskResponseWithDerivedCloseout(
+	ctx context.Context,
+	task domain.Task,
+) (TaskResponse, error) {
+	name, description, err := h.taskNameAndDescription(ctx, task)
+	if err != nil {
+		return TaskResponse{}, err
+	}
+	closeouts, err := h.tasks.TaskCloseoutViews(ctx, []domain.Task{task})
+	if err != nil {
+		return TaskResponse{}, err
+	}
+	return taskResponseWithCloseout(task, name, description, closeouts[task.ID]), nil
 }
 
 // cancel 处理 POST /api/v1/tasks/{taskID}/cancel。
@@ -206,12 +241,12 @@ func (h *taskHandler) cancel(w http.ResponseWriter, r *http.Request, taskID stri
 		h.writeServiceError(w, r, err)
 		return
 	}
-	name, description, err := h.taskNameAndDescription(r.Context(), task)
+	response, err := h.taskResponseWithDerivedCloseout(r.Context(), task)
 	if err != nil {
 		h.writeServiceError(w, r, err)
 		return
 	}
-	writeJSON(w, r, h.logger, http.StatusOK, taskResponse(task, name, description))
+	writeJSON(w, r, h.logger, http.StatusOK, response)
 }
 
 // remove 处理 DELETE /api/v1/tasks/{taskID}。
@@ -319,19 +354,35 @@ func (h *taskHandler) taskResponses(
 	ctx context.Context,
 	tasks []domain.Task,
 ) ([]TaskResponse, error) {
+	closeouts, err := h.tasks.TaskCloseoutViews(ctx, tasks)
+	if err != nil {
+		return nil, err
+	}
 	responses := make([]TaskResponse, 0, len(tasks))
 	for _, task := range tasks {
 		name, description, err := h.taskNameAndDescription(ctx, task)
 		if err != nil {
 			return nil, err
 		}
-		responses = append(responses, taskResponse(task, name, description))
+		responses = append(
+			responses,
+			taskResponseWithCloseout(task, name, description, closeouts[task.ID]),
+		)
 	}
 	return responses, nil
 }
 
 // taskResponse 把领域任务转换为对外表示。
 func taskResponse(task domain.Task, name, description string) TaskResponse {
+	return taskResponseWithCloseout(task, name, description, domain.TaskCloseoutUnconfirmed)
+}
+
+// taskResponseWithCloseout 把领域任务与派生的收尾结论一起转换为对外表示。
+func taskResponseWithCloseout(
+	task domain.Task,
+	name, description string,
+	closeout domain.TaskCloseoutState,
+) TaskResponse {
 	return TaskResponse{
 		ID:                task.ID.String(),
 		Name:              name,
@@ -339,6 +390,9 @@ func taskResponse(task domain.Task, name, description string) TaskResponse {
 		Status:            string(task.Status),
 		StatusTerminal:    task.Status.IsTerminal(),
 		StatusFinished:    task.Status.IsFinished(),
+		FinalResult:       string(task.FinalResult),
+		Closeout:          closeout.String(),
+		CloseoutSummary:   closeout.Summary(),
 		ProjectID:         task.Config.ProjectID,
 		CancelRequested:   task.CancelRequested,
 		CancelRequestedAt: task.CancelRequestedAt,
