@@ -6,7 +6,9 @@
 > P1-M2 已在 HEAD `3219591` 之后按实际接入与改动更新；
 > P1-M3 已在 HEAD `2545e74` 之后按实际接入与改动更新；
 > P1-M4 已在 HEAD `b7f7e22` 之后按实际核实与改动更新；
-> P1-M5 已在 HEAD `b36a9d2` 之后按实际核实与改动更新。
+> P1-M5 已在 HEAD `b36a9d2` 之后按实际核实与改动更新；
+> P2-M1 已在 HEAD `7a55dfe` 之后按实际核实与文档改动更新（结论见
+> [`P2-M1-recovery-boundaries.md`](./P2-M1-recovery-boundaries.md)）。
 
 ## 项目最终业务目标
 
@@ -34,8 +36,9 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 
 ## 当前实现状态摘要（基于代码证据）
 
-> **当前阶段：P1 已完成**（P1-M1、P1-M2 于 2026-10-23 完成，P1-M3、P1-M4 于 2026-10-23
-> 完成，P1-M5 于 2026-10-23 核实并完成；证据见 `P1-single-task-e2e.md` 的对应"完成记录"）。
+> **当前阶段：P2 进行中**（P1 全部里程碑于 2026-10-23 完成；P2-M1 于 2026-10-23 完成，
+> P2-M2 起待启动）。P1 证据见 `P1-single-task-e2e.md` 的对应"完成记录"；P2-M1 证据见
+> `P2-M1-recovery-boundaries.md`。
 >
 > P1-M4 的核实结论：修复闭环确实在生产调用链内并自然进入交付阶段；核实中修复了两处
 > 真实生产断点——(1) Developer 执行从不写入 Session 记录（`callAgent` 只 `Load` 而不
@@ -103,8 +106,12 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - 代码保存（Commit/Push/可选 Merge）与保存记录恢复核验（`internal/app/code_save*.go`、
   `internal/domain/code_save*.go`、`internal/cli/code.go` 的 `code verify`）。
 - 会话归档核验（`internal/app/task_workflow_exec.go` 的 `sessionsPersisted`）。
-- 启动恢复（工作流运行记录 / 计划现场 / 取消现场收敛，
-  `internal/app/task_workflow_run.go`、`internal/app/task_launch_recovery.go`）。
+- 启动恢复（P2-M1 已核实并成文）：`TaskWorkflowService.Start` 收敛工作流运行记录 /
+  计划现场 / 取消现场（`internal/app/task_workflow_run.go`）；`TaskLaunchService.Start`
+  收敛工作区初始化残留与步骤执行占用（`internal/app/task_launch.go`、
+  `task_workspace_recovery.go`、`task_launch_recovery.go`）；`HostValidationService.Start`
+  重新调度 `checking` 节点。真实调用顺序与逐阶段边界见
+  [`P2-M1-recovery-boundaries.md`](./P2-M1-recovery-boundaries.md)。
 - Web 任务页：创建/查看/取消/删除、启动/取消/恢复工作流与进度面板
   （`lingting-agent-flow-ui/src/pages/tasks/TasksPage.tsx`）。
 - **验证失败修复与重新验证闭环**（P1-M3）：`app.StepWorkflowService.ExecuteAndValidate`
@@ -143,8 +150,21 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - 多任务调度队列、有界并发与任务领取。
 - 私有仓库的 Git 凭据支持：`source.GitCredentialProvider` 与 `codesaver.GitCredentialProvider`
   均无实现，真实链路上私有仓库必然失败（已记录的架构决策，需凭据存储设计与安全评审）。
+- **五类执行残留的收敛路径**（P2-M1 核实，见 `P2-M1-recovery-boundaries.md` §3.4）：
+  `attempts` 停在 `running`、`sessions` 停在 `running`/`starting`（`SessionService.Fail`
+  无生产调用者）、`validation_runs` 停在 `pending`/`running`、Attempt 级 `code_fetches`
+  残留、`container.state=unknown` 与"已创建但未关联任务"的孤儿容器。
+- **外部副作用的自动恢复入口**：`code verify` 目前只有 CLI 手工入口，
+  `recovery_required` 之后没有"核验并继续"的编排能力。
 
 **待调查**：
+
+- **P2-M1 记录的阻塞/高风险缺陷**（需在 M2 处理，本阶段未改生产代码）：
+  B1 步骤占用残留与 `blocked` 执行记录互相锁死（`workflowRunActivePredicate` 把 `blocked`
+  算作未结束，而 `RecoverStepOccupancy` 据此拒绝收敛）；B2 `validation_runs` 残留使
+  Attempt 永久无法再验证；B3 `attempts`/`sessions` 残留无收敛；B5 执行记录层取消生效但
+  任务层未收敛；B6 租约只判定一次、无续租（10 分钟租约 vs 30 分钟默认步骤超时）；
+  B7 `partial` 会话仍被标记 `archive_status=succeeded`。
 
 - `Review` 步骤是否仍需要：P1-M2 已确认语义审查作为"某一步验证的一环"动态调用即可满足
   需求，`domain.BuildPlan` 与编排器都不需要新增步骤类型。是否要为其他用途引入独立审查
@@ -231,5 +251,6 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 
 - [P1-single-task-e2e.md](./P1-single-task-e2e.md)
 - [P2-reliability-recovery.md](./P2-reliability-recovery.md)
+- [P2-M1-recovery-boundaries.md](./P2-M1-recovery-boundaries.md)
 - [P3-multi-task-scheduling.md](./P3-multi-task-scheduling.md)
 - [P4-product-experience-optimization.md](./P4-product-experience-optimization.md)
