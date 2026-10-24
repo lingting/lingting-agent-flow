@@ -26,16 +26,25 @@
 ## 当前阶段与当前里程碑
 
 - **当前阶段**：P2 进行中 —— 流程可靠性与恢复。
-- **当前里程碑**：`P2-M3` —— 明确修复次数上限、停止条件、重试资格和结果不确定处理规则
-  （`pending`）。M1 为其列出 3 项移交问题；M2 已明确"中断语义已定义 ≠ 自动重试资格已
-  定义"，重试资格判定与跨进程轮次计数仍待 M3 实现。
-- **上一个里程碑**：`P2-M2` —— 明确超时、取消、中断、进程重启后的恢复语义，状态
+- **当前里程碑**：`P2-M4` —— 核验提交、推送、合并等外部副作用的恢复路径（`pending`）。
+- **上一个里程碑**：`P2-M3` —— 明确修复次数上限、停止条件、重试资格和结果不确定处理
+  规则，状态 `completed`（2026-10-24，基于 `master` HEAD `2a1bb0d` 实施）。交付内容：
+  预算落到持久化事实（`repair_cycles` + `attempts.budget_scope*`，迁移
+  `0022_repair_cycles.sql`）；重试资格与预算由 `domain.DecideRepairStart` /
+  `domain.DecideRepairBudget` 统一定义，编排与恢复都引用它；用户显式新周期走
+  `POST .../steps/{id}/open-repair-cycle`（CLI `agentflow task reopen-step`），只在上一
+  周期已收敛且预算用尽或策略不再允许修复时成功；反馈写入失败由
+  `RepairClassFeedbackUnavailable` 明确停止，首轮依据只取当前周期内最近一次验证。
+  测试证据：`tests/unit/domain/repair_cycle_test.go`、
+  `tests/integration/local/workflow/repair_budget_test.go`（含重启与并发）、
+  `e2e_repair_limit_test.go` 的 `TestE2ERepairLimitSurvivesRestart`。
+- **更早里程碑**：`P2-M2` —— 明确超时、取消、中断、进程重启后的恢复语义，状态
   `completed`（2026-10-24，基于 `master` HEAD `2a1bb0d` 实施与核实）。交付物为
   [`P2-M2-interruption-semantics.md`](./P2-M2-interruption-semantics.md)：四类中断的
   判定依据、六层状态 × 四类中断的收敛矩阵、跨层一致性规则。本次同时修复了 B1（步骤占用
   与 `blocked` 执行记录互相锁死）、B5（取消意图跨层丢失）、B6（租约无续租），并新增
   `app.ExecutionResidueService` 收敛 `attempts` / `sessions` / `validation_runs` 残留。
-- **更早里程碑**：`P2-M1` —— 梳理所有阶段的状态持久化与恢复边界，状态 `completed`
+- **更早里程碑（续）**：`P2-M1` —— 梳理所有阶段的状态持久化与恢复边界，状态 `completed`
   （2026-10-23，基于 `master` HEAD `7a55dfe` 核实）。交付物为
   [`P2-M1-recovery-boundaries.md`](./P2-M1-recovery-boundaries.md)：14 个阶段的完整恢复边界
   矩阵、服务启动恢复的真实调用链（`HostValidationService` → `StepExecutor`/`Validation`/
@@ -49,8 +58,13 @@
   Developer 会话从未写入数据库、收尾终态写入失败留下 `running` 残留两处生产断点）。
   `P1-M3` —— 有上限、可停止的验证失败修复与重新验证闭环。`P1-M2` —— Developer、
   确定性验证与 Validator Agent 的完整验证决策链。`P1-M1` —— 任务启动至计划生成的前置流程。
-- **下一步**：按"下一步工作的选择规则"进入 P2-M3。P1 遗留的真实缺口是私有仓库 Git 凭据
-  支持（`source.GitCredentialProvider` / `codesaver.GitCredentialProvider` 无实现），
+- **下一步**：按"下一步工作的选择规则"进入 P2-M4（commit / push / merge 的恢复核验）。
+  P2-M3 的交接事项：`interrupted` / `unknown` / `recovery_required` 尝试一律阻止自动重放
+  与开启新周期，只保留人工核验；`code_fetches` 与 `container.state=unknown` 两类残留仍
+  没有收敛路径（B4/G14，属 M4/M5）；"任务结论存疑"（`tasks.completed` 与
+  `workflow_runs.recovery_required` 同时成立）仍没有专门表达。
+  P1 遗留的真实缺口是私有仓库 Git 凭据支持
+  （`source.GitCredentialProvider` / `codesaver.GitCredentialProvider` 无实现），
   记录在 `ROADMAP.md` 的"尚未实现"。
 
 > 阶段与里程碑的状态可能随开发推进而变化，以上仅为撰写本路线图时的快照；最新状态

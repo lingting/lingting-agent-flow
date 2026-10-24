@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/lingting/agentflow/internal/agent"
+	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/domain"
 )
 
@@ -241,4 +242,73 @@ func TestE2ERepairLimitPreservesContainer(t *testing.T) {
 	if container.Detached {
 		t.Fatal("失败后不得自动脱离容器管理")
 	}
+}
+
+// TestE2ERepairLimitSurvivesRestart 验证达到上限后重启不能创建新的执行尝试。
+//
+// 该用例是 P2-M3 的关键验收点：修复上限必须来自持久化事实。重启后重新打开数据库、
+// 重新装配编排器，再通过正式执行入口推进同一任务，Attempt 数量必须保持不变，
+// 且步骤必须停在可诊断的停止状态上。
+func TestE2ERepairLimitSurvivesRestart(t *testing.T) {
+	t.Parallel()
+	fixture := newE2EFixture(t, e2eOptions{
+		codeSaver:     true,
+		retry:         domain.RetryConfig{MaxAttempts: 2, RetryVerification: true},
+		agentReplies:  e2eAlwaysFailReplies(),
+		checkSequence: e2eAlwaysFailChecks(),
+	})
+	fixture.repo.writeFile(t, "internal/feature.go", "package internal\n")
+	fixture.launchTask(t)
+	if result := fixture.settle(t); result.Run.Status != domain.WorkflowRunBlocked {
+		t.Fatalf("达到尝试上限应阻塞，实际 %s", formatE2ERun(result.Run))
+	}
+	steps := fixture.reloadSteps(t)
+	attemptsBefore := len(fixture.attempts(t, steps[1].ID))
+	if attemptsBefore != 2 {
+		t.Fatalf("应留下 2 次尝试，实际 %d", attemptsBefore)
+	}
+	cyclesBefore := e2eCyclesOf(t, fixture, steps[1].ID)
+	if len(cyclesBefore) != 1 {
+		t.Fatalf("应只有一个执行周期，实际 %d", len(cyclesBefore))
+	}
+	if cyclesBefore[0].Active() {
+		t.Fatal("停止后周期必须结束")
+	}
+	// 模拟进程退出后重启：同一数据库路径重新打开并重新装配服务。替身端口随之重建，
+	// 因此重启后的调用计数从零开始，可以直接断言"重启后没有发生任何调用"。
+	fixture.restart(t)
+
+	// 重启后重新推进同一任务：必须被拒绝，不得产生新的 Agent 调用或检查调用。
+	if _, err := fixture.workflow.StartWorkflow(fixture.ctx, app.StartWorkflowRequest{
+		TaskID: fixture.task.ID.String(),
+	}); err == nil {
+		t.Fatal("达到上限后重启不得启动新的工作流执行")
+	}
+	if _, _, agentCallsAfter, checkCallsAfter := fixture.ports.counts(); agentCallsAfter != 0 ||
+		checkCallsAfter != 0 {
+		t.Fatalf("重启后不得调用 Agent 或执行检查: agent=%d check=%d",
+			agentCallsAfter, checkCallsAfter)
+	}
+	// 数据库事实不变：尝试数量、周期登记与步骤状态都保持原样。
+	steps = fixture.reloadSteps(t)
+	if attemptsAfter := len(fixture.attempts(t, steps[1].ID)); attemptsAfter != attemptsBefore {
+		t.Fatalf("重启后不得创建新尝试: %d → %d", attemptsBefore, attemptsAfter)
+	}
+	cyclesAfter := e2eCyclesOf(t, fixture, steps[1].ID)
+	if len(cyclesAfter) != len(cyclesBefore) {
+		t.Fatalf("重启后不得创建新周期: %d → %d", len(cyclesBefore), len(cyclesAfter))
+	}
+	if cyclesAfter[0].ID != cyclesBefore[0].ID {
+		t.Fatalf("重启后周期标识不得变化: %s → %s", cyclesBefore[0].ID, cyclesAfter[0].ID)
+	}
+}
+
+// e2eCyclesOf 读取步骤的执行周期登记。
+func e2eCyclesOf(t *testing.T, fixture *e2eFixture, stepID domain.ID) []domain.RepairCycle {
+	t.Helper()
+	cycles, err := fixture.db.ListRepairCyclesByStep(fixture.ctx, stepID)
+	if err != nil {
+		t.Fatalf("读取执行周期失败: %v", err)
+	}
+	return cycles
 }

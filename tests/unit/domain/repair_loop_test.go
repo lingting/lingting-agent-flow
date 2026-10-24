@@ -10,9 +10,12 @@ import (
 // passingRepairInput 返回一份"验证失败且仍可修复"的基准输入。
 func passingRepairInput() domain.RepairLoopInput {
 	return domain.RepairLoopInput{
-		StepType:            domain.StepTypeDevelop,
+		StepType: domain.StepTypeDevelop,
+		// Attempts / MaxAttempts 保留为兼容字段；预算判定只读取 Budget 与 HasBudget。
 		Attempts:            1,
 		MaxAttempts:         3,
+		Budget:              domain.RepairBudget{MaxAttempts: 3, Consumed: 1},
+		HasBudget:           true,
 		Retry:               domain.RetryConfig{MaxAttempts: 3, RetryVerification: true},
 		Outcome:             domain.StepExecutionCompleted,
 		VerificationRan:     true,
@@ -60,6 +63,7 @@ func TestDecideRepairLoopAttemptLimitBoundary(t *testing.T) {
 			input := passingRepairInput()
 			input.Attempts = testCase.attempts
 			input.MaxAttempts = testCase.max
+			input.Budget = domain.RepairBudget{MaxAttempts: testCase.max, Consumed: testCase.attempts}
 			decision := domain.DecideRepairLoop(input)
 			if decision.CanRepair() != testCase.expected {
 				t.Fatalf("%s: 期望可修复=%v，实际 %s（%s）",
@@ -78,10 +82,12 @@ func TestDecideRepairLoopZeroMaxAttemptsUsesDefault(t *testing.T) {
 	input := passingRepairInput()
 	input.MaxAttempts = 0
 	input.Attempts = domain.DefaultMaxAttempts - 1
+	input.Budget = domain.RepairBudget{MaxAttempts: 0, Consumed: domain.DefaultMaxAttempts - 1}
 	if decision := domain.DecideRepairLoop(input); !decision.CanRepair() {
 		t.Fatalf("默认上限 %d 内应允许修复，实际 %s", domain.DefaultMaxAttempts, decision.Class)
 	}
 	input.Attempts = domain.DefaultMaxAttempts
+	input.Budget = domain.RepairBudget{MaxAttempts: 0, Consumed: domain.DefaultMaxAttempts}
 	decision := domain.DecideRepairLoop(input)
 	if decision.CanRepair() {
 		t.Fatalf("默认上限 %d 已用尽时不得继续修复", domain.DefaultMaxAttempts)
@@ -235,6 +241,7 @@ func TestDecideRepairLoopCompletedOnlyWhenVerificationPassed(t *testing.T) {
 	input := passingRepairInput()
 	input.Verification = domain.StepVerificationPassed
 	input.Attempts = input.MaxAttempts
+	input.Budget = domain.RepairBudget{MaxAttempts: input.MaxAttempts, Consumed: input.MaxAttempts}
 	decision := domain.DecideRepairLoop(input)
 	if !decision.Completed() {
 		t.Fatalf("验证通过时必须结束循环，实际 %s（%s）", decision.Kind, decision.Class)

@@ -153,6 +153,17 @@ type Attempt struct {
 	SessionIDs []ID `json:"session_ids,omitempty"`
 	// CodeSaveID 是本次尝试关联的代码保存记录 ID。
 	CodeSaveID string `json:"code_save_id,omitempty"`
+	// BudgetScope 是本次尝试消耗的预算作用域。
+	//
+	// 它与 BudgetScopeID 一起构成"这一次尝试算在哪一个执行周期里"的持久化表达：
+	// 空值表示该记录属于本字段引入之前的历史数据，周期归属无法确定，预算判定因此
+	// 必须拒绝自动继续（domain.RepairClassCycleUnresolved）。
+	BudgetScope RepairBudgetScope `json:"budget_scope,omitempty"`
+	// BudgetScopeID 是本次尝试所属的执行周期标识。
+	//
+	// 只有用户显式开启的新周期才会写入不同的取值：进程重启、HTTP 重试与 workflow
+	// 恢复都必须复用同一个标识，因此修复预算可以跨进程保持一致。
+	BudgetScopeID ID `json:"budget_scope_id,omitempty"`
 	// GitBranch 是本次执行所在的工作区分支名，未采集时为空。
 	GitBranch string `json:"git_branch,omitempty"`
 	// GitBefore 是执行前采集到的 Git 工作区状态。
@@ -210,6 +221,17 @@ func (a Attempt) Validate() error {
 	}
 	if err := a.VerificationVerdict.Validate(); err != nil {
 		return err
+	}
+	if err := a.BudgetScope.Validate(); err != nil {
+		return err
+	}
+	// 作用域与周期标识必须同时出现：只有标识没有作用域（或反之）会让"这次尝试
+	// 算在哪一个周期"变成无法解释的半成品记录。
+	if a.BudgetScope == RepairBudgetScopeNone && !a.BudgetScopeID.IsEmpty() {
+		return invalidField("Attempt", "budget_scope", "登记执行周期时必须同时给出预算作用域")
+	}
+	if a.BudgetScope == RepairBudgetScopeCycle && a.BudgetScopeID.IsEmpty() {
+		return invalidField("Attempt", "budget_scope_id", "预算作用域为 cycle 时必须给出周期标识")
 	}
 	if a.VerificationID != nil {
 		if err := a.VerificationID.Validate(); err != nil {

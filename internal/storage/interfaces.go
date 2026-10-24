@@ -291,7 +291,50 @@ type StartAttemptRequest struct {
 	TaskID domain.ID
 	// StepID 是尝试所属步骤。
 	StepID domain.ID
+	// BudgetScope 是本次尝试消耗的预算作用域。
+	//
+	// 为空表示该尝试不属于任何已登记的执行周期（历史数据或首轮执行）。
+	BudgetScope domain.RepairBudgetScope
+	// BudgetScopeID 是本次尝试所属的执行周期标识。
+	//
+	// 只有用户显式开启的新周期才会传入不同的取值：恢复与重复调用必须复用同一个
+	// 标识，因此修复预算可以跨进程保持一致。
+	BudgetScopeID domain.ID
 	// At 是尝试的开始时间，零值使用当前时间。
+	At time.Time
+}
+
+// RepairCycleStore 保存开发执行周期的登记与结束。
+//
+// 周期是"修复预算算在哪一次逻辑执行里"的持久化依据：只有用户显式入口才能开启
+// 新周期，进程重启、HTTP 重试与 workflow 恢复都必须复用同一个周期标识。
+type RepairCycleStore interface {
+	// StartRepairCycle 在一个事务内分配周期序号并写入新的活动周期。
+	//
+	// 序号分配与插入共享同一事务：先查最大值再插入会让并发开启拿到相同序号。
+	// 同一步骤已有活动周期时返回 ErrConflict，调用方必须重新读取现场。
+	StartRepairCycle(ctx context.Context, request StartRepairCycleRequest) (domain.RepairCycle, error)
+	// CloseRepairCycle 结束一个活动周期，重复结束是幂等的。
+	CloseRepairCycle(ctx context.Context, id domain.ID, at time.Time) error
+	// GetActiveRepairCycle 返回步骤当前的活动周期。
+	//
+	// 没有活动周期时返回 ErrNotFound：调用方据此判断"首轮执行"与"周期已结束"。
+	GetActiveRepairCycle(ctx context.Context, stepID domain.ID) (*domain.RepairCycle, error)
+	// ListRepairCyclesByStep 按周期序号返回步骤的全部周期登记。
+	ListRepairCyclesByStep(ctx context.Context, stepID domain.ID) ([]domain.RepairCycle, error)
+}
+
+// StartRepairCycleRequest 是一次"开启执行周期"的输入。
+type StartRepairCycleRequest struct {
+	// TaskID 是周期所属任务，必须与步骤所属任务一致。
+	TaskID domain.ID
+	// StepID 是周期所属步骤。
+	StepID domain.ID
+	// MaxAttempts 是新周期生效的尝试次数上限（含首轮）。
+	MaxAttempts int
+	// OpenedBy 是开启来源的稳定标签。
+	OpenedBy string
+	// At 是开启时间，零值使用当前时间。
 	At time.Time
 }
 
@@ -713,6 +756,8 @@ type Tx interface {
 	WorkflowRunStore
 	// WorkflowRunLeaseStore 提供执行权的延长，与状态写入分离。
 	WorkflowRunLeaseStore
+	// RepairCycleStore 提供开发执行周期的登记与查询，是修复预算的持久化依据。
+	RepairCycleStore
 }
 
 // Store 是持久化的统一入口。

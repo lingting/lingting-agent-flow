@@ -122,9 +122,11 @@ func (s stepExecutionStore) begin(
 		)
 	}
 	attempt, err := attempts.assignAndInsert(ctx, storage.StartAttemptRequest{
-		TaskID: task.ID,
-		StepID: step.ID,
-		At:     at,
+		TaskID:        task.ID,
+		StepID:        step.ID,
+		BudgetScope:   request.BudgetScope,
+		BudgetScopeID: request.BudgetScopeID,
+		At:            at,
 	})
 	if err != nil {
 		return storage.StepExecutionStart{}, err

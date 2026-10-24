@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,6 +39,7 @@ func newTaskCommand(a *app.App) *cobra.Command {
 	command.AddCommand(newTaskGetCommand(a))
 	command.AddCommand(newTaskListCommand(a))
 	command.AddCommand(newTaskCancelCommand(a))
+	command.AddCommand(newTaskReopenStepCommand(a))
 	return command
 }
 
@@ -748,4 +750,58 @@ func idOrNone(id *domain.ID) string {
 		return "（无）"
 	}
 	return id.String()
+}
+
+// newTaskReopenStepCommand 构建 task reopen-step 子命令。
+//
+// 它是"用户显式开启新的执行周期"的正式入口：只有上一周期已安全收敛且预算已用尽
+// （或重试策略不再允许修复）时才允许开启，开启后该步骤获得一份新的预算。
+// 命令本身不执行任何 Agent 调用，执行仍需走 execute-and-validate / execute-workflow。
+func newTaskReopenStepCommand(a *app.App) *cobra.Command {
+	var address string
+	command := &cobra.Command{
+		Use:   "reopen-step <task-id> <step-id>",
+		Short: "为步骤显式开启新的执行周期（重置修复预算）",
+		Long: "向本地 API 发起 POST /api/v1/tasks/{taskID}/steps/{stepID}/open-repair-cycle。\n" +
+			"只有上一执行周期已安全收敛、且预算已用尽或重试策略不再允许修复时才允许开启；\n" +
+			"上一周期仍有剩余预算、存在结果不确定的执行尝试或周期归属不明时会被拒绝。\n" +
+			"该命令不执行任何 Agent 调用，也不代表验证会通过。",
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := a.ValidateConfig(cmd.Context(), hostConfigPath(cmd))
+			if err != nil {
+				return err
+			}
+			target := strings.TrimSpace(address)
+			if target == "" {
+				target = cfg.Server.Address()
+			}
+			client := newWorkflowAPIClient(target, a.Logger().Slog())
+			result, err := client.openRepairCycle(cmd.Context(), args[0], args[1])
+			if err != nil {
+				return err
+			}
+			return printOpenRepairCycle(a, result)
+		},
+	}
+	command.Flags().StringVar(&address, "address", "", "服务地址，省略时使用配置文件的 server 段")
+	return command
+}
+
+// printOpenRepairCycle 输出周期开启结果。
+//
+// 输出只包含周期登记与预算事实：命令不会把它描述成"执行已完成"或"验证已通过"。
+func printOpenRepairCycle(a *app.App, result workflowAPIOpenRepairCycle) error {
+	lines := []string{
+		"已开启新的执行周期",
+		"任务: " + result.TaskID,
+		"步骤: " + result.StepID,
+		"周期: " + result.CycleID + "（第 " + strconv.Itoa(result.CycleSequence) + " 个周期）",
+		"尝试上限: " + strconv.Itoa(result.MaxAttempts),
+		"上一周期已消耗: " + strconv.Itoa(result.PreviousConsumed),
+		"开启时间: " + result.OpenedAt.UTC().Format(time.RFC3339),
+		"注意: 该操作只重置修复预算，不执行开发调用，也不代表验证会通过",
+	}
+	_, err := fmt.Fprintln(a.Stdout(), strings.Join(lines, newlineSeparator))
+	return err
 }

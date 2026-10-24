@@ -57,6 +57,11 @@ const (
 	// 每一轮修复都会追加一条事件，记录轮次、尝试上限、对应的 Attempt 与 Validation
 	// Run、以及"为什么继续或停止"。它只用于追溯，不参与状态推进。
 	EventTypeRepairRound EventType = "repair.round"
+	// 执行周期开启事件。
+	//
+	// 它记录"哪一次执行周期被开启、上一周期已消耗多少尝试、为什么允许重置"。开启
+	// 周期是用户显式决定，因此必须留下可追溯的审计记录，不能只改一行状态。
+	EventTypeRepairCycleOpened EventType = "repair.cycle_opened"
 )
 
 // knownEventTypes 是当前受支持的事件类型集合。
@@ -97,6 +102,7 @@ var knownEventTypes = []EventType{
 	EventTypeWorkflowRecovery,
 	EventTypeWorkflowCodeSaved,
 	EventTypeRepairRound,
+	EventTypeRepairCycleOpened,
 }
 
 // Validate 校验事件类型是否受支持。

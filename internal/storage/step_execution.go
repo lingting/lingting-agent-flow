@@ -29,6 +29,13 @@ type StepExecutionStartRequest struct {
 	DockerID string
 	// InputDigest 是本次尝试输入配置的摘要。
 	InputDigest string
+	// BudgetScope 是本次尝试消耗的预算作用域。
+	BudgetScope domain.RepairBudgetScope
+	// BudgetScopeID 是本次尝试所属的执行周期标识。
+	//
+	// 它由应用层在占用之前从已登记的周期读取：同一逻辑周期的恢复必须复用同一个
+	// 标识，因此重启后的预算统计与退出前一致。
+	BudgetScopeID domain.ID
 	// At 是占用与尝试的开始时间，零值使用当前时间。
 	At time.Time
 }

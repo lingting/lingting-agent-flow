@@ -72,8 +72,10 @@ P2 主要补齐更系统的恢复语义与恢复验收。
 
 **待补**：
 
-- 修复次数上限、重试资格与结果不确定处理规则在 P1-M3 引入修复循环后，需要重新审视
-  其与工作流恢复的衔接，避免两套规则冲突（M3）。
+- ~~修复次数上限、重试资格与结果不确定处理规则在 P1-M3 引入修复循环后，需要重新审视
+  其与工作流恢复的衔接，避免两套规则冲突（M3）。~~ 已在 P2-M3 完成：预算落到
+  `repair_cycles` + `attempts.budget_scope*`，准入统一由 `domain.DecideRepairStart`
+  判定，编排与恢复都引用同一规则。
 - 关键恢复场景的测试当前分散在 `tests/integration/local/workflow/recovery_test.go`
   与 `tests/integration/local/codesaver/`；清单 §6.2 已列出 G1–G14 共 14 个未覆盖窗口。
 
@@ -99,7 +101,7 @@ P2 主要补齐更系统的恢复语义与恢复验收。
 |---|---|---|---|
 | P2-M1 | 梳理所有阶段的状态持久化和恢复边界 | `completed` | P1 退出 |
 | P2-M2 | 明确超时、取消、中断、进程重启后的恢复语义 | `completed` | P2-M1 |
-| P2-M3 | 明确修复次数上限、停止条件、重试资格和结果不确定处理规则 | `pending` | P2-M1 |
+| P2-M3 | 明确修复次数上限、停止条件、重试资格和结果不确定处理规则 | `completed` | P2-M1 |
 | P2-M4 | 核验提交、推送、合并等外部副作用的恢复路径 | `pending` | P2-M2 |
 | P2-M5 | 补齐关键恢复场景的集成测试与恢复验收 | `pending` | P2-M2、P2-M3、P2-M4 |
 
@@ -206,26 +208,99 @@ P2 主要补齐更系统的恢复语义与恢复验收。
   同时成立的组合（`TestWorkflowAPILifecycle` 间歇失败）。读取顺序改为
   "执行记录 → 任务 → 步骤"。
 - **完成定义**：四种中断在文档与代码中一致，且有测试区分 —— 已满足。
-- **不在本次范围（移交 P2-M3）**：跨进程持久化的修复轮次计数、统一的 retry
-  eligibility 框架、自动重放中断的 Attempt、`validation_feedbacks` 写入失败补偿。
+- **不在本次范围（移交 P2-M3，已在 M3 处理）**：跨进程持久化的修复轮次计数（→
+  `repair_cycles` + `attempts.budget_scope*`）、统一的 retry eligibility 框架（→
+  `domain.DecideRepairStart`）、自动重放中断的 Attempt（→ 明确禁止，需人工核验）、
+  `validation_feedbacks` 写入失败补偿（→ 由 `RepairClassFeedbackUnavailable` 停止）。
 
 ### P2-M3 明确修复次数上限、停止条件、重试资格和结果不确定处理规则
 
 - **ID**：`P2-M3`
-- **状态**：`pending`
+- **状态**：`completed`（2026-10-24，基于 `master` HEAD `2a1bb0d` 实施）
 - **必要性**：修复循环（P1-M3）引入后，重试与恢复规则必须统一，否则会出现两套判断。
-- **当前证据**：`domain.RetryPolicy`（默认 3、上限 10）、`StepStatusRetryWait` 已存在；
-  `domain.DecideRepairLoop` / `DecideRepairCloseout` 已定义修复循环停止规则。
 - **前置依赖**：P2-M1（已完成）。
-- **M1 移交的具体问题**：
-  1. `validation_runs` / `attempts` / `sessions` 的残留 `running` 没有收敛规则（清单 B2、B3），
-     "能否重试"无从判定；
-  2. 修复循环的 `attempts` 是进程内计数，跨进程中断后"已消耗轮次"丢失，与持久化的
-     `MaxAttempts` 语义未打通（清单 §2.8）；
-  3. `validation_feedbacks` 写入失败只记日志，下一次执行会静默失去修复依据，
-     而 `RepairClassFeedbackUnavailable` 只覆盖"读取失败"（清单 §2.8）。
-- **目标结果**：领域层单一规则定义重试资格/上限/停止/不确定处理。
-- **完成定义**：规则在领域层定义一次，编排与恢复都引用它。
+- **M1 移交问题的处理结果**：
+  1. **残留 `running` 的收敛（B2/B3）**：已由 P2-M2 的 `app.ExecutionResidueService`
+     完成（`attempts` → `interrupted`、`sessions` → `interrupted` + `run_status=failed`、
+     `validation_runs` → `failed` + `verdict=failed`）。P2-M3 补齐了**收敛之后的
+     重新执行资格**：收敛成功不等于自动获得重试资格，仍需依据持久化历史、验证结果、
+     反馈与预算作出判定。
+  2. **跨进程预算**：`runRepairLoop` 的 `attempts := 0` 不再承担预算判定。预算改由
+     `domain.DecideRepairBudget` 依据 `repair_cycles` 与 `attempts.budget_scope*` 计算，
+     进程重启后重新读取历史得到相同结论。
+  3. **反馈写入失败**：`persistFeedback` 返回 `false` 时由 `domain.DecideRepairLoop`
+     判定为 `RepairClassFeedbackUnavailable` 并停止，不再"只记日志后继续"。首轮修复
+     依据改为按当前周期内最近一次验证精确读取，旧周期反馈不会被误用。
+- **正式定义（本次成文）**：
+  - **Attempt**：一次真实的开发执行尝试，必须有独立、持久化的记录。
+  - **修复轮次**：一次开发执行与其对应验证、必要反馈及收口组成的业务周期。
+  - **MaxAttempts**：一个明确执行预算内允许的开发尝试总数，包含首轮。
+  - **执行周期**：由 `repair_cycles` 登记的一次逻辑开发闭环；进程重启不能自动创建新的
+    预算。
+  - **预算作用域**：`attempts.budget_scope` / `budget_scope_id`。同一逻辑周期的恢复
+    （进程重启、HTTP 重试、重复调用、workflow resume）复用同一个标识；只有用户显式
+    入口才写入新标识。
+- **预算计算规则（`domain.DecideRepairBudget`）**：
+  - 有活动周期时按活动周期统计，否则按最近一个已结束周期统计（否则"用尽后开启新周期"
+    永远无法成立）；
+  - 只有 `BudgetScopeID` 等于该周期的 Attempt 计入；其他周期不消耗本周期预算；
+  - 所有状态都消耗预算（含 `running` / `interrupted` / `unknown` / `recovery_required`），
+    唯一例外是 `cancelled`：用户取消不应挤占后续修复预算；
+  - 上限取周期开启时的快照（`repair_cycles.max_attempts`），事后修改步骤配置不会让已
+    开启的周期获得更多预算；
+  - 读取失败一律返回错误，结论是"不能判定是否可重试"，而不是默认还有余额。
+- **统一准入规则（`domain.DecideRepairStart`）**，顺序固定：
+  1. 步骤仍被一次执行占用 → `execution_active`；
+  2. 存在 `unknown` / `recovery_required` / `interrupted` 尝试 → `cycle_unresolved`；
+  3. 上一周期已结束且未显式要求新周期 → `cycle_closed`；
+  4. 有尝试引用了未登记的周期 → `cycle_unresolved`；
+  5. 显式要求新周期：没有任何历史 → `new_cycle_denied`；上一周期仍有余额且策略仍允许
+     修复 → `new_cycle_denied`；否则允许并 `OpenCycle = true`；
+  6. 未要求新周期：当前周期仍有剩余预算 → 允许；否则 `attempts_exhausted`。
+- **正式调用方**（无第二套判定）：
+  - `app.StepWorkflowService.ExecuteAndValidate`（`step_workflow_repair.go`）在启动
+    Agent 之前调用它；
+  - `app.StepWorkflowService.runRepairLoop` 每轮结束后重新读取预算并交给
+    `domain.DecideRepairLoop`；
+  - `app.StepWorkflowService.OpenRepairCycle`（`step_workflow_cycle.go`）判定新周期资格；
+  - `app.TaskWorkflowService.drive` 消费 `ExecuteAndValidateResult.Repair` 的停止类别，
+    不重新推导。
+- **不确定结果的处理**：`interrupted` / `unknown` / `recovery_required` 尝试一律阻止
+  自动重放与开启新周期；`running` 由步骤占用（`CurrentAttemptID` + 租约）表达，第二个
+  执行者会被占用准入拒绝。恢复服务只收敛残留状态，不授予重试资格。
+- **新增迁移**：`0022_repair_cycles.sql`（`repair_cycles` 表 + `attempts.budget_scope` /
+  `budget_scope_id` + 索引）。旧历史尝试的两列为 `NULL`，表示周期归属无法确定：迁移
+  不回填、不改写历史；这类记录在全部历史都无归属时按单一隐式周期统计，在混有已登记
+  周期时判定为 `cycle_unresolved` 并要求人工核验。
+- **新增接口**：`POST /api/v1/tasks/{taskID}/steps/{stepID}/open-repair-cycle`（CLI
+  `agentflow task reopen-step`）。只登记预算作用域，不执行任何 Agent 调用；只有上一周期
+  已安全收敛且预算已用尽或策略不再允许修复时才成功。
+- **测试证据**：
+  - `tests/unit/domain/repair_cycle_test.go`：预算边界、各状态是否消耗预算、
+    `DecideRepairStart` 的全部停止类别、新周期准入、上限快照、字段校验（表驱动）。
+  - `tests/integration/local/workflow/repair_budget_test.go`（真实 SQLite + 正式迁移 +
+    真实 `app.StepWorkflowService`）：重启后预算一致、达到上限后重启不能创建新 Attempt、
+    重复调用不重置预算、显式新周期获得新预算、仍有余额时拒绝新周期、不确定尝试阻止
+    重放、反馈写入/读取失败停止、旧周期反馈不被冒充、并发开启新周期只有一个成功。
+  - `tests/integration/local/workflow/e2e_repair_limit_test.go` 新增
+    `TestE2ERepairLimitSurvivesRestart`：达到上限后重启并重新推进任务，Agent 与检查调用
+    为 0，Attempt 与周期登记数量与标识全部不变。
+- **完成定义**：规则在领域层定义一次，编排与恢复都引用它 —— 已满足。
+- **不在本次范围**：自动重试框架（自动决定"下一次由谁重试"）、`code_fetches` 与
+  `container.state=unknown` 两类残留的收敛（B4/G14，属 M4/M5）、任务结论存疑的表达。
+- **真实执行的测试命令与结果（2026-10-24）**：
+  - `go test -count=1 ./tests/...` → 退出码 0，1751 passed / 0 failed（45 packages）。
+  - `go test -count=1 ./tests/unit/domain/ ./tests/unit/app/ ./tests/unit/httpapi/
+    ./tests/unit/store/ ./tests/integration/local/workflow/
+    ./tests/integration/local/database/` → 退出码 0，1132 passed。
+  - `go test -count=1 -v -run "TestRepairBudget|TestOpenRepairCycle|TestRepairStops|
+    TestRepairIgnores|TestE2ERepairLimit" ./tests/integration/local/workflow/` → 退出码 0，
+    14 个用例全部 PASS（含 `TestE2ERepairLimitSurvivesRestart`）。
+  - `gofmt -l internal cmd tests` → 无输出；`go vet ./...` → 无问题。
+  - `TEST_ARTIFACT_DIR=C:\Users\lingting\AppData\Local\Temp\lingting-agent-flow-tests\workflow-1680917061`
+    （测试产物按仓库约定保留，未清理）。
+  - 真实 Pi / SSH / Docker 用例未在本机执行：`tests/config/pi.yml`、`ssh.yml`、
+    `docker.yml` 未启用，相关用例按约定输出 `WARN [SKIP]`；本次没有把跳过用例报告为通过。
 
 ### P2-M4 核验提交、推送、合并等外部副作用的恢复路径
 

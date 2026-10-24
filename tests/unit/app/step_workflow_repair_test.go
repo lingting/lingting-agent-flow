@@ -558,7 +558,8 @@ func TestRepairLoopReleasesOccupationAfterLimit(t *testing.T) {
 	if step.CurrentAttemptID != nil {
 		t.Fatal("达到上限后必须释放执行占用")
 	}
-	// 显式重新执行是一次新的用户决定：必须能真正启动，且创建新的 Attempt。
+	// 显式重新执行是一次新的用户决定：必须先开启新的执行周期，且创建新的 Attempt。
+	fixture.reopenCycle(t)
 	second, err := fixture.execute(t, fixture.ctx)
 	if err != nil {
 		t.Fatalf("显式重新执行失败: %v", err)

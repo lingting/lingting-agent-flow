@@ -56,6 +56,10 @@ type e2eFixture struct {
 	codeSaver *e2eCodeSaver
 	task      domain.Task
 	now       time.Time
+	// options 是本次现场的构造参数，重启后按同一份参数重新装配。
+	options e2eOptions
+	// dbPath 是数据库文件路径，重启时用同一路径重新打开。
+	dbPath string
 }
 
 // e2eOptions 允许用例调整端到端现场的构造方式。
@@ -107,6 +111,8 @@ func newE2EFixture(t *testing.T, options e2eOptions) *e2eFixture {
 		logger:    logger,
 		workspace: workspace,
 		now:       time.Now().UTC(),
+		options:   options,
+		dbPath:    workspace.DatabasePath(),
 	}
 	fixture.seed(t, options)
 	fixture.repo = newE2ERepo(t, fixture.task.ID)
@@ -215,6 +221,7 @@ func (f *e2eFixture) assemble(t *testing.T, options e2eOptions) {
 		Steps:      executor,
 		Validation: validation,
 		Store:      f.db,
+		Cycles:     f.db,
 		Logger:     f.logger.Slog(),
 	})
 	if err != nil {
@@ -494,6 +501,35 @@ func e2eMarkHostNormal(
 		t.Fatalf("写入校验结果失败: %v", err)
 	}
 	return *stored
+}
+
+// restart 关闭数据库并用同一路径重新打开，然后重新装配全部服务。
+//
+// 它模拟"进程退出后重启"：只有数据库里的记录会保留，进程内的对象（编排器、执行器、
+// 替身端口）全部重建。因此重启后得到的结论只可能来自持久化事实。
+func (f *e2eFixture) restart(t *testing.T) {
+	t.Helper()
+	if err := f.db.Close(); err != nil {
+		t.Fatalf("关闭测试数据库失败: %v", err)
+	}
+	db, err := sqlite.Open(f.ctx, sqlite.Options{Path: f.dbPath})
+	if err != nil {
+		t.Fatalf("重新打开测试数据库失败: %s: %v", f.dbPath, err)
+	}
+	f.db = db
+	t.Cleanup(func() {
+		if closeErr := db.Close(); closeErr != nil {
+			t.Errorf("关闭测试数据库失败: %v", closeErr)
+		}
+	})
+	// 替身端口按原样重建：Agent 回复与检查序列保持同一份配置，但调用计数从零开始。
+	f.ports = &e2ePorts{
+		repo:          f.repo,
+		running:       true,
+		agentReplies:  f.options.agentReplies,
+		checkSequence: f.options.checkSequence,
+	}
+	f.assemble(t, f.options)
 }
 
 // e2eSettled 判断工作流是否已经停止自动推进。

@@ -370,6 +370,7 @@ func newWorkflowFixture(t *testing.T, options workflowOptions) *workflowFixture 
 		Steps:      executor,
 		Validation: validation,
 		Store:      workflowStore,
+		Cycles:     workflowCyclesOf(db),
 		Logger:     logger.Slog(),
 	})
 	if err != nil {
@@ -429,6 +430,20 @@ func (f *workflowFixture) execute(
 ) (app.ExecuteAndValidateResult, error) {
 	t.Helper()
 	return f.service.ExecuteAndValidate(ctx, f.request())
+}
+
+// reopenCycle 通过正式入口为步骤显式开启新的执行周期。
+//
+// 上一周期已结束时，继续执行必须由用户显式决定：用例走产品入口而不是直接改数据库，
+// 因此同时验证了"新周期准入"这条规则。
+func (f *workflowFixture) reopenCycle(t *testing.T) {
+	t.Helper()
+	if _, err := f.service.OpenRepairCycle(f.ctx, app.OpenRepairCycleRequest{
+		TaskID: f.task.ID.String(),
+		StepID: f.step.ID.String(),
+	}); err != nil {
+		t.Fatalf("显式开启执行周期失败: %v", err)
+	}
 }
 
 // reloadStep 读取数据库中的步骤。
@@ -761,7 +776,9 @@ func TestWorkflowPersistsFailureFeedbackForRetry(t *testing.T) {
 		t.Fatalf("反馈输出摘要不符: %s", feedback.Checks[0].StderrSummary)
 	}
 
-	// 显式重新执行：必须创建新的 Attempt 与新的 Session，并在提示词中引用上一轮问题。
+	// 显式重新执行：必须先由用户开启新的执行周期，再创建新的 Attempt 与新的 Session，
+	// 并在提示词中引用上一轮问题。
+	fixture.reopenCycle(t)
 	second, err := fixture.execute(t, fixture.ctx)
 	if err != nil {
 		t.Fatalf("第二次闭环失败: %v", err)
@@ -962,6 +979,7 @@ func TestWorkflowStopCancelsInFlightRun(t *testing.T) {
 		Steps:      executor,
 		Validation: validation,
 		Store:      db,
+		Cycles:     db,
 		Logger:     logger.Slog(),
 	})
 	if err != nil {

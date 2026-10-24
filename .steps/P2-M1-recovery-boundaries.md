@@ -262,16 +262,16 @@ agentflow server（internal/cli/server.go:runServer）
 | 字段 | 内容 |
 |---|---|
 | 阶段与入口 | `StepWorkflowService.ExecuteAndValidate`（`internal/app/step_workflow_repair.go:40`）→ `runRepairLoop`（`:105`）；接口 `POST .../steps/{id}/execute-and-validate` |
-| 前置条件 | `CheckStepExecutionStart`；前序步骤完成；`requireStepVerificationSpec`（至少一项启用必需检查）；`initialFeedback` 读取成功 |
+| 前置条件 | `CheckStepExecutionStart`；前序步骤完成；`requireStepVerificationSpec`（至少一项启用必需检查）；`domain.DecideRepairStart` 允许开始（P2-M3）；`ensureRepairCycle` 拿到周期标识；`initialFeedback` 按当前周期精确读取成功 |
 | 副作用 | 每轮一次 Developer 调用 + 一次验证 |
 | 执行前记录 | 每轮新建 Attempt（`BeginStepExecution`）→ 新 Session（`SessionService.Start`）→ 新 Validation Run（`BeginValidationRun`）；每轮写 `repair.round` 事件 |
 | 成功证据 | 轮次决策由 `domain.DecideRepairLoop` 依据持久化事实判定；终态由 `domain.DecideRepairCloseout` 计算 |
 | 失败与中断窗口 | 轮次之间进程退出 → 步骤停在 `failed` / `recovery_required` / `retry_wait`；某轮 Attempt 停在 `running` → 同 2.6 |
 | 当前恢复入口 | 无（重启后不续跑修复循环） |
 | 当前收敛行为 | 保持现场；用户可显式再次调用（`repairStopMapping` 决定工作流状态：`blocked` 或 `recovery_required`） |
-| 重试安全性 | 显式重试是新的预算（`attempts` 只统计本轮真实创建的 Attempt）；自动重试被禁止 |
+| 重试安全性 | **P2-M3 更新**：预算来自 `repair_cycles` + `attempts.budget_scope*`，同一周期跨重启保持一致；上一周期结束后必须由用户显式调用 `open-repair-cycle` 才能获得新预算；自动重试仍被禁止 |
 | 证据与测试 | `tests/unit/app/step_workflow_repair_test.go`、`tests/unit/app/task_workflow_repair_test.go`、`tests/unit/domain/repair_loop_test.go`、`tests/integration/local/workflow/e2e_repair_test.go`、`e2e_repair_limit_test.go`、`delivery_chain_test.go`（`TestDeliveryChainStopsAtRepairLimit`） |
-| 剩余缺口 | 1) `validation_feedbacks` 写入失败只记日志（`step_workflow_run.go:persistFeedback`），下一次执行会静默失去修复依据；`DecideRepairLoop` 的 `RepairClassFeedbackUnavailable` 只覆盖"读取失败"；2) 修复循环跨进程中断后"已消耗轮次"无法恢复（`attempts` 是进程内计数，与持久化的 `MaxAttempts` 语义未打通，属 M3 范围） |
+| 剩余缺口 | 已由 P2-M3 关闭：1) `persistFeedback` 返回 `false` 时由 `RepairClassFeedbackUnavailable` 明确停止，首轮依据改为按当前周期内最近一次验证精确读取；2) 已消耗轮次改为持久化事实（`repair_cycles` + `attempts.budget_scope*`）。仍需注意：`interrupted` / `unknown` / `recovery_required` 尝试一律阻止重放与开启新周期，只能人工核验 |
 
 ### 2.9 commit
 
@@ -707,16 +707,27 @@ agentflow server（internal/cli/server.go:runServer）
 
 ## 7. 对 M2–M5 的依赖与调查优先级
 
-> **P2-M2 完成后的移交状态（2026-10-24）**：本表 P2-M2 行的 4 项问题已全部落地
-> （见 §5.1/§5.2/§5.3/§5.5/§5.6 的"P2-M2 修复"段落与
+> **P2-M2 / P2-M3 完成后的移交状态（2026-10-24）**：本表 P2-M2 行的 4 项问题已全部
+> 落地（见 §5.1/§5.2/§5.3/§5.5/§5.6 的"P2-M2 修复"段落与
 > [`P2-M2-interruption-semantics.md`](./P2-M2-interruption-semantics.md)）。P2-M3 行的
-> 第 2 项（残留唯一收敛规则）已由 `app.ExecutionResidueService` 提供，但**重试资格**
-> 本身仍未定义——"收敛为 `interrupted`"不等于"允许自动重跑"，这仍是 M3 的核心工作。
+> 3 项问题已全部落地：
+>
+> 1. **重试资格**由 `domain.DecideRepairStart` 统一定义：残留收敛为 `interrupted` 只是
+>    把记录推进到合法终态，**不授予**重试资格；存在 `interrupted` / `unknown` /
+>    `recovery_required` 尝试时一律判定为 `cycle_unresolved` 并保持阻塞。
+> 2. 残留唯一收敛规则由 `app.ExecutionResidueService` 提供（M2 已完成）。
+> 3. 修复轮次计数改为持久化事实：`repair_cycles`（迁移 `0022_repair_cycles.sql`）+
+>    `attempts.budget_scope` / `budget_scope_id`，预算由 `domain.DecideRepairBudget`
+>    依据同一周期的 Attempt 计算。
+>
+> 同时修正了本文 §2.8 记录的"`validation_feedbacks` 写入失败只记日志"缺口：现在由
+> `RepairClassFeedbackUnavailable` 明确停止，且首轮修复依据只按当前周期内最近一次验证
+> 精确读取，不再无条件使用步骤级"最近一次反馈"。
 
 | 里程碑 | 依赖 M1 的结论 | 首要问题 | P2-M2 后状态 |
 |---|---|---|---|
 | P2-M2（中断语义） | §2.14、§4.1、B1、B5、B6 | 1) 统一"用户取消 / 超时 / 服务停止 / 进程崩溃"在**每一层**（Task / WorkflowRun / Step / Attempt / Session / ValidationRun）的收敛目标；2) 修复 B1 的锁死；3) 让执行记录层取消生效时任务层必须同步收敛（B5）；4) 决定租约续期或改用心跳（B6） | **已完成** |
-| P2-M3（重试资格） | §2.6–2.8、§3.3、B2、B3 | 1) 定义"残留 `running`"的重试资格；2) 让 `validation_runs` / `attempts` / `sessions` 的残留有唯一收敛规则；3) 把修复循环的轮次计数从进程内计数改为持久化事实 | 第 2 项已完成（`ExecutionResidueService`）；第 1、3 项待做 |
+| P2-M3（重试资格） | §2.6–2.8、§3.3、B2、B3 | 1) 定义"残留 `running`"的重试资格；2) 让 `validation_runs` / `attempts` / `sessions` 的残留有唯一收敛规则；3) 把修复循环的轮次计数从进程内计数改为持久化事实 | **已完成**（1 → `domain.DecideRepairStart`；2 → `ExecutionResidueService`；3 → `repair_cycles` + `attempts.budget_scope*`） |
 | P2-M4（外部副作用） | §2.9–2.11、§3.2、§3.3 | 1) `VerifyCodeSave` 从"CLI 手工"升级为可编排的核验步骤（但仍需显式触发）；2) `unknown`/`conflict` 之后的用户决策路径；3) 补充"核验期间再次退出"的用例 |
 | P2-M5（恢复验收） | §6.1、§6.2 | 按 G1–G14 补齐用例，优先 G2/G4/G5/G9/G10/G12/G13；先修复 `TestPlanGenerationInterruptedByShutdown` 的竞态 |
 
@@ -724,7 +735,7 @@ agentflow server（internal/cli/server.go:runServer）
 
 1. ~~B1（步骤占用 × blocked 执行记录锁死）~~ —— **P2-M2 已修复**。
 2. ~~B2/B3（`validation_runs` / `attempts` / `sessions` 残留）~~ —— **P2-M2 已补齐收敛
-   路径**；"重试资格"仍归 M3。
+   路径**，**P2-M3 已补齐收敛之后的重试资格判定**。
 3. ~~B5（任务层取消未收敛）~~ —— **P2-M2 已修复**。
 4. ~~B6（租约）~~ —— **P2-M2 已修复**（周期续租）。
 5. B4（容器孤儿/unknown）——影响环境准备阶段的可恢复性，仍待处理（M4/M5）。

@@ -53,6 +53,14 @@ type StepWorkflowStore interface {
 		ctx context.Context,
 		feedback domain.ValidationFailureFeedback,
 	) error
+	// ListValidationRunsByAttempt 按创建时间返回某次尝试的全部验证记录。
+	//
+	// 首轮修复依据必须来自当前执行周期内的验证记录：只用步骤级"最近一次反馈"
+	// 会把其他周期的旧反馈当成当前依据。
+	ListValidationRunsByAttempt(
+		ctx context.Context,
+		attemptID domain.ID,
+	) ([]domain.ValidationRun, error)
 	// GetValidationFailureFeedback 读取某轮验证的失败反馈。
 	//
 	// 修复循环按上一轮的 ValidationRunID 精确读取依据，避免误用其他步骤或任务的
@@ -180,6 +188,13 @@ type ExecuteAndValidateResult struct {
 	Repair domain.RepairDecision
 	// RepairCloseout 是修复循环结束时依据 domain.DecideRepairCloseout 得出的收口结论。
 	RepairCloseout domain.RepairCloseoutDecision
+	// Budget 是本次闭环所属执行周期的持久化预算事实。
+	//
+	// 它由 domain.DecideRepairBudget 依据 Attempt 的预算作用域计算，不是进程内计数：
+	// 进程重启后重新读取历史会得到同一个值。
+	Budget domain.RepairBudget
+	// CycleID 是本次闭环所属的执行周期标识。
+	CycleID domain.ID
 }
 
 // StepWorkflowOptions 是构造闭环协调器的输入。
@@ -190,6 +205,11 @@ type StepWorkflowOptions struct {
 	Validation *ValidationService
 	// Store 是持久化入口，必填。
 	Store StepWorkflowStore
+	// Cycles 是执行周期与预算事实的持久化入口，必填。
+	//
+	// 修复预算必须能从数据库重新计算，因此该依赖不是可选的：为空时构造直接失败，
+	// 而不是退化成"只有进程内计数"的旧语义。
+	Cycles RepairCycleStore
 	// Logger 是日志器，为空时使用默认日志器。
 	Logger *slog.Logger
 	// Now 是可注入的时钟，零值使用当前时间。
@@ -212,8 +232,10 @@ type StepWorkflowService struct {
 	steps      *StepExecutor
 	validation *ValidationService
 	store      StepWorkflowStore
-	logger     *slog.Logger
-	now        func() time.Time
+	// cycles 是执行周期与预算事实的持久化入口。
+	cycles RepairCycleStore
+	logger *slog.Logger
+	now    func() time.Time
 	// defaultValidationTimeout 是整次验证的默认总超时。
 	defaultValidationTimeout time.Duration
 	// running 记录本进程内正在闭环执行的步骤，用于快速拒绝重复请求。
@@ -236,6 +258,9 @@ func NewStepWorkflowService(options StepWorkflowOptions) (*StepWorkflowService, 
 	if options.Store == nil {
 		return nil, fmt.Errorf("闭环协调器初始化失败: 存储不能为空")
 	}
+	if options.Cycles == nil {
+		return nil, fmt.Errorf("闭环协调器初始化失败: 执行周期存储不能为空")
+	}
 	logger := options.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -252,6 +277,7 @@ func NewStepWorkflowService(options StepWorkflowOptions) (*StepWorkflowService, 
 		steps:                    options.Steps,
 		validation:               options.Validation,
 		store:                    options.Store,
+		cycles:                   options.Cycles,
 		logger:                   logger,
 		now:                      now,
 		defaultValidationTimeout: timeout,
@@ -421,24 +447,58 @@ func (s *StepWorkflowService) checkPrerequisites(
 	return nil
 }
 
-// initialFeedback 读取步骤最近一次的验证失败反馈，作为首轮执行的修复依据。
+// initialFeedback 读取当前执行周期内最近一次的验证失败反馈，作为首轮执行的修复依据。
 //
-// 与"读取失败不阻止执行"的旧语义不同，这里区分三种情况：
-//   - 没有反馈：返回 nil，表示这是该步骤的首次执行，提示词不需要历史问题小节；
-//   - 读取成功但归属不符：返回错误，拿错步骤的反馈会让修复方向完全错误；
+// 反馈来源必须是**本周期内**的验证记录：不能无条件使用步骤级的"最近一次反馈"，
+// 否则上一周期（或另一轮）的旧反馈会被当成当前修复依据，让新的执行在没有明确提示
+// 的情况下重复一个已经过期的修复方向。
+//
+// 判定顺序固定为：
+//   - 该步骤没有任何历史尝试：这是首轮执行，返回 nil，提示词不需要历史问题小节；
+//   - 本周期最近一次尝试没有产生验证记录：返回 nil，本周期还没有可引用的失败证据；
+//   - 本周期最近一次验证没有反馈（验证通过或未写入）：返回 nil，不使用其他轮次；
+//   - 反馈归属不符：返回错误，拿错步骤的反馈会让修复方向完全错误；
 //   - 读取失败：返回错误，不能在"不确定上一轮有没有失败"的情况下继续执行。
-//
-// 归属校验是必需的：数据库不声明外键，孤立或错配的关联 ID 只能由应用层识别。
 func (s *StepWorkflowService) initialFeedback(
 	ctx context.Context,
 	step domain.Step,
+	cycle domain.RepairCycle,
 ) (*domain.ValidationFailureFeedback, error) {
-	feedback, err := s.store.LatestValidationFailureFeedbackByStep(ctx, step.ID)
+	attempts, err := s.cycles.ListAttemptsByStep(ctx, step.ID)
+	if err != nil {
+		return nil, fmt.Errorf("读取执行尝试历史失败: %w", err)
+	}
+	attemptID, ok, err := currentCycleAttempt(attempts, cycle)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		// 本周期还没有任何尝试：这是用户显式开启新周期后的首次执行。此时唯一可信
+		// 的依据是紧邻的上一周期（已结束）最后一条验证反馈，而不是步骤级"最近一次
+		// 反馈"——后者可能来自更早的、与本次决定无关的周期。
+		attemptID, ok, err = previousCycleAttempt(ctx, s.cycles, attempts, cycle)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !ok {
+		return nil, nil
+	}
+	runs, err := s.store.ListValidationRunsByAttempt(ctx, attemptID)
+	if err != nil {
+		return nil, fmt.Errorf("读取本周期验证记录失败: %w", err)
+	}
+	if len(runs) == 0 {
+		return nil, nil
+	}
+	// 同一 Attempt 允许多次验证（重跑检查），只有最近一次能作为修复依据。
+	runID := runs[len(runs)-1].ID
+	feedback, err := s.store.GetValidationFailureFeedback(ctx, runID)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("读取上一次验证失败反馈失败: %w", err)
+		return nil, fmt.Errorf("读取本周期验证失败反馈失败: %w", err)
 	}
 	if feedback.StepID != step.ID || feedback.TaskID != step.TaskID {
 		return nil, fmt.Errorf(
@@ -448,7 +508,79 @@ func (s *StepWorkflowService) initialFeedback(
 			step.ID,
 		)
 	}
+	if feedback.ValidationRunID != runID {
+		// 反馈必须精确对应当前周期的验证记录：关联不一致说明记录已错配。
+		return nil, fmt.Errorf(
+			"%w: 失败反馈 %s 与本周期验证记录 %s 不一致",
+			ErrStepWorkflowInvalidConfig,
+			feedback.ValidationRunID,
+			runID,
+		)
+	}
 	return feedback, nil
+}
+
+// previousCycleAttempt 返回紧邻的上一周期内最近一次尝试的标识。
+//
+// "紧邻"指周期序号小于当前周期的最大序号：只有这一个周期的最后一条验证可以被
+// 当作本次显式新周期的起点依据，更早周期的反馈不得冒充。
+func previousCycleAttempt(
+	ctx context.Context,
+	cycles RepairCycleStore,
+	attempts []domain.Attempt,
+	cycle domain.RepairCycle,
+) (domain.ID, bool, error) {
+	stored, err := cycles.ListRepairCyclesByStep(ctx, cycle.StepID)
+	if err != nil {
+		return "", false, fmt.Errorf("读取执行周期历史失败: %w", err)
+	}
+	var previous domain.RepairCycle
+	found := false
+	for _, candidate := range stored {
+		if candidate.ID == cycle.ID {
+			continue
+		}
+		if candidate.Sequence >= cycle.Sequence {
+			continue
+		}
+		if !found || candidate.Sequence > previous.Sequence {
+			previous = candidate
+			found = true
+		}
+	}
+	if !found {
+		return "", false, nil
+	}
+	return currentCycleAttempt(attempts, previous)
+}
+
+// currentCycleAttempt 返回当前执行周期内最近一次尝试的标识。
+//
+// 返回 ok=false 表示本周期还没有任何尝试：此时不存在可引用的周期内反馈。
+func currentCycleAttempt(
+	attempts []domain.Attempt,
+	cycle domain.RepairCycle,
+) (domain.ID, bool, error) {
+	var latest domain.Attempt
+	found := false
+	for _, attempt := range attempts {
+		if attempt.BudgetScopeID != cycle.ID {
+			continue
+		}
+		latest = attempt
+		found = true
+	}
+	if !found {
+		return "", false, nil
+	}
+	if latest.ID.IsEmpty() {
+		return "", false, fmt.Errorf(
+			"%w: 本周期执行尝试 #%d 缺少标识",
+			ErrStepWorkflowInvalidConfig,
+			latest.AttemptNumber,
+		)
+	}
+	return latest.ID, true, nil
 }
 
 // validationTimeout 返回本次验证的总超时时间。

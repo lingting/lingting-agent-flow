@@ -1,5 +1,7 @@
 package domain
 
+import "strings"
+
 // DefaultMaxAttempts 是未显式配置时的步骤尝试次数上限。
 const DefaultMaxAttempts = 3
 
@@ -82,6 +84,14 @@ const (
 	RepairClassNotPersisted RepairFailureClass = "not_persisted"
 	// RepairClassFeedbackUnavailable 表示缺少可信的修复依据。
 	RepairClassFeedbackUnavailable RepairFailureClass = "feedback_unavailable"
+	// RepairClassExecutionActive 表示步骤仍被一次执行占用，不能启动第二个执行者。
+	RepairClassExecutionActive RepairFailureClass = "execution_active"
+	// RepairClassCycleUnresolved 表示历史执行的周期归属或结果无法确认，必须先核验现场。
+	RepairClassCycleUnresolved RepairFailureClass = "cycle_unresolved"
+	// RepairClassNewCycleDenied 表示当前不满足开启新执行周期的条件。
+	RepairClassNewCycleDenied RepairFailureClass = "new_cycle_denied"
+	// RepairClassCycleClosed 表示上一执行周期已结束，继续执行必须先显式开启新周期。
+	RepairClassCycleClosed RepairFailureClass = "cycle_closed"
 )
 
 // Validate 校验修复停止类别是否属于已知取值。
@@ -101,7 +111,11 @@ func (c RepairFailureClass) Validate() error {
 		RepairClassInfrastructure,
 		RepairClassCancelled,
 		RepairClassNotPersisted,
-		RepairClassFeedbackUnavailable:
+		RepairClassFeedbackUnavailable,
+		RepairClassExecutionActive,
+		RepairClassCycleUnresolved,
+		RepairClassNewCycleDenied,
+		RepairClassCycleClosed:
 		return nil
 	default:
 		return invalidField("RepairLoop", "class", "未知的修复停止类别 "+string(c))
@@ -151,8 +165,21 @@ type RepairLoopInput struct {
 	FeedbackPersisted bool
 	// Finalized 表示本轮收口状态是否全部写入成功。
 	Finalized bool
-	// Cancelled 表示上下文已取消（用户取消或服务停止）。
 	Cancelled bool
+	// Budget 是本次循环所属执行周期的持久化预算事实。
+	//
+	// 它由 DecideRepairBudget 依据 Attempt 的预算作用域计算得出，不是进程内计数：
+	// 进程重启后重新读取历史记录会得到同一个值，因此修复上限可以跨进程保持。
+	Budget RepairBudget
+	// HasBudget 表示 Budget 是否来自已读取的持久化历史。
+	//
+	// 为 false 时判定必须拒绝自动继续：无法读取预算就不能假定"还有余额"。
+	HasBudget bool
+	// UnresolvedAttempts 是历史上结果不确定、必须先核验的尝试描述。
+	//
+	// 非空时不得启动下一轮：unknown / recovery_required / interrupted 都可能存在
+	// 未确认的副作用，直接重放会掩盖真实故障。
+	UnresolvedAttempts []string
 }
 
 // RepairDecision 是修复循环的下一步动作与原因。
@@ -191,7 +218,9 @@ func (d RepairDecision) Completed() bool {
 //  10. 失败反馈未可靠保存：停止（feedback_unavailable），没有修复依据就不重放调用；
 //  11. 非开发步骤：停止（unsupported_step），规划步骤重跑不会产生新的计划；
 //  12. 重试策略不允许验证失败自动修复：停止（repair_disabled）；
-//  13. 仍在尝试上限内：允许再修复一轮（retry）；否则停止（attempts_exhausted）。
+//  13. 无法从持久化历史确认本周期预算：停止（cycle_unresolved），读不到就不能假定有余额；
+//  14. 存在结果不确定的历史尝试：停止（cycle_unresolved），必须先核验现场；
+//  15. 本周期仍有剩余预算：允许再修复一轮（retry）；否则停止（attempts_exhausted）。
 //
 // 该函数是纯函数：不读数据库、不启动进程，因此可以被完整地单元测试。
 func DecideRepairLoop(input RepairLoopInput) RepairDecision {
@@ -279,19 +308,40 @@ func DecideRepairLoop(input RepairLoopInput) RepairDecision {
 			Summary: "步骤重试策略未允许验证失败自动修复",
 		}
 	}
-	policy := RetryPolicy{MaxAttempts: input.MaxAttempts}
-	if !policy.CanRetry(input.Attempts) {
+	// 预算必须来自已读取的持久化历史：读不到就不能假定"还有余额"，
+	// 否则进程重启后的一次读取失败会退化成"无限重试"。
+	if !input.HasBudget {
+		return RepairDecision{
+			Kind:    RepairDecisionStop,
+			Class:   RepairClassCycleUnresolved,
+			Summary: "无法从持久化历史确认本执行周期的预算，停止自动修复",
+		}
+	}
+	if len(input.UnresolvedAttempts) > 0 {
+		return RepairDecision{
+			Kind:  RepairDecisionStop,
+			Class: RepairClassCycleUnresolved,
+			Summary: "存在结果不确定的历史尝试（" +
+				strings.Join(input.UnresolvedAttempts, "、") + "），必须先核验现场",
+		}
+	}
+	budget := input.Budget
+	if budget.MaxAttempts < 1 {
+		budget.MaxAttempts = input.MaxAttempts
+	}
+	if budget.Exhausted() {
 		return RepairDecision{
 			Kind:  RepairDecisionStop,
 			Class: RepairClassAttemptsExhausted,
-			Summary: "已达到尝试次数上限 " + itoa(policy.limitOrDefault()) +
-				"，停止自动修复",
+			Summary: "已达到尝试次数上限 " + itoa(budget.limit()) +
+				"（本周期已用 " + itoa(budget.Consumed) + " 次），停止自动修复",
 		}
 	}
 	return RepairDecision{
-		Kind:    RepairDecisionRetry,
-		Class:   RepairClassNone,
-		Summary: "验证未通过且仍在上限内，进入第 " + itoa(input.Attempts+1) + " 次修复",
+		Kind:  RepairDecisionRetry,
+		Class: RepairClassNone,
+		Summary: "验证未通过且仍在上限内，进入第 " + itoa(budget.Consumed+1) +
+			" 次修复",
 	}
 }
 

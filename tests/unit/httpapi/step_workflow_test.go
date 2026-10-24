@@ -245,6 +245,7 @@ func newWorkflowAPIFixture(t *testing.T) *workflowAPIFixture {
 		Steps:      executor,
 		Validation: validation,
 		Store:      db,
+		Cycles:     db,
 		Logger:     logger.Slog(),
 	})
 	if err != nil {
@@ -299,6 +300,11 @@ func newWorkflowAPIFixture(t *testing.T) *workflowAPIFixture {
 // workflowPath 返回闭环接口路径。
 func workflowPath(taskID, stepID string) string {
 	return httpapi.PathTasks + "/" + taskID + "/steps/" + stepID + "/execute-and-validate"
+}
+
+// reopenCyclePath 返回"显式开启执行周期"动作的路径。
+func reopenCyclePath(taskID, stepID string) string {
+	return httpapi.PathTasks + "/" + taskID + "/steps/" + stepID + "/open-repair-cycle"
 }
 
 // post 发送一次闭环请求。
@@ -537,6 +543,14 @@ func TestListValidationsAPI(t *testing.T) {
 		fixture.step.ID.String(),
 	), nil); recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("第一次闭环应返回 500，实际 %d: %s", recorder.Code, recorder.Body.String())
+	}
+	// 第二次执行前必须先显式开启新的执行周期：上一周期已结束，继续执行是用户的
+	// 显式决定，而不是自动重试。
+	if recorder := fixture.post(t, reopenCyclePath(
+		fixture.task.ID.String(),
+		fixture.step.ID.String(),
+	), nil); recorder.Code != http.StatusOK {
+		t.Fatalf("开启执行周期应返回 200，实际 %d: %s", recorder.Code, recorder.Body.String())
 	}
 	// 第二次执行：必需检查通过。
 	fixture.port.checkExitCode = 0

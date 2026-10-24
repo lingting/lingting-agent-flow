@@ -136,6 +136,10 @@ func (rt *router) tasksHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// 开发—验证闭环与单步骤执行共享 {taskID}/steps/{stepID} 前缀，且都是写操作，
 	// 因此必须先判定闭环形状，再判定单步骤执行形状。
+	if taskID, stepID, ok := parseOpenRepairCyclePath(r.URL.Path); ok {
+		rt.stepExec.serveOpenRepairCycle(w, r, taskID, stepID)
+		return
+	}
 	if taskID, stepID, ok := parseExecuteAndValidatePath(r.URL.Path); ok {
 		rt.stepExec.serveExecuteAndValidate(w, r, taskID, stepID)
 		return

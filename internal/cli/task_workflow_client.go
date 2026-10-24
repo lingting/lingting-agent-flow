@@ -227,6 +227,38 @@ func (c *workflowAPIClient) start(
 	return run, nil
 }
 
+// workflowAPIOpenRepairCycle 是一次执行周期开启的结果。
+type workflowAPIOpenRepairCycle struct {
+	TaskID string `json:"task_id"`
+	StepID string `json:"step_id"`
+	// CycleID 是新登记的执行周期标识。
+	CycleID string `json:"cycle_id"`
+	// CycleSequence 是该步骤内的周期序号。
+	CycleSequence int `json:"cycle_sequence"`
+	// MaxAttempts 是新周期生效的尝试次数上限（含首轮）。
+	MaxAttempts int `json:"max_attempts"`
+	// PreviousConsumed 是上一周期已消耗的尝试数。
+	PreviousConsumed int       `json:"previous_consumed"`
+	OpenedAt         time.Time `json:"opened_at"`
+}
+
+// openRepairCycle 为用户显式开启一次执行周期。
+//
+// 该请求是同步的：服务端在周期登记完成或明确拒绝后返回。开启周期不执行任何 Agent
+// 调用，也不代表步骤已经通过验证。
+func (c *workflowAPIClient) openRepairCycle(
+	ctx context.Context,
+	taskID, stepID string,
+) (workflowAPIOpenRepairCycle, error) {
+	url := c.baseURL + httpapi.PathTasks + "/" + strings.TrimSpace(taskID) +
+		"/steps/" + strings.TrimSpace(stepID) + "/open-repair-cycle"
+	var result workflowAPIOpenRepairCycle
+	if err := c.do(ctx, http.MethodPost, url, nil, &result); err != nil {
+		return workflowAPIOpenRepairCycle{}, err
+	}
+	return result, nil
+}
+
 // status 查询任务当前的工作流进度。
 func (c *workflowAPIClient) status(ctx context.Context, taskID string) (workflowAPIStatus, error) {
 	url := c.baseURL + httpapi.PathTasks + "/" + strings.TrimSpace(taskID) + "/workflow"

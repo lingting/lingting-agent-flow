@@ -298,7 +298,11 @@ func DecideRepairCloseout(input RepairCloseoutInput) RepairCloseoutDecision {
 	case RepairClassNotPersisted,
 		RepairClassInfrastructure,
 		RepairClassVerificationNotRun,
-		RepairClassFeedbackUnavailable:
+		RepairClassFeedbackUnavailable,
+		RepairClassCycleUnresolved,
+		RepairClassExecutionActive,
+		RepairClassNewCycleDenied,
+		RepairClassCycleClosed:
 		return RepairCloseoutDecision{
 			Status:      StepStatusRecoveryRequired,
 			Summary:     "修复循环停止：结果无法确认，需要人工核验: " + input.Decision.Summary,

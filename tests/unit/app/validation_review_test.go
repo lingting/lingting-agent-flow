@@ -323,6 +323,7 @@ func newReviewFixture(t *testing.T, options reviewOptions) *reviewFixture {
 		Steps:      executor,
 		Validation: validation,
 		Store:      db,
+		Cycles:     db,
 		Logger:     logger.Slog(),
 	})
 	if err != nil {
@@ -776,6 +777,13 @@ func TestReviewHistoryIsAppendOnly(t *testing.T) {
 		reviewReply{status: agent.RunCompleted, finalText: `{"passed":true,"summary":"已满足"}`},
 	)
 	fixture.port.mu.Unlock()
+	// 上一周期已结束：继续执行需要用户显式开启新的执行周期。
+	if _, cycleErr := fixture.service.OpenRepairCycle(fixture.ctx, app.OpenRepairCycleRequest{
+		TaskID: fixture.task.ID.String(),
+		StepID: fixture.step.ID.String(),
+	}); cycleErr != nil {
+		t.Fatalf("显式开启执行周期失败: %v", cycleErr)
+	}
 	second, err := fixture.execute(t)
 	if err != nil {
 		t.Fatalf("第二次执行失败: %v", err)

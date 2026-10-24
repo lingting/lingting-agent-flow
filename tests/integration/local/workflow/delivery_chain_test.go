@@ -508,6 +508,7 @@ func (f *deliveryFixture) assemble(t *testing.T, options deliveryOptions) {
 		Steps:      executor,
 		Validation: validation,
 		Store:      f.db,
+		Cycles:     f.db,
 		Logger:     f.logger.Slog(),
 	})
 	if err != nil {

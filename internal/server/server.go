@@ -324,7 +324,9 @@ func (s *Server) openDatabase(ctx context.Context) error {
 			Steps:      s.stepExecutor,
 			Validation: s.validationEngine,
 			Store:      s.store,
-			Logger:     s.logger,
+			// 执行周期与预算事实来自同一份数据库：修复上限因此可以跨进程保持一致。
+			Cycles: s.store,
+			Logger: s.logger,
 		})
 		if workflowErr != nil {
 			return fmt.Errorf("初始化步骤闭环协调器失败: %w", workflowErr)

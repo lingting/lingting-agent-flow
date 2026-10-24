@@ -187,7 +187,7 @@ func (f *e2eFixture) assemble(t *testing.T) {
 		t.Fatalf("构造验证引擎失败: %v", err)
 	}
 	stepFlow, err := app.NewStepWorkflowService(app.StepWorkflowOptions{
-		Steps: executor, Validation: validation, Store: f.db, Logger: f.logger.Slog(),
+		Steps: executor, Validation: validation, Store: f.db, Cycles: f.db, Logger: f.logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造单步骤闭环失败: %v", err)

@@ -21,6 +21,8 @@
 > **"中断语义已定义" ≠ "自动重试资格已定义"。** 本文只定义"中断后各层收敛到
 > 什么状态、保留哪些证据、允许哪些后续动作"。是否允许自动重跑、重跑上限与
 > 修复轮次计数属于 P2-M3，本文不做实现也不做承诺。
+> （P2-M3 已完成：重试资格与预算现由 `domain.DecideRepairStart` /
+> `domain.DecideRepairBudget` 统一定义，见 §4 末尾的"M3 之后需注意的事实变化"。）
 
 ---
 
@@ -194,11 +196,18 @@
 - 验证引擎的取消、超时、服务停止测试；
 - `TestPlanGenerationInterruptedByShutdown` 的确定性。
 
-本文**不**实现（P2-M3）：
+本文**不**实现（移交 P2-M3，已在 M3 落地）：
 
-- 跨进程持久化的修复轮次计数；
-- 统一的 retry eligibility 框架与自动重试策略；
-- 自动重新执行所有中断的 Attempt；
-- `validation_feedbacks` 写入失败后的补偿路径。
+- 跨进程持久化的修复轮次计数 → `repair_cycles`（迁移 `0022_repair_cycles.sql`）+
+  `attempts.budget_scope` / `budget_scope_id`；
+- 统一的 retry eligibility 框架 → `domain.DecideRepairStart`（唯一准入规则）；
+- 自动重新执行所有中断的 Attempt → **仍然禁止**：`interrupted` / `unknown` /
+  `recovery_required` 一律阻止自动重放与开启新周期，必须先人工核验；
+- `validation_feedbacks` 写入失败后的补偿路径 → 不补偿，由
+  `RepairClassFeedbackUnavailable` 明确停止。
 
 任何未确认执行结果的记录，都不得仅因"已达到某个状态"被自动重放。
+
+> **M3 之后需注意的事实变化**：本文描述的残留收敛只把记录推进到合法终态，
+> **不授予重试资格**。收敛完成后仍必须由 `domain.DecideRepairStart` 依据周期登记、
+> 已消耗预算与历史尝试状态判定；判定为 `cycle_unresolved` 时保持阻塞。

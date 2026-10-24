@@ -18,10 +18,10 @@ const attemptColumns = `id, task_id, step_id, attempt_number, status, container_
 	docker_id, input_digest, exit_code, timed_out, cancelled, retry_reason, error_class,
 	failure_stage, failure_summary, verification_verdict, verification_summary,
 	verification_id, session_ids_json, code_save_id, git_branch, git_before_json,
-	git_after_json, started_at, finished_at, created_at`
+	git_after_json, budget_scope, budget_scope_id, started_at, finished_at, created_at`
 
 // attemptInsertCount 是写入尝试时的参数个数。
-const attemptInsertCount = 26
+const attemptInsertCount = 28
 
 // attemptStore 实现 storage.AttemptStore。
 type attemptStore struct {
@@ -110,6 +110,13 @@ func (s attemptStore) assignAndInsert(
 		attemptStartTime(request.At),
 	)
 	if err != nil {
+		return domain.Attempt{}, err
+	}
+	// 预算作用域来自调用方已登记的周期：它与尝试同一次写入，因此"已创建 Attempt"
+	// 与"预算已消耗"永远同时成立，不存在先计数后发现没有执行记录的情况。
+	attempt.BudgetScope = request.BudgetScope
+	attempt.BudgetScopeID = request.BudgetScopeID
+	if err := attempt.Validate(); err != nil {
 		return domain.Attempt{}, err
 	}
 	if err := s.ensureAttemptScope(ctx, attempt); err != nil {
@@ -211,7 +218,8 @@ UPDATE attempts SET
 	timed_out = ?, cancelled = ?, retry_reason = ?, error_class = ?, failure_stage = ?,
 	failure_summary = ?, verification_verdict = ?, verification_summary = ?,
 	verification_id = ?, session_ids_json = ?, code_save_id = ?, git_branch = ?,
-	git_before_json = ?, git_after_json = ?, finished_at = ?
+	git_before_json = ?, git_after_json = ?, budget_scope = ?, budget_scope_id = ?,
+	finished_at = ?
 WHERE id = ?`
 	args := []any{
 		string(record.attempt.Status),
@@ -233,6 +241,8 @@ WHERE id = ?`
 		nullIfBlank(record.attempt.GitBranch),
 		nullIfBlank(record.gitBeforeJSON),
 		nullIfBlank(record.gitAfterJSON),
+		nullIfBlank(string(record.attempt.BudgetScope)),
+		nullIfBlank(record.attempt.BudgetScopeID.String()),
 		toMillisPtr(record.attempt.FinishedAt),
 		toIDParam(record.attempt.ID),
 	}
@@ -497,6 +507,8 @@ func attemptArgs(record attemptRecord) []any {
 		nullIfBlank(attempt.GitBranch),
 		nullIfBlank(record.gitBeforeJSON),
 		nullIfBlank(record.gitAfterJSON),
+		nullIfBlank(string(attempt.BudgetScope)),
+		nullIfBlank(attempt.BudgetScopeID.String()),
 		toMillis(attempt.StartedAt),
 		toMillisPtr(attempt.FinishedAt),
 		toMillis(attempt.CreatedAt),
@@ -528,6 +540,8 @@ func scanAttempt(row scanner) (*domain.Attempt, error) {
 		gitBranch           sql.NullString
 		gitBeforeJSON       sql.NullString
 		gitAfterJSON        sql.NullString
+		budgetScope         sql.NullString
+		budgetScopeID       sql.NullString
 		startedAt           int64
 		finishedAt          sql.NullInt64
 		createdAt           int64
@@ -556,6 +570,8 @@ func scanAttempt(row scanner) (*domain.Attempt, error) {
 		&gitBranch,
 		&gitBeforeJSON,
 		&gitAfterJSON,
+		&budgetScope,
+		&budgetScopeID,
 		&startedAt,
 		&finishedAt,
 		&createdAt,
@@ -581,6 +597,8 @@ func scanAttempt(row scanner) (*domain.Attempt, error) {
 	attempt.VerificationID = fromIDPtr(verificationID)
 	attempt.CodeSaveID = codeSaveID.String
 	attempt.GitBranch = gitBranch.String
+	attempt.BudgetScope = domain.RepairBudgetScope(budgetScope.String)
+	attempt.BudgetScopeID = domain.ID(budgetScopeID.String)
 	before, err := decodeGitState("Attempt.git_before", gitBeforeJSON.String)
 	if err != nil {
 		return nil, err

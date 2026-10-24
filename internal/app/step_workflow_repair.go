@@ -68,9 +68,26 @@ func (s *StepWorkflowService) ExecuteAndValidate(
 	if err := requireStepVerificationSpec(step); err != nil {
 		return ExecuteAndValidateResult{}, err
 	}
+	// 预算判定必须在读取反馈与启动 Agent 之前完成：无法确认剩余预算、历史结果
+	// 不确定或现场未收敛时，直接拒绝执行，而不是先跑一轮再发现超预算。
+	decision, facts, err := s.decideRepairStart(ctx, step, false)
+	if err != nil {
+		return ExecuteAndValidateResult{}, err
+	}
+	if !decision.Allowed {
+		return ExecuteAndValidateResult{}, fmt.Errorf(
+			"%w: %s",
+			ErrStepExecutionConflict,
+			decision.Summary,
+		)
+	}
+	cycle, err := s.ensureRepairCycle(ctx, step, facts)
+	if err != nil {
+		return ExecuteAndValidateResult{}, err
+	}
 	// 首轮修复依据同样在开发之前读取：读取失败时直接拒绝进入循环，避免跑完一轮后
 	// 才发现提示词里的"上一次问题"并不可信。
-	feedback, err := s.initialFeedback(ctx, step)
+	feedback, err := s.initialFeedback(ctx, step, cycle)
 	if err != nil {
 		return ExecuteAndValidateResult{}, err
 	}
@@ -95,7 +112,7 @@ func (s *StepWorkflowService) ExecuteAndValidate(
 	}
 	defer release()
 
-	return s.runRepairLoop(runCtx, request, task, step, prompt)
+	return s.runRepairLoop(runCtx, request, task, step, cycle, prompt)
 }
 
 // runRepairLoop 逐轮执行开发与完整验证，直到验证通过或出现停止条件。
@@ -107,11 +124,16 @@ func (s *StepWorkflowService) runRepairLoop(
 	request ExecuteAndValidateRequest,
 	task domain.Task,
 	step domain.Step,
+	cycle domain.RepairCycle,
 	initialPrompt string,
 ) (ExecuteAndValidateResult, error) {
 	prompt := initialPrompt
-	// attempts 只统计本轮真实创建并落库的 Attempt：计数即持久化事实。
+	// attempts 只统计本次调用真实创建并落库的 Attempt，用于日志与事件追溯；
+	// 是否还能继续由持久化预算判定，不由这个局部变量决定。
 	attempts := 0
+	// budget 是本次循环所属执行周期的持久化预算：每轮结束后重新读取，因此进程重启、
+	// 重复调用与恢复入口都得到同一份结论。
+	budget := domain.RepairBudget{}
 	var last ExecuteAndValidateResult
 	for round := 1; ; round++ {
 		if err := runCtx.Err(); err != nil {
@@ -139,7 +161,7 @@ func (s *StepWorkflowService) runRepairLoop(
 					" 不允许继续执行，停止自动修复",
 			}, attempts)
 		}
-		result, executeErr := s.executeRepairRound(runCtx, request, current, prompt, round)
+		result, executeErr := s.executeRepairRound(runCtx, request, current, cycle, prompt, round)
 		last = result
 		if executeErr != nil {
 			// 协调器返回错误意味着本次没有产生真实执行（状态冲突、前置条件缺失、
@@ -150,7 +172,27 @@ func (s *StepWorkflowService) runRepairLoop(
 		if !result.AttemptID.IsEmpty() {
 			attempts++
 		}
-		decision := domain.DecideRepairLoop(repairLoopInputOf(current, result, attempts, runCtx))
+		// 预算读取是只读事实查询：即使上下文已被取消也必须能读到，否则"取消"
+		// 会被误报成"预算无法确认"。取消本身由 DecideRepairLoop 的 Cancelled
+		// 分支判定，不依赖这次读取是否成功。
+		facts, factsErr := s.loadRepairBudgetFacts(context.WithoutCancel(runCtx), current)
+		if factsErr != nil {
+			// 预算无法读取时结论必须是"不能判定是否可重试"，不能默认还有余额。
+			return s.closeRepairLoop(runCtx, result, current, domain.RepairDecision{
+				Kind:    domain.RepairDecisionStop,
+				Class:   domain.RepairClassCycleUnresolved,
+				Summary: "读取执行周期预算失败: " + errorSummary(factsErr),
+			}, attempts)
+		}
+		budget = facts.Budget
+		decision := domain.DecideRepairLoop(repairLoopInputOf(
+			current,
+			cycle,
+			result,
+			budget,
+			facts.Unresolved,
+			runCtx,
+		))
 		if decision.CanRepair() && result.AttemptID.IsEmpty() {
 			// 没有产生 Attempt 却要"再执行一轮"说明现场与判定不一致：继续循环会
 			// 重放没有记录的调用，因此按"结果无法确认"停止。
@@ -161,6 +203,7 @@ func (s *StepWorkflowService) runRepairLoop(
 			}
 		}
 		result.Repair = decision
+		result.Budget = budget
 		s.appendRepairEvent(runCtx, result, decision, round, attempts, current.MaxAttempts)
 		if decision.Completed() {
 			// 成功路径也要回报本次闭环的尝试次数与轮次，使调用方看到完整事实。
@@ -188,6 +231,7 @@ func (s *StepWorkflowService) runRepairLoop(
 			slog.String("validation_run_id", result.ValidationRunID.String()),
 			slog.Int("round", round+1),
 			slog.Int("attempts", attempts),
+			slog.Int("cycle_consumed", budget.Consumed),
 			slog.Int("max_attempts", current.MaxAttempts),
 		)
 	}
@@ -198,6 +242,7 @@ func (s *StepWorkflowService) executeRepairRound(
 	runCtx context.Context,
 	request ExecuteAndValidateRequest,
 	step domain.Step,
+	cycle domain.RepairCycle,
 	prompt string,
 	round int,
 ) (ExecuteAndValidateResult, error) {
@@ -216,6 +261,10 @@ func (s *StepWorkflowService) executeRepairRound(
 		StepID:  step.ID.String(),
 		Prompt:  prompt,
 		Timeout: request.Timeout,
+		// 预算作用域随 Attempt 一起写入：因此"创建了 Attempt"与"消耗了预算"
+		// 是同一件事，重启后重新统计得到相同结果。
+		BudgetScope:   domain.RepairBudgetScopeCycle,
+		BudgetScopeID: cycle.ID,
 		// 开发成功只进入 verifying：此时既没有通过验证，也没有失败。
 		DeferCompletion: true,
 	})
@@ -248,17 +297,21 @@ func (s *StepWorkflowService) executeRepairRound(
 // repairLoopInputOf 依据本轮真实结果构造领域判定输入。
 func repairLoopInputOf(
 	step domain.Step,
+	cycle domain.RepairCycle,
 	result ExecuteAndValidateResult,
-	attempts int,
+	budget domain.RepairBudget,
+	unresolved []string,
 	ctx context.Context,
 ) domain.RepairLoopInput {
-	maxAttempts := step.MaxAttempts
-	if maxAttempts < 1 {
-		maxAttempts = domain.DefaultMaxAttempts
+	maxAttempts := effectiveMaxAttempts(step)
+	if budget.CycleID.IsEmpty() {
+		// 本次判定必须绑定到一个明确的执行周期：没有周期标识就无法把"已消耗"
+		// 归属到某一次逻辑执行，预算结论不可信。
+		budget.CycleID = cycle.ID
 	}
 	return domain.RepairLoopInput{
 		StepType:            step.Type,
-		Attempts:            attempts,
+		Attempts:            budget.Consumed,
 		MaxAttempts:         maxAttempts,
 		Retry:               step.Retry,
 		Outcome:             result.Outcome,
@@ -269,6 +322,9 @@ func repairLoopInputOf(
 		FeedbackPersisted:   result.FeedbackPersisted,
 		Finalized:           result.Finalized,
 		Cancelled:           ctx != nil && ctx.Err() != nil,
+		Budget:              budget,
+		HasBudget:           true,
+		UnresolvedAttempts:  unresolved,
 	}
 }
 
@@ -327,8 +383,10 @@ func (s *StepWorkflowService) closeRepairLoop(
 ) (ExecuteAndValidateResult, error) {
 	writeCtx := context.WithoutCancel(ctx)
 	closeout := domain.DecideRepairCloseout(domain.RepairCloseoutInput{
-		Decision:    decision,
-		Attempts:    attempts,
+		Decision: decision,
+		// 收口说明里的"共 N 次尝试"必须是本周期真实的已消耗次数：进程内计数只统计
+		// 本次调用产生的 Attempt，用它说明上限会让重启后的结论自相矛盾。
+		Attempts:    maxInt(attempts, result.Budget.Consumed),
 		MaxAttempts: step.MaxAttempts,
 	})
 	// 收口摘要必须保留最后一轮的真实失败证据（失败检查名与退出码）：只写"达到上限"
@@ -341,6 +399,12 @@ func (s *StepWorkflowService) closeRepairLoop(
 	result.Repair = decision
 	result.RepairCloseout = closeout
 	result.Attempts = attempts
+	// 周期结束只写 closed_at：达到上限或需要人工核验时周期不再活动，因此下一次
+	// 恢复不会在同一周期上继续消耗预算，而用户显式开启新周期时才能得到新预算。
+	if err := s.closeCycleOf(writeCtx, result.StepID); err != nil {
+		result.FinalizationErrors = append(result.FinalizationErrors, err.Error())
+		result.Finalized = false
+	}
 	closed, err := s.applyRepairCloseout(writeCtx, result, closeout)
 	closed.Repair = decision
 	closed.RepairCloseout = closeout
@@ -556,4 +620,31 @@ func (s *StepWorkflowService) appendRepairEvent(
 		"final":                !decision.CanRepair(),
 	}
 	s.appendCloseoutEvent(ctx, result, domain.EventTypeRepairRound, payload)
+}
+
+// closeCycleOf 结束步骤当前的活动执行周期。
+//
+// 只在修复循环确定停止时调用：结束周期使"是否还有剩余预算"在下一次读取时得出
+// 确定的结论，而不是依赖上一次调用的内存状态。读取失败只记录错误，不改变已经
+// 写入的业务状态。
+func (s *StepWorkflowService) closeCycleOf(ctx context.Context, stepID domain.ID) error {
+	cycle, err := s.cycles.GetActiveRepairCycle(ctx, stepID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("读取执行周期失败: %w", err)
+	}
+	if err := s.cycles.CloseRepairCycle(ctx, cycle.ID, s.now()); err != nil {
+		return fmt.Errorf("结束执行周期失败: %w", err)
+	}
+	return nil
+}
+
+// maxInt 返回两个整数中的较大值。
+func maxInt(left, right int) int {
+	if left > right {
+		return left
+	}
+	return right
 }

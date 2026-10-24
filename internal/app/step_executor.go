@@ -56,6 +56,13 @@ type StepExecuteRequest struct {
 	Prompt string
 	// Timeout 是本次调用的超时时间，零值使用任务配置或默认值。
 	Timeout time.Duration
+	// BudgetScope 是本次执行消耗的预算作用域。
+	//
+	// 闭环协调器传入 domain.RepairBudgetScopeCycle 与已登记的周期标识；为空表示
+	// 本次执行不属于任何已登记周期（历史行为），预算判定会因此拒绝自动继续。
+	BudgetScope domain.RepairBudgetScope
+	// BudgetScopeID 是本次执行所属的执行周期标识。
+	BudgetScopeID domain.ID
 	// DeferCompletion 表示本次调用只完成开发阶段，由闭环协调器收口步骤状态。
 	//
 	// 为 true 时，开发成功后步骤进入 verifying 并保持被当前尝试占用：此时既没有通过
@@ -337,7 +344,14 @@ func (e *StepExecutor) Execute(
 	}
 	defer release()
 
-	started, err := e.beginExecution(runCtx, task, step, container)
+	started, err := e.beginExecution(
+		runCtx,
+		task,
+		step,
+		container,
+		request.BudgetScope,
+		request.BudgetScopeID,
+	)
 	if err != nil {
 		return StepExecutionResult{}, err
 	}
@@ -685,6 +699,8 @@ func (e *StepExecutor) beginExecution(
 	task domain.Task,
 	step domain.Step,
 	container domain.Container,
+	scope domain.RepairBudgetScope,
+	scopeID domain.ID,
 ) (storage.StepExecutionStart, error) {
 	started, err := e.store.BeginStepExecution(ctx, storage.StepExecutionStartRequest{
 		TaskID:             task.ID,
@@ -694,6 +710,8 @@ func (e *StepExecutor) beginExecution(
 		ContainerID:        container.ID.String(),
 		DockerID:           container.DockerID,
 		InputDigest:        digestStepExecution(task, step),
+		BudgetScope:        scope,
+		BudgetScopeID:      scopeID,
 		At:                 e.now(),
 	})
 	if err != nil {

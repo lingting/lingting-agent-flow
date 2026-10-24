@@ -8,7 +8,9 @@
 > P1-M4 已在 HEAD `b7f7e22` 之后按实际核实与改动更新；
 > P1-M5 已在 HEAD `b36a9d2` 之后按实际核实与改动更新；
 > P2-M1 已在 HEAD `7a55dfe` 之后按实际核实与文档改动更新（结论见
-> [`P2-M1-recovery-boundaries.md`](./P2-M1-recovery-boundaries.md)）。
+> [`P2-M1-recovery-boundaries.md`](./P2-M1-recovery-boundaries.md)）；
+> P2-M3 已在 HEAD `2a1bb0d` 之后按实际实施更新（结论见
+> [`P2-reliability-recovery.md`](./P2-reliability-recovery.md) 的 M3 详情）。
 
 ## 项目最终业务目标
 
@@ -37,9 +39,22 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 ## 当前实现状态摘要（基于代码证据）
 
 > **当前阶段：P2 进行中**（P1 全部里程碑于 2026-10-23 完成；P2-M1 于 2026-10-23 完成，
-> P2-M2 于 2026-10-24 完成，P2-M3 起待启动）。P1 证据见 `P1-single-task-e2e.md` 的对应
-> "完成记录"；P2-M1 证据见 `P2-M1-recovery-boundaries.md`；P2-M2 证据见
-> `P2-M2-interruption-semantics.md`。
+> P2-M2 于 2026-10-24 完成，P2-M3 于 2026-10-24 完成）。P1 证据见
+> `P1-single-task-e2e.md` 的对应"完成记录"；P2-M1 证据见
+> `P2-M1-recovery-boundaries.md`；P2-M2 证据见 `P2-M2-interruption-semantics.md`；
+> P2-M3 证据见 `P2-reliability-recovery.md` 的 M3 详情。
+>
+> P2-M3 的核实结论：修复预算此前只有进程内计数（`runRepairLoop` 的 `attempts := 0`），
+> 重启后的恢复与重复调用会重新得到"还有余额"的结论。本次把预算落到持久化事实：
+> 新增 `repair_cycles`（迁移 `0022_repair_cycles.sql`）与 `attempts.budget_scope` /
+> `attempts.budget_scope_id`，预算只统计同一周期的 Attempt；领域层新增
+> `domain.DecideRepairBudget` / `domain.DecideRepairStart` 作为唯一准入与预算规则，
+> 编排、恢复与重复调用全部引用它。用户显式开启新周期走独立入口
+> `POST /api/v1/tasks/{taskID}/steps/{stepID}/open-repair-cycle`（CLI：`agentflow task
+> reopen-step`），只有在上一周期已安全收敛且预算已用尽或策略不再允许修复时才允许；
+> 上一周期仍有余额时拒绝，避免用"开新周期"绕过上限。首轮修复依据改为按"当前周期内
+> 最近一次验证"精确读取反馈，不再无条件使用步骤级"最近一次反馈"，从而不会把旧周期
+> 反馈当成当前依据。
 >
 > P2-M2 的核实结论：四类中断（用户取消 / 单次超时 / 服务停止 / 进程崩溃）在
 > Task / WorkflowRun / Step / Attempt / Session / ValidationRun 六层的收敛目标已成文并
@@ -138,6 +153,15 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - 验证失败修复依据：`validation_feedbacks` 已持久化并按 `ValidationRunID` 精确引用
   （`internal/app/step_workflow_prompt.go`、`step_workflow_repair.go` 的 `repairPrompt`），
   读取失败或归属不符时停止循环而不是静默降级。
+- **修复预算与执行周期**（P2-M3）：预算来自持久化事实而不是进程内计数。
+  `repair_cycles`（迁移 `0022_repair_cycles.sql`）登记每个执行周期与开启时的上限快照，
+  `attempts.budget_scope` / `budget_scope_id` 记录每次尝试归属哪个周期；预算只统计同一
+  周期的 Attempt。`domain.DecideRepairBudget` / `domain.DecideRepairStart` 是唯一预算与
+  准入规则，`app.StepWorkflowService`（`step_workflow_cycle.go`、`step_workflow_repair.go`）
+  在启动 Agent 之前读取历史并判定，读取失败即拒绝执行。用户显式开启新周期走
+  `POST /api/v1/tasks/{taskID}/steps/{stepID}/open-repair-cycle`（CLI
+  `agentflow task reopen-step`），只在上一周期已收敛且预算用尽或策略不再允许修复时成功。
+  首轮修复依据改为按"当前周期内最近一次验证"精确读取，不再无条件使用步骤级最近反馈。
 - **单任务端到端验收**（P1-M5）：本地 `tests/integration/local/workflow/e2e_*_test.go`
   （18 个用例）+ 真实远程 `tests/integration/remote/workflow/e2e_*_test.go`。真实 SQLite + 正式迁移、真实统一启动入口（`app.TaskLaunchService`）与真实
   `app.ExecutionEnvironmentService` 四阶段准备、真实编排器/执行器/验证引擎/语义审查/

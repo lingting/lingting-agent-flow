@@ -33,6 +33,8 @@ type dbStore struct {
 	validationFeedbackStore
 	// workflowRunStore 提供任务级工作流执行记录的追加与推进。
 	workflowRunStore
+	// repairCycleStore 提供开发执行周期的登记与查询，是修复预算的持久化依据。
+	repairCycleStore
 }
 
 // txStore 把事务上的各实体仓储组合成 storage.Tx。
@@ -58,6 +60,8 @@ type txStore struct {
 	validationFeedbackStore
 	// workflowRunStore 提供任务级工作流执行记录的追加与推进。
 	workflowRunStore
+	// repairCycleStore 提供开发执行周期的登记与查询，是修复预算的持久化依据。
+	repairCycleStore
 }
 
 // newDBStore 构造连接池仓储。
@@ -82,6 +86,7 @@ func newDBStore(db *sql.DB) *dbStore {
 		stepExecutionStore:      stepExecutionStore{q: pool},
 		validationFeedbackStore: validationFeedbackStore{q: pool},
 		workflowRunStore:        workflowRunStore{q: pool},
+		repairCycleStore:        repairCycleStore{q: pool},
 	}
 }
 
@@ -106,6 +111,7 @@ func newTxStore(tx *sql.Tx) *txStore {
 		stepExecutionStore:      stepExecutionStore{q: tx},
 		validationFeedbackStore: validationFeedbackStore{q: tx},
 		workflowRunStore:        workflowRunStore{q: tx},
+		repairCycleStore:        repairCycleStore{q: tx},
 	}
 }
 

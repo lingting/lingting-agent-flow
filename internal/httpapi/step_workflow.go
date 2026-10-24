@@ -224,7 +224,8 @@ func (h *stepExecutionHandler) writeWorkflowError(
 		errors.Is(err, storage.ErrNotFound):
 		status = http.StatusNotFound
 		code = CodeNotFound
-	case errors.Is(err, app.ErrStepExecutionConflict),
+	case errors.Is(err, app.ErrStepWorkflowCycleDenied),
+		errors.Is(err, app.ErrStepExecutionConflict),
 		errors.Is(err, app.ErrValidationConflict),
 		errors.Is(err, domain.ErrStepExecutionBlocked),
 		errors.Is(err, domain.ErrValidationBlocked),

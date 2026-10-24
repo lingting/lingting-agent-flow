@@ -68,6 +68,14 @@ func workflowStoreOf(store app.StepWorkflowStore, createErr error) app.StepWorkf
 	return workflow
 }
 
+// workflowCyclesOf 构造闭环协调器使用的执行周期存储。
+//
+// 周期与预算必须来自真实数据库：替身无法证明"重启后预算仍然一致"，因此这里直接
+// 复用产品存储，只在需要注入失败时包装。
+func workflowCyclesOf(store app.RepairCycleStore) app.RepairCycleStore {
+	return store
+}
+
 // errFeedbackInjected 是反馈写入失败的注入错误。
 var errFeedbackInjected = errors.New("注入的反馈写入失败")
 
