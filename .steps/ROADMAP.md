@@ -40,15 +40,32 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 
 ## 当前实现状态摘要（基于代码证据）
 
-> **当前阶段：P3 进行中 —— 多任务执行与调度**（P1 全部里程碑于 2026-10-23 完成；
+> **当前阶段：P3 已完成 —— 多任务执行与调度**（P1 全部里程碑于 2026-10-23 完成；
 > P2-M1 于 2026-10-23 完成，P2-M2 于 2026-10-24 完成，P2-M3 于 2026-10-24 完成，
 > P2-M4 于 2026-10-25 完成，P2-M5 于 2026-10-25 完成；
 > **P3-M1 于 2026-10-25 完成，P3-M2 于 2026-10-25 完成，P3-M3 于 2026-10-26 完成
 > （文档记录日期；实际实施与本次 P3-M4 同在 2026-10-25，日期不自洽已记录在
-> `P3-M4-scheduler-recovery.md` §1.2），P3-M4 于 2026-10-25 完成**）。P1 证据见
+> `P3-M4-scheduler-recovery.md` §1.2），P3-M4 于 2026-10-25 完成，P3-M5 于 2026-10-25
+> 完成**）。P1 证据见
 > `P1-single-task-e2e.md` 的对应"完成记录"；P2-M1 证据见
 > `P2-M1-recovery-boundaries.md`；P2-M2 证据见 `P2-M2-interruption-semantics.md`；
 > P2-M3 与 P2-M4 证据见 `P2-reliability-recovery.md` 的对应里程碑详情。
+>
+> P3-M5 的核实结论：本轮以可复核的测试证据为中心，先定位真实缺口再修复，共修复 4 个
+> 生产缺陷——D1 `TaskService.CancelTask`（CLI 入口）用无条件整行写入，会覆盖并发领取的
+> `lease_owner` / `lease_epoch`（新增 `storage.TaskStore.UpdateTaskCancellation`，只写
+> 取消相关列并带状态前置条件）；D2 CLI 与 HTTP 各有一套取消状态语义且 `queued` 任务停在
+> `cancelling`（新增 `domain.Task.ApplyCancellationRequest` 作为唯一落点）；D3
+> `isContainerMissing` 把 `CodeOwnershipMismatch` 当作"容器不存在"，使回收伪造"按删除
+> 成功处理"；D4 `TaskScheduler.Scan` 的名额统计与领取不在同一临界区，并发扫描实测在
+> 上限 2 时领取 3 个（新增 `scanMu`）。并发上限语义明确为**"同一份数据库上的名额上限"**：
+> 多个调度器共享同一数据库时总量等于单进程上限，跨库全局配额是明确的非目标。
+> 测试证据：`tests/integration/local/scheduler/{concurrency,resource}_acceptance_test.go`
+> （16 个用例，真实 SQLite + 正式迁移 + 多独立连接）与
+> `tests/integration/remote/docker/concurrency_acceptance_test.go`（3 个真实远程用例：
+> `unknown` / 孤儿 / absent 现场注入、两个任务并行与分别回收、短暂不可达后重新核验；
+> 远程 Docker CLI / Engine `29.9.1`、API `1.56`）。交付物为
+> `P3-M5-multi-task-acceptance.md`。
 >
 > P3-M4 的核实结论：本轮把"调度器重启"落成**安全协议**而不是"自动接管"——过期租约
 > 只证明持有者没有续租，不能证明它发出的远程操作已经停止，因此新增
@@ -89,9 +106,10 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > （真实 SQLite + 正式迁移，覆盖跨任务容器隔离、租约 fencing、孤儿容器与共享缓存边界）。
 > 明确保留的边界：租约栅栏只保护数据库写入（远程命令的物理收敛由 P3-M4 定义为
 > "只记录现场、不自动重放"）；
-> 真实远程依赖用例（`tests/integration/{ssh,pi,remote/**}`）已全部通过，孤儿容器与
-> `unknown` 现场仍需在真实远程环境主动注入验收（归 P3-M5）；跨进程全局配额需要
-> 数据库仲裁。
+> 真实远程依赖用例（`tests/integration/{ssh,pi,remote/**}`）已全部通过；孤儿容器与
+> `unknown` 现场的真实远程主动注入验收已在 P3-M5 完成
+> （`tests/integration/remote/docker/concurrency_acceptance_test.go`）。并发上限的
+> 语义已在 P3-M5 明确为"同一份数据库上的名额上限"，跨库全局配额是明确的非目标。
 >
 > P3-M2 的核实结论：本轮把 P3-M1 的契约落到运行时——`AcquireTaskLease` 成为生产
 > 调用路径（`app.TaskScheduler` 显式传 `queued` 集合）、`ReleaseTaskLease` 补上
@@ -335,8 +353,10 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
   过期租约残留（不释放租约、不改写状态），并固定"恢复先于调度"的启动顺序；
   `running` 记录的租约过期收敛由既有 `recoverUnfinished` 承担。见
   [`P3-M4-scheduler-recovery.md`](./P3-M4-scheduler-recovery.md)。
-- **跨进程的全局容量配额**：P3-M2 的并发上限基于数据库事实但只在本进程内生效；
-  多进程共享同一数据库时总量可能短暂超过上限，全局配额需要数据库仲裁。
+- **跨数据库的全局容量配额**（P3-M5 已明确语义与非目标）：并发上限的事实来源是
+  数据库，因此**多个调度器共享同一数据库时总量等于单进程上限**；两个进程各持独立
+  数据库时互不知情。跨库全局配额需要跨库仲裁协议，属明确的非目标，见
+  [`P3-M5-multi-task-acceptance.md`](./P3-M5-multi-task-acceptance.md) §3。
 - **~~`failed` 任务的用户显式重试入口~~**（P3-M4 已完成）：状态机允许
   `failed → preparing`，现在有经过领域规则约束的生产入口——
   `domain.DecideTaskRetryEligibility` + `app.TaskRetryService` +
@@ -457,4 +477,5 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - [P3-M2-bounded-concurrency.md](./P3-M2-bounded-concurrency.md)
 - [P3-M3-execution-isolation.md](./P3-M3-execution-isolation.md)
 - [P3-M4-scheduler-recovery.md](./P3-M4-scheduler-recovery.md)
+- [P3-M5-multi-task-acceptance.md](./P3-M5-multi-task-acceptance.md)
 - [P4-product-experience-optimization.md](./P4-product-experience-optimization.md)

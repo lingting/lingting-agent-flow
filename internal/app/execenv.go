@@ -585,12 +585,15 @@ func describeRetained(container domain.Container, note string) string {
 }
 
 // isContainerMissing 判断错误是否表示容器在远程已不存在。
+//
+// 只有 CodeContainerNotFound 算"确认不存在"。归属校验失败（CodeOwnershipMismatch）
+// 表示同名容器存在但标签与登记记录不一致：此时容器可能仍在运行，把结论写成
+// "按删除成功处理"会伪造一次没有发生的清理，并让现场失去诊断线索。
 func isContainerMissing(err error) bool {
 	if err == nil {
 		return false
 	}
-	code := docker.ErrorCodeOf(err)
-	return code == docker.CodeContainerNotFound || code == docker.CodeOwnershipMismatch
+	return docker.ErrorCodeOf(err) == docker.CodeContainerNotFound
 }
 
 // debug 输出调试日志；未配置日志器时忽略。

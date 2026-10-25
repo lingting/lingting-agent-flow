@@ -232,29 +232,24 @@ func (s *TaskService) CancelTaskForAPI(
 	// 直接用推进后的状态做条件会导致更新永远匹配不到。
 	originalStatus := task.Status
 	now := s.now()
-	switch {
-	case originalStatus.IsFinished():
+	// 已结束（含 failed）的任务不能被取消：CancelImmediately 的判定不覆盖 failed，
+	// 因此这里必须先按 IsFinished 拒绝，再交给统一的领域规则。
+	if originalStatus.IsFinished() {
 		return domain.Task{}, fmt.Errorf(
 			"%w: 任务已结束，状态为 %s",
 			ErrTaskStateConflict,
 			originalStatus,
 		)
-	case originalStatus == domain.TaskStatusQueued:
-		if err := task.CancelImmediately(now); err != nil {
-			return domain.Task{}, fmt.Errorf("%w: %w", ErrTaskStateConflict, err)
-		}
-	case originalStatus == domain.TaskStatusCancelling:
+	}
+	repeated, err := task.ApplyCancellationRequest(now)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("%w: %w", ErrTaskStateConflict, err)
+	}
+	if repeated {
 		// 重复取消：请求已记录，等待执行者确认停止，不改写时间戳。
 		return task, nil
-	default:
-		if err := task.RequestCancel(now); err != nil {
-			return domain.Task{}, fmt.Errorf("%w: %w", ErrTaskStateConflict, err)
-		}
-		if err := task.Transition(domain.TaskStatusCancelling, now); err != nil {
-			return domain.Task{}, fmt.Errorf("%w: %w", ErrTaskStateConflict, err)
-		}
 	}
-	if err := s.store.UpdateTaskIfStatus(
+	if err := s.store.UpdateTaskCancellation(
 		ctx,
 		task,
 		[]domain.TaskStatus{originalStatus},

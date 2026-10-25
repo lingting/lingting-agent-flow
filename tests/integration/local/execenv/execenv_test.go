@@ -166,6 +166,8 @@ type fakeContainers struct {
 	inspectErr error
 	// deleteErr 使删除失败。
 	deleteErr error
+	// loadErr 使读取容器登记记录失败（用于构造归属核验失败的现场）。
+	loadErr error
 	// detachErr 使脱离管理失败。
 	detachErr error
 	// execReply 是命令执行的受控结果。
@@ -346,6 +348,9 @@ func (f *fakeContainers) LoadContainer(
 ) (domain.Container, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.loadErr != nil {
+		return domain.Container{}, f.loadErr
+	}
 	if f.container.ID.IsEmpty() {
 		return domain.Container{}, errors.New("容器记录不存在")
 	}
@@ -916,6 +921,63 @@ func TestReleaseDeleteIsIdempotentWhenContainerMissing(t *testing.T) {
 	}
 	if !result.ContainerRemoved {
 		t.Fatal("容器不存在时必须报告删除完成")
+	}
+}
+
+// TestReleaseRejectsOwnershipMismatchAsMissing 验证归属不匹配不被当作"容器不存在"。
+//
+// 归属校验失败说明同名容器存在但标签与登记记录不一致：容器可能仍在运行。把它当成
+// "确认不存在"会让释放流程报告"按删除成功处理"，伪造一次没有发生的清理，并让现场
+// 失去诊断线索。只有 CodeContainerNotFound 才允许按删除成功处理。
+func TestReleaseRejectsOwnershipMismatchAsMissing(t *testing.T) {
+	t.Parallel()
+	fixture := newFixture(t)
+	prepared, err := fixture.service.Prepare(context.Background(), prepareSpec(t))
+	if err != nil {
+		t.Fatalf("准备执行环境失败: %v", err)
+	}
+	ownershipErr := fmt.Errorf(
+		"容器所有权核验失败: %w",
+		&docker.Error{
+			Code:   docker.CodeOwnershipMismatch,
+			Op:     "ownership",
+			Detail: "容器登记记录标签不一致",
+		},
+	)
+	// 删除路径：删除前核验所有权失败，不得按删除成功处理。
+	fixture.containers.mu.Lock()
+	fixture.containers.deleteErr = ownershipErr
+	fixture.containers.mu.Unlock()
+	result, deleteErr := fixture.service.Release(
+		context.Background(),
+		prepared.Environment,
+		execenv.ReleaseRequest{Retention: execenv.RetentionDelete},
+	)
+	if deleteErr == nil {
+		t.Fatal("归属不匹配时释放必须返回错误，不得报告删除成功")
+	}
+	if result.ContainerRemoved || result.TaskResourcesRemoved {
+		t.Fatalf("归属不匹配时不得报告已清理: %+v", result)
+	}
+	if result.Succeeded() {
+		t.Fatal("归属不匹配时不得判定释放成功")
+	}
+
+	// 读取路径：容器记录读取返回归属不匹配，同样不得当成"已不存在"。
+	fixture.containers.mu.Lock()
+	fixture.containers.deleteErr = nil
+	fixture.containers.loadErr = ownershipErr
+	fixture.containers.mu.Unlock()
+	loadResult, loadErr := fixture.service.Release(
+		context.Background(),
+		prepared.Environment,
+		execenv.ReleaseRequest{Retention: execenv.RetentionDelete},
+	)
+	if loadErr == nil {
+		t.Fatal("读取容器记录遇到归属不匹配时释放必须返回错误")
+	}
+	if loadResult.ContainerRemoved || loadResult.TaskResourcesRemoved {
+		t.Fatalf("读取失败时不得报告已清理: %+v", loadResult)
 	}
 }
 

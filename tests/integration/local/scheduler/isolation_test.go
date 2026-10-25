@@ -38,6 +38,7 @@ const isolationBuildHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123
 type isolationFixture struct {
 	ctx  context.Context
 	db   *sqlite.DB
+	path string
 	now  time.Time
 	host domain.ExecutionHost
 }
@@ -92,7 +93,24 @@ func newIsolationFixture(t *testing.T) *isolationFixture {
 	if _, err := db.UpdateExecutionHostValidation(ctx, *stored, stored.ValidationGeneration); err != nil {
 		t.Fatalf("写入校验结果失败: %v", err)
 	}
-	return &isolationFixture{ctx: ctx, db: db, now: now, host: *stored}
+	return &isolationFixture{ctx: ctx, db: db, path: path, now: now, host: *stored}
+}
+
+// openSecondConnection 在同一个数据库文件上再打开一条独立连接。
+//
+// 并发安全必须来自数据库的条件写入：只有独立连接上的竞争才能证明它真的生效。
+func (f *isolationFixture) openSecondConnection(t *testing.T) *sqlite.DB {
+	t.Helper()
+	other, err := sqlite.Open(f.ctx, sqlite.Options{Path: f.path})
+	if err != nil {
+		t.Fatalf("打开第二个数据库连接失败: %s: %v", f.path, err)
+	}
+	t.Cleanup(func() {
+		if closeErr := other.Close(); closeErr != nil {
+			t.Errorf("关闭第二个数据库连接失败: %v", closeErr)
+		}
+	})
+	return other
 }
 
 // task 写入一个 queued 任务并返回它。

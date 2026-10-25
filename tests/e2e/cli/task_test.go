@@ -299,7 +299,9 @@ func TestTaskCancelMarksRequest(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("取消任务失败: %d %s", code, cancelErr)
 	}
-	for _, fragment := range []string{"状态: cancelling", "取消请求: 是"} {
+	// 任务从未进入执行阶段，取消必须直接收敛为 cancelled：停在 cancelling 会让
+	// 一个没有任何执行者的任务只能靠重启恢复才收敛。
+	for _, fragment := range []string{"状态: cancelled", "取消请求: 是"} {
 		if !strings.Contains(cancelOut, fragment) {
 			t.Fatalf("取消输出缺少 %q: %s", fragment, cancelOut)
 		}

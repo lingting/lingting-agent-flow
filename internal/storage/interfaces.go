@@ -210,6 +210,19 @@ type TaskStore interface {
 	//
 	// 事件写入失败时整体回滚，避免留下"有效租约但没有审计痕迹"的现场。
 	AppendTaskLeaseEvent(ctx context.Context, event domain.Event) (domain.Event, error)
+	// UpdateTaskCancellation 在任务状态仍属于 expected 时写入取消请求。
+	//
+	// 它只更新取消相关列（status、cancel_requested、cancel_requested_at、
+	// final_result、failure_summary、finished_at、updated_at），不触碰
+	// lease_owner / lease_epoch / lease_expires_at：取消是用户意图，不是执行权
+	// 交接，因此既不能要求持有租约，也绝不能抹掉并发执行者的租约。
+	//
+	// 状态不匹配时返回 storage.ErrConflict，调用方不得假定取消已被记录。
+	UpdateTaskCancellation(
+		ctx context.Context,
+		task domain.Task,
+		expected []domain.TaskStatus,
+	) error
 }
 
 // TaskLeaseRequest 是一次任务租约领取请求。

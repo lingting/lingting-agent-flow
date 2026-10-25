@@ -25,8 +25,25 @@
 
 ## 当前阶段与当前里程碑
 
-- **当前阶段**：P3 进行中 —— 多任务执行与调度。
-- **当前里程碑**：`P3-M4` —— 打通任务取消、失败、恢复与调度器重启，状态
+- **当前阶段**：P3 已完成 —— 多任务执行与调度。
+- **当前里程碑**：`P3-M5` —— 验证多任务并发、冲突和资源回收行为，状态
+  `completed`（2026-10-25，基于 `master` HEAD `abfdfd3` 之后的工作区核实与实施）。
+  交付物为 [`P3-M5-multi-task-acceptance.md`](./P3-M5-multi-task-acceptance.md)。
+  本次以可复核的测试证据为中心，先定位真实缺口再修复，共修复 4 个生产缺陷：
+  D1 取消的无条件整行写入会覆盖并发领取的租约（新增
+  `storage.TaskStore.UpdateTaskCancellation`，只写取消列并带状态前置条件）；
+  D2 CLI 与 HTTP 各有一套取消状态语义、`queued` 任务停在 `cancelling`
+  （新增 `domain.Task.ApplyCancellationRequest` 作为唯一落点）；
+  D3 `isContainerMissing` 把归属不匹配当作"容器不存在"，使回收伪造"按删除成功处理"；
+  D4 `TaskScheduler.Scan` 的名额统计与领取不在同一临界区，并发扫描实测可超额领取
+  （新增 `scanMu`）。测试证据：
+  `tests/integration/local/scheduler/{concurrency,resource}_acceptance_test.go`
+  （16 个用例，真实 SQLite + 正式迁移 + 多独立连接）与
+  `tests/integration/remote/docker/concurrency_acceptance_test.go`
+  （3 个真实远程用例：`unknown` / 孤儿 / absent 现场注入、两个任务并行与分别回收、
+  短暂不可达后重新核验）。并发上限语义已在文档 §3 明确为"同一份数据库上的名额
+  上限"，跨库全局配额是明确的非目标。
+- **更早里程碑**：`P3-M4` —— 打通任务取消、失败、恢复与调度器重启，状态
   `completed`（2026-10-25，基于 `master` HEAD `b61b7e4` 之后的工作区核实与实施）。
   交付物为 [`P3-M4-scheduler-recovery.md`](./P3-M4-scheduler-recovery.md)。核心改动：
   过期任务租约的残留核验（`internal/app/task_lease_recovery.go` 的
@@ -133,14 +150,15 @@
   `0023_code_fetch_active_unique.sql`、`VerifyCodeSave` 在容器缺失时降级为
   `unverifiable` 并落盘、新增 HTTP `verify-code-save` 与 `resume-eligibility`
   （CLI `task resume-status`）、`ensureNoPendingContainer` 阻止创建第二个容器。
-- **下一步**：`P3-M5` —— 验证多任务并发、冲突和资源回收行为。
-  P3-M4 已落地的前提见
-  [`P3-M4-scheduler-recovery.md`](./P3-M4-scheduler-recovery.md) §2 与 §4 与
-  [`P3-multi-task-scheduling.md`](./P3-multi-task-scheduling.md) 的"下一步入口"。
-  P3-M4 的交接事项：租约残留核验不判断远程进程是否真的停止（物理收敛需要节点侧
-  可观测能力）；重试入口只接受 `failed`（`blocked` / `recovery_required` 仍走
-  `resume-workflow`）；前端重试入口尚未实现（只交付 API 与 CLI）；跨进程全局并发
-  配额仍需数据库仲裁。
+- **下一步**：P3 阶段已全部完成（M1–M5 均 `completed`）。按
+  [`ROADMAP.md`](./ROADMAP.md) 的优先级规则，下一步进入 **P4 —— 产品操作体验与针对性
+  优化**，入口见
+  [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
+  P3-M5 的交接事项见
+  [`P3-M5-multi-task-acceptance.md`](./P3-M5-multi-task-acceptance.md) §8：并发上限是
+  "同一份数据库上的名额上限"（跨库全局配额是明确的非目标）；数据库 fencing 不等于
+  远程命令已停止；真实远程 `unknown` 现场的"注入"用受控观测端口包裹真实连接，不是
+  真的切断网络；前端重试入口仍未实现。
   P3-M3 已落地的前提见
   [`P3-M3-execution-isolation.md`](./P3-M3-execution-isolation.md) §2 与 §3。
   P3-M3 的交接事项：容器归属契约（`DecideContainerOwnership`）与统一加载入口
@@ -148,10 +166,11 @@
   单步骤三个入口已统一领取任务租约，步骤占用与任务终态写入具备租约栅栏；
   租约栅栏只保护数据库写入，已发出的远程命令的物理收敛由 P3-M4 定义为"只记录现场、
   不自动重放"；
-  真实远程依赖用例（`tests/integration/{ssh,pi,remote/**}`）已全部通过，但孤儿容器与
-  `unknown` 现场仍需在真实远程环境主动注入验收（归 P3-M5）；
-  跨进程全局并发配额需要数据库仲裁。
-  P3-M2 的交接事项：并发上限是**进程级**（跨进程全局配额需要数据库仲裁）；
+  真实远程依赖用例（`tests/integration/{ssh,pi,remote/**}`）已全部通过；孤儿容器与
+  `unknown` 现场的真实远程主动注入验收已在 P3-M5 完成；
+  跨库全局并发配额是明确的非目标（P3-M5 §3）。
+  P3-M2 的交接事项：并发上限的事实来源是数据库（P3-M5 已明确语义：多个调度器共享
+  同一数据库时总量等于单进程上限，跨库全局配额是非目标）；
   服务停止保留的租约依赖 TTL 自然过期（P3-M4 已把该现场落成可追溯记录）；
   轮询扫描（默认 1s）是可接受的取舍。
   P2-M5 的交接事项：真实远程 Docker 上的容器残留与 merge 恢复仍缺证据（需在真实远程
@@ -181,6 +200,7 @@
 | [`P3-M2-bounded-concurrency.md`](./P3-M2-bounded-concurrency.md) | P3-M2：任务租约 fencing（`lease_epoch`）、统一所有权、有界并发调度器与生命周期集成 |
 | [`P3-M3-execution-isolation.md`](./P3-M3-execution-isolation.md) | P3-M3：容器 / 工作区 / Session / 资源隔离契约、统一执行入口所有权、资源回收所有权校验 |
 | [`P3-M4-scheduler-recovery.md`](./P3-M4-scheduler-recovery.md) | P3-M4：调度器重启协议、过期租约残留核验、失败任务显式重试入口 |
+| [`P3-M5-multi-task-acceptance.md`](./P3-M5-multi-task-acceptance.md) | P3-M5：多任务并发、冲突与资源回收的系统性验收（缺口矩阵、并发上限语义、4 个生产缺陷修复、真实远程证据） |
 | [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md) | P4：产品操作体验与针对性优化 |
 
 ## 下一步工作的选择规则

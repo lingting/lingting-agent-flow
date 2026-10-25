@@ -44,9 +44,8 @@ AgentFlow 只能一次处理一个任务，无法成为可用的编排器。
 
 **尚未实现**：
 
-- 跨进程的全局容量配额（当前并发上限是进程级）。
-- 多任务并发与资源回收的系统性验收（P3-M5）。
-- 真实远程环境下的孤儿容器与 `unknown` 现场主动注入验收（P3-M5）。
+- 跨数据库的全局容量配额（P3-M5 已明确语义与明确的非目标，见下文）。
+- 前端重试入口（P3-M4 交接事项，尚未实现）。
 
 已完成（P3-M3 / P3-M4）：
 
@@ -83,7 +82,7 @@ AgentFlow 只能一次处理一个任务，无法成为可用的编排器。
 | P3-M2 | 实现有界并发和任务生命周期协调 | `completed` | P3-M1 |
 | P3-M3 | 落实执行环境、工作区、Session 与资源隔离 | `completed` | P3-M1 |
 | P3-M4 | 处理任务取消、失败、恢复和调度器重启 | `completed` | P3-M2、P3-M3 |
-| P3-M5 | 验证多任务并发、冲突和资源回收行为 | `pending` | P3-M2、P3-M3、P3-M4 |
+| P3-M5 | 验证多任务并发、冲突和资源回收行为 | `completed` | P3-M2、P3-M3、P3-M4 |
 
 ## 阶段退出条件
 
@@ -97,7 +96,10 @@ AgentFlow 只能一次处理一个任务，无法成为可用的编排器。
 4. ✅ 任务取消、失败、恢复与调度器重启的语义明确，无 `running` 残留与重复副作用
    （P3-M4：`TaskLeaseRecoveryService` + `TaskRetryService` + 既有恢复入口；
    见 [`P3-M4-scheduler-recovery.md`](./P3-M4-scheduler-recovery.md)）。
-5. ⬜ 多任务并发、冲突与资源回收有测试证据（P3-M5；P3-M2 已提供存储与调度层的并发证据）。
+5. ✅ 多任务并发、冲突与资源回收有测试证据（P3-M5：
+   `tests/integration/local/scheduler/{concurrency,resource}_acceptance_test.go` 与
+   `tests/integration/remote/docker/concurrency_acceptance_test.go`；并修复 4 个生产缺陷
+   D1–D4，见 [`P3-M5-multi-task-acceptance.md`](./P3-M5-multi-task-acceptance.md)）。
 
 ## 风险与边界
 
@@ -108,9 +110,15 @@ AgentFlow 只能一次处理一个任务，无法成为可用的编排器。
 
 ## 下一步选择规则
 
-**下一步入口：P3-M5（验证多任务并发、冲突和资源回收行为）。**
+**下一步入口：P4（产品操作体验与针对性优化）。**
 
-顺序固定：M1/M2/M3/M4 已完成 → **M5**（并发验收）。
+顺序固定：M1/M2/M3/M4/M5 全部已完成 → **P4**。
+
+P3-M5 已落地的前提与交接事项见
+[`P3-M5-multi-task-acceptance.md`](./P3-M5-multi-task-acceptance.md)：并发上限语义为
+"同一份数据库上的名额上限"（跨库全局配额是明确的非目标）；数据库 fencing 不等于远程
+命令已停止；真实远程 `unknown` 现场的"注入"用受控观测端口包裹真实连接；前端重试入口
+仍未实现。
 
 P3-M4 已落地的前提（P3-M5 不需要重新设计）：
 
@@ -145,7 +153,8 @@ P3-M3 已落地的前提（P3-M4 不需要重新设计）：
   该边界落成显式协议：`TaskLeaseRecoveryService` 只记录现场，不把 fencing 当作
   "远程进程已停止"的证据。
 - 真实远程依赖用例（`tests/integration/{ssh,pi,remote/**}`）已全部通过；孤儿容器与
-  `unknown` 现场仍需在真实远程环境主动注入验收（归 P3-M5）。
+  `unknown` 现场的真实远程主动注入验收已在 P3-M5 完成
+  （`tests/integration/remote/docker/concurrency_acceptance_test.go`）。
 - 跨进程全局并发配额需要数据库仲裁。
 - （P3-M4 已解决）`failed` 任务现在有经领域规则约束的显式重试入口。
 
@@ -270,7 +279,8 @@ P3-M2 已落地的前提（P3-M3/M4 不需要重新设计）：
 - **明确未做**：调度器重启接管（M4）、多任务验收（M5）、分布式配额、
   真实远程环境下的孤儿容器主动注入验收、`failed` 显式重试入口。
 - **移交 P3-M4**：租约栅栏只保护数据库写入，已发出的远程命令的物理收敛属 P3-M4；
-  真实远程依赖用例已全部通过；孤儿容器与 `unknown` 现场仍需主动注入验收（归 P3-M5）。
+  真实远程依赖用例已全部通过；孤儿容器与 `unknown` 现场的真实远程主动注入验收
+  已在 P3-M5 完成。
 
 ### P3-M4 处理任务取消、失败、恢复和调度器重启
 
@@ -308,9 +318,27 @@ P3-M2 已落地的前提（P3-M3/M4 不需要重新设计）：
 ### P3-M5 验证多任务并发、冲突和资源回收行为
 
 - **ID**：`P3-M5`
-- **状态**：`pending`
+- **状态**：`completed`（2026-10-25，基于 `master` HEAD `abfdfd3` 之后的工作区核实与实施）
 - **必要性**：并发与资源回收必须靠真实测试证明。
-- **当前证据**：无多任务并发测试。
+- **本次核实到的真实缺口**：取消入口用无条件整行写入会覆盖并发领取的租约（D1）；
+  CLI 与 HTTP 各有一套取消状态语义且 `queued` 任务停在 `cancelling`（D2）；
+  `isContainerMissing` 把归属不匹配当作"容器不存在"（D3）；`TaskScheduler.Scan` 的
+  名额统计与领取不在同一临界区，并发扫描实测超额领取（D4）。
 - **前置依赖**：P3-M2、P3-M3、P3-M4。
 - **目标结果**：并发、冲突、资源回收的测试证据。
 - **完成定义**：关键并发与回收场景有可复核的测试产物与结论。
+- **交付物**：
+  - [`P3-M5-multi-task-acceptance.md`](./P3-M5-multi-task-acceptance.md)（缺口矩阵、
+    并发上限语义、4 个缺陷的修复与证据、真实远程结果）
+  - `internal/domain/task.go`：`Task.ApplyCancellationRequest`（取消语义唯一落点）
+  - `internal/storage/interfaces.go` + `internal/storage/sqlite/tasks.go`：
+    `UpdateTaskCancellation`（只写取消列，带状态前置条件）
+  - `internal/app/task_scheduler.go`：`scanMu`（名额统计与领取同临界区）
+  - `internal/app/execenv.go`：`isContainerMissing` 只认 `CodeContainerNotFound`
+  - 测试：`tests/integration/local/scheduler/{concurrency,resource}_acceptance_test.go`
+    （16 个用例）、`tests/integration/remote/docker/concurrency_acceptance_test.go`
+    （3 个真实远程用例）
+- **明确未做**：跨数据库全局容量仲裁、事件驱动调度、优先级抢占、前端并发状态展示。
+- **移交 P4**：并发上限语义已明确（跨库全局配额是明确的非目标）；数据库 fencing
+  不等于远程命令已停止；真实远程 `unknown` 现场的"注入"用受控观测端口包裹真实连接；
+  前端重试入口仍未实现。

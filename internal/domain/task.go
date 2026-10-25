@@ -507,6 +507,44 @@ func (t *Task) CancelImmediately(at time.Time) error {
 	return t.Transition(TaskStatusCancelled, now)
 }
 
+// ApplyCancellationRequest 依据当前状态应用一次用户取消请求。
+//
+// 这是取消语义的唯一落点，CLI 与 HTTP 两个入口都必须经过它，不得各自实现一套：
+//   - queued：还没有进入执行阶段，直接收敛为 cancelled（CancelImmediately）；
+//   - cancelling：重复请求是幂等的，不改写请求时间，也不重复迁移状态；
+//   - 终态：返回 ErrInvalidState，绝不把已结束的任务改写；
+//   - 其他未结束状态：只记录取消请求并推进到 cancelling，实际停止由执行者确认。
+//
+// 返回的 repeated 表示"该请求已被先前请求覆盖"，调用方据此跳过事件与写入，
+// 避免同一份取消意图在时间线上出现两次。
+func (t *Task) ApplyCancellationRequest(at time.Time) (repeated bool, err error) {
+	if t == nil {
+		return false, invalidField("Task", "", "实体为空")
+	}
+	if t.Status.IsTerminal() {
+		return false, fmt.Errorf(
+			"%w: 已结束的任务不能请求取消，当前状态 %s",
+			ErrInvalidState,
+			t.Status,
+		)
+	}
+	now := normalizeTime(at)
+	switch t.Status {
+	case TaskStatusQueued:
+		return false, t.CancelImmediately(now)
+	case TaskStatusCancelling:
+		// 请求已落盘，等待执行者确认停止：重复请求不产生新的意图。
+		return true, nil
+	default:
+		// 除 queued 外的所有未结束状态都进入 cancelling：取消意图必须立刻对调度器
+		// 可见（cancelling 不在任何自动领取集合内），实际停止仍由执行者确认。
+		if err := t.RequestCancel(now); err != nil {
+			return false, err
+		}
+		return false, t.Transition(TaskStatusCancelling, now)
+	}
+}
+
 // MarkDeleted 记录逻辑删除时间。
 //
 // 只有终态任务允许删除：执行中的任务必须先停止，否则会留下无人接管的容器现场。

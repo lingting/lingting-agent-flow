@@ -299,10 +299,14 @@ func TestCancelDoesNotRequireTaskLease(t *testing.T) {
 	if !cancelled.CancelRequested {
 		t.Fatal("取消意图必须被持久化")
 	}
-	// 运行中的任务只记录取消意图，实际停止由执行者确认：状态保持 developing，
-	// 由执行路径把它经 cancelling 收敛为 cancelled。这不是伪造"已停止"。
-	if cancelled.Status != domain.TaskStatusDeveloping {
-		t.Fatalf("运行中任务取消后应保持当前阶段，实际 %s", cancelled.Status)
+	// 运行中的任务只记录取消意图并进入 cancelling，实际停止由执行者确认：
+	// 这里断言"没有伪造已停止"（不是 cancelled、没有结论与结束时间），而不是断言
+	// 任务停留在执行阶段的中间状态。
+	if cancelled.Status != domain.TaskStatusCancelling {
+		t.Fatalf("运行中任务取消后应进入 cancelling，实际 %s", cancelled.Status)
+	}
+	if cancelled.FinalResult != domain.TaskResultNone || cancelled.FinishedAt != nil {
+		t.Fatalf("尚未确认停止时不得写入结论与结束时间: %+v", cancelled)
 	}
 	// 取消意图落盘后，旧执行者不得再领取执行权。
 	if _, claimErr := fixture.leases.Claim(fixture.ctx, app.TaskClaimRequest{

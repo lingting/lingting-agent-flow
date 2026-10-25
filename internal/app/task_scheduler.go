@@ -116,6 +116,13 @@ type TaskScheduler struct {
 	stopOnce   context.CancelFunc
 	runs       sync.WaitGroup
 	scanning   sync.WaitGroup
+	// scanMu 串行化同一调度器的扫描。
+	//
+	// 名额统计是"读取数据库占用快照 → 计算空名额 → 逐个领取"的三步过程。两次并发
+	// 扫描会同时读到同一份空名额快照，各自再领取自己的份额，使本进程的领取数超过
+	// 上限（实测：上限 2 时并发扫描可领取 3 个）。互斥锁只保护本进程内的扫描，
+	// 跨进程仍由任务租约的条件更新拒绝重复领取。
+	scanMu sync.Mutex
 }
 
 // schedulerDispatch 是一次在途分派。
@@ -292,7 +299,11 @@ func (s *TaskScheduler) runScan(ctx context.Context) {
 //
 // 读取失败不会伪造"可调度"：无法判断候选资格时跳过该候选，并记录日志，不让一个
 // 有问题的候选阻塞整条队列。
+// 并发扫描串行执行：名额统计与领取必须在同一个临界区内完成，否则两次扫描会基于
+// 同一份空名额快照各自领取，使本进程的领取数超过配置上限。
 func (s *TaskScheduler) Scan(ctx context.Context) error {
+	s.scanMu.Lock()
+	defer s.scanMu.Unlock()
 	s.mu.Lock()
 	if s.stopped {
 		s.mu.Unlock()

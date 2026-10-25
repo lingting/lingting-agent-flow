@@ -173,6 +173,69 @@ WHERE id = ? AND status IN (` + strings.Join(conditions, ", ") + `)`
 	return nil
 }
 
+// UpdateTaskCancellation 在任务状态仍属于 expected 时写入取消请求。
+//
+// 与 UpdateTaskIfStatus 的区别只有一处：本方法不写租约列。取消是用户意图而不是
+// 执行权交接，写租约列会让"取消"与"调度器刚领取"互相覆盖——取消可能抹掉新执行者
+// 的 owner/epoch，新执行者也可能抹掉取消意图。
+func (s taskStore) UpdateTaskCancellation(
+	ctx context.Context,
+	task domain.Task,
+	expected []domain.TaskStatus,
+) error {
+	record, err := encodeTask(task)
+	if err != nil {
+		return err
+	}
+	if len(expected) == 0 {
+		return wrapError(
+			"条件更新任务取消请求",
+			errors.Join(storage.ErrInvalidData, errors.New("期望状态集合不能为空")),
+		)
+	}
+	conditions := make([]string, 0, len(expected))
+	args := make([]any, 0, len(expected)+10)
+	args = append(
+		args,
+		string(record.task.Status),
+		toBoolInt(record.task.CancelRequested),
+		toMillisPtr(record.task.CancelRequestedAt),
+		nullIfBlank(string(record.task.FinalResult)),
+		nullIfBlank(record.task.FailureSummary),
+		toMillisPtr(record.task.FinishedAt),
+		toMillis(record.task.UpdatedAt),
+		toIDParam(record.task.ID),
+	)
+	for _, status := range expected {
+		conditions = append(conditions, "?")
+		args = append(args, string(status))
+	}
+	statement := `
+UPDATE tasks SET
+	status = ?, cancel_requested = ?, cancel_requested_at = ?, final_result = ?,
+	failure_summary = ?, finished_at = ?, updated_at = ?
+WHERE id = ? AND deleted_at IS NULL AND status IN (` +
+		strings.Join(conditions, ", ") + `)`
+	result, err := s.q.ExecContext(ctx, statement, args...)
+	if err != nil {
+		return wrapError("条件更新任务取消请求", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return wrapError("条件更新任务取消请求", err)
+	}
+	if affected == 0 {
+		return wrapError(
+			"条件更新任务取消请求",
+			errors.Join(
+				storage.ErrConflict,
+				errors.New("任务状态已变更，拒绝过期取消请求: "+task.ID.String()),
+			),
+		)
+	}
+	return nil
+}
+
 // GetTask 读取单个任务。
 func (s taskStore) GetTask(ctx context.Context, id domain.ID) (*domain.Task, error) {
 	if err := id.Validate(); err != nil {

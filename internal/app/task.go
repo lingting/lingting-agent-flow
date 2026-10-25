@@ -424,27 +424,33 @@ func (s *TaskService) Detail(ctx context.Context, taskID string) (TaskDetail, er
 // CancelTask 记录取消请求并把任务收敛为取消状态。
 //
 // 取消请求先落盘：即使当前没有执行者，后续推进也会看到取消请求并停止。
+//
+// 语义按状态区分（与 CancelTaskForAPI 一致）：
+//   - queued：还没有进入执行阶段，直接收敛为 cancelled，不会停在 cancelling；
+//   - 其他未结束状态：只记录取消请求并推进到 cancelling，实际停止由执行者确认；
+//   - 终态：返回状态冲突，不会把已结束的任务改写。
+//
+// 写入必须带状态前置条件：无条件的整行写入会覆盖同一时间由调度器领取的租约
+// （lease_owner / lease_epoch），使新执行者失去执行权却继续推进现场。
 func (s *TaskService) CancelTask(ctx context.Context, taskID string) (domain.Task, error) {
 	task, err := s.GetTask(ctx, taskID)
 	if err != nil {
 		return domain.Task{}, err
 	}
-	if task.Status.IsTerminal() {
-		return domain.Task{}, fmt.Errorf(
-			"取消任务失败: 任务已处于终态 %s",
-			task.Status,
-		)
-	}
+	originalStatus := task.Status
 	now := s.now()
-	if err := task.RequestCancel(now); err != nil {
+	repeated, err := task.ApplyCancellationRequest(now)
+	if err != nil {
 		return domain.Task{}, fmt.Errorf("取消任务失败: %w", err)
 	}
-	if !task.Status.IsActive() {
-		if err := task.Transition(domain.TaskStatusCancelling, now); err != nil {
-			return domain.Task{}, fmt.Errorf("取消任务失败: %w", err)
-		}
+	if repeated {
+		return task, nil
 	}
-	if err := s.store.UpdateTask(ctx, task); err != nil {
+	if err := s.store.UpdateTaskCancellation(
+		ctx,
+		task,
+		[]domain.TaskStatus{originalStatus},
+	); err != nil {
 		return domain.Task{}, fmt.Errorf("取消任务失败: %w", err)
 	}
 	event, err := domain.NewEvent(
