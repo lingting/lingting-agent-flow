@@ -51,6 +51,11 @@ type Deps struct {
 	Containers *app.ContainerService
 	// ResumeEligibility 计算任务的续跑资格，为空时该接口返回服务不可用。
 	ResumeEligibility *app.ResumeEligibilityService
+	// TaskRetry 是任务显式重试服务，为空时重试接口返回服务不可用。
+	//
+	// 重试入口只在领域规则判定通过后才把 failed 任务重开为新的执行周期；它复用
+	// 统一启动流程，不实现第二套启动逻辑。
+	TaskRetry *app.TaskRetryService
 	// Logger 是日志器，为空时使用 slog.Default。
 	Logger *slog.Logger
 }
@@ -83,6 +88,7 @@ func NewHandler(deps Deps) http.Handler {
 		taskLeases:        deps.TaskLeases,
 		containers:        deps.Containers,
 		resumeEligibility: deps.ResumeEligibility,
+		taskRetry:         deps.TaskRetry,
 		logger:            logger,
 	}
 	mux := http.NewServeMux()
@@ -113,7 +119,9 @@ type router struct {
 	taskLeases        *app.TaskLeaseService
 	containers        *app.ContainerService
 	resumeEligibility *app.ResumeEligibilityService
-	logger            *slog.Logger
+	// taskRetry 是任务显式重试服务，为空时重试接口返回服务不可用。
+	taskRetry *app.TaskRetryService
+	logger    *slog.Logger
 }
 
 // tasksHandler 分发任务集合路径与单任务路径的请求。
@@ -124,6 +132,12 @@ func (rt *router) tasksHandler(w http.ResponseWriter, r *http.Request) {
 	// 未初始化不应让启动接口返回"任务服务未初始化"这类误导性错误。
 	if isTaskLaunchPath(r.URL.Path) {
 		rt.serveTaskLaunch(w, r)
+		return
+	}
+	// 显式重试同样先于任务服务的可用性判定：它只依赖重试服务与统一启动流程，
+	// 任务管理服务未初始化不应让重试接口返回误导性错误。
+	if isTaskRetryPath(r.URL.Path) {
+		rt.serveTaskRetry(w, r)
 		return
 	}
 	if rt.tasks == nil || rt.tasks.tasks == nil {

@@ -74,6 +74,12 @@ const (
 	// 释放事件在租约释放成功后追加，用于追溯名额释放。
 	EventTypeTaskClaimed  EventType = "task.claimed"
 	EventTypeTaskReleased EventType = "task.lease_released"
+	// 任务显式重试事件。
+	//
+	// 它记录"用户把一个失败任务重开为新的执行周期"：包含重开前的状态、取得的新领取
+	// 代次与领取者。重试是用户的显式决定，因此必须留下可追溯的审计记录，不能只改
+	// 一行状态。
+	EventTypeTaskRetried EventType = "task.retried"
 )
 
 // knownEventTypes 是当前受支持的事件类型集合。
@@ -118,6 +124,7 @@ var knownEventTypes = []EventType{
 	EventTypeCodeSaveRecoveryRequired,
 	EventTypeTaskClaimed,
 	EventTypeTaskReleased,
+	EventTypeTaskRetried,
 }
 
 // Validate 校验事件类型是否受支持。

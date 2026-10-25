@@ -53,6 +53,10 @@ type e2eFixture struct {
 	sessions  *app.SessionService
 	launch    *app.TaskLaunchService
 	workflow  *app.TaskWorkflowService
+	// retry 是任务显式重试服务：它复用 launch，不实现第二套启动流程。
+	retry *app.TaskRetryService
+	// leases 是任务租约服务，为显式重试提供执行权。
+	leases    *app.TaskLeaseService
 	codeSaver *e2eCodeSaver
 	task      domain.Task
 	now       time.Time
@@ -271,6 +275,24 @@ func (f *e2eFixture) assemble(t *testing.T, options e2eOptions) {
 		t.Fatalf("构造统一启动服务失败: %v", err)
 	}
 	f.launch = launch
+	leases, leaseErr := app.NewTaskLeaseService(app.TaskLeaseOptions{
+		Store:  f.db,
+		Logger: f.logger.Slog(),
+	})
+	if leaseErr != nil {
+		t.Fatalf("构造任务租约服务失败: %v", leaseErr)
+	}
+	f.leases = leases
+	retry, retryErr := app.NewTaskRetryService(app.TaskRetryOptions{
+		Store:  f.db,
+		Leases: f.leases,
+		Launch: launch,
+		Logger: f.logger.Slog(),
+	})
+	if retryErr != nil {
+		t.Fatalf("构造任务重试服务失败: %v", retryErr)
+	}
+	f.retry = retry
 	startE2EServices(t, launch, executor, validation, stepFlow, workflow)
 }
 

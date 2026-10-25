@@ -216,6 +216,12 @@ type Server struct {
 	containerService *app.ContainerService
 	// resumeEligibility 计算任务续跑资格，为空时该接口返回 503。
 	resumeEligibility *app.ResumeEligibilityService
+	// taskRetry 是任务显式重试服务，为空时不提供重试接口。
+	taskRetry *app.TaskRetryService
+	// taskLeaseRecovery 在启动时核验残留的任务租约现场。
+	//
+	// 它不释放租约、不改写任务状态：租约过期不等于远程操作已停止。
+	taskLeaseRecovery *app.TaskLeaseRecoveryService
 	requireWeb        bool
 	logger            *slog.Logger
 	report            func(message string)
@@ -476,6 +482,27 @@ func (s *Server) openDatabase(ctx context.Context) error {
 		}
 		s.scheduler = scheduler
 	}
+	// 显式重试复用统一启动流程：它只负责重开任务与取得执行权，不实现第二套启动逻辑。
+	if s.taskLaunch != nil {
+		retry, retryErr := app.NewTaskRetryService(app.TaskRetryOptions{
+			Store:  store,
+			Leases: leases,
+			Launch: s.taskLaunch,
+			Logger: s.logger,
+		})
+		if retryErr != nil {
+			return fmt.Errorf("初始化任务重试服务失败: %w", retryErr)
+		}
+		s.taskRetry = retry
+	}
+	// 租约残留核验只记录现场：它不释放租约、不改写任务状态、不重放外部操作。
+	leaseRecovery, leaseRecoveryErr := app.NewTaskLeaseRecoveryService(
+		app.TaskLeaseRecoveryOptions{Store: store, Logger: s.logger},
+	)
+	if leaseRecoveryErr != nil {
+		return fmt.Errorf("初始化租约残留核验服务失败: %w", leaseRecoveryErr)
+	}
+	s.taskLeaseRecovery = leaseRecovery
 	if s.codeInitializeFactory != nil {
 		initializer, initErr := s.codeInitializeFactory(store, s.cfg)
 		if initErr != nil {
@@ -549,6 +576,11 @@ func (s *Server) startServices(ctx context.Context) error {
 		// 统一启动服务注册在编排器之后：它依赖编排器，停止顺序因此反过来，
 		// 先停止新的启动请求，再让下层服务收敛在途工作。
 		services = append(services, s.taskLaunch)
+	}
+	if s.taskLeaseRecovery != nil {
+		// 租约残留核验必须排在调度器之前：调度器的第一次扫描不得在"租约过期但现场
+		// 未核验"的任务上做任何判断。它只记录现场，不释放租约、不改写状态。
+		services = append(services, s.taskLeaseRecovery)
 	}
 	if s.scheduler != nil {
 		// 调度器注册在最后：它依赖数据库、任务租约与统一启动服务，因此启动顺序
@@ -698,6 +730,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		TaskLeases:        s.taskLeases,
 		Containers:        s.containerService,
 		ResumeEligibility: s.resumeEligibility,
+		TaskRetry:         s.taskRetry,
 		CodeInitialize:    s.codeInitialize,
 		RequireWebUI:      s.requireWeb,
 		ShutdownTimeout:   s.shutdownTimeout,

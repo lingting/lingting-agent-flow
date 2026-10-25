@@ -44,10 +44,20 @@ AgentFlow 只能一次处理一个任务，无法成为可用的编排器。
 
 **尚未实现**：
 
-- 跨任务的资源隔离与回收规则落地（当前只有单任务内的容器/Session 隔离）。
-- 调度器重启后的任务接管与恢复（进程崩溃残留与过期租约的接管策略）。
-- `failed` 任务的用户显式重试入口（状态机允许迁移，但没有生产入口）。
 - 跨进程的全局容量配额（当前并发上限是进程级）。
+- 多任务并发与资源回收的系统性验收（P3-M5）。
+- 真实远程环境下的孤儿容器与 `unknown` 现场主动注入验收（P3-M5）。
+
+已完成（P3-M3 / P3-M4）：
+
+- 跨任务的资源隔离与回收规则（P3-M3，见
+  [`P3-M3-execution-isolation.md`](./P3-M3-execution-isolation.md)）。
+- 调度器重启后的恢复协议：启动恢复先于调度、过期租约残留只记录不释放、旧执行者受
+  `owner + epoch` fencing 约束（P3-M4，见
+  [`P3-M4-scheduler-recovery.md`](./P3-M4-scheduler-recovery.md)）。
+- `failed` 任务的用户显式重试入口（P3-M4：
+  `domain.DecideTaskRetryEligibility` + `app.TaskRetryService` +
+  `POST /api/v1/tasks/{taskID}/retry` + `agentflow task retry`）。
 
 ## 阶段范围
 
@@ -72,7 +82,7 @@ AgentFlow 只能一次处理一个任务，无法成为可用的编排器。
 | P3-M1 | 明确任务队列、领取和调度的业务语义 | `completed` | P2 退出 |
 | P3-M2 | 实现有界并发和任务生命周期协调 | `completed` | P3-M1 |
 | P3-M3 | 落实执行环境、工作区、Session 与资源隔离 | `completed` | P3-M1 |
-| P3-M4 | 处理任务取消、失败、恢复和调度器重启 | `pending` | P3-M2、P3-M3 |
+| P3-M4 | 处理任务取消、失败、恢复和调度器重启 | `completed` | P3-M2、P3-M3 |
 | P3-M5 | 验证多任务并发、冲突和资源回收行为 | `pending` | P3-M2、P3-M3、P3-M4 |
 
 ## 阶段退出条件
@@ -84,8 +94,9 @@ AgentFlow 只能一次处理一个任务，无法成为可用的编排器。
 3. ✅ 执行环境、工作区、Session 与资源之间互不串扰，且规则成文并落地（P3-M3：
    `DecideContainerOwnership` 容器归属契约 + 单步骤入口统一领取任务租约 +
    资源回收所有权校验；`tests/integration/local/scheduler/isolation_test.go`）。
-4. ⬜ 任务取消、失败、恢复与调度器重启的语义明确，无 `running` 残留与重复副作用
-   （P3-M4；P3-M2 已落地"停止不重放、保留租约至过期"的边界）。
+4. ✅ 任务取消、失败、恢复与调度器重启的语义明确，无 `running` 残留与重复副作用
+   （P3-M4：`TaskLeaseRecoveryService` + `TaskRetryService` + 既有恢复入口；
+   见 [`P3-M4-scheduler-recovery.md`](./P3-M4-scheduler-recovery.md)）。
 5. ⬜ 多任务并发、冲突与资源回收有测试证据（P3-M5；P3-M2 已提供存储与调度层的并发证据）。
 
 ## 风险与边界
@@ -97,9 +108,24 @@ AgentFlow 只能一次处理一个任务，无法成为可用的编排器。
 
 ## 下一步选择规则
 
-**下一步入口：P3-M4（处理任务取消、失败、恢复和调度器重启）。**
+**下一步入口：P3-M5（验证多任务并发、冲突和资源回收行为）。**
 
-顺序固定：M1/M2/M3 已完成 → **M4**（取消/失败/重启）→ M5（并发验收）。
+顺序固定：M1/M2/M3/M4 已完成 → **M5**（并发验收）。
+
+P3-M4 已落地的前提（P3-M5 不需要重新设计）：
+
+1. 启动顺序固定为"恢复 → 调度"：`TaskLeaseRecovery` 注册在 `TaskScheduler` 之前。
+2. 过期租约残留只记录现场（`task.recovery_required` 事件 + WARN 日志），不释放租约、
+   不改写任务状态、不重放外部操作。
+3. `failed` 任务只能经 `domain.DecideTaskRetryEligibility` 判定通过后显式重试，
+   重试复用 `TaskLaunchService.Launch` 与 `DecideTaskCodeSaveResume`。
+
+**P3-M4 的交接事项**：
+
+- 租约残留核验不判断远程进程是否真的停止（物理收敛需要节点侧可观测能力）。
+- 重试入口只接受 `failed`：`blocked` / `recovery_required` 仍走 `resume-workflow`。
+- 前端重试入口尚未实现（只交付 API 与 CLI）。
+- 跨进程全局并发配额仍需数据库仲裁。
 
 P3-M3 已落地的前提（P3-M4 不需要重新设计）：
 
@@ -115,11 +141,13 @@ P3-M3 已落地的前提（P3-M4 不需要重新设计）：
 
 **P3-M3 的交接事项**：
 
-- 租约栅栏只保护数据库写入；已发出的远程命令是否停止取决于下层执行器，物理收敛属 P3-M4。
+- 租约栅栏只保护数据库写入；已发出的远程命令是否停止取决于下层执行器。P3-M4 已把
+  该边界落成显式协议：`TaskLeaseRecoveryService` 只记录现场，不把 fencing 当作
+  "远程进程已停止"的证据。
 - 真实远程依赖用例（`tests/integration/{ssh,pi,remote/**}`）已全部通过；孤儿容器与
   `unknown` 现场仍需在真实远程环境主动注入验收（归 P3-M5）。
 - 跨进程全局并发配额需要数据库仲裁。
-- `failed` 任务仍无用户显式重试入口，需要独立的里程碑与接口契约。
+- （P3-M4 已解决）`failed` 任务现在有经领域规则约束的显式重试入口。
 
 P3-M2 已落地的前提（P3-M3/M4 不需要重新设计）：
 
@@ -138,8 +166,8 @@ P3-M2 已落地的前提（P3-M3/M4 不需要重新设计）：
 **P3-M2 的交接事项**：
 
 - 并发上限是**进程级**：跨进程全局配额需要数据库仲裁，属后续里程碑。
-- 服务停止保留的租约依赖 TTL 自然过期，物理收敛属 P3-M4。
-- `failed` 任务仍无用户显式重试入口，需要独立的里程碑与接口契约。
+- 服务停止保留的租约依赖 TTL 自然过期；P3-M4 已把该现场落成可追溯记录。
+- （P3-M4 已解决）`failed` 任务现在有经领域规则约束的显式重试入口。
 - 轮询扫描（默认 1s）是可接受的取舍；事件驱动留待有证据的需求。
 - （P3-M3 已解决）`StepExecutor` 的任务终态写入现在是租约栅栏写，不再是纯状态条件写。
 
@@ -157,6 +185,7 @@ P3-M2 已落地的前提（P3-M3/M4 不需要重新设计）：
 | `POST .../steps/{id}/open-repair-cycle` | ❌ 不需要：只登记预算作用域，不启动 Agent |
 | 自动调度（`app.TaskScheduler`） | ✅ 显式 `queued` 集合领取 |
 | 用户取消（`POST .../cancel`） | ❌ 有意：取消意图必须先落盘，不受租约阻塞 |
+| 用户显式重试（`POST .../retry`） | ✅ P3-M4：先按领域规则判定资格，再以 `failed` 集合领取任务租约，成功后交接给统一启动流程 |
 
 ---
 
@@ -246,12 +275,35 @@ P3-M2 已落地的前提（P3-M3/M4 不需要重新设计）：
 ### P3-M4 处理任务取消、失败、恢复和调度器重启
 
 - **ID**：`P3-M4`
-- **状态**：`pending`
-- **必要性**：调度器重启或多任务取消时，若不能正确收敛，会卡死或重复执行。
-- **当前证据**：单任务启动恢复已实现；缺调度器层面的接管与恢复。
+- **状态**：`completed`（2026-10-25，基于 `master` HEAD `b61b7e4` 之后的工作区核实与实施）
+- **必要性**：调度器重启或多任务取消时，若不能正确收敛，会卡死或重复执行外部副作用。
+- **本次核实到的真实缺口**：过期租约的失效事实没有落成可追溯现场；`failed` 任务在
+  生产代码中没有任何显式重试入口（状态机允许 `failed → preparing`，但
+  `ExplicitLaunchStatuses` 明确排除 `failed`，调度器只领取 `queued`）。
 - **前置依赖**：P3-M2、P3-M3。
-- **目标结果**：任务取消/失败/恢复与调度器重启语义明确且正确。
-- **完成定义**：重启后无 `running` 残留，无重复副作用。
+- **目标结果**：任务取消 / 失败 / 恢复与调度器重启语义明确且正确，用户有显式重试入口。
+- **完成定义**：重启后无 `running` 残留，无未经确认的重复副作用；失败任务只能经领域
+  规则约束的显式入口进入新执行周期。
+- **交付物**：
+  - [`P3-M4-scheduler-recovery.md`](./P3-M4-scheduler-recovery.md)（审计表、协议与证据）
+  - `internal/domain/task_retry.go`：`DecideTaskRetryEligibility`、`AllowsExplicitRetry`、
+    `ReopenForRetry`、10 个稳定拒绝原因
+  - `internal/domain/task_launch.go`：抽出 `checkTaskLaunchPrerequisites` 供启动与重试共用
+  - `internal/app/task_retry.go`：`TaskRetryService`（领域判定 → 领取执行权 → 租约栅栏
+    重开 → 交接统一启动流程）
+  - `internal/app/task_lease_recovery.go`：`TaskLeaseRecoveryService`（过期租约残留只记录
+    现场，不释放租约、不改写状态）
+  - `internal/httpapi/task_retry.go`：`POST .../retry` 与 `GET .../retry-eligibility`
+  - `internal/cli/task_retry.go`：`agentflow task retry` 与 `agentflow task retry-status`
+  - `internal/server/server.go`：`TaskLeaseRecovery` 注册在 `TaskScheduler` 之前
+  - 测试：`tests/unit/domain/task_retry_test.go`、
+    `tests/integration/local/scheduler/{restart_protocol,retry}_test.go`、
+    `tests/unit/httpapi/task_retry_test.go`、
+    `tests/integration/local/workflow/retry_e2e_test.go`
+- **明确未做**：跨进程全局配额、分布式调度、优先级抢占、孤儿容器自动重新关联、
+  结果不确定的外部操作自动重放、前端重试入口。
+- **移交 P3-M5**：多任务并发与资源回收的系统性验收；真实远程环境主动注入 `unknown` /
+  孤儿容器现场；跨进程全局配额的数据库仲裁方案。
 
 ### P3-M5 验证多任务并发、冲突和资源回收行为
 

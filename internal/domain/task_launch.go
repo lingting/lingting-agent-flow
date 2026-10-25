@@ -120,6 +120,15 @@ func CheckTaskLaunchStart(input TaskLaunchInput) error {
 			)
 		}
 	}
+	return checkTaskLaunchPrerequisites(task)
+}
+
+// checkTaskLaunchPrerequisites 校验执行环境相关的启动前置条件。
+//
+// 它只包含"任务配置是否足以准备执行环境"这一组判定，供统一启动与显式重试共用：
+// 两处各自实现一遍会让"什么算前置条件缺失"出现第二种解释。状态、取消意图与执行
+// 记录相关的判定仍留在各自的入口，因为它们在不同场景下的语义不同。
+func checkTaskLaunchPrerequisites(task Task) error {
 	if task.HostID == nil {
 		return fmt.Errorf(
 			"%w: 任务 %s 没有绑定执行节点，无法准备执行环境",

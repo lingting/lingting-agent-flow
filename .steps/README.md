@@ -26,8 +26,24 @@
 ## 当前阶段与当前里程碑
 
 - **当前阶段**：P3 进行中 —— 多任务执行与调度。
-- **当前里程碑**：`P3-M3` —— 落实执行环境、工作区、Session 与资源隔离，状态
-  `completed`（2026-10-26，基于 `master` HEAD `7e950e7` 之后的工作区核实与实施）。
+- **当前里程碑**：`P3-M4` —— 打通任务取消、失败、恢复与调度器重启，状态
+  `completed`（2026-10-25，基于 `master` HEAD `b61b7e4` 之后的工作区核实与实施）。
+  交付物为 [`P3-M4-scheduler-recovery.md`](./P3-M4-scheduler-recovery.md)。核心改动：
+  过期任务租约的残留核验（`internal/app/task_lease_recovery.go` 的
+  `TaskLeaseRecoveryService`，只记录现场、不释放租约、不改写任务状态）与启动顺序
+  约束（`internal/server/server.go` 中 `TaskLeaseRecovery` 注册在 `TaskScheduler` 之前）；
+  失败任务的显式重试入口（`internal/domain/task_retry.go` 的
+  `DecideTaskRetryEligibility` / `AllowsExplicitRetry` / `ReopenForRetry` 与 10 个稳定
+  拒绝原因，`internal/app/task_retry.go` 的 `TaskRetryService`，
+  `POST /api/v1/tasks/{taskID}/retry`、`GET .../retry-eligibility`，CLI
+  `agentflow task retry` / `task retry-status`）。测试证据：
+  `tests/unit/domain/task_retry_test.go`、
+  `tests/integration/local/scheduler/{restart_protocol,retry}_test.go`、
+  `tests/unit/httpapi/task_retry_test.go`、
+  `tests/integration/local/workflow/retry_e2e_test.go`。
+- **更早里程碑**：`P3-M3` —— 落实执行环境、工作区、Session 与资源隔离，状态
+  `completed`（文档记录日期 2026-10-26；本次实施发生在 2026-10-25，日期不自洽已在
+  `P3-M4-scheduler-recovery.md` §1.2 记录，未追溯修改）。
   交付物为 [`P3-M3-execution-isolation.md`](./P3-M3-execution-isolation.md)。核心改动：
   容器归属契约（`internal/domain/container_ownership.go` 的 `DecideContainerOwnership` /
   `CheckContainerOwnership`，9 个稳定拒绝原因）与统一加载入口
@@ -117,20 +133,26 @@
   `0023_code_fetch_active_unique.sql`、`VerifyCodeSave` 在容器缺失时降级为
   `unverifiable` 并落盘、新增 HTTP `verify-code-save` 与 `resume-eligibility`
   （CLI `task resume-status`）、`ensureNoPendingContainer` 阻止创建第二个容器。
-- **下一步**：`P3-M4` —— 处理任务取消、失败、恢复和调度器重启。
-  P3-M3 已落地的前提见
-  [`P3-M3-execution-isolation.md`](./P3-M3-execution-isolation.md) §2 与 §3 与
+- **下一步**：`P3-M5` —— 验证多任务并发、冲突和资源回收行为。
+  P3-M4 已落地的前提见
+  [`P3-M4-scheduler-recovery.md`](./P3-M4-scheduler-recovery.md) §2 与 §4 与
   [`P3-multi-task-scheduling.md`](./P3-multi-task-scheduling.md) 的"下一步入口"。
+  P3-M4 的交接事项：租约残留核验不判断远程进程是否真的停止（物理收敛需要节点侧
+  可观测能力）；重试入口只接受 `failed`（`blocked` / `recovery_required` 仍走
+  `resume-workflow`）；前端重试入口尚未实现（只交付 API 与 CLI）；跨进程全局并发
+  配额仍需数据库仲裁。
+  P3-M3 已落地的前提见
+  [`P3-M3-execution-isolation.md`](./P3-M3-execution-isolation.md) §2 与 §3。
   P3-M3 的交接事项：容器归属契约（`DecideContainerOwnership`）与统一加载入口
   （`loadOwnedContainer`）已落地，所有执行入口不再直接用字符串核验容器；
   单步骤三个入口已统一领取任务租约，步骤占用与任务终态写入具备租约栅栏；
-  租约栅栏只保护数据库写入，已发出的远程命令的物理收敛属 P3-M4；
+  租约栅栏只保护数据库写入，已发出的远程命令的物理收敛由 P3-M4 定义为"只记录现场、
+  不自动重放"；
   真实远程依赖用例（`tests/integration/{ssh,pi,remote/**}`）已全部通过，但孤儿容器与
-  `unknown` 现场仍需在真实远程环境主动注入验收；
-  跨进程全局并发配额需要数据库仲裁；`failed` 任务仍无用户显式重试入口。
+  `unknown` 现场仍需在真实远程环境主动注入验收（归 P3-M5）；
+  跨进程全局并发配额需要数据库仲裁。
   P3-M2 的交接事项：并发上限是**进程级**（跨进程全局配额需要数据库仲裁）；
-  服务停止保留的租约依赖 TTL 自然过期（物理收敛属 P3-M4）；
-  `failed` 任务仍无用户显式重试入口，需要独立的里程碑与接口契约；
+  服务停止保留的租约依赖 TTL 自然过期（P3-M4 已把该现场落成可追溯记录）；
   轮询扫描（默认 1s）是可接受的取舍。
   P2-M5 的交接事项：真实远程 Docker 上的容器残留与 merge 恢复仍缺证据（需在真实远程
   环境注入 `unknown` / 孤儿现场）；遗留的 `completed` + `recovery_required` 只被报告、
@@ -158,6 +180,7 @@
 | [`P3-M1-task-queue-semantics.md`](./P3-M1-task-queue-semantics.md) | P3-M1：任务队列、领取、调度名额与执行权交接契约（准入/排序/仲裁/fencing/名额，含存储层验收项 S1–S7） |
 | [`P3-M2-bounded-concurrency.md`](./P3-M2-bounded-concurrency.md) | P3-M2：任务租约 fencing（`lease_epoch`）、统一所有权、有界并发调度器与生命周期集成 |
 | [`P3-M3-execution-isolation.md`](./P3-M3-execution-isolation.md) | P3-M3：容器 / 工作区 / Session / 资源隔离契约、统一执行入口所有权、资源回收所有权校验 |
+| [`P3-M4-scheduler-recovery.md`](./P3-M4-scheduler-recovery.md) | P3-M4：调度器重启协议、过期租约残留核验、失败任务显式重试入口 |
 | [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md) | P4：产品操作体验与针对性优化 |
 
 ## 下一步工作的选择规则

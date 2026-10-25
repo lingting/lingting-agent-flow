@@ -43,10 +43,33 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > **当前阶段：P3 进行中 —— 多任务执行与调度**（P1 全部里程碑于 2026-10-23 完成；
 > P2-M1 于 2026-10-23 完成，P2-M2 于 2026-10-24 完成，P2-M3 于 2026-10-24 完成，
 > P2-M4 于 2026-10-25 完成，P2-M5 于 2026-10-25 完成；
-> **P3-M1 于 2026-10-25 完成，P3-M2 于 2026-10-25 完成，P3-M3 于 2026-10-26 完成**）。P1 证据见
+> **P3-M1 于 2026-10-25 完成，P3-M2 于 2026-10-25 完成，P3-M3 于 2026-10-26 完成
+> （文档记录日期；实际实施与本次 P3-M4 同在 2026-10-25，日期不自洽已记录在
+> `P3-M4-scheduler-recovery.md` §1.2），P3-M4 于 2026-10-25 完成**）。P1 证据见
 > `P1-single-task-e2e.md` 的对应"完成记录"；P2-M1 证据见
 > `P2-M1-recovery-boundaries.md`；P2-M2 证据见 `P2-M2-interruption-semantics.md`；
 > P2-M3 与 P2-M4 证据见 `P2-reliability-recovery.md` 的对应里程碑详情。
+>
+> P3-M4 的核实结论：本轮把"调度器重启"落成**安全协议**而不是"自动接管"——过期租约
+> 只证明持有者没有续租，不能证明它发出的远程操作已经停止，因此新增
+> `app.TaskLeaseRecoveryService`（`internal/app/task_lease_recovery.go`）只把失效事实
+> 落成可追溯现场（`task.recovery_required` 事件 + WARN 日志），不释放租约、不改写任务
+> 状态、不重放外部操作；`internal/server/server.go` 把它的注册顺序固定在
+> `TaskScheduler` 之前，保证"先恢复、后调度"。同时补齐了实施前真实缺失的唯一入口：
+> `failed` 任务的显式重试（`internal/domain/task_retry.go` 的
+> `DecideTaskRetryEligibility` / `AllowsExplicitRetry` / `ReopenForRetry` 与 10 个稳定
+> 拒绝原因，`internal/app/task_retry.go` 的 `TaskRetryService`，
+> `POST /api/v1/tasks/{taskID}/retry`、`GET .../retry-eligibility`，CLI
+> `agentflow task retry` / `task retry-status`）。重试先按领域规则判定资格（状态、租约
+> 归属、未结束执行记录、步骤占用、恢复残留、未核验外部副作用、启动前置条件、是否还有
+> 可重试步骤），再以 `failed` 集合领取任务租约、用 `UpdateTaskLeaseGuard` 把任务重开为
+> `preparing`，最后交接给既有 `TaskLaunchService.Launch`；历史 Attempt / Session /
+> WorkflowRun 全部保留。交付物为 `P3-M4-scheduler-recovery.md`；测试证据为
+> `tests/unit/domain/task_retry_test.go`、
+> `tests/integration/local/scheduler/{restart_protocol,retry}_test.go`、
+> `tests/unit/httpapi/task_retry_test.go`、
+> `tests/integration/local/workflow/retry_e2e_test.go`。明确保留的边界：租约残留核验不
+> 判断远程进程是否真的停止；重试只接受 `failed`；前端重试入口尚未实现。
 >
 > P3-M3 的核实结论：本轮核实到 6 个真实隔离缺口（执行链路直接用
 > `task.ContainerID` 字符串核验容器、没有容器归属领域概念、单步骤三个入口不领取
@@ -64,9 +87,11 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > `tests/unit/domain/container_ownership_test.go`（8 个用例）与
 > `tests/integration/local/scheduler/{isolation,lease_fencing,resource_reclaim}_test.go`
 > （真实 SQLite + 正式迁移，覆盖跨任务容器隔离、租约 fencing、孤儿容器与共享缓存边界）。
-> 明确保留的边界：租约栅栏只保护数据库写入（远程命令的物理收敛属 P3-M4）；
+> 明确保留的边界：租约栅栏只保护数据库写入（远程命令的物理收敛由 P3-M4 定义为
+> "只记录现场、不自动重放"）；
 > 真实远程依赖用例（`tests/integration/{ssh,pi,remote/**}`）已全部通过，孤儿容器与
-> `unknown` 现场仍需在真实远程环境主动注入验收；跨进程全局配额需要数据库仲裁。
+> `unknown` 现场仍需在真实远程环境主动注入验收（归 P3-M5）；跨进程全局配额需要
+> 数据库仲裁。
 >
 > P3-M2 的核实结论：本轮把 P3-M1 的契约落到运行时——`AcquireTaskLease` 成为生产
 > 调用路径（`app.TaskScheduler` 显式传 `queued` 集合）、`ReleaseTaskLease` 补上
@@ -80,8 +105,9 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > `tests/unit/domain/task_lease_test.go`、
 > `tests/integration/local/scheduler/lease_store_test.go`（9 个用例，多独立连接并发领取）
 > 与 `tests/integration/local/scheduler/scheduler_test.go`（12 个用例，真实调度器）。
-> 明确保留的边界：并发上限是**进程级**；`StepExecutor` 入口尚未接入租约栅栏；
-> 服务停止保留的租约依赖 TTL 自然过期；`failed` 任务仍无显式重试入口。
+> 明确保留的边界：并发上限是**进程级**；`StepExecutor` 入口的租约栅栏已在 P3-M3 接入；
+> 服务停止保留的租约依赖 TTL 自然过期（P3-M4 已把该现场落成可追溯记录）；
+> `failed` 任务的显式重试入口已在 P3-M4 补齐。
 >
 > P3-M1 的核实结论：本轮把队列语义写成唯一契约，并核实了三处容易被误判为"已有能力"
 > 的事实——(1) `TaskStatus.CanStart()` 会为 7 个状态返回 `true`（含 `failed` /
@@ -273,6 +299,19 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
   避免把结果不确定当作普通失败立即重试。证据：`tests/unit/domain/task_queue_test.go`
   （30 个用例）。**数据库原子领取与并发保证**已由 P3-M2 实现并验证（迁移 `0024` 的
   `lease_epoch` 栅栏 + `tests/integration/local/scheduler/lease_store_test.go`）。
+- **调度器重启与失败任务显式重试**（P3-M4）：`internal/app/task_lease_recovery.go` 的
+  `TaskLeaseRecoveryService` 在启动时核验过期任务租约残留，只追加
+  `task.recovery_required` 事件与 WARN 日志——**不释放租约、不改写任务状态、不重放外部
+  操作**，因为"租约过期"不等于"远程操作已停止"。`internal/server/server.go` 把它的注册
+  顺序固定在 `TaskScheduler` 之前，保证"恢复先于调度"。
+  `internal/domain/task_retry.go` 的 `DecideTaskRetryEligibility` 定义失败任务的重试
+  资格（10 个稳定拒绝原因，全部拒绝原因一次收集），`internal/app/task_retry.go` 的
+  `TaskRetryService` 先领取 `failed` 集合的任务租约、用 `UpdateTaskLeaseGuard` 把任务
+  重开为 `preparing`、再交接给既有 `TaskLaunchService.Launch`；历史 Attempt / Session /
+  WorkflowRun 全部保留。证据：`tests/unit/domain/task_retry_test.go`、
+  `tests/integration/local/scheduler/{restart_protocol,retry}_test.go`、
+  `tests/unit/httpapi/task_retry_test.go`、
+  `tests/integration/local/workflow/retry_e2e_test.go`。
 - **修复后交付与任务收尾闭环**（P1-M4）：`internal/app/task_workflow_exec.go` 的
   `finalize` → `saveCode` → `sessionsPersisted` → `applyCloseout` 顺序执行，收尾结论只由
   `domain.DecideWorkflowCloseout` 计算。核实中修复两处真实断点：
@@ -292,15 +331,18 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
   单步骤入口的任务租约统一、步骤占用与任务终态写入的租约栅栏、共享缓存与不可变
   环境资源的边界都已在 P3-M3 落地并成文，见
   [`P3-M3-execution-isolation.md`](./P3-M3-execution-isolation.md)。
-- **调度器重启后的接管策略**（P3-M4）：`running` 记录的租约过期收敛、进程崩溃残留的
-  接管，都需要在 P3-M4 定义。`StepExecutor` 入口的租约栅栏已在 P3-M3 统一。
+- **~~调度器重启后的接管策略~~**（P3-M4 已完成）：`TaskLeaseRecoveryService` 只记录
+  过期租约残留（不释放租约、不改写状态），并固定"恢复先于调度"的启动顺序；
+  `running` 记录的租约过期收敛由既有 `recoverUnfinished` 承担。见
+  [`P3-M4-scheduler-recovery.md`](./P3-M4-scheduler-recovery.md)。
 - **跨进程的全局容量配额**：P3-M2 的并发上限基于数据库事实但只在本进程内生效；
   多进程共享同一数据库时总量可能短暂超过上限，全局配额需要数据库仲裁。
-- **`failed` 任务的用户显式重试入口**：状态机允许 `failed → preparing` / `planning`，
-  但没有任何生产调用方，HTTP 与 CLI 也没有对应接口。P3-M2 审计后决定**不**在调度器
-  中隐式承担（见
-  [`P3-M2-bounded-concurrency.md`](./P3-M2-bounded-concurrency.md) §6）；安全重试需要
-  独立的里程碑与接口契约。
+- **~~`failed` 任务的用户显式重试入口~~**（P3-M4 已完成）：状态机允许
+  `failed → preparing`，现在有经过领域规则约束的生产入口——
+  `domain.DecideTaskRetryEligibility` + `app.TaskRetryService` +
+  `POST /api/v1/tasks/{taskID}/retry` + `agentflow task retry`。调度器仍只领取
+  `queued`，不会隐式重试。见
+  [`P3-M4-scheduler-recovery.md`](./P3-M4-scheduler-recovery.md) §3。
 - 私有仓库的 Git 凭据支持：`source.GitCredentialProvider` 与 `codesaver.GitCredentialProvider`
   均无实现，真实链路上私有仓库必然失败（已记录的架构决策，需凭据存储设计与安全评审）。
 - **~~五类执行残留的收敛路径~~**（P2-M1 记录，见 `P2-M1-recovery-boundaries.md` §3.4）：
@@ -414,4 +456,5 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - [P3-M1-task-queue-semantics.md](./P3-M1-task-queue-semantics.md)
 - [P3-M2-bounded-concurrency.md](./P3-M2-bounded-concurrency.md)
 - [P3-M3-execution-isolation.md](./P3-M3-execution-isolation.md)
+- [P3-M4-scheduler-recovery.md](./P3-M4-scheduler-recovery.md)
 - [P4-product-experience-optimization.md](./P4-product-experience-optimization.md)

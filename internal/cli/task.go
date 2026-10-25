@@ -18,7 +18,7 @@ import (
 func newTaskCommand(a *app.App) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "task",
-		Short: "创建、执行、查询与取消任务",
+		Short: "创建、执行、查询、取消与重试任务",
 		Long: "任务执行由 agentflow server 内的任务级工作流编排器负责，CLI 只做管理与查询。\n" +
 			"每次 Planner、Developer、Validator 调用都使用独立的 Invocation 与独立 Session。\n" +
 			"必需确定性验证命令先执行，Agent 的 passed 结论不能覆盖必需检查的失败。",
@@ -39,6 +39,8 @@ func newTaskCommand(a *app.App) *cobra.Command {
 	command.AddCommand(newTaskGetCommand(a))
 	command.AddCommand(newTaskListCommand(a))
 	command.AddCommand(newTaskCancelCommand(a))
+	command.AddCommand(newTaskRetryCommand(a))
+	command.AddCommand(newTaskRetryStatusCommand(a))
 	command.AddCommand(newTaskReopenStepCommand(a))
 	command.AddCommand(newTaskResumeStatusCommand(a))
 	return command

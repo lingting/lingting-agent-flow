@@ -227,6 +227,75 @@ func (c *workflowAPIClient) start(
 	return run, nil
 }
 
+// workflowAPIRetryRequest 是显式重试请求的请求体。
+//
+// 只包含执行参数：要重开哪个执行周期、用哪些步骤完全由服务端依据持久化事实决定。
+type workflowAPIRetryRequest struct {
+	Prompt                   string `json:"prompt"`
+	TimeoutSeconds           int    `json:"timeout_seconds"`
+	ValidationTimeoutSeconds int    `json:"validation_timeout_seconds"`
+	PlanTimeoutSeconds       int    `json:"plan_timeout_seconds"`
+}
+
+// workflowAPIRetry 是一次显式重试的结果。
+//
+// `workflow_started` 为 false 时任务已进入新周期但没有启动编排：命令不得把它描述成
+// "已开始执行"。`lease_epoch` 用于区分执行周期，历史执行记录保持不变。
+type workflowAPIRetry struct {
+	TaskID          string          `json:"task_id"`
+	PreviousStatus  string          `json:"previous_status"`
+	TaskStatus      string          `json:"task_status"`
+	LeaseEpoch      int64           `json:"lease_epoch"`
+	LeaseOwner      string          `json:"lease_owner"`
+	WorkflowStarted bool            `json:"workflow_started"`
+	Run             *workflowAPIRun `json:"run"`
+	FailureStage    string          `json:"failure_stage"`
+	Failure         string          `json:"failure"`
+}
+
+// workflowAPIRetryEligibility 是只读的重试资格结论。
+type workflowAPIRetryEligibility struct {
+	TaskID     string   `json:"task_id"`
+	TaskStatus string   `json:"task_status"`
+	CanRetry   bool     `json:"can_retry"`
+	Blocking   []string `json:"blocking"`
+	Summary    string   `json:"summary"`
+}
+
+// retry 发起一次显式重试请求。
+//
+// 该请求是同步的：服务端在任务被重开且启动流程得出真实结论后才返回。重试是用户的
+// 显式决定，命令层不会自动重发。
+func (c *workflowAPIClient) retry(
+	ctx context.Context,
+	taskID string,
+	request workflowAPIRetryRequest,
+) (workflowAPIRetry, error) {
+	body, err := json.Marshal(request)
+	if err != nil {
+		return workflowAPIRetry{}, fmt.Errorf("构造请求失败: %w", err)
+	}
+	url := c.baseURL + httpapi.PathTasks + "/" + strings.TrimSpace(taskID) + "/retry"
+	var result workflowAPIRetry
+	if err := c.do(ctx, http.MethodPost, url, body, &result); err != nil {
+		return workflowAPIRetry{}, err
+	}
+	return result, nil
+}
+
+// retryEligibility 查询任务的只读重试资格。
+func (c *workflowAPIClient) retryEligibility(
+	ctx context.Context,
+	taskID string,
+) (workflowAPIRetryEligibility, error) {
+	url := c.baseURL + httpapi.PathTasks + "/" + strings.TrimSpace(taskID) + "/retry-eligibility"
+	var result workflowAPIRetryEligibility
+	if err := c.do(ctx, http.MethodGet, url, nil, &result); err != nil {
+		return workflowAPIRetryEligibility{}, err
+	}
+	return result, nil
+}
+
 // workflowAPIOpenRepairCycle 是一次执行周期开启的结果。
 type workflowAPIOpenRepairCycle struct {
 	TaskID string `json:"task_id"`
@@ -480,6 +549,48 @@ func printStartTaskResult(a *app.App, result workflowAPIStartTask) error {
 		return printWorkflowRun(a, *result.Run)
 	}
 	return nil
+}
+
+// printRetryResult 输出显式重试结果。
+//
+// 输出必须如实区分"任务已重开"与"编排已启动"：`workflow_started` 为 false 时不得
+// 描述成任务已开始执行。
+func printRetryResult(a *app.App, result workflowAPIRetry) error {
+	lines := []string{
+		fmt.Sprintf("任务: %s", result.TaskID),
+		fmt.Sprintf("重试前状态: %s", emptyAsUnknown(result.PreviousStatus)),
+		fmt.Sprintf("当前状态: %s", emptyAsUnknown(result.TaskStatus)),
+		fmt.Sprintf("执行代次: %d（领取者 %s）", result.LeaseEpoch, emptyAsUnknown(result.LeaseOwner)),
+		fmt.Sprintf("工作流已启动: %s", flagMark(result.WorkflowStarted)),
+	}
+	if stage := strings.TrimSpace(result.FailureStage); stage != "" {
+		lines = append(lines, fmt.Sprintf("失败阶段: %s", stage))
+	}
+	if failure := strings.TrimSpace(result.Failure); failure != "" {
+		lines = append(lines, fmt.Sprintf("原因: %s", failure))
+	}
+	if _, err := fmt.Fprintln(a.Stdout(), strings.Join(lines, newlineSeparator)); err != nil {
+		return err
+	}
+	if result.Run != nil {
+		return printWorkflowRun(a, *result.Run)
+	}
+	return nil
+}
+
+// printRetryEligibility 输出只读的重试资格结论。
+func printRetryEligibility(a *app.App, result workflowAPIRetryEligibility) error {
+	lines := []string{
+		fmt.Sprintf("任务: %s", result.TaskID),
+		fmt.Sprintf("任务状态: %s", emptyAsUnknown(result.TaskStatus)),
+		fmt.Sprintf("可以重试: %s", flagMark(result.CanRetry)),
+		fmt.Sprintf("说明: %s", emptyAsUnknown(result.Summary)),
+	}
+	if len(result.Blocking) > 0 {
+		lines = append(lines, "阻塞项: "+strings.Join(result.Blocking, "、"))
+	}
+	_, err := fmt.Fprintln(a.Stdout(), strings.Join(lines, newlineSeparator))
+	return err
 }
 
 // printWorkflowProgress 输出一次进度变化。
