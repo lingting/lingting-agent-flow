@@ -267,6 +267,8 @@ func (s *StepWorkflowService) executeRepairRound(
 		BudgetScopeID: cycle.ID,
 		// 开发成功只进入 verifying：此时既没有通过验证，也没有失败。
 		DeferCompletion: true,
+		// 任务执行权随闭环传入：开发阶段的任务终态写入因此附带租约栅栏。
+		Grant: request.Grant,
 	})
 	result = applyDeveloperResult(result, developer)
 	if devErr != nil {

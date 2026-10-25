@@ -86,6 +86,14 @@ type ExecuteAndValidateRequest struct {
 	Timeout time.Duration
 	// ValidationTimeout 是验证阶段的总超时，零值使用服务默认值。
 	ValidationTimeout time.Duration
+	// Grant 是本次闭环持有的任务执行权凭据。
+	//
+	// 闭环会连续修改同一份工作区、容器与步骤状态，因此必须由任务租约覆盖整个
+	// 周期，而不是只在开始时检查一次。凭据为空表示调用方没有任务执行权（例如
+	// 任务级编排器已自行持有），此时开发阶段退化为状态条件写入。
+	//
+	// 该字段只由应用层内部使用，不通过 HTTP 请求体暴露。
+	Grant *WorkflowExecutionGrant
 }
 
 // ExecuteAndValidateResult 是一次开发—验证闭环的结果。

@@ -326,7 +326,10 @@ func newStepExecutorFixtureWithStart(
 		AgentTimeoutSeconds: 30,
 	}
 	if !options.noContainer {
-		task.ContainerID = "container-1"
+		// 容器归属必须来自真实的容器登记记录：任务记录里的 container_id 只是
+		// 普通文本列，执行链路会核验归属。
+		_, withContainer := createTaskContainer(t, db, ctx, task)
+		task.ContainerID = withContainer.ContainerID
 	}
 	if err := db.CreateTask(ctx, task); err != nil {
 		t.Fatalf("写入任务失败: %v", err)

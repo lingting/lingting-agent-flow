@@ -43,10 +43,30 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > **当前阶段：P3 进行中 —— 多任务执行与调度**（P1 全部里程碑于 2026-10-23 完成；
 > P2-M1 于 2026-10-23 完成，P2-M2 于 2026-10-24 完成，P2-M3 于 2026-10-24 完成，
 > P2-M4 于 2026-10-25 完成，P2-M5 于 2026-10-25 完成；
-> **P3-M1 于 2026-10-25 完成，P3-M2 于 2026-10-25 完成**）。P1 证据见
+> **P3-M1 于 2026-10-25 完成，P3-M2 于 2026-10-25 完成，P3-M3 于 2026-10-26 完成**）。P1 证据见
 > `P1-single-task-e2e.md` 的对应"完成记录"；P2-M1 证据见
 > `P2-M1-recovery-boundaries.md`；P2-M2 证据见 `P2-M2-interruption-semantics.md`；
 > P2-M3 与 P2-M4 证据见 `P2-reliability-recovery.md` 的对应里程碑详情。
+>
+> P3-M3 的核实结论：本轮核实到 6 个真实隔离缺口（执行链路直接用
+> `task.ContainerID` 字符串核验容器、没有容器归属领域概念、单步骤三个入口不领取
+> 任务租约、步骤占用与任务终态写入只有状态条件、领取冲突无法区分 404/409、
+> 孤儿容器没有归属判据），并全部修复：新增容器归属契约
+> （`internal/domain/container_ownership.go` 的 `DecideContainerOwnership` /
+> `CheckContainerOwnership`，9 个稳定拒绝原因）与统一加载入口
+> （`internal/app/task_container.go` 的 `loadOwnedContainer`），六个执行入口
+> （工作区初始化、代码初始化、步骤执行、验证、工作流编排、任务启动）不再直接用
+> 字符串核验容器；单步骤三个入口统一领取任务租约，步骤占用与任务终态写入新增
+> 租约栅栏（`StepExecutionStartRequest.Lease` +
+> `StepExecutionStore.UpdateTaskLeaseGuard`）；领取冲突细分为 404/409
+> （`ErrTaskLeaseNotFound` + `classifyClaimConflict`）。交付物为
+> `P3-M3-execution-isolation.md`；测试证据为
+> `tests/unit/domain/container_ownership_test.go`（8 个用例）与
+> `tests/integration/local/scheduler/{isolation,lease_fencing,resource_reclaim}_test.go`
+> （真实 SQLite + 正式迁移，覆盖跨任务容器隔离、租约 fencing、孤儿容器与共享缓存边界）。
+> 明确保留的边界：租约栅栏只保护数据库写入（远程命令的物理收敛属 P3-M4）；
+> 真实远程依赖用例（`tests/integration/{ssh,pi,remote/**}`）已全部通过，孤儿容器与
+> `unknown` 现场仍需在真实远程环境主动注入验收；跨进程全局配额需要数据库仲裁。
 >
 > P3-M2 的核实结论：本轮把 P3-M1 的契约落到运行时——`AcquireTaskLease` 成为生产
 > 调用路径（`app.TaskScheduler` 显式传 `queued` 集合）、`ReleaseTaskLease` 补上
@@ -267,11 +287,13 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 
 **尚未实现**：
 
-- **跨任务的隔离与回收规则**（P3-M3）：容器、工作区、Session 与共享缓存在多任务
-  并发下的隔离边界尚未成文，名额上限与单节点容器数量的对应关系、缓存卷与镜像争用
-  规则也未定义。P3-M2 已落地进程级并发上限与任务级租约栅栏，但它们不是隔离规则。
+- **~~跨任务的隔离与回收规则~~**（P3-M3 已完成）：容器归属契约
+  （`domain.DecideContainerOwnership`）、统一加载入口（`app.loadOwnedContainer`）、
+  单步骤入口的任务租约统一、步骤占用与任务终态写入的租约栅栏、共享缓存与不可变
+  环境资源的边界都已在 P3-M3 落地并成文，见
+  [`P3-M3-execution-isolation.md`](./P3-M3-execution-isolation.md)。
 - **调度器重启后的接管策略**（P3-M4）：`running` 记录的租约过期收敛、进程崩溃残留的
-  接管、`StepExecutor` 入口的租约栅栏统一，都需要在 P3-M4 定义。
+  接管，都需要在 P3-M4 定义。`StepExecutor` 入口的租约栅栏已在 P3-M3 统一。
 - **跨进程的全局容量配额**：P3-M2 的并发上限基于数据库事实但只在本进程内生效；
   多进程共享同一数据库时总量可能短暂超过上限，全局配额需要数据库仲裁。
 - **`failed` 任务的用户显式重试入口**：状态机允许 `failed → preparing` / `planning`，
@@ -391,4 +413,5 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - [P3-multi-task-scheduling.md](./P3-multi-task-scheduling.md)
 - [P3-M1-task-queue-semantics.md](./P3-M1-task-queue-semantics.md)
 - [P3-M2-bounded-concurrency.md](./P3-M2-bounded-concurrency.md)
+- [P3-M3-execution-isolation.md](./P3-M3-execution-isolation.md)
 - [P4-product-experience-optimization.md](./P4-product-experience-optimization.md)

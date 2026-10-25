@@ -65,6 +65,7 @@ func (e *StepExecutor) runAttempt(
 		gitAfter:  after,
 		// 闭环模式只完成开发阶段：步骤进入 verifying 并保持占用，由协调器收口。
 		deferCompletion: request.deferCompletion,
+		grant:           request.grant,
 	})
 	result.AttemptStatus = finalization.attemptStatus
 	result.StepStatus = finalization.stepStatus
@@ -178,6 +179,11 @@ type finalizeRequest struct {
 	// gitBefore 与 gitAfter 是执行前后的 Git 工作区状态，为空表示本次没有采集。
 	gitBefore *domain.GitWorktreeState
 	gitAfter  *domain.GitWorktreeState
+	// grant 是本次执行持有的任务执行权凭据，为空表示没有任务租约。
+	//
+	// 非空时任务终态写入附带 owner + epoch 条件：旧代次的执行者无法在任务被接管
+	// 之后把成功或失败终态写到新执行者的记录上。
+	grant *WorkflowExecutionGrant
 }
 
 // finalizeOutcome 描述最终状态写入的结果。
@@ -413,18 +419,20 @@ func (e *StepExecutor) finishTask(
 		}
 	}
 	if next == domain.TaskStatusCancelled {
-		return e.persistCancelledTask(ctx, task, request.task.Status)
+		return e.persistCancelledTask(ctx, task, request.task.Status, request.grant)
 	}
 	if next == domain.TaskStatusRecoveryRequired {
-		if err := e.persistTaskStatus(ctx, task, next, request.task.Status); err != nil {
+		if err := e.persistTaskStatus(ctx, task, next, request.task.Status, request.grant); err != nil {
 			return task, err
 		}
 		return task, nil
 	}
-	if err := e.store.UpdateTaskIfStatus(
+	if err := updateTaskGuarded(
 		ctx,
+		e.store,
 		task,
 		[]domain.TaskStatus{request.task.Status},
+		request.grant,
 	); err != nil {
 		if errors.Is(err, storage.ErrConflict) {
 			current, readErr := e.store.GetTask(ctx, task.ID)
@@ -473,8 +481,9 @@ func (e *StepExecutor) persistCancelledTask(
 	ctx context.Context,
 	task domain.Task,
 	expected domain.TaskStatus,
+	grant *WorkflowExecutionGrant,
 ) (domain.Task, error) {
-	if err := e.store.UpdateTaskIfStatus(ctx, task, []domain.TaskStatus{expected}); err != nil {
+	if err := updateTaskGuarded(ctx, e.store, task, []domain.TaskStatus{expected}, grant); err != nil {
 		if errors.Is(err, storage.ErrConflict) {
 			current, readErr := e.store.GetTask(ctx, task.ID)
 			if readErr != nil {
@@ -492,13 +501,14 @@ func (e *StepExecutor) persistTaskStatus(
 	ctx context.Context,
 	task domain.Task,
 	next, expected domain.TaskStatus,
+	grant *WorkflowExecutionGrant,
 ) error {
 	if task.Status != next {
 		if err := task.Transition(next, e.now()); err != nil {
 			return fmt.Errorf("标记任务状态失败: %w", err)
 		}
 	}
-	if err := e.store.UpdateTaskIfStatus(ctx, task, []domain.TaskStatus{expected}); err != nil {
+	if err := updateTaskGuarded(ctx, e.store, task, []domain.TaskStatus{expected}, grant); err != nil {
 		if errors.Is(err, storage.ErrConflict) {
 			return fmt.Errorf("写入任务状态失败: 状态已被其他操作推进: %w", err)
 		}

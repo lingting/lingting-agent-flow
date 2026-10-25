@@ -380,7 +380,9 @@ func mustValidationTask(
 	if err := db.CreateTask(ctx, task); err != nil {
 		t.Fatalf("写入任务失败: %v", err)
 	}
-	// 任务必须处于可验证状态并绑定受管理的运行中容器。
+	// 任务必须处于可验证状态并绑定属于它的运行中容器记录：容器归属核验读取的是
+	// 数据库里的真实记录，只填一个字符串不构成可执行现场。
+	seedOwnedContainer(t, db, ctx, task, "container-under-test", "docker-container-under-test")
 	if err := task.SetContainer("container-under-test"); err != nil {
 		t.Fatalf("绑定任务容器失败: %v", err)
 	}

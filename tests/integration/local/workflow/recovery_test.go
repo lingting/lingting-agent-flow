@@ -193,6 +193,7 @@ func (f *restartFixture) createTask(
 		t.Fatalf("构造任务失败: %v", err)
 	}
 	task.HostID = &f.host.ID
+	seedOwnedContainer(t, f.db, f.ctx, task, "container-1", "docker-container-1")
 	task.ContainerID = "container-1"
 	task.Config = domain.TaskConfig{
 		Goal:            "完成本次需求",

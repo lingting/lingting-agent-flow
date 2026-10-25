@@ -165,7 +165,10 @@ func newPlanFixture(t *testing.T, options planOptions) *planFixture {
 	}
 	task.HostID = &host.ID
 	if !options.noContainer {
-		task.ContainerID = "container-1"
+		// 容器归属必须来自真实的容器登记记录：任务记录里的 container_id 只是
+		// 普通文本列，执行链路会核验归属。
+		_, withContainer := createTaskContainer(t, db, ctx, task)
+		task.ContainerID = withContainer.ContainerID
 	}
 	task.Config = domain.TaskConfig{
 		Goal:            "完成本次需求",

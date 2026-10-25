@@ -203,6 +203,24 @@ func (s *launchTaskStore) ListContainers(
 	return append([]domain.Container(nil), s.containers...), nil
 }
 
+// GetContainer 按标识返回受控的容器登记记录。
+//
+// 归属核验需要它：任务记录的 container_id 必须指向登记了该任务归属的容器记录。
+func (s *launchTaskStore) GetContainer(
+	ctx context.Context,
+	id domain.ID,
+) (*domain.Container, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := range s.containers {
+		if s.containers[index].ID == id {
+			container := s.containers[index]
+			return &container, nil
+		}
+	}
+	return nil, storage.ErrNotFound
+}
+
 // launchEnvironment 是环境准备的替身。
 type launchEnvironment struct {
 	mu sync.Mutex
@@ -399,10 +417,32 @@ func newLaunchFixture(t *testing.T) *launchFixture {
 	return fixture
 }
 
-// setContainer 把容器关联写入任务记录。
+// setContainer 写入一条属于该任务的可用容器记录，并把容器关联写入任务记录。
+//
+// 归属核验读取的是容器登记记录，因此这里必须同时登记记录与引用，否则启动流程会
+// 因为"任务引用的容器记录不存在"而拒绝。
 func (f *launchFixture) setContainer(containerID string) {
 	f.store.mu.Lock()
 	defer f.store.mu.Unlock()
+	container, err := domain.NewContainer(
+		domain.ID(containerID),
+		containerHostID(f.store.task),
+		"agentflow-"+containerID,
+		domain.EnvironmentRef{Type: domain.EnvironmentTypeLanguage, Name: "go"},
+		domain.FormatVersionLabel(1),
+		testContainerBuildHash,
+		testContainerImageID,
+		time.Now().UTC(),
+	)
+	if err != nil {
+		panic(err)
+	}
+	taskID := f.store.task.ID
+	container.TaskID = &taskID
+	container.DockerID = "docker-" + containerID
+	container.State = domain.ContainerStateRunning
+	container.DockerState = domain.DockerStateRunning
+	f.store.containers = append(f.store.containers, container)
 	f.store.task.ContainerID = containerID
 }
 

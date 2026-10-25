@@ -319,11 +319,13 @@ func (h *workflowHandler) writeError(w http.ResponseWriter, r *http.Request, err
 		status = http.StatusBadRequest
 		code = CodeInvalidRequest
 	case errors.Is(err, app.ErrWorkflowNotFound),
+		errors.Is(err, app.ErrTaskLeaseNotFound),
 		errors.Is(err, app.ErrStepExecutionNotFound),
 		errors.Is(err, storage.ErrNotFound):
 		status = http.StatusNotFound
 		code = CodeNotFound
 	case errors.Is(err, app.ErrWorkflowConflict),
+		errors.Is(err, app.ErrTaskLeaseConflict),
 		errors.Is(err, app.ErrStepExecutionConflict),
 		errors.Is(err, app.ErrValidationConflict),
 		errors.Is(err, domain.ErrInvalidState),

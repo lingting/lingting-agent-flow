@@ -30,6 +30,13 @@ type ExecuteStepsRequest struct {
 	Prompt string
 	// Timeout 是单个步骤调用的超时时间，零值使用任务配置或默认值。
 	Timeout time.Duration
+	// Grant 是本次顺序执行持有的任务执行权凭据。
+	//
+	// 顺序执行会连续推进多个步骤，每一步都修改同一份工作区与容器，因此任务租约
+	// 必须覆盖整个调用周期：凭据非空时每一步的占用与任务终态写入都附带栅栏。
+	//
+	// 该字段只由应用层内部使用，不通过 HTTP 请求体暴露。
+	Grant *WorkflowExecutionGrant
 }
 
 // StepSequenceResult 是一次顺序执行的结果。
@@ -155,6 +162,7 @@ func (e *StepExecutor) ExecuteSteps(
 			StepID:  step.ID.String(),
 			Prompt:  request.Prompt,
 			Timeout: request.Timeout,
+			Grant:   request.Grant,
 		})
 		executed++
 		entry := StepSequenceStep{

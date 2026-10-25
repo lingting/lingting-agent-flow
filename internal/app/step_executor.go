@@ -71,6 +71,15 @@ type StepExecuteRequest struct {
 	//
 	// 该字段只由应用层内部使用，不通过 HTTP 请求体暴露。
 	DeferCompletion bool
+	// Grant 是本次执行持有的任务执行权凭据。
+	//
+	// 任务租约保护整个 Task 的执行权，步骤占用保护单次 Step 的执行登记：两者职责
+	// 不同、都不能替代对方。凭据非空时，占用步骤与写入任务终态都附带 owner + epoch
+	// 条件，因此旧代次的执行者无法在任务被接管后继续推进；为空表示调用方没有任务
+	// 执行权，此时只用状态条件写入。
+	//
+	// 该字段只由应用层内部使用，不通过 HTTP 请求体暴露。
+	Grant *WorkflowExecutionGrant
 }
 
 // StepExecutionResult 是一次单步骤执行的结果。
@@ -136,6 +145,16 @@ type StepExecutorTaskRepository interface {
 		task domain.Task,
 		expected []domain.TaskStatus,
 	) error
+	// UpdateTaskLeaseGuard 在仍持有任务执行权时写入任务状态。
+	//
+	// 它是"旧代次的执行者不得覆盖新执行者状态"的落点：条件包含 status + owner +
+	// epoch，任一不匹配都返回 storage.ErrConflict。
+	UpdateTaskLeaseGuard(
+		ctx context.Context,
+		task domain.Task,
+		expected []domain.TaskStatus,
+		handle domain.TaskLeaseHandle,
+	) error
 }
 
 // StepExecutorAttemptRepository 是执行协调器需要的尝试读写能力。
@@ -176,6 +195,7 @@ type StepExecutionStore interface {
 	StepExecutorAttemptRepository
 	StepExecutorRoleRepository
 	StepExecutorHostRepository
+	TaskContainerStore
 	storage.StepExecutionStore
 	// AppendEvent 追加任务事件。
 	AppendEvent(ctx context.Context, event domain.Event) (domain.Event, error)
@@ -351,6 +371,7 @@ func (e *StepExecutor) Execute(
 		container,
 		request.BudgetScope,
 		request.BudgetScopeID,
+		request.Grant,
 	)
 	if err != nil {
 		return StepExecutionResult{}, err
@@ -380,6 +401,7 @@ func (e *StepExecutor) Execute(
 		timeout:         timeout,
 		gitBefore:       before,
 		deferCompletion: request.DeferCompletion,
+		grant:           request.Grant,
 	})
 	result.AttemptNumber = started.Attempt.AttemptNumber
 	return result, nil
@@ -400,6 +422,8 @@ type runAttemptRequest struct {
 	gitBefore *domain.GitWorktreeState
 	// deferCompletion 表示只完成开发阶段，由闭环协调器收口步骤状态。
 	deferCompletion bool
+	// grant 是本次执行持有的任务执行权凭据，为空表示没有任务租约。
+	grant *WorkflowExecutionGrant
 }
 
 // checkPrerequisites 校验指定步骤的全部前序步骤是否已完成。
@@ -605,16 +629,14 @@ func (e *StepExecutor) requireContainer(
 	if err := e.ensureHostUsable(ctx, task); err != nil {
 		return domain.Container{}, err
 	}
-	containerID := strings.TrimSpace(task.ContainerID)
-	if containerID == "" {
-		return domain.Container{}, fmt.Errorf(
-			"%w: 任务 %s 还没有任务容器；请先完成环境准备（创建容器并获取代码）后再执行步骤",
-			ErrStepExecutionPrerequisite,
-			task.ID,
-		)
+	// 归属核验先于任何远程操作：任务记录的 container_id 只是普通文本列，必须确认
+	// 它确实指向登记了该任务归属的容器记录，否则 Agent 调用会进入别的任务现场。
+	owned, err := loadOwnedContainer(ctx, e.store, task)
+	if err != nil {
+		return domain.Container{}, fmt.Errorf("%w: %w", ErrStepExecutionPrerequisite, err)
 	}
 	detail, err := e.containers.InspectContainer(ctx, InspectContainerRequest{
-		ContainerID: containerID,
+		ContainerID: owned.ID.String(),
 		Sync:        true,
 	})
 	if err != nil {
@@ -701,6 +723,7 @@ func (e *StepExecutor) beginExecution(
 	container domain.Container,
 	scope domain.RepairBudgetScope,
 	scopeID domain.ID,
+	grant *WorkflowExecutionGrant,
 ) (storage.StepExecutionStart, error) {
 	started, err := e.store.BeginStepExecution(ctx, storage.StepExecutionStartRequest{
 		TaskID:             task.ID,
@@ -712,6 +735,7 @@ func (e *StepExecutor) beginExecution(
 		InputDigest:        digestStepExecution(task, step),
 		BudgetScope:        scope,
 		BudgetScopeID:      scopeID,
+		Lease:              leaseOf(grant),
 		At:                 e.now(),
 	})
 	if err != nil {

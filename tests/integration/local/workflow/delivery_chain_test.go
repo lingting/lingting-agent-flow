@@ -444,6 +444,7 @@ func (f *deliveryFixture) seed(t *testing.T, options deliveryOptions) {
 		t.Fatalf("构造任务失败: %v", err)
 	}
 	task.HostID = &host.ID
+	seedOwnedContainer(t, f.db, f.ctx, task, deliveryContainerID, deliveryDockerID)
 	task.ContainerID = deliveryContainerID
 	task.Config = domain.TaskConfig{
 		Goal:            "完成本次需求",

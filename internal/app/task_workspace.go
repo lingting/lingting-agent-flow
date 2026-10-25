@@ -106,6 +106,7 @@ type TaskWorkspaceStore interface {
 	GetTask(ctx context.Context, id domain.ID) (*domain.Task, error)
 	AppendEvent(ctx context.Context, event domain.Event) (domain.Event, error)
 	codeFetchHostStore
+	TaskContainerStore
 	storage.TaskWorkspaceInitStore
 }
 
@@ -554,16 +555,14 @@ func (s *TaskWorkspaceService) requireContainer(
 	if err := checkHostUsableForCodeFetch(ctx, s.store, task); err != nil {
 		return domain.Container{}, fmt.Errorf("%w: %w", ErrTaskWorkspacePrerequisite, err)
 	}
-	containerID := strings.TrimSpace(task.ContainerID)
-	if containerID == "" {
-		return domain.Container{}, fmt.Errorf(
-			"%w: 任务 %s 还没有任务容器；请先完成环境准备后再初始化工作区",
-			ErrTaskWorkspacePrerequisite,
-			task.ID,
-		)
+	// 归属核验先于任何远程操作：任务记录的 container_id 只是普通文本列，
+	// 必须确认它确实指向登记了该任务归属的容器记录，否则命令会进入别的任务现场。
+	owned, err := loadOwnedContainer(ctx, s.store, task)
+	if err != nil {
+		return domain.Container{}, fmt.Errorf("%w: %w", ErrTaskWorkspacePrerequisite, err)
 	}
 	detail, err := s.containers.InspectContainer(ctx, InspectContainerRequest{
-		ContainerID: containerID,
+		ContainerID: owned.ID.String(),
 		Sync:        true,
 	})
 	if err != nil {
@@ -600,6 +599,16 @@ func (s *TaskWorkspaceService) requireContainer(
 			"%w: 任务容器 %s 缺少 Docker 容器标识",
 			ErrTaskWorkspacePrerequisite,
 			container.ID,
+		)
+	}
+	if container.DockerID != owned.DockerID {
+		// 远程观测到的 Docker ID 与登记记录不一致：现场已经变化，不能继续写入。
+		return domain.Container{}, fmt.Errorf(
+			"%w: 任务容器 %s 的 Docker 标识已变化: 记录 %s，观测 %s",
+			ErrTaskWorkspacePrerequisite,
+			container.ID,
+			owned.DockerID,
+			container.DockerID,
 		)
 	}
 	return container, nil

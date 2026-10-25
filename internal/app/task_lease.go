@@ -23,6 +23,11 @@ var (
 	ErrTaskLeaseInvalid = errors.New("app: 任务租约请求非法")
 	// ErrTaskLeaseLost 表示本次执行者已不再持有任务执行权。
 	ErrTaskLeaseLost = errors.New("app: 任务执行权已丢失")
+	// ErrTaskLeaseNotFound 表示目标任务不存在或已被删除。
+	//
+	// 它与 ErrTaskLeaseConflict 分开表达：目标不存在属于 404，执行权竞争属于 409，
+	// 把两者压成同一个状态码会让调用方误以为"任务还在、只是被占用"。
+	ErrTaskLeaseNotFound = errors.New("app: 任务租约目标不存在")
 )
 
 // 任务租约的默认参数。
@@ -198,7 +203,10 @@ func (s *TaskLeaseService) Claim(
 	})
 	if err != nil {
 		if errors.Is(err, storage.ErrConflict) {
-			return TaskClaim{}, fmt.Errorf("%w: %w", ErrTaskLeaseConflict, err)
+			// 冲突既可能是"任务已被其他执行者持有"，也可能是"任务不存在或状态
+			// 不允许领取"：存储层的条件 UPDATE 无法区分，这里用一次只读查询把
+			// 两种情况分开，使接口能给出 404 而不是笼统的状态冲突。
+			return TaskClaim{}, s.classifyClaimConflict(ctx, request.TaskID, err)
 		}
 		return TaskClaim{}, fmt.Errorf("领取任务租约失败: %w", err)
 	}
@@ -229,6 +237,31 @@ func (s *TaskLeaseService) Claim(
 //
 // 读取失败或核对失败都按错误返回：调用方不得在"无法确认持有执行权"的情况下启动
 // 任何有副作用的阶段。
+// classifyClaimConflict 把领取冲突细分为"任务不存在"与"执行权冲突"。
+//
+// 存储层的条件 UPDATE 在"任务不存在"、"已删除"、"状态不允许领取"与"已被他人持有"
+// 四种情况下都返回同一个 ErrConflict。接口需要区分它们：前三种属于目标或状态问题
+// （404 / 409），最后一种才是真正的执行权竞争。判定只做一次只读查询，不重试领取。
+func (s *TaskLeaseService) classifyClaimConflict(
+	ctx context.Context,
+	taskID domain.ID,
+	cause error,
+) error {
+	task, err := s.store.GetTask(ctx, taskID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return fmt.Errorf("%w: 任务 %s 不存在", ErrTaskLeaseNotFound, taskID)
+		}
+		// 读取失败时不掩盖原始冲突：无法确认现场时按冲突返回，调用方不会因此
+		// 认为"任务不存在"而删除或重建任何东西。
+		return fmt.Errorf("%w: %w", ErrTaskLeaseConflict, cause)
+	}
+	if task.Deleted() {
+		return fmt.Errorf("%w: 任务 %s 已删除", ErrTaskLeaseNotFound, taskID)
+	}
+	return fmt.Errorf("%w: %w", ErrTaskLeaseConflict, cause)
+}
+
 func (s *TaskLeaseService) loadClaimedTask(
 	ctx context.Context,
 	handle domain.TaskLeaseHandle,

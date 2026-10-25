@@ -65,12 +65,17 @@ func NewHandler(deps Deps) http.Handler {
 		logger = slog.Default()
 	}
 	router := &router{
-		health:            deps.Health,
-		systemInfo:        deps.SystemInfo,
-		tasks:             newTaskHandler(deps.Tasks, logger),
-		hosts:             newHostHandler(deps.Hosts, logger),
-		executions:        newExecutionHandler(deps.ExecutionRecords, logger),
-		stepExec:          newStepExecutionHandler(deps.StepExecutor, deps.StepWorkflow, logger),
+		health:     deps.Health,
+		systemInfo: deps.SystemInfo,
+		tasks:      newTaskHandler(deps.Tasks, logger),
+		hosts:      newHostHandler(deps.Hosts, logger),
+		executions: newExecutionHandler(deps.ExecutionRecords, logger),
+		stepExec: newStepExecutionHandler(
+			deps.StepExecutor,
+			deps.StepWorkflow,
+			deps.TaskLeases,
+			logger,
+		),
 		workflow:          deps.Workflow,
 		validation:        newValidationHandler(deps.Validation, logger),
 		codeInit:          newCodeInitializeHandler(deps.CodeInitialize, logger),

@@ -119,6 +119,8 @@ type ValidationStore interface {
 	GetStep(ctx context.Context, id domain.ID) (*domain.Step, error)
 	GetAttempt(ctx context.Context, id domain.ID) (*domain.Attempt, error)
 	GetExecutionHost(ctx context.Context, id domain.ID) (*domain.ExecutionHost, error)
+	// GetContainer 读取容器登记记录，用于核验任务容器的真实归属。
+	GetContainer(ctx context.Context, id domain.ID) (*domain.Container, error)
 	UpdateAttemptIfStatus(
 		ctx context.Context,
 		attempt domain.Attempt,
@@ -545,16 +547,14 @@ func (s *ValidationService) requireContainer(
 	if err := s.ensureHostUsable(ctx, task); err != nil {
 		return domain.Container{}, err
 	}
-	containerID := strings.TrimSpace(task.ContainerID)
-	if containerID == "" {
-		return domain.Container{}, fmt.Errorf(
-			"%w: 任务 %s 还没有任务容器；请先完成环境准备（创建容器并获取代码）后再执行验证",
-			ErrValidationPrerequisite,
-			task.ID,
-		)
+	// 归属核验先于任何远程操作：任务记录的 container_id 只是普通文本列，必须确认
+	// 它确实指向登记了该任务归属的容器记录，否则检查命令会进入别的任务现场。
+	owned, err := loadOwnedContainer(ctx, s.store, task)
+	if err != nil {
+		return domain.Container{}, fmt.Errorf("%w: %w", ErrValidationPrerequisite, err)
 	}
 	detail, err := s.containers.InspectContainer(ctx, InspectContainerRequest{
-		ContainerID: containerID,
+		ContainerID: owned.ID.String(),
 		Sync:        true,
 	})
 	if err != nil {

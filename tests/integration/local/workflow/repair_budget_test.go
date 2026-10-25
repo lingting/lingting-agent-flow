@@ -133,6 +133,7 @@ func (f *budgetFixture) seed(t *testing.T, options budgetOptions) {
 		t.Fatalf("构造任务失败: %v", err)
 	}
 	task.HostID = &host.ID
+	seedOwnedContainer(t, f.db, f.ctx, task, e2eContainerID, e2eDockerID)
 	task.ContainerID = e2eContainerID
 	retry := options.retry
 	if retry.IsZero() {

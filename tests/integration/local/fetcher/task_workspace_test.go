@@ -125,6 +125,7 @@ func newTaskWorkspaceFixture(t *testing.T) *taskWorkspaceFixture {
 		t.Fatalf("构造任务失败: %v", err)
 	}
 	task.HostID = &host.ID
+	seedOwnedContainer(t, db, ctx, task, workspaceContainerID, testDockerID)
 	task.ContainerID = workspaceContainerID
 	task.Config = domain.TaskConfig{
 		Goal:            "完成本次需求",

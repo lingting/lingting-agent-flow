@@ -595,6 +595,15 @@ func ExplicitPlanningStatuses() []TaskStatus {
 	return filterTaskStatuses(TaskStatus.AllowsExplicitPlanning)
 }
 
+// ExplicitStepExecutionStatuses 返回单步骤执行允许领取的任务状态集合。
+//
+// 它与 ExplicitWorkflowStatuses 相同：单步骤执行与任务级工作流推进的是同一份
+// 工作区与容器，因此准入集合必须一致，不能一边允许另一边拒绝。两者都不含
+// failed：失败任务的重新开始属于独立的用户显式重试入口。
+func ExplicitStepExecutionStatuses() []TaskStatus {
+	return filterTaskStatuses(TaskStatus.AllowsExplicitWorkflowStart)
+}
+
 // ExplicitWorkflowStatuses 返回用户显式启动或恢复工作流允许领取的任务状态集合。
 func ExplicitWorkflowStatuses() []TaskStatus {
 	return filterTaskStatuses(TaskStatus.AllowsExplicitWorkflowStart)

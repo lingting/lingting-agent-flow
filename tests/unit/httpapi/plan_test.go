@@ -159,6 +159,9 @@ func newPlanAPIFixture(t *testing.T, finalText string) *planAPIFixture {
 		t.Fatalf("构造任务失败: %v", err)
 	}
 	task.HostID = &host.ID
+	// 容器归属必须来自真实的容器登记记录：任务记录里的 container_id 只是普通
+	// 文本列，执行链路会核验归属。
+	seedOwnedContainer(t, db, ctx, task, "container-1", "docker-container-1")
 	task.ContainerID = "container-1"
 	task.Config = domain.TaskConfig{
 		Goal:            "完成本次需求",

@@ -223,7 +223,9 @@ func newReviewFixture(t *testing.T, options reviewOptions) *reviewFixture {
 		t.Fatalf("构造任务失败: %v", err)
 	}
 	task.HostID = &host.ID
-	task.ContainerID = "container-1"
+	// 容器归属必须来自真实的容器登记记录。
+	_, withContainer := createTaskContainer(t, db, ctx, task)
+	task.ContainerID = withContainer.ContainerID
 	config := domain.TaskConfig{
 		Goal:            "完成本次需求",
 		Environment:     domain.EnvironmentRef{Type: domain.EnvironmentTypeLanguage, Name: "go"},

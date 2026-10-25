@@ -388,10 +388,12 @@ type taskWorkflowFixture struct {
 	codeSaver  *taskWorkflowCodeSaver
 	service    *app.TaskWorkflowService
 	task       domain.Task
-	steps      []domain.Step
-	ctx        context.Context
-	workspace  *testkit.Workspace
-	logger     *logging.Logger
+	// container 是该任务真实持有的容器登记记录。
+	container domain.Container
+	steps     []domain.Step
+	ctx       context.Context
+	workspace *testkit.Workspace
+	logger    *logging.Logger
 	// now 是构造测试数据时使用的时间。
 	now time.Time
 }
@@ -477,13 +479,15 @@ func newTaskWorkflowFixture(t *testing.T, options taskWorkflowOptions) *taskWork
 		t.Fatalf("构造任务失败: %v", err)
 	}
 	task.HostID = &host.ID
-	task.ContainerID = "container-1"
 	task.Config = domain.TaskConfig{
 		Goal:            "完成本次需求",
 		Environment:     domain.EnvironmentRef{Type: domain.EnvironmentTypeLanguage, Name: "go"},
 		DeveloperRoleID: role.ID,
 		PlannerRoleID:   role.ID,
 	}
+	// 容器归属必须来自真实的容器登记记录：任务记录里的 container_id 只是普通
+	// 文本列，执行链路会核验归属，因此只填一个字符串不足以构成可执行现场。
+	container, task := createTaskContainer(t, db, ctx, task)
 	if err := db.CreateTask(ctx, task); err != nil {
 		t.Fatalf("写入任务失败: %v", err)
 	}
@@ -574,6 +578,7 @@ func newTaskWorkflowFixture(t *testing.T, options taskWorkflowOptions) *taskWork
 		codeSaver:  codeSaver,
 		service:    service,
 		task:       task,
+		container:  container,
 		steps:      steps,
 		ctx:        ctx,
 		workspace:  workspace,

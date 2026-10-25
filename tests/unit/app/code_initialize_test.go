@@ -178,6 +178,8 @@ func newCodeInitFixture(t *testing.T) *codeInitFixture {
 		t.Fatalf("构造任务失败: %v", err)
 	}
 	task.HostID = &host.ID
+	// 容器归属必须来自真实的容器登记记录：标识与受控容器替身保持一致。
+	seedOwnedContainer(t, db, ctx, task, codeInitContainerID, codeInitDockerID)
 	task.ContainerID = codeInitContainerID
 	task.Config = domain.TaskConfig{
 		Goal:            "完成本次需求",

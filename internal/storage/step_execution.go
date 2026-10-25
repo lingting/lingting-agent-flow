@@ -36,6 +36,12 @@ type StepExecutionStartRequest struct {
 	// 它由应用层在占用之前从已登记的周期读取：同一逻辑周期的恢复必须复用同一个
 	// 标识，因此重启后的预算统计与退出前一致。
 	BudgetScopeID domain.ID
+	// Lease 是本次执行者持有的任务租约身份。
+	//
+	// 它非空时，事务内的任务写入附带 owner + epoch 条件：旧代次的执行者无法在
+	// 任务已被接管之后占用步骤或推进任务状态。为空表示本次调用没有任务执行权
+	// （当前只用于历史调用路径），此时只能用状态条件写入。
+	Lease *domain.TaskLeaseHandle
 	// At 是占用与尝试的开始时间，零值使用当前时间。
 	At time.Time
 }

@@ -163,12 +163,28 @@ func (s stepExecutionStore) begin(
 	if err := task.SetCurrentAttempt(&attempt.ID); err != nil {
 		return storage.StepExecutionStart{}, err
 	}
-	if err := tasks.UpdateTaskIfStatus(
-		ctx,
-		*task,
-		[]domain.TaskStatus{request.ExpectedTaskStatus},
-	); err != nil {
+	// 任务写入附带执行权条件：请求带有任务租约时使用租约栅栏写入，旧代次的执行者
+	// 无法在任务已被接管之后占用步骤或推进任务状态。
+	if err := updateTaskForStepExecution(ctx, tasks, *task, request); err != nil {
 		return storage.StepExecutionStart{}, err
 	}
 	return storage.StepExecutionStart{Attempt: attempt, Task: *task, Step: *step}, nil
+}
+
+// updateTaskForStepExecution 在占用步骤时写入任务状态。
+//
+// 请求带有任务租约时使用租约栅栏写入（status + owner + epoch）：这是"旧执行者
+// 不得占用已被接管的任务"的落点。没有租约时退化为状态条件写入，仅用于不持有任务
+// 执行权的历史调用路径。
+func updateTaskForStepExecution(
+	ctx context.Context,
+	tasks taskStore,
+	task domain.Task,
+	request storage.StepExecutionStartRequest,
+) error {
+	expected := []domain.TaskStatus{request.ExpectedTaskStatus}
+	if request.Lease == nil {
+		return tasks.UpdateTaskIfStatus(ctx, task, expected)
+	}
+	return tasks.UpdateTaskLeaseGuard(ctx, task, expected, *request.Lease)
 }

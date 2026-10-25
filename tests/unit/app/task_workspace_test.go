@@ -162,6 +162,8 @@ func newWorkspaceFixture(t *testing.T) *workspaceFixture {
 		t.Fatalf("构造任务失败: %v", err)
 	}
 	task.HostID = &host.ID
+	// 容器归属必须来自真实的容器登记记录：标识与受控容器替身保持一致。
+	seedOwnedContainer(t, db, ctx, task, workspaceContainerID, workspaceDockerID)
 	task.ContainerID = workspaceContainerID
 	task.Config = domain.TaskConfig{
 		Goal:            "完成本次需求",
@@ -273,6 +275,10 @@ func TestInitializeTaskWorkspaceReinitializesAfterContainerChange(t *testing.T) 
 	if err != nil {
 		t.Fatalf("读取任务失败: %v", err)
 	}
+	// 新容器同样必须是一条属于该任务的真实登记记录：归属核验读取数据库，
+	// 只改任务里的字符串会让流程以"容器记录不存在"拒绝。
+	// Docker 标识沿用受控替身返回的值：远程观测与登记记录必须一致。
+	seedOwnedContainer(t, fixture.db, fixture.ctx, *stored, "container-new", workspaceDockerID)
 	if setErr := stored.SetContainer("container-new"); setErr != nil {
 		t.Fatalf("写入容器关联失败: %v", setErr)
 	}

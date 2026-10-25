@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
@@ -647,16 +646,14 @@ func (s *TaskWorkflowService) checkContainerReady(
 	ctx context.Context,
 	task domain.Task,
 ) error {
-	containerID := strings.TrimSpace(task.ContainerID)
-	if containerID == "" {
-		return fmt.Errorf(
-			"%w: 任务 %s 没有受管理的任务容器",
-			ErrWorkflowPrerequisite,
-			task.ID,
-		)
+	// 归属核验先于任何远程操作：任务记录的 container_id 只是普通文本列，必须确认
+	// 它确实指向登记了该任务归属的容器记录，否则工作流会在别的任务现场上推进。
+	owned, err := loadOwnedContainer(ctx, s.store, task)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrWorkflowPrerequisite, err)
 	}
 	detail, err := s.containers.InspectContainer(ctx, InspectContainerRequest{
-		ContainerID: containerID,
+		ContainerID: owned.ID.String(),
 		Sync:        true,
 	})
 	if err != nil {

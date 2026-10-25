@@ -178,13 +178,16 @@ func (f *launchFixture) createTask(t *testing.T) domain.Task {
 	return task
 }
 
-// attachContainer 把容器关联写入任务记录。
+// attachContainer 写入一条属于该任务的容器记录并把关联写入任务记录。
+//
+// 归属核验读取的是容器登记记录，因此只给任务填一个字符串不足以构成可执行现场。
 func (f *launchFixture) attachContainer(t *testing.T, containerID string) {
 	t.Helper()
 	task, err := f.db.GetTask(f.ctx, f.task.ID)
 	if err != nil {
 		t.Fatalf("读取任务失败: %v", err)
 	}
+	seedOwnedContainer(t, f.db, f.ctx, *task, containerID, "docker-"+containerID)
 	if err := task.SetContainer(containerID); err != nil {
 		t.Fatalf("写入容器关联失败: %v", err)
 	}

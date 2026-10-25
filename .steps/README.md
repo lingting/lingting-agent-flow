@@ -26,7 +26,22 @@
 ## 当前阶段与当前里程碑
 
 - **当前阶段**：P3 进行中 —— 多任务执行与调度。
-- **当前里程碑**：`P3-M2` —— 实现有界并发和任务生命周期协调，状态 `completed`
+- **当前里程碑**：`P3-M3` —— 落实执行环境、工作区、Session 与资源隔离，状态
+  `completed`（2026-10-26，基于 `master` HEAD `7e950e7` 之后的工作区核实与实施）。
+  交付物为 [`P3-M3-execution-isolation.md`](./P3-M3-execution-isolation.md)。核心改动：
+  容器归属契约（`internal/domain/container_ownership.go` 的 `DecideContainerOwnership` /
+  `CheckContainerOwnership`，9 个稳定拒绝原因）与统一加载入口
+  （`internal/app/task_container.go` 的 `loadOwnedContainer`），六个执行入口
+  （工作区初始化、代码初始化、步骤执行、验证、计划生成、工作流编排、任务启动）
+  不再直接用 `task.ContainerID` 字符串核验容器；单步骤三个入口
+  （`execute` / `execute-steps` / `execute-and-validate`）统一领取任务租约，
+  步骤占用与任务终态写入新增租约栅栏（`StepExecutionStartRequest.Lease`、
+  `StepExecutionStore.UpdateTaskLeaseGuard`）；领取冲突细分为 404 / 409
+  （`ErrTaskLeaseNotFound` + `classifyClaimConflict`）。
+  测试证据：`tests/unit/domain/container_ownership_test.go`（8 个用例）、
+  `tests/integration/local/scheduler/{isolation,lease_fencing,resource_reclaim}_test.go`
+  （真实 SQLite + 正式迁移，覆盖跨任务容器隔离、租约 fencing、孤儿容器与共享缓存边界）。
+- **更早里程碑**：`P3-M2` —— 实现有界并发和任务生命周期协调，状态 `completed`
   （2026-10-25，基于 `master` HEAD `d8a0fdd` 之后的工作区核实与实施）。交付物为
   [`P3-M2-bounded-concurrency.md`](./P3-M2-bounded-concurrency.md)。核心改动：
   任务租约的持久化 fencing（`tasks.lease_epoch`，迁移 `0024_task_lease_epoch.sql`；
@@ -102,12 +117,18 @@
   `0023_code_fetch_active_unique.sql`、`VerifyCodeSave` 在容器缺失时降级为
   `unverifiable` 并落盘、新增 HTTP `verify-code-save` 与 `resume-eligibility`
   （CLI `task resume-status`）、`ensureNoPendingContainer` 阻止创建第二个容器。
-- **下一步**：`P3-M3` —— 明确执行环境、工作区、Session 和资源之间的隔离规则。
-  P3-M2 已落地的前提见
-  [`P3-M2-bounded-concurrency.md`](./P3-M2-bounded-concurrency.md) §8 与
+- **下一步**：`P3-M4` —— 处理任务取消、失败、恢复和调度器重启。
+  P3-M3 已落地的前提见
+  [`P3-M3-execution-isolation.md`](./P3-M3-execution-isolation.md) §2 与 §3 与
   [`P3-multi-task-scheduling.md`](./P3-multi-task-scheduling.md) 的"下一步入口"。
+  P3-M3 的交接事项：容器归属契约（`DecideContainerOwnership`）与统一加载入口
+  （`loadOwnedContainer`）已落地，所有执行入口不再直接用字符串核验容器；
+  单步骤三个入口已统一领取任务租约，步骤占用与任务终态写入具备租约栅栏；
+  租约栅栏只保护数据库写入，已发出的远程命令的物理收敛属 P3-M4；
+  真实远程依赖用例（`tests/integration/{ssh,pi,remote/**}`）已全部通过，但孤儿容器与
+  `unknown` 现场仍需在真实远程环境主动注入验收；
+  跨进程全局并发配额需要数据库仲裁；`failed` 任务仍无用户显式重试入口。
   P3-M2 的交接事项：并发上限是**进程级**（跨进程全局配额需要数据库仲裁）；
-  `StepExecutor` 的任务终态写入仍是状态条件写（无租约栅栏）；
   服务停止保留的租约依赖 TTL 自然过期（物理收敛属 P3-M4）；
   `failed` 任务仍无用户显式重试入口，需要独立的里程碑与接口契约；
   轮询扫描（默认 1s）是可接受的取舍。
@@ -136,6 +157,7 @@
 | [`P3-multi-task-scheduling.md`](./P3-multi-task-scheduling.md) | P3：多任务执行与调度 |
 | [`P3-M1-task-queue-semantics.md`](./P3-M1-task-queue-semantics.md) | P3-M1：任务队列、领取、调度名额与执行权交接契约（准入/排序/仲裁/fencing/名额，含存储层验收项 S1–S7） |
 | [`P3-M2-bounded-concurrency.md`](./P3-M2-bounded-concurrency.md) | P3-M2：任务租约 fencing（`lease_epoch`）、统一所有权、有界并发调度器与生命周期集成 |
+| [`P3-M3-execution-isolation.md`](./P3-M3-execution-isolation.md) | P3-M3：容器 / 工作区 / Session / 资源隔离契约、统一执行入口所有权、资源回收所有权校验 |
 | [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md) | P4：产品操作体验与针对性优化 |
 
 ## 下一步工作的选择规则

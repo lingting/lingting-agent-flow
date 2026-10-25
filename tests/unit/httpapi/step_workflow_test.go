@@ -177,6 +177,9 @@ func newWorkflowAPIFixture(t *testing.T) *workflowAPIFixture {
 		t.Fatalf("构造任务失败: %v", err)
 	}
 	task.HostID = &host.ID
+	// 容器归属必须来自真实的容器登记记录：任务记录里的 container_id 只是普通
+	// 文本列，执行链路会核验归属。
+	seedOwnedContainer(t, db, ctx, task, "container-1", "docker-container-1")
 	task.ContainerID = "container-1"
 	task.Config = domain.TaskConfig{
 		Goal:                "完成本次需求",
@@ -278,6 +281,14 @@ func newWorkflowAPIFixture(t *testing.T) *workflowAPIFixture {
 	if err != nil {
 		t.Fatalf("构造执行记录服务失败: %v", err)
 	}
+	// 闭环入口同样需要任务租约：它是与任务级工作流共用的唯一所有权令牌。
+	leases, err := app.NewTaskLeaseService(app.TaskLeaseOptions{
+		Store:  db,
+		Logger: logger.Slog(),
+	})
+	if err != nil {
+		t.Fatalf("构造任务租约服务失败: %v", err)
+	}
 	handler := httpapi.NewHandler(httpapi.Deps{
 		Health:           app.NewHealthService(db),
 		SystemInfo:       func() app.SystemInfo { return app.SystemInfo{Version: "test"} },
@@ -286,6 +297,7 @@ func newWorkflowAPIFixture(t *testing.T) *workflowAPIFixture {
 		StepExecutor:     executor,
 		Validation:       validation,
 		StepWorkflow:     workflow,
+		TaskLeases:       leases,
 	})
 	return &workflowAPIFixture{
 		handler: handler,

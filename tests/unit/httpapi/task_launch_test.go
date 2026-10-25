@@ -196,6 +196,32 @@ func (s *startAPITaskStore) ListContainers(
 	return nil, nil
 }
 
+// GetContainer 返回受控的容器登记记录。
+//
+// 归属核验需要它：任务记录的 container_id 必须指向登记了该任务归属的容器记录。
+func (s *startAPITaskStore) GetContainer(
+	ctx context.Context,
+	id domain.ID,
+) (*domain.Container, error) {
+	// 任务记录引用了容器时才返回归属成立的记录：归属核验读取的是这里返回的事实，
+	// 因此"任务有可用容器"必须在替身里同样成立。
+	if s.task.ContainerID == "" || s.task.ContainerID != id.String() {
+		return nil, storage.ErrNotFound
+	}
+	taskID := s.task.ID
+	container := domain.Container{
+		ID:          id,
+		HostID:      containerHostID(s.task),
+		DockerID:    "docker-" + id.String(),
+		Name:        "agentflow-" + id.String(),
+		Environment: domain.EnvironmentRef{Type: domain.EnvironmentTypeLanguage, Name: "go"},
+		TaskID:      &taskID,
+		State:       domain.ContainerStateRunning,
+		DockerState: domain.DockerStateRunning,
+	}
+	return &container, nil
+}
+
 // startAPIWorkspace 是任务级工作区初始化的替身。
 //
 // 默认报告"已就绪"，使既有用例继续覆盖计划与工作流阶段。

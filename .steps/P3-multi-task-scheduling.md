@@ -71,7 +71,7 @@ AgentFlow 只能一次处理一个任务，无法成为可用的编排器。
 |---|---|---|---|
 | P3-M1 | 明确任务队列、领取和调度的业务语义 | `completed` | P2 退出 |
 | P3-M2 | 实现有界并发和任务生命周期协调 | `completed` | P3-M1 |
-| P3-M3 | 明确执行环境、工作区、Session 和资源之间的隔离规则 | `pending` | P3-M1 |
+| P3-M3 | 落实执行环境、工作区、Session 与资源隔离 | `completed` | P3-M1 |
 | P3-M4 | 处理任务取消、失败、恢复和调度器重启 | `pending` | P3-M2、P3-M3 |
 | P3-M5 | 验证多任务并发、冲突和资源回收行为 | `pending` | P3-M2、P3-M3、P3-M4 |
 
@@ -81,7 +81,9 @@ AgentFlow 只能一次处理一个任务，无法成为可用的编排器。
    + `cfg.Scheduler.MaxConcurrentTasks`）。
 2. ✅ 同一任务不会被两个执行者同时推进（P3-M2：`lease_epoch` 栅栏 +
    `workflow_runs` 部分唯一索引；`TestAcquireTaskLeaseIsExclusiveAcrossConnections`）。
-3. ⬜ 执行环境、工作区、Session 与资源之间互不串扰，且规则成文并落地（P3-M3）。
+3. ✅ 执行环境、工作区、Session 与资源之间互不串扰，且规则成文并落地（P3-M3：
+   `DecideContainerOwnership` 容器归属契约 + 单步骤入口统一领取任务租约 +
+   资源回收所有权校验；`tests/integration/local/scheduler/isolation_test.go`）。
 4. ⬜ 任务取消、失败、恢复与调度器重启的语义明确，无 `running` 残留与重复副作用
    （P3-M4；P3-M2 已落地"停止不重放、保留租约至过期"的边界）。
 5. ⬜ 多任务并发、冲突与资源回收有测试证据（P3-M5；P3-M2 已提供存储与调度层的并发证据）。
@@ -95,11 +97,31 @@ AgentFlow 只能一次处理一个任务，无法成为可用的编排器。
 
 ## 下一步选择规则
 
-**下一步入口：P3-M3（明确执行环境、工作区、Session 和资源之间的隔离规则）。**
+**下一步入口：P3-M4（处理任务取消、失败、恢复和调度器重启）。**
 
-顺序固定：M1/M2 已完成 → **M3**（隔离规则）→ M4（取消/失败/重启）→ M5（并发验收）。
+顺序固定：M1/M2/M3 已完成 → **M4**（取消/失败/重启）→ M5（并发验收）。
 
-P3-M2 已落地的前提（P3-M3 不需要重新设计）：
+P3-M3 已落地的前提（P3-M4 不需要重新设计）：
+
+1. 容器归属契约（`domain.DecideContainerOwnership`）与统一加载入口
+   （`app.loadOwnedContainer`）：所有执行入口读取容器登记记录并核验
+   `task_id` / `host_id` / 生命周期状态 / `docker_id`，不再直接用字符串。
+2. 单步骤三个入口（`execute` / `execute-steps` / `execute-and-validate`）统一领取
+   任务租约，租约覆盖整个调用周期。
+3. 步骤占用与任务终态写入具备租约栅栏（`StepExecutionStartRequest.Lease` +
+   `StepExecutionStore.UpdateTaskLeaseGuard`）。
+4. 领取冲突细分为 404 / 409（`ErrTaskLeaseNotFound` + `classifyClaimConflict`）。
+5. 共享资源边界成文：缓存卷名不含任务标识，镜像与缓存从不自动删除。
+
+**P3-M3 的交接事项**：
+
+- 租约栅栏只保护数据库写入；已发出的远程命令是否停止取决于下层执行器，物理收敛属 P3-M4。
+- 真实远程依赖用例（`tests/integration/{ssh,pi,remote/**}`）已全部通过；孤儿容器与
+  `unknown` 现场仍需在真实远程环境主动注入验收（归 P3-M5）。
+- 跨进程全局并发配额需要数据库仲裁。
+- `failed` 任务仍无用户显式重试入口，需要独立的里程碑与接口契约。
+
+P3-M2 已落地的前提（P3-M3/M4 不需要重新设计）：
 
 1. `AcquireTaskLease` 由 `app.TaskScheduler` 生产调用，显式传
    `Statuses: domain.AutomaticSchedulingStatuses()`（只有 `queued`）。
@@ -116,12 +138,12 @@ P3-M2 已落地的前提（P3-M3 不需要重新设计）：
 **P3-M2 的交接事项**：
 
 - 并发上限是**进程级**：跨进程全局配额需要数据库仲裁，属后续里程碑。
-- `StepExecutor` 的任务终态写入仍是状态条件写（无租约栅栏），P3-M3/M4 需统一入口。
 - 服务停止保留的租约依赖 TTL 自然过期，物理收敛属 P3-M4。
 - `failed` 任务仍无用户显式重试入口，需要独立的里程碑与接口契约。
 - 轮询扫描（默认 1s）是可接受的取舍；事件驱动留待有证据的需求。
+- （P3-M3 已解决）`StepExecutor` 的任务终态写入现在是租约栅栏写，不再是纯状态条件写。
 
-**P3-M2 的入口审计结论**（本次完成）：
+**入口审计结论（P3-M3 完成后）**：
 
 | 入口 | 是否经过唯一所有权 |
 |---|---|
@@ -129,9 +151,12 @@ P3-M2 已落地的前提（P3-M3 不需要重新设计）：
 | `POST /api/v1/tasks/{id}/plan` | ✅ 同上；计划生成是同步操作，返回时释放 |
 | `POST /api/v1/tasks/{id}/execute-workflow` | ✅ 同上 |
 | `POST /api/v1/tasks/{id}/resume-workflow` | ✅ 同上 |
-| `POST /api/v1/tasks/{id}/execute-steps`（单步骤顺序执行） | ⚠️ 不领取任务租约，受步骤占用事务与状态条件保护；P3-M3/M4 需统一 |
-| `POST .../steps/{id}/execute-and-validate` | ⚠️ 同上 |
+| `POST /api/v1/tasks/{id}/execute-steps`（单步骤顺序执行） | ✅ P3-M3 统一：领取任务租约并覆盖整个周期 |
+| `POST .../steps/{id}/execute` | ✅ P3-M3 统一：同上 |
+| `POST .../steps/{id}/execute-and-validate` | ✅ P3-M3 统一：同上 |
+| `POST .../steps/{id}/open-repair-cycle` | ❌ 不需要：只登记预算作用域，不启动 Agent |
 | 自动调度（`app.TaskScheduler`） | ✅ 显式 `queued` 集合领取 |
+| 用户取消（`POST .../cancel`） | ❌ 有意：取消意图必须先落盘，不受租约阻塞 |
 
 ---
 
@@ -190,15 +215,33 @@ P3-M2 已落地的前提（P3-M3 不需要重新设计）：
 - **移交 P3-M3/M4**：进程级并发上限、`StepExecutor` 入口的租约栅栏、服务停止后租约的
   物理收敛、`failed` 显式重试入口。
 
-### P3-M3 明确执行环境、工作区、Session 和资源之间的隔离规则
+### P3-M3 落实执行环境、工作区、Session 与资源隔离
 
 - **ID**：`P3-M3`
-- **状态**：`pending`
+- **状态**：`completed`（2026-10-26，基于 `master` HEAD `7e950e7` 之后的工作区核实与实施）
 - **必要性**：多任务并发下，容器/Session/工作区串扰会导致错误结果。
-- **当前证据**：单任务内已有容器/Session 隔离，缺跨任务规则。
-- **前置依赖**：P3-M1。
+- **本次核实到的真实缺口**：执行链路直接用 `task.ContainerID` 字符串核验容器（该列无外键）、
+  没有"容器归属"领域概念、单步骤三个入口不领取任务租约、步骤占用与任务终态写入只有
+  状态条件、领取冲突无法区分 404/409。
+- **前置依赖**：P3-M1（`completed`）。
 - **目标结果**：跨任务隔离规则成文并落地。
 - **完成定义**：每个任务的容器、工作区、Session 互不串扰。
+- **交付物**：
+  - [`P3-M3-execution-isolation.md`](./P3-M3-execution-isolation.md)（完整契约与证据）
+  - `internal/domain/container_ownership.go`：`DecideContainerOwnership` /
+    `CheckContainerOwnership` 与 9 个稳定拒绝原因
+  - `internal/app/task_container.go`：`loadOwnedContainer`（统一加载并核验归属）
+  - 六个执行入口改为经 `loadOwnedContainer`（工作区初始化、代码初始化、步骤执行、
+    验证、工作流编排、任务启动）
+  - 单步骤三个入口统一领取任务租约；`StepExecutionStartRequest.Lease` +
+    `StepExecutionStore.UpdateTaskLeaseGuard` 提供租约栅栏
+  - `ErrTaskLeaseNotFound` + `classifyClaimConflict` 把领取冲突细分为 404 / 409
+  - 测试：`tests/unit/domain/container_ownership_test.go`、
+    `tests/integration/local/scheduler/{isolation,lease_fencing,resource_reclaim}_test.go`
+- **明确未做**：调度器重启接管（M4）、多任务验收（M5）、分布式配额、
+  真实远程环境下的孤儿容器主动注入验收、`failed` 显式重试入口。
+- **移交 P3-M4**：租约栅栏只保护数据库写入，已发出的远程命令的物理收敛属 P3-M4；
+  真实远程依赖用例已全部通过；孤儿容器与 `unknown` 现场仍需主动注入验收（归 P3-M5）。
 
 ### P3-M4 处理任务取消、失败、恢复和调度器重启
 

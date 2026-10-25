@@ -345,3 +345,50 @@ func (s *TaskWorkflowService) checkTaskOwnership(
 	}
 	return nil
 }
+
+// leaseOf 把执行权凭据转换为可选的租约身份。
+//
+// 凭据为空表示调用方没有任务执行权，此时只能使用状态条件写入；凭据非空时写入
+// 附带 owner + epoch 条件，因此旧代次的执行者无法覆盖新执行者的状态。
+func leaseOf(grant *WorkflowExecutionGrant) *domain.TaskLeaseHandle {
+	if grant == nil {
+		return nil
+	}
+	handle := grant.Lease
+	return &handle
+}
+
+// holdsGrant 判断任务记录是否仍由该凭据持有执行权。
+//
+// grant 为 nil 时不做租约判定（调用方本就不持有执行权，写入使用状态条件）。
+func holdsGrant(task domain.Task, grant *WorkflowExecutionGrant, at time.Time) bool {
+	if grant == nil {
+		return true
+	}
+	return domain.TaskHoldsLease(task, grant.Lease, at)
+}
+
+// updateTaskGuarded 写入任务状态，并在持有执行权时附带租约条件。
+//
+// grant 为 nil 时退化为状态条件写入；非空时使用 owner + epoch 栅栏，因此迟到的
+// 旧代次写入会被数据库拒绝。
+func updateTaskGuarded(
+	ctx context.Context,
+	store interface {
+		UpdateTaskIfStatus(ctx context.Context, task domain.Task, expected []domain.TaskStatus) error
+		UpdateTaskLeaseGuard(
+			ctx context.Context,
+			task domain.Task,
+			expected []domain.TaskStatus,
+			handle domain.TaskLeaseHandle,
+		) error
+	},
+	task domain.Task,
+	expected []domain.TaskStatus,
+	grant *WorkflowExecutionGrant,
+) error {
+	if grant == nil {
+		return store.UpdateTaskIfStatus(ctx, task, expected)
+	}
+	return store.UpdateTaskLeaseGuard(ctx, task, expected, grant.Lease)
+}

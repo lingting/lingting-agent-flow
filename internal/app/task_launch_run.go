@@ -248,7 +248,7 @@ func (s *TaskLaunchService) loadLaunchInput(
 	}
 	usable := false
 	if strings.TrimSpace(task.ContainerID) != "" {
-		checked, checkErr := s.containerUsable(ctx, task.ContainerID)
+		checked, checkErr := s.containerUsable(ctx, task)
 		if checkErr != nil {
 			// 核验失败不等于"容器不可用"：远程不可达时创建新容器会让现场更糟。
 			// 这种情况按前置条件缺失报告，由用户确认节点与容器状态后再启动。
@@ -299,9 +299,12 @@ func (s *TaskLaunchService) loadWorkspaceState(
 }
 
 // containerUsable 核验任务记录关联的容器当前是否受管理且运行中。
+//
+// 归属不成立时返回前置条件错误而不是"不可用"：不可用会让启动流程去创建第二个容器，
+// 而"任务引用着不属于自己的容器记录"必须由人工核验，不能靠新建容器掩盖。
 func (s *TaskLaunchService) containerUsable(
 	ctx context.Context,
-	containerID string,
+	task domain.Task,
 ) (bool, error) {
 	if s.containers == nil {
 		return false, fmt.Errorf(
@@ -309,8 +312,15 @@ func (s *TaskLaunchService) containerUsable(
 			ErrTaskLaunchPrerequisite,
 		)
 	}
+	owned, err := loadOwnedContainer(ctx, s.store, task)
+	if err != nil {
+		if errors.Is(err, ErrTaskContainerMissing) {
+			return false, nil
+		}
+		return false, fmt.Errorf("%w: %w", ErrTaskLaunchPrerequisite, err)
+	}
 	detail, err := s.containers.InspectContainer(ctx, InspectContainerRequest{
-		ContainerID: containerID,
+		ContainerID: owned.ID.String(),
 		Sync:        true,
 	})
 	if err != nil {

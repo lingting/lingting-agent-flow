@@ -260,11 +260,13 @@ func (h *taskLaunchHandler) writeError(w http.ResponseWriter, r *http.Request, e
 		status = http.StatusBadRequest
 		code = CodeInvalidRequest
 	case errors.Is(err, app.ErrTaskLaunchNotFound),
+		errors.Is(err, app.ErrTaskLeaseNotFound),
 		errors.Is(err, app.ErrWorkflowNotFound),
 		errors.Is(err, storage.ErrNotFound):
 		status = http.StatusNotFound
 		code = CodeNotFound
 	case errors.Is(err, app.ErrTaskLaunchConflict),
+		errors.Is(err, app.ErrTaskLeaseConflict),
 		errors.Is(err, app.ErrWorkflowConflict),
 		// 工作区初始化结果不确定属于状态冲突：现场存在但无法确认，必须先核验，
 		// 既不是参数错误，也不是"缺东西"的前置条件缺失。

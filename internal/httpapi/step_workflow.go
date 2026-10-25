@@ -157,6 +157,19 @@ func (h *stepExecutionHandler) serveExecuteAndValidate(
 		h.writeServiceError(w, r, err)
 		return
 	}
+	// 闭环会连续修改工作区、容器与步骤状态，必须由任务租约覆盖整个周期：只在
+	// 开始时检查一次会让旧执行者在被接管后继续推进。
+	grant, release, claimErr := h.claimForStepExecution(
+		r,
+		taskID,
+		domain.ExplicitStepExecutionStatuses(),
+	)
+	if claimErr != nil {
+		h.writeServiceError(w, r, claimErr)
+		return
+	}
+	defer release()
+	request.Grant = &grant
 	result, err := h.workflow.ExecuteAndValidate(r.Context(), request)
 	if err != nil {
 		h.writeWorkflowError(w, r, result, err)

@@ -79,6 +79,11 @@ type WorkflowTaskRepository interface {
 	) error
 	// ListTasks 按状态筛选任务，用于启动时收敛计划生成的残留现场。
 	ListTasks(ctx context.Context, filter storage.TaskFilter) ([]domain.Task, error)
+	// GetContainer 读取容器登记记录，用于核验任务容器的真实归属。
+	//
+	// 任务记录的 container_id 只是普通文本列，没有外键约束：执行前必须确认它
+	// 确实指向登记了该任务归属的容器记录。
+	GetContainer(ctx context.Context, id domain.ID) (*domain.Container, error)
 }
 
 // WorkflowStepRepository 是编排器需要的步骤读写能力。

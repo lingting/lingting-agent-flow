@@ -401,6 +401,9 @@ func (s *TaskWorkflowService) runStep(
 		Prompt:            exec.prompt,
 		Timeout:           exec.timeout,
 		ValidationTimeout: exec.validationTimeout,
+		// 任务执行权随工作流传入：步骤闭环因此与编排器共用同一套所有权，
+		// 开发阶段的任务终态写入附带 owner + epoch 栅栏。
+		Grant: &exec.grant,
 	})
 	if runErr != nil {
 		// 协调器返回错误意味着本次没有产生真实执行（状态冲突、前置条件缺失、

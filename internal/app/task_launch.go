@@ -146,6 +146,8 @@ type TaskLaunchStore interface {
 	//
 	// 启动流程只读它：旧容器只能由用户显式 delete / detach，启动不会替用户处置。
 	ListContainers(ctx context.Context, filter domain.ContainerFilter) ([]domain.Container, error)
+	// GetContainer 读取容器登记记录，用于核验任务容器的真实归属。
+	GetContainer(ctx context.Context, id domain.ID) (*domain.Container, error)
 }
 
 // TaskLaunchEnvironmentPort 是启动流程对环境准备能力的需求。

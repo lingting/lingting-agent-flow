@@ -105,6 +105,19 @@ func (h *stepExecutionHandler) serveSteps(w http.ResponseWriter, r *http.Request
 		h.writeServiceError(w, r, err)
 		return
 	}
+	// 顺序执行会连续推进多个步骤，必须由任务租约覆盖整个调用周期：每一步的
+	// 占用与任务终态写入都附带 owner + epoch 栅栏。
+	grant, release, claimErr := h.claimForStepExecution(
+		r,
+		taskID,
+		domain.ExplicitStepExecutionStatuses(),
+	)
+	if claimErr != nil {
+		h.writeServiceError(w, r, claimErr)
+		return
+	}
+	defer release()
+	request.Grant = &grant
 	result, err := h.executor.ExecuteSteps(r.Context(), request)
 	if err != nil {
 		h.writeServiceError(w, r, err)
