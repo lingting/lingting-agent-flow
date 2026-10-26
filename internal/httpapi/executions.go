@@ -230,6 +230,7 @@ type executionHandler struct {
 //   - {taskID}/steps/{stepID}/attempts
 //   - {taskID}/steps/{stepID}/attempts/{attemptID}/sessions
 //   - {taskID}/steps/{stepID}/validations
+//   - {taskID}/steps/{stepID}/validations/{runID}/feedback
 //   - {taskID}/sessions/{sessionID}
 //
 // 其他形状一律按接口不存在处理：执行记录接口不提供任何写操作，因此不注册
@@ -246,6 +247,11 @@ func (h *executionHandler) serve(w http.ResponseWriter, r *http.Request) {
 		segments[3] == attemptsSegment &&
 		segments[5] == sessionsSegment:
 		h.listSessions(w, r, segments[0], segments[2], segments[4])
+	case len(segments) == 6 &&
+		segments[1] == stepsSegment &&
+		segments[3] == validationsSegment &&
+		segments[5] == feedbackSegment:
+		h.getValidationFeedback(w, r, segments[0], segments[2], segments[4])
 	case len(segments) == 4 && segments[1] == stepsSegment && segments[3] == validationsSegment:
 		h.listValidations(w, r, segments[0], segments[2])
 	case len(segments) == 3 && segments[1] == sessionsSegment:

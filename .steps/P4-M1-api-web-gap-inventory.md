@@ -160,7 +160,7 @@ Web 完成"新建任务 → 准备环境 → 获取代码 → 生成计划 → �
 | **G3** | 选择/创建语言环境与可用环境版本（含镜像构建） | **查询已由 P4-M2-2 闭合**（新增只依赖存储的 `app.EnvironmentQueryService`；初始化/创建版本/构建仍由 `EnvironmentService` 承担）；本行保留 P4-M1 盘点时的现场 | **查询已实现**：`GET /api/v1/environments?host_id=…`、`GET /api/v1/environments/{type}/{name}/versions/{number}?host_id=…`；构建/CRUD 仍**不存在** | 缺失 | 占位页 | **查询部分不再是阻塞**：环境与版本的构建状态、`image_ref`、服务端计算的可用性可从 HTTP 读取；剩余阻塞是前端接入（M2-3）与环境构建 Web 入口（未排期），CLI `agentflow docker init` / `docker env build` 仍是生成版本的唯一入口 | `internal/app/environments_query.go`（`EnvironmentQueryService`）；`internal/httpapi/environments.go`；`internal/app/execenv_prepare.go:145-180`；`internal/app/environments_build.go:47` | P4-M2（查询部分已完成，见 [`P4-M2-2-environment-query-api.md`](./P4-M2-2-environment-query-api.md)） | **P0** |
 | **G4** | 从可用执行节点中选择节点（而非手抄 ID） | 已实现（`ExecutionHostService`） | `GET /hosts` 已存在 | 已封装 `fetchHosts` | **部分接通**：`CreateTaskModal` 仍是自由文本 `Input`，未复用 `fetchHosts` | **否**（可手填，但易错且与已有能力脱节） | `lingting-agent-flow-ui/src/pages/tasks/CreateTaskModal.tsx:280-290`；`endpoints.ts` 的 `fetchHosts` | P4-M2 | **P1** |
 | **G5** | 失败任务显式重试（先看资格再决定） | 已实现（`TaskRetryService.Retry` / `Eligibility`，10 个稳定拒绝原因） | `POST /tasks/{id}/retry`、`GET /tasks/{id}/retry-eligibility` | **缺失** | **缺失** | **是（业务决策）**：`failed` 任务在 Web 上无任何后续动作；前端也不得自行推断可重试 | `internal/httpapi/task_retry.go`；`internal/domain/task_retry.go:22-49`；`lingting-agent-flow-ui/src/pages/tasks/status.ts`（无重试判定） | P4-M4 | **P1** |
-| **G6** | 看懂验证结果与失败原因（哪些检查失败、退出码、输出摘要、语义审查结论） | 部分实现：验证历史与检查结果可查；**失败反馈无查询入口** | `GET /tasks/{id}/steps/{sid}/validations` 已存在；**feedback 无 API** | **缺失** | **缺失** | **是（业务决策）**：用户无法判断"为什么没通过"，只能看到 `error_summary` | `internal/httpapi/executions.go:347`、`:105-132`；`internal/storage/interfaces.go:610-629`（无 HTTP） | P4-M3（+ P4-M2 补 feedback API） | **P1** |
+| **G6** | 看懂验证结果与失败原因（哪些检查失败、退出码、输出摘要、语义审查结论） | 部分实现：验证历史与检查结果可查；失败反馈查询 API 已补齐（P4-M2-5），前端视图仍缺 | `GET /tasks/{id}/steps/{sid}/validations`；`GET …/validations/{runID}/feedback`（P4-M2-5） | **缺失** | **缺失** | **是（业务决策）**：用户无法判断"为什么没通过"，只能看到 `error_summary` | `internal/httpapi/executions.go`、`internal/httpapi/execution_feedback.go`（P4-M2-5）、`internal/app/execution_feedback.go`（P4-M2-5） | P4-M3（M3-2 前端视图） | **P1** |
 | **G7** | 查看步骤 / Attempt / Session 历史（含归档与导出状态） | 已实现（`ExecutionRecordService`） | `GET /tasks/{id}/steps`、`.../attempts`、`.../sessions`、`/tasks/{id}/sessions/{sid}` | **缺失** | **缺失** | **是（业务决策）**：无法查看历史尝试与失败记录 | `internal/httpapi/executions.go:237-256`、`:258-330`、`:419` | P4-M3 | **P1** |
 | **G8** | 查看代码保存（提交/推送/合并）记录并核验 | 部分实现：记录查询与核验都在，但**没有列表 API**，`recordID` 在 Web 上不可获得 | `POST .../code-saves/{recordID}/verify-code-save`、`GET .../resume-eligibility`（其中含未决记录） | **缺失** | **缺失** | **是（业务决策）**：用户无法确认代码是否真的推送到远端 | `internal/app/code_save.go:145`（仅 CLI）；`internal/httpapi/code_recovery.go:145`、`:227` | P4-M3（列表 API）+ P4-M4（核验操作） | **P1** |
 | **G9** | 处置旧容器（`delete` / `detach`）以便重新开始 | 已实现（`ContainerService` 全套） | **不存在** | 缺失 | 缺失 | **是**：重新开始/重试的错误信息直接要求用户执行 `agentflow docker container inspect/delete/detach`，Web 无对应入口 | `internal/app/execenv_task.go:272-283`（错误文本）；`internal/app/containers_ops.go:29-401` | P4-M4（+ 需补 HTTP） | **P1** |
@@ -302,6 +302,14 @@ agentflow docker init"。
 
 ### G6 验证结果与失败反馈不可见（P1）
 
+> **状态更新（P4-M2-5，2026-10-26）**：失败反馈查询的 **API 部分已闭合**。新增只读
+> `GET /api/v1/tasks/{taskID}/steps/{stepID}/validations/{runID}/feedback`，由
+> `app.ExecutionRecordService.GetValidationFailureFeedback` 校验任务 → 步骤 → 验证记录 →
+> 反馈的完整归属链后返回已持久化并已脱敏的逐项失败检查；没有反馈时返回 `404`，不构造空
+> 反馈，也不把缺失当作验证通过。步骤级"最近一次反馈"入口经核实由验证历史列表覆盖，本轮
+> 有意不新增。前端验证历史与逐项检查视图仍归 P4-M3（M3-2）。契约与测试证据见
+> [`P4-M2-5-validation-feedback-api.md`](./P4-M2-5-validation-feedback-api.md)。
+
 **事实**：
 
 - 有：`GET /tasks/{id}/steps/{sid}/validations` 返回 `state` / `latest` / `records`，
@@ -431,8 +439,8 @@ HTTP 只有 `POST .../code-saves/{recordID}/verify-code-save`，而 `recordID` �
 | M2-1 角色初始化接入启动流程 + `GET /api/v1/roles` | G2 | 无 | **已完成（2026-10-26）**：见 [`P4-M2-1-role-initialization-api.md`](./P4-M2-1-role-initialization-api.md)；剩余角色变更入口与前端选择器（M2-4） |
 | M2-2 环境查询 HTTP 接口 | G3 | 无 | 只读列表 + 版本 + 构建状态优先；构建入口次之。**已完成**（查询部分，见 [`P4-M2-2-environment-query-api.md`](./P4-M2-2-environment-query-api.md)） |
 | M2-3 前端接入统一启动 `/start` | G1 | M2-1、M2-2 | **已完成（2026-10-26）**：任务页"启动"走 `POST /tasks/{id}/start`，`execute-workflow` 不再用于新任务；环境选择接入 M2-2 接口。见 [`P4-M2-3-web-task-launch.md`](./P4-M2-3-web-task-launch.md) |
-| M2-4 创建任务弹窗复用 `fetchHosts` 与角色接口 | G4、G2 | M2-1 | 纯前端 + 已有接口 |
-| M2-5 验证失败反馈查询 API | G6（部分） | 无 | 存储层已具备，只缺 HTTP |
+| M2-4 创建任务弹窗复用 `fetchHosts` 与角色接口 | G4、G2 | M2-1 | 纯前端 + 已有接口。**已完成（2026-10-26）**：见 [`P4-M2-4-task-creation-selectors.md`](./P4-M2-4-task-creation-selectors.md) |
+| M2-5 验证失败反馈查询 API | G6（部分） | 无 | 存储层已具备，只缺 HTTP。**已完成（2026-10-26）**：见 [`P4-M2-5-validation-feedback-api.md`](./P4-M2-5-validation-feedback-api.md) |
 | M2-6 代码保存记录列表 API | G8（部分） | 无 | 让 `recordID` 可获取 |
 | M2-7 单步骤 / 顺序执行 / 闭环 / 修复周期入口（诊断用） | G14、G13 | M2-3 | 优先级低于 M2-1~M2-4 |
 

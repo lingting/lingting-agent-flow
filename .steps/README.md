@@ -51,8 +51,15 @@
   驱动的选择器；节点只允许已启用且 `usable_for_remote_task` 的记录，角色按 `type` 分类
   并排除 `enabled=false`，节点切换清空旧环境与版本并重新查询；加载中 / 失败 / 空列表 /
   某类无启用角色分别呈现，失败不伪装为空列表且带重试入口；提交仍只用
-  `CreateTaskRequest` 的真实 `host_id` 与角色 `id`，创建不自动启动任务。剩余工作项
-  M2-5 起待实施。详见
+  `CreateTaskRequest` 的真实 `host_id` 与角色 `id`，创建不自动启动任务。子任务
+  **M2-5（验证失败反馈查询 API）已于 2026-10-26 完成**，交付物为
+  [`P4-M2-5-validation-feedback-api.md`](./P4-M2-5-validation-feedback-api.md)：新增只读
+  `GET /api/v1/tasks/{taskID}/steps/{stepID}/validations/{runID}/feedback`，由
+  `app.ExecutionRecordService.GetValidationFailureFeedback` 校验任务 → 步骤 → 验证记录 →
+  反馈的完整归属链后返回已持久化的 `domain.ValidationFailureFeedback`（含逐项失败检查的
+  标识、必需标记、状态、退出码、原因与已脱敏输出摘要），不构造空反馈、不跨任务泄露、
+  不触发任何执行或状态写入；步骤级"最近一次反馈"入口经核实由验证历史列表覆盖，本轮
+  有意不新增并记录依据。剩余工作项 M2-6 起待实施。详见
   [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
 - **上一里程碑**：`P4-M1` —— 盘点 API 与 Web 业务操作能力的缺口，状态 `completed`
   （2026-10-26，基于 `master` HEAD `70f82b1` 的实际代码核实）。交付物为
@@ -77,10 +84,9 @@
   里程碑归属。本次未运行任何测试，全部结论为静态代码核实，已在文档 §9 如实记录。
   另外记录了 7 处历史文档与代码不符之处（README 仍称并发调度未实现、任务调度器未接入、
   项目/环境/容器/代码保存均无 HTTP 接口、任务页尚未接入步骤执行入口等）。
-- **下一步**：`P4-M2-5` —— 验证失败反馈查询 API（存储层 `validation_feedbacks` 已具备，
-  缺 HTTP 查询入口），覆盖缺口 G6 的 API 部分。M2 内其余工作项依次为 M2-6（代码保存
-  记录列表 API）与 M2-7（单步骤 / 顺序执行 / 闭环 / 修复周期 / 计划生成入口）。环境构建
-  Web 入口是否上 Web 仍按产品取舍决定。详见
+- **下一步**：`P4-M2-6` —— 代码保存记录列表 API（让 `recordID` 可从 Web 获取），覆盖缺口
+  G8 的 API 部分。M2 内其余工作项为 M2-7（单步骤 / 顺序执行 / 闭环 / 修复周期 / 计划生成
+  入口）。环境构建 Web 入口与角色变更入口是否上 Web 仍按产品取舍决定。详见
   [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
 - **更早里程碑**：`P3-M5` —— 验证多任务并发、冲突和资源回收行为，状态
   `completed`（2026-10-25，基于 `master` HEAD `abfdfd3` 之后的工作区核实与实施）。
@@ -207,8 +213,8 @@
   `unverifiable` 并落盘、新增 HTTP `verify-code-save` 与 `resume-eligibility`
   （CLI `task resume-status`）、`ensureNoPendingContainer` 阻止创建第二个容器。
 - **下一步**：P3 阶段已全部完成（M1–M5 均 `completed`），P4-M1 已完成，P4-M2-1、
-  M2-2、M2-3、M2-4 均已完成（见上方"当前阶段与当前里程碑"）。按
-  [`ROADMAP.md`](./ROADMAP.md) 的优先级规则，下一步是 **P4-M2-5 —— 验证失败反馈查询
+  M2-2、M2-3、M2-4、M2-5 均已完成（见上方"当前阶段与当前里程碑"）。按
+  [`ROADMAP.md`](./ROADMAP.md) 的优先级规则，下一步是 **P4-M2-6 —— 代码保存记录列表
   API**，入口见
   [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)；
   缺口依据见
@@ -266,6 +272,7 @@
 | [`P4-M2-2-environment-query-api.md`](./P4-M2-2-environment-query-api.md) | P4-M2-2：环境查询 HTTP API 契约（列表与单版本路由、字段语义、错误映射、代码证据、测试证据、剩余风险） |
 | [`P4-M2-3-web-task-launch.md`](./P4-M2-3-web-task-launch.md) | P4-M2-3：Web 接入统一任务启动与环境选择（调用链、启动结果三态、环境选择行为、测试证据、剩余风险） |
 | [`P4-M2-4-task-creation-selectors.md`](./P4-M2-4-task-creation-selectors.md) | P4-M2-4：任务创建表单接入执行节点与角色选择器（接口契约、选择与校验规则、四态展示、测试证据、剩余风险） |
+| [`P4-M2-5-validation-feedback-api.md`](./P4-M2-5-validation-feedback-api.md) | P4-M2-5：验证失败反馈查询 API 契约（路由、字段语义、完整归属校验、错误映射、最近反馈入口的范围决策、测试证据、剩余风险） |
 
 ## 下一步工作的选择规则
 

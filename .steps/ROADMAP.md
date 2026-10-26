@@ -51,6 +51,8 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > HTTP API：列表与单版本、真实构建状态与服务端计算的可用性），**P4-M2-3 于 2026-10-26
 > 完成**（Web 接入统一任务启动 `POST /tasks/{id}/start` 与环境选择），**P4-M2-4 于
 > 2026-10-26 完成**（创建任务表单接入执行节点与角色选择器，`fetchRoles` + `fetchHosts`），
+> **P4-M2-5 于 2026-10-26 完成**（验证失败反馈查询 API：
+> `GET /tasks/{taskID}/steps/{stepID}/validations/{runID}/feedback`，应用层校验完整归属链），
 > P4-M2 因此仍为 `in_progress`）。P1 证据见
 > `P1-single-task-e2e.md` 的对应"完成记录"；P2-M1 证据见
 > `P2-M1-recovery-boundaries.md`；P2-M2 证据见 `P2-M2-interruption-semantics.md`；
@@ -413,7 +415,12 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
     `usable_for_remote_task` 的记录，角色按 `type` 分类并排除 `enabled=false`；节点切换
     清空旧环境与版本并重新查询；加载中 / 失败 / 空列表 / 某类无启用角色分别呈现且带重试
     入口。仍缺：角色变更入口（CRUD 或显式同步）与环境构建 Web 入口。
-  - P1 业务决策阻塞七项：G5 重试、G6 验证失败反馈查询、G7 执行记录历史、G8 代码保存
+  - **G6 验证失败反馈查询的 API 部分已于 P4-M2-5 闭合**：新增只读
+    `GET /api/v1/tasks/{taskID}/steps/{stepID}/validations/{runID}/feedback`，由
+    `app.ExecutionRecordService.GetValidationFailureFeedback` 校验任务 → 步骤 → 验证记录 →
+    反馈的完整归属链，返回已持久化并已脱敏的逐项失败检查；没有反馈时返回 `404`，不构造
+    空反馈，也不把缺失当作验证通过。前端验证历史视图仍归 P4-M3（M3-2）。
+  - 其余 P1 业务决策阻塞六项：G5 重试、G7 执行记录历史、G8 代码保存
     列表、G9 容器处置、G10 收尾结论展示、G11 续跑阻塞原因。
   - P2 六项：G12 项目后端能力缺失（无表、无服务）、G13 计划生成入口、G14 单步诊断入口、
     G15 事件时间线、G16 修复周期历史、G18 工作流步骤起止时间恒为空。
@@ -529,3 +536,4 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - [P4-M2-2-environment-query-api.md](./P4-M2-2-environment-query-api.md)
 - [P4-M2-3-web-task-launch.md](./P4-M2-3-web-task-launch.md)
 - [P4-M2-4-task-creation-selectors.md](./P4-M2-4-task-creation-selectors.md)
+- [P4-M2-5-validation-feedback-api.md](./P4-M2-5-validation-feedback-api.md)
