@@ -283,6 +283,22 @@
   `0023_code_fetch_active_unique.sql`、`VerifyCodeSave` 在容器缺失时降级为
   `unverifiable` 并落盘、新增 HTTP `verify-code-save` 与 `resume-eligibility`
   （CLI `task resume-status`）、`ensureNoPendingContainer` 阻止创建第二个容器。
+- **测试基础设施（独立工程质量项，不属于 P4-M3）**：前端测试并发治理已于 2026-10-27 完成，
+  交付物为
+  [`P4-frontend-test-resource-governance.md`](./P4-frontend-test-resource-governance.md)。
+  本轮核实了真实资源模型：Playwright 的 `webServer` 一次运行只启动一个 `vp dev`，全部 worker
+  共享同一 `baseURL`，因此 CPU 开销等于「无头浏览器实例数 = worker 数」，限制 worker 即限制
+  CPU 峰值，不需要进程级 CPU 配额（最初实施的 Windows Job Object 硬配额方案已验证有效但
+  维护成本过高，已全部删除）。落地内容：`playwright.config.ts` 关闭 `fullyParallel` 并把
+  `workers` 默认设为 4，`vite.config.ts` 的 `test.maxWorkers` 默认 4，两处共用新增的
+  `tests/internal/test-resource-policy.ts`（只接受 1–8 的十进制整数，非法值直接报错、不静默
+  回退），`package.json` 新增 `check` / `test:unit:safe` / `test:e2e:safe` / `test:safe` /
+  `test:all:safe` 且原有脚本语义不变。真实执行记录：全量单元测试 296 通过（原 282 + 新增 14，
+  未减少覆盖）；全量 E2E 110 通过 / 3 失败，`Running 113 tests using 4 workers`、耗时 1.3 分钟
+  （单 worker 时为 4.1 分钟），`[WebServer]` 只启动一次；`pnpm check` 与 `pnpm build` 通过。
+  3 个失败项已用 `git stash -u` 在未修改的基线上逐个复现，确认为既有问题、非本次引入，
+  本次未修复（涉及业务逻辑判断，需单独立项）。本轮**未修改任何前置业务代码与测试断言**，
+  也未提供任何 CPU 硬上限——降低 worker 属于软限制，不得表述为 CPU 百分比上限。
 - **下一步**：P3 阶段已全部完成（M1–M5 均 `completed`），P4-M1 已完成，P4-M2-1 至
   M2-7 均已完成（见上方"当前阶段与当前里程碑"）。按
   [`ROADMAP.md`](./ROADMAP.md) 的优先级规则，下一步是 **P4-M3 —— 展示阶段进度、验证结果、
@@ -354,6 +370,7 @@
 | [`P4-M3-3-task-closeout-display.md`](./P4-M3-3-task-closeout-display.md) | P4-M3-3：任务最终结论与收尾闭环展示（真实 DTO 契约、M3-1 / M3-2 核验结论、三行独立事实与警示、测试证据、未执行项与剩余风险） |
 | [`P4-M3-5-code-save-status-display.md`](./P4-M3-5-code-save-status-display.md) | P4-M3-5：代码保存三阶段状态展示（后端 DTO 字段契约、前端类型与查询封装、五组独立事实与警示、测试证据、未执行项与剩余风险） |
 | [`P4-M3-4-resume-eligibility-display.md`](./P4-M3-4-resume-eligibility-display.md) | P4-M3-4：续跑资格与阻塞原因展示（后端查询契约与阻塞分类来源、前端类型与查询封装、资格结论与阻塞项展示规则、加载失败与竞态处理、测试证据、退出条件检查、剩余风险） |
+| [`P4-frontend-test-resource-governance.md`](./P4-frontend-test-resource-governance.md) | P4 工程质量：前端测试并发治理（真实资源模型核实、Playwright worker 4 / Vitest worker 4 默认值、非法输入拒绝、资源受限入口、能力边界、验收命令与既有失败隔离） |
 
 ## 下一步工作的选择规则
 

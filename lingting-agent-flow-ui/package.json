@@ -8,7 +8,12 @@
     "build": "node scripts/build-webui.mjs",
     "build:assets": "vp build",
     "lint": "vp fmt && vp lint --fix && tsc --noEmit",
-    "test": "vp test run"
+    "check": "vp fmt && vp lint --fix && tsc --noEmit",
+    "test": "vp test run",
+    "test:unit:safe": "vp test run --maxWorkers 1",
+    "test:e2e:safe": "playwright test --workers=1",
+    "test:safe": "vp test run --maxWorkers 1 && playwright test --workers=1 && vp fmt && vp lint --fix && tsc --noEmit && node scripts/build-webui.mjs",
+    "test:all:safe": "pnpm test:unit:safe && pnpm test:e2e:safe && pnpm check && pnpm build"
   },
   "dependencies": {
     "@ant-design/cssinjs": "^2.1.2",

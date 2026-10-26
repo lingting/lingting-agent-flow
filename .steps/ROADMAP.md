@@ -582,6 +582,7 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 | 多任务调度队列、有界并发 | **已在 P3-M2 / P3-M5 完成并验收**（`app.TaskScheduler` + `tasks.lease_epoch` fencing）；此条仅保留为历史记录 | P3（已完成） |
 | 通用化抽象 / 插件化框架 | 尚无可支撑抽象的第二条真实实现，避免围绕临时实现提前投入 | 待真实需求出现 |
 | 性能、并发、存储优化 | 缺少真实使用数据，属于推测性优化 | P4 |
+| 前端测试并发治理 | **已完成**（2026-10-27，Playwright worker 4 / Vitest worker 4，关闭用例级完全并行）；不属于 M3-1 功能项，也未引入 CPU 硬配额 | P4 工程质量（已完成） |
 | 与完整流程无关的 UI 美化 | 不阻塞主流程 | P4 |
 | 计划重新生成 / 计划版本化 | 当前单次计划足够支撑 P1，版本化待真实需求 | 待定（不阻塞 P1） |
 | 本机 Pi 执行路径 | 已按架构决策移除，测试只针对远程容器执行架构 | 不再恢复 |
@@ -610,3 +611,4 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - [P4-M3-3-task-closeout-display.md](./P4-M3-3-task-closeout-display.md)
 - [P4-M3-5-code-save-status-display.md](./P4-M3-5-code-save-status-display.md)
 - [P4-M3-4-resume-eligibility-display.md](./P4-M3-4-resume-eligibility-display.md)
+- [P4-frontend-test-resource-governance.md](./P4-frontend-test-resource-governance.md)

@@ -145,6 +145,68 @@ tests/
   `lingting-agent-flow-ui-tests/run-*`，测试结束后保留，不自动清理。
 - 测试默认不依赖 Go 后端、Docker、SSH、Pi CLI 或真实模型服务。
 
+## 测试并发与资源
+
+浏览器测试的资源开销来自**无头浏览器实例数**，而实例数等于 Playwright 的 worker 数。
+dev server 只有一份：`webServer` 在一次运行中只启动一个 `vp dev` 进程，全部 worker 共享同一个
+`baseURL`（这是 Playwright 的原生行为，不需要额外机制）。因此限制 worker 就是限制 CPU 峰值。
+
+| 项目 | 默认值 | 覆盖方式 |
+| ---- | ------ | -------- |
+| Playwright worker | 4 | `AGENTFLOW_TEST_PLAYWRIGHT_WORKERS` 或 `playwright test --workers=N` |
+| Vitest worker | 4 | `AGENTFLOW_TEST_VITEST_WORKERS` 或 `vp test run --maxWorkers N` |
+| 用例级完全并行 | 关闭（`fullyParallel: false`） | 不改：它与「一个 worker 一个浏览器」的资源模型冲突 |
+| 失败重试 | `retries: 0` | 不改：资源治理不引入自动重跑 |
+
+默认值、合法区间与校验逻辑集中在 `tests/internal/test-resource-policy.ts`，两个配置文件都从
+这里取值。worker 数只接受 1–8 的十进制整数，百分比、小数、0 与越界值都会直接报错中断，
+不会静默回退到更高并发。
+
+说明：
+
+- 这里没有进程级 CPU 配额（cgroup / Job Object 之类）。受支持的做法是降低 worker 数，
+  以及按需把并发压到 1。降低 worker 与顺序执行属于软限制，**不是** CPU 百分比上限。
+- `--workers=N` 的实际并发会取 `min(N, 并行测试文件数)`：单个 spec 文件在
+  `fullyParallel: false` 下只用一个 worker，需要多个文件才会用满默认并发。
+- 单文件运行时出现 `Running N tests using 1 worker` 属于预期行为。
+
+### 资源受限入口
+
+```bash
+pnpm test:unit:safe   # 单元测试，1 worker，不启动浏览器
+pnpm test:e2e:safe    # 浏览器测试，1 worker
+pnpm test:safe        # 顺序执行：单测 → E2E → 格式/lint/类型检查 → 构建
+pnpm test:all:safe    # 同上，通过 pnpm 子任务串联，便于逐段重跑
+pnpm check            # vp fmt && vp lint --fix && tsc --noEmit
+```
+
+各阶段是 `&&` 串联的，前一阶段失败即停止，退出码原样保留，不会把部分失败汇总成成功。
+原有的 `pnpm test` / `pnpm lint` / `pnpm build` / `pnpm exec playwright test` 语义保持不变，
+需要更高并发时仍可直接加参数。
+
+### 诊断命令
+
+```bash
+# 只跑单个测试文件（并发需求低，不会拉起多个浏览器）
+pnpm exec playwright test tests/e2e/layout.spec.ts
+pnpm test tests/unit/api-client.test.ts
+
+# 只跑单个用例
+pnpm exec playwright test tests/e2e/layout.spec.ts -g "根重定向"
+pnpm test -t "Playwright 与 Vitest 默认并发都是 4"
+
+# 临时把并发压到 1，排查资源竞争
+AGENTFLOW_TEST_PLAYWRIGHT_WORKERS=1 pnpm exec playwright test
+pnpm test:e2e:safe
+
+# 确认当前生效的并发与产物目录（开头会打印 PLAYWRIGHT_WORKERS= 与 TEST_ARTIFACT_DIR=）
+pnpm exec playwright test --list
+```
+
+产物目录：`TEST_ARTIFACT_DIR` 指向 `<OS 临时目录>/lingting-agent-flow-ui-tests/run-<随机>`，
+其中 `playwright-output/` 保存失败截图与 trace，`playwright-report/` 是 HTML 报告。
+失败排查用 `pnpm exec playwright show-trace <trace.zip>`。
+
 ## 参考项目对照
 
 参考项目 `lingting-ai-gateway`（`lingting-ai-gateway-ui`）的实际实现与本次借鉴点：

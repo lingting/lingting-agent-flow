@@ -3,6 +3,7 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite-plus";
 
+import { resolveVitestWorkers } from "./tests/internal/test-resource-policy";
 import { peerDependencies } from "lingting-react-ui/package.json";
 
 // LRI 的 peerDependencies 是宿主去重列表的唯一来源。缺少任一条目时，构建产物会包含
@@ -75,5 +76,11 @@ export default defineConfig({
   },
   test: {
     include: ["tests/**/*.test.ts"],
+    // 资源治理：Vitest 默认把 worker 数取成逻辑 CPU 数（18 核机器就是 18 个 fork），
+    // 会让前台负载长时间打满。这里统一从测试资源策略取值，默认最多 2 个 worker，
+    // 安全模式降到 1 个；`--maxWorkers` 仍可由命令行显式覆盖。
+    // 只设置 maxWorkers，不同时设置 minWorkers / fileParallelism，避免参数互相冲突：
+    // fileParallelism 保持默认，测试隔离（isolate）也保持默认开启。
+    maxWorkers: resolveVitestWorkers(),
   },
 });
