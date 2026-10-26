@@ -40,16 +40,34 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 
 ## 当前实现状态摘要（基于代码证据）
 
-> **当前阶段：P3 已完成 —— 多任务执行与调度**（P1 全部里程碑于 2026-10-23 完成；
+> **当前阶段：P4 —— 产品操作体验与针对性优化**（P1 全部里程碑于 2026-10-23 完成；
 > P2-M1 于 2026-10-23 完成，P2-M2 于 2026-10-24 完成，P2-M3 于 2026-10-24 完成，
 > P2-M4 于 2026-10-25 完成，P2-M5 于 2026-10-25 完成；
 > **P3-M1 于 2026-10-25 完成，P3-M2 于 2026-10-25 完成，P3-M3 于 2026-10-26 完成
 > （文档记录日期；实际实施与本次 P3-M4 同在 2026-10-25，日期不自洽已记录在
 > `P3-M4-scheduler-recovery.md` §1.2），P3-M4 于 2026-10-25 完成，P3-M5 于 2026-10-25
-> 完成**）。P1 证据见
+> 完成；P4-M1 于 2026-10-26 完成（基于 `master` HEAD `70f82b1`）**）。P1 证据见
 > `P1-single-task-e2e.md` 的对应"完成记录"；P2-M1 证据见
 > `P2-M1-recovery-boundaries.md`；P2-M2 证据见 `P2-M2-interruption-semantics.md`；
 > P2-M3 与 P2-M4 证据见 `P2-reliability-recovery.md` 的对应里程碑详情。
+>
+> P4-M1 的核实结论：本轮只做盘点，**未修改任何生产代码或前端功能代码**，交付
+> `P4-M1-api-web-gap-inventory.md`。结论是"后端执行链路已完整、Web 操作入口严重缺失"：
+> 统一启动、计划生成、单步骤/顺序执行、开发—验证闭环、修复周期、确定性验证、任务级
+> 编排、显式重试、续跑资格、代码保存核验、执行记录查询全部有服务与 HTTP 入口（34 条
+> 路由逐条核实），但前端 `src/lib/api` 只封装了其中 17 个，`src/pages` 只有任务、机器、
+> 概览三个页面真实接通。识别出 3 条 P0 端到端断链——G1 `POST /api/v1/tasks/{taskID}/start`
+> 未接入 Web（任务页直接调 `execute-workflow`，对 `queued` 新任务必然 409，因为
+> `domain.CheckWorkflowStart` 要求已有容器与已持久化步骤）；**G2 角色初始化
+> （`app.RoleSeeds` + `storage.RoleSeeder.SeedRoles`）在生产代码中零调用者**，`agentflow
+> server` 启动不导入角色、CLI 无角色命令、无 `/api/v1/roles`，全新数据库 `roles` 为空导致
+> `TaskService.CreateTask` → `ensureRoles` 失败，**任何任务都创建不出来**（历史文档从未
+> 记录该断链）；G3 环境（语言环境/版本/镜像）只有 CLI，无 HTTP 入口，`/start` 会在
+> `container` 阶段失败。另有 7 项 P1（重试、验证失败反馈、执行记录历史、代码保存列表、
+> 容器处置、收尾结论、续跑阻塞原因）、6 项 P2、3 项 P3，共 21 项缺口，逐项附代码证据、
+> 优先级、里程碑归属与验收标准。同时记录 7 处历史文档与代码不符（README 仍称并发调度
+> 未实现、任务调度器未接入、项目/环境/容器/代码保存均无 HTTP 接口、任务页尚未接入步骤
+> 执行入口等）。本次未运行任何测试，全部结论为静态代码核实，已在文档 §9 如实记录。
 >
 > P3-M5 的核实结论：本轮以可复核的测试证据为中心，先定位真实缺口再修复，共修复 4 个
 > 生产缺陷——D1 `TaskService.CancelTask`（CLI 入口）用无条件整行写入，会覆盖并发领取的
@@ -375,6 +393,17 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - **容器残留与 merge 恢复的真实远程证据**：P2-M5 的容器 `unknown` / 孤儿收敛与 merge
   恢复判定只有本地受控端口 + 本机真实 Git 的证据，缺少真实远程 Docker 上的现场注入。
   P2 退出条件据此仍需在真实远程环境复核这一类行为。
+- **P4-M1 核实的操作入口缺口**（P4 范围，见
+  [`P4-M1-api-web-gap-inventory.md`](./P4-M1-api-web-gap-inventory.md) §5）：
+  - P0 端到端阻塞三项：G2 角色初始化无生产调用者且无 `/api/v1/roles`；G1 统一启动
+    `POST /tasks/{taskID}/start` 未接入 Web；G3 环境（语言/版本/镜像）无 HTTP 接口。
+  - P1 业务决策阻塞七项：G5 重试、G6 验证失败反馈查询、G7 执行记录历史、G8 代码保存
+    列表、G9 容器处置、G10 收尾结论展示、G11 续跑阻塞原因。
+  - P2 六项：G12 项目后端能力缺失（无表、无服务）、G13 计划生成入口、G14 单步诊断入口、
+    G15 事件时间线、G16 修复周期历史、G18 工作流步骤起止时间恒为空。
+  - P3 三项：G17 调度名额可见性、G19 进度自动刷新、G20 单步诊断动作。
+  - 上述缺口**不影响后端执行链路的正确性**，只影响用户能否仅通过 Web 完成与观察业务
+    流程；因此不改变 P1–P3 的完成结论。
 
 **待调查**：
 
@@ -459,7 +488,7 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 
 | 事项 | 暂缓理由 | 预计阶段 |
 |---|---|---|
-| 多任务调度队列、有界并发 | 单任务端到端闭环尚未成立，提前建设会与真实需求脱节 | P3 |
+| 多任务调度队列、有界并发 | **已在 P3-M2 / P3-M5 完成并验收**（`app.TaskScheduler` + `tasks.lease_epoch` fencing）；此条仅保留为历史记录 | P3（已完成） |
 | 通用化抽象 / 插件化框架 | 尚无可支撑抽象的第二条真实实现，避免围绕临时实现提前投入 | 待真实需求出现 |
 | 性能、并发、存储优化 | 缺少真实使用数据，属于推测性优化 | P4 |
 | 与完整流程无关的 UI 美化 | 不阻塞主流程 | P4 |
@@ -479,3 +508,4 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - [P3-M4-scheduler-recovery.md](./P3-M4-scheduler-recovery.md)
 - [P3-M5-multi-task-acceptance.md](./P3-M5-multi-task-acceptance.md)
 - [P4-product-experience-optimization.md](./P4-product-experience-optimization.md)
+- [P4-M1-api-web-gap-inventory.md](./P4-M1-api-web-gap-inventory.md)

@@ -22,7 +22,10 @@ API 兼容性、Docker CLI 帮助信息、基础 Dockerfile 的外部 `FROM` 镜
 `POST /api/v1/tasks/{taskID}/execute-workflow` 并轮询真实进度。计划生成已提供独立入口
 （`POST /api/v1/tasks/{taskID}/plan`），编排器本身仍只消费已持久化的计划、不创建容器：
 启动前要求任务已有受管理且运行中的容器与已持久化的计划步骤，否则返回前置条件错误或状态
-冲突。**自动重试、多任务并发调度仍未实现**。文档只会在对应能力落地后才声明其可用。
+冲突。多任务并发调度已实现（`app.TaskScheduler`，复用 `scheduler.max_concurrent_tasks`），
+失败任务的显式重试已提供入口（`POST /api/v1/tasks/{taskID}/retry` 与
+`GET .../retry-eligibility`）；**无需用户确认的自动重试仍未实现**，调度器只领取 `queued`。
+文档只会在对应能力落地后才声明其可用。
 
 ## 第一版功能范围
 
@@ -252,6 +255,12 @@ make web-dev            # 等价于 cd lingting-agent-flow-ui && pnpm dev
 | POST   | `/api/v1/tasks/{taskID}/resume-workflow` | 恢复一次已停止的工作流执行    |
 | POST   | `/api/v1/tasks/{taskID}/steps/{stepID}/attempts/{attemptID}/validate` | 执行确定性验证 |
 | POST   | `/api/v1/tasks/{taskID}/steps/{stepID}/attempts/{attemptID}/initialize-code` | 容器内初始化代码 |
+| GET    | `/api/v1/tasks/{taskID}/steps/{stepID}/validations` | 验证历史（流程状态与结论分列）  |
+| POST   | `/api/v1/tasks/{taskID}/steps/{stepID}/open-repair-cycle` | 显式开启新的执行周期（重置修复预算） |
+| POST   | `/api/v1/tasks/{taskID}/retry`  | 失败任务的显式重试，返回 202 与真实状态              |
+| GET    | `/api/v1/tasks/{taskID}/retry-eligibility` | 只读查询重试资格与阻塞分类                |
+| POST   | `/api/v1/tasks/{taskID}/code-saves/{recordID}/verify-code-save` | 只读核验代码保存记录 |
+| GET    | `/api/v1/tasks/{taskID}/resume-eligibility` | 只读查询续跑资格、阻塞原因与下一步动作     |
 | GET    | `/api/v1/hosts`                 | 执行节点列表（含校验状态与详情）                       |
 | POST   | `/api/v1/hosts`                 | 新增执行节点，返回 201 与真实初始状态 `checking`       |
 | GET    | `/api/v1/hosts/{hostID}`        | 执行节点详情                                          |
@@ -465,7 +474,9 @@ GET /api/v1/tasks/{taskID}/sessions/{sessionID}
 - 单步骤执行接口 `POST /api/v1/tasks/{taskID}/steps/{stepID}/execute` 执行一个已存在的 Step。
 - 未经真实执行器创建时不会存在 Step / Attempt / Session 记录；查询返回空列表是正确结果，
   不会用虚构数据填充。
-- 角色没有查询接口，创建任务时需要手工填写其标识；执行节点已提供 `/api/v1/hosts` 接口。
+- 角色既没有查询接口也没有导入入口：创建任务时必须手工填写其标识，且全新数据库的 `roles`
+  表为空（`app.RoleSeeds` / `storage.RoleSeeder.SeedRoles` 在生产代码中没有调用者），
+  因此创建任务会因角色不存在而失败。执行节点已提供 `/api/v1/hosts` 接口。
 
 `/api` 下的未知路径返回 JSON 404，不会回退到前端页面；`/api` 之外的未知页面路径进入 SPA
 回退，因此浏览器刷新任意前端路由都能正常打开页面。
@@ -1130,15 +1141,21 @@ SSH、容器、Pi 或代码保存能力，也不会在服务不可达时退回�
 
 ### 尚未实现的接口
 
-项目、环境、容器、代码保存与 Agent 调度均**没有** HTTP 接口。Web 页面中的对应入口仍为
-占位说明，连接指示器只表示 HTTP API 的可用性，不代表 SSH、Docker 或 Pi Agent 已就绪。
-任务页面已接入真实接口，但只能创建、查看、取消与删除任务记录，尚未接入步骤执行入口。
+项目、环境、容器、角色与 Agent 调度均**没有** HTTP 接口。代码保存只有按记录标识的只读
+核验入口（`POST /api/v1/tasks/{taskID}/code-saves/{recordID}/verify-code-save`），**没有
+记录列表接口**，因此记录标识目前只能从 CLI（`agentflow code status`）或
+`GET .../resume-eligibility` 的未决记录中取得。Web 页面中的项目、环境与设置入口仍为占位
+说明，连接指示器只表示 HTTP API 的可用性，不代表 SSH、Docker 或 Pi Agent 已就绪。
+
+任务页面已接入真实接口：任务创建/查看/取消/删除、工作流启动/取消/恢复与工作流进度面板；
+**尚未接入统一启动 `/start`、计划生成、步骤级执行、验证历史、失败反馈与重试入口**。
 机器页面已接入执行节点接口与环境预检结果展示。
 
-后台服务目前注册了执行节点环境预检、单步骤执行协调器、确定性验证引擎、开发—验证闭环
-协调器与任务级工作流编排器：任务调度器与自动 Retry 编排尚未接入，`agentflow server` 启动后
-提供 API、页面、环境预检、单步骤执行、显式顺序执行、单步骤开发—验证闭环、计划生成与
-任务级工作流编排能力。
+后台服务注册了执行节点环境预检、单步骤执行协调器、确定性验证引擎、开发—验证闭环协调器、
+任务级工作流编排器、任务调度器、任务租约残留核验、容器/代码获取/代码保存恢复扫描与执行
+记录残留收敛。`agentflow server` 启动后提供 API、页面、环境预检、单步骤执行、显式顺序
+执行、单步骤开发—验证闭环、计划生成、任务级工作流编排、有界并发自动调度与失败任务显式
+重试能力；**无需用户确认的自动重试仍未实现**。
 
 ## 容器内 Pi Runner 与 Session 生命周期
 
@@ -1773,22 +1790,23 @@ SSH 连接层按三层覆盖：`tests/unit/ssh/`（主机密钥、认证配置�
 
 以下能力均在计划中，当前版本**不提供**：
 
-- 需求队列、Worker 与并发调度（`internal/scheduler`）。
-- 持久化任务队列与任务自动领取。
-
-- Validator Agent 调用接入：验证结论当前只来自确定性检查命令。
+- 无需用户确认的自动重试与退避策略：调度器只领取 `queued`；`failed` 任务的重试必须由用户
+  通过 `POST /api/v1/tasks/{taskID}/retry` 显式发起。验证失败后的修复循环由
+  `execute-and-validate` 在单次闭环内完成，有上限且不跨调用自动续跑。
 - 旧容器的显式处置命令：`task retry` / `task recover` 已随 `internal/workflow` 引擎包移除，
-  重新开始需要先通过容器管理命令处置旧容器。
-- 多步骤自动编排与 Planner → Developer → Validator 自动串联。
-- 自动重试、退避策略与验证失败回退。
+  重新开始需要先通过容器管理命令（`agentflow docker container delete` / `detach`）处置旧容器。
 - Git Worktree 创建与清理（每个任务目前使用远程容器内的工作区）。
 - Git 之外的代码获取方式（HTTP 下载、wget、curl、SCP）：`source.Fetcher` 抽象已就位，
   但只注册了 Git Clone 实现。
 - 私有仓库认证：仓库地址中的内嵌凭据被拒绝，凭据需由环境镜像自行注入。
-- 项目、环境的 HTTP 接口与对应页面（任务、执行节点、执行记录已提供接口）。
+- 项目、环境、容器、角色与调度的 HTTP 接口与对应页面（任务、执行节点、执行记录、
+  代码保存核验已提供接口）；Web 上的项目、环境与设置页仍为占位说明。
 - 多 Agent Provider 与分布式执行（当前只支持 Pi）。
-- 角色管理 CLI 与 Web 页面（当前只有存储层的角色初始化与增删改查接口）。
-- 前端步骤执行入口与实时日志页面。
+- 角色管理 CLI、Web 页面与角色查询接口：存储层已有 `CreateRole` / `UpdateRole` /
+  `DeleteRole` / `ListRoles` 与 `SeedRoles`，但**生产代码没有调用者**，全新数据库的角色表
+  需要由后续版本补齐正式入口。
+- 前端统一启动 `/start`、计划生成、步骤执行、验证历史、失败反馈与重试入口。
+- 前端实时日志页面。
 
 ## 安全与风险提示
 
