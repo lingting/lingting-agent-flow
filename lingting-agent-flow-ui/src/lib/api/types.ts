@@ -344,3 +344,151 @@ export type ResumeWorkflowRequest = {
   timeout_seconds?: number;
   validation_timeout_seconds?: number;
 };
+
+/**
+ * 统一任务启动的阶段。
+ *
+ * 取值与 Go 端 `domain.TaskLaunchStage` 完全一致：阶段只说明这一次启动走到了哪一步，
+ * 不表示任务成功。前端据此展示"卡在哪个阶段"，不得自行推断。
+ */
+export type TaskLaunchStage = "validate" | "container" | "workspace" | "plan" | "workflow";
+
+/**
+ * 任务级工作区初始化状态。
+ *
+ * 取值与 Go 端 `domain.TaskWorkspaceInitStatus` 一致；只有 `succeeded` 与 `skipped`
+ * 表示代码已就绪，其余取值都不是成功。
+ */
+export type TaskWorkspaceInitStatus =
+  | "pending"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "timed_out"
+  | "skipped"
+  | "uncertain";
+
+/** `POST /api/v1/tasks/{taskID}/start` 的请求体；只能传执行参数 */
+export type StartTaskRequest = {
+  /** 可选补充说明，会追加在计划与每一步骤的提示词之后 */
+  prompt?: string;
+  /** 单个步骤开发阶段的超时秒数，0 或省略表示使用任务配置或服务端默认值 */
+  timeout_seconds?: number;
+  /** 单个步骤验证阶段的超时秒数，0 或省略表示使用服务端默认值 */
+  validation_timeout_seconds?: number;
+  /** 本次规划调用的超时秒数，0 或省略表示使用任务配置或服务端默认值 */
+  plan_timeout_seconds?: number;
+};
+
+/** 已持久化的计划步骤，与 Go 端 `httpapi.PlanStepResponse` 一一对应 */
+export type PlanStep = {
+  step_id: string;
+  sequence: number;
+  title: string;
+  /** 步骤类型，与 Go 端 `domain.StepType` 一致 */
+  step_type: string;
+  /** 步骤状态，与 Go 端 `domain.StepStatus` 一致 */
+  status: string;
+  /** 锁定到步骤上的执行角色标识 */
+  role_id?: string;
+  /** 生效的必需检查名称 */
+  required_checks: string[];
+};
+
+/**
+ * `POST /api/v1/tasks/{taskID}/start` 的响应（202）。
+ *
+ * 结构显式区分四件事：走到了哪个阶段、任务当前真实状态、计划是否真的写入数据库、
+ * 以及工作流是否真的启动。`workflow_started` 为 false 时不得把任务展示为已开始执行。
+ */
+export type StartTaskResponse = {
+  task_id: string;
+  /** 本次启动最后进入的阶段 */
+  stage: TaskLaunchStage;
+  /** 收尾后读取到的任务真实状态 */
+  task_status: TaskStatus;
+  /** 本次启动使用的容器登记记录 ID，未准备时缺省 */
+  container_id?: string;
+  /** 本次调用是否真的创建了容器 */
+  container_prepared: boolean;
+  /** 本次启动观察到的任务级工作区初始化状态，未走到该阶段时缺省 */
+  workspace_status?: TaskWorkspaceInitStatus;
+  /** 工作区初始化核验到的 commit SHA */
+  workspace_commit?: string;
+  /** 计划是否已完整写入数据库 */
+  plan_persisted: boolean;
+  /** 已持久化的计划步骤，按序号升序 */
+  plan_steps: PlanStep[];
+  /** 本次调用是否真的启动了工作流推进 */
+  workflow_started: boolean;
+  /** 启动后的执行记录，未启动时缺省 */
+  run?: WorkflowRun;
+  /** 失败阶段，成功时缺省 */
+  failure_stage?: string;
+  /** 失败原因摘要，成功时缺省 */
+  failure?: string;
+  started_at?: string;
+  finished_at?: string;
+};
+
+/**
+ * 环境类型。
+ *
+ * 取值与 Go 端 `domain.EnvironmentType` 一致：基础环境名称固定为 `base`，
+ * 语言环境名称遵循 `^[a-z0-9][a-z0-9-]{0,31}$`。
+ */
+export type EnvironmentType = "base" | "language";
+
+/** 环境版本的构建状态，取值与 Go 端 `domain.BuildStatus` 一致 */
+export type BuildStatus = "pending" | "building" | "succeeded" | "failed";
+
+/** 环境版本的对外表示，与 Go 端 `httpapi.EnvironmentVersionResponse` 一一对应 */
+export type EnvironmentVersion = {
+  /** 版本标签，例如 v0001 */
+  version: string;
+  /** 递增版本号 */
+  number: number;
+  /** 真实构建状态 */
+  build_status: BuildStatus;
+  /**
+   * 该版本当前是否可以用于创建容器。
+   *
+   * 由服务端按"构建成功且已核实镜像 ID"计算，前端不得从 image_ref 或版本号推断。
+   */
+  usable: boolean;
+  /** 创建版本时确定的镜像引用 */
+  image_ref: string;
+  /** 构建成功后核实的实际镜像 ID，未构建成功时缺省 */
+  image_id?: string;
+  /** 依赖的父基础环境版本标签，基础环境缺省 */
+  parent_version?: string;
+  /** 构建失败的可诊断摘要 */
+  error_summary?: string;
+  created_at: string;
+  /** 构建完成时间，未构建成功时缺省 */
+  built_at?: string;
+};
+
+/**
+ * 单个环境的对外表示，与 Go 端 `httpapi.EnvironmentResponse` 一一对应。
+ *
+ * `current_version` 是当前可用版本，`latest_version` 是已创建的最大版本标签；
+ * 两者语义不同，不能把最新版本默认当成可用版本。
+ */
+export type Environment = {
+  type: EnvironmentType;
+  name: string;
+  /** 当前可用版本标签，没有可用版本时缺省 */
+  current_version?: string;
+  /** 已创建的最大版本标签 */
+  latest_version: string;
+  /** 该环境的全部版本，按版本号升序 */
+  versions: EnvironmentVersion[];
+};
+
+/** `GET /api/v1/environments?host_id=…` 的响应 */
+export type EnvironmentListResponse = {
+  records: Environment[];
+  total: number;
+};

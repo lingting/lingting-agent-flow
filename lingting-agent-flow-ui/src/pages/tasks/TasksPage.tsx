@@ -22,18 +22,18 @@ import {
   fetchTaskWorkflow,
   fetchTasks,
   resumeTaskWorkflow,
-  startTaskWorkflow,
+  startTask,
   type Task,
   type TaskStatus,
   type WorkflowStatusResponse,
 } from "@/lib/api";
 import { CreateTaskModal } from "@/pages/tasks/CreateTaskModal";
+import { canStartTask, describeLaunchResult } from "@/pages/tasks/launch";
 import {
   canCancelTask,
   canCancelWorkflow,
   canDeleteTask,
   canResumeWorkflow,
-  canStartWorkflow,
   TASK_STATUS_META,
   WORKFLOW_RUN_STATUS_DICT,
 } from "@/pages/tasks/status";
@@ -187,6 +187,22 @@ export function TasksPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [workflow, setWorkflow] = useState<WorkflowStatusResponse>();
   const [workflowLoading, setWorkflowLoading] = useState(false);
+  /** 正在启动的任务标识：用于阻止重复提交并给出进行中反馈 */
+  const [startingTaskID, setStartingTaskID] = useState<string>();
+  /**
+   * 进行中标记的同步副本。
+   *
+   * 同一帧内的连续点击不会让 state 及时更新，因此用 ref 做第一道防重复提交；
+   * 真正的并发安全仍由服务端任务租约与状态机保证。
+   */
+  const launchingRef = useRef(false);
+  /** 最近一次启动的服务端结论（只在请求成功返回时设置） */
+  const [launchOutcome, setLaunchOutcome] = useState<{
+    taskName: string;
+    result: ReturnType<typeof describeLaunchResult>;
+  }>();
+  /** 启动结论之后的刷新失败提示：不覆盖已得到的启动结论 */
+  const [launchRefreshError, setLaunchRefreshError] = useState<string>();
 
   /** 重新拉取当前页真实数据 */
   const reload = useCallback(() => void actionRef.current?.reload(), []);
@@ -223,19 +239,69 @@ export function TasksPage() {
     [loadWorkflow],
   );
 
-  /** 启动任务级工作流：服务端立即返回真实初始状态，进度通过刷新查询 */
-  const handleStartWorkflow = useCallback(
-    async (task: Task) => {
-      setActionError(undefined);
+  /**
+   * 启动请求结束后重新读取服务端事实。
+   *
+   * 启动接口会真实创建容器、初始化工作区、生成计划并启动工作流，因此无论响应是成功
+   * 还是失败，都必须以数据库中的真实状态为准刷新页面，不能依赖本地对象。
+   *
+   * 刷新失败单独记录：已经得到的启动结论不会被抹除，只提示状态可能不是最新。
+   */
+  const refreshAfterLaunch = useCallback(
+    async (taskID: string) => {
+      const failures: string[] = [];
       try {
-        await startTaskWorkflow(task.id);
-        reload();
-        await loadWorkflow(task.id);
+        const { data } = await fetchTask(taskID);
+        setSelected((current) => (current?.id === taskID ? data : current));
       } catch (cause) {
+        failures.push(`任务详情（${describeError(cause)}）`);
+      }
+      reload();
+      try {
+        const { data } = await fetchTaskWorkflow(taskID);
+        setWorkflow(data);
+      } catch (cause) {
+        failures.push(`工作流进度（${describeError(cause)}）`);
+      }
+      setLaunchRefreshError(
+        failures.length > 0
+          ? `启动请求已结束，但状态刷新失败：${failures.join("、")}。页面可能不是最新状态，请手动刷新确认。`
+          : undefined,
+      );
+    },
+    [reload],
+  );
+
+  /**
+   * 显式启动任务：走统一启动 `POST /tasks/{id}/start`。
+   *
+   * 该入口由服务端依次准备容器、初始化工作区、生成并持久化计划、启动工作流，因此
+   * 新任务（`queued`、无容器、无步骤）必须用它，而不是 `execute-workflow`。
+   *
+   * 不做任何乐观状态更新，也不自动重试：启动流程可能已经产生容器等外部副作用，
+   * 重试必须由用户基于最新状态显式触发。
+   */
+  const handleStartTask = useCallback(
+    async (task: Task) => {
+      if (launchingRef.current) return;
+      launchingRef.current = true;
+      setActionError(undefined);
+      setLaunchRefreshError(undefined);
+      setLaunchOutcome(undefined);
+      setStartingTaskID(task.id);
+      try {
+        const { data } = await startTask(task.id);
+        setLaunchOutcome({ result: describeLaunchResult(data), taskName: task.name });
+      } catch (cause) {
+        // HTTP 失败：只展示服务端给出的错误，不根据前端预期推断服务端状态。
         setActionError(describeError(cause));
+      } finally {
+        await refreshAfterLaunch(task.id);
+        launchingRef.current = false;
+        setStartingTaskID(undefined);
       }
     },
-    [loadWorkflow, reload],
+    [refreshAfterLaunch],
   );
 
   /** 请求取消当前工作流：取消请求先落盘，最终状态由真实收敛结果决定 */
@@ -338,9 +404,10 @@ export function TasksPage() {
           <Space>
             <LinkButton onClick={() => void openDetail(record.id)} text="详情" />
             <LinkButton
-              disabled={!canStartWorkflow(record)}
-              onClick={() => void handleStartWorkflow(record)}
-              text="执行工作流"
+              disabled={!canStartTask(record) || startingTaskID === record.id}
+              loading={startingTaskID === record.id}
+              onClick={() => void handleStartTask(record)}
+              text={startingTaskID === record.id ? "启动中" : "启动"}
             />
             <LinkButton
               disabled={!canCancelTask(record)}
@@ -364,7 +431,7 @@ export function TasksPage() {
         valueType: "option",
       },
     ],
-    [handleCancel, handleDelete, handleStartWorkflow, openDetail],
+    [handleCancel, handleDelete, handleStartTask, openDetail, startingTaskID],
   );
 
   /**
@@ -407,6 +474,26 @@ export function TasksPage() {
       )}
       {actionError && (
         <Alert closable description={actionError} showIcon title="操作失败" type="error" />
+      )}
+      {launchOutcome && (
+        <Alert
+          closable
+          description={launchOutcome.result.description}
+          onClose={() => setLaunchOutcome(undefined)}
+          showIcon
+          title={`${launchOutcome.result.title}：${launchOutcome.taskName}`}
+          type={launchOutcome.result.kind === "started" ? "success" : "warning"}
+        />
+      )}
+      {launchRefreshError && (
+        <Alert
+          closable
+          description={launchRefreshError}
+          onClose={() => setLaunchRefreshError(undefined)}
+          showIcon
+          title="状态刷新失败"
+          type="warning"
+        />
       )}
 
       {selected && (

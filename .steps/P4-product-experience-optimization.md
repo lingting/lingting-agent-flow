@@ -10,6 +10,9 @@
 > **P4-M2-2（环境查询 HTTP API）已于 2026-10-26 实施完成**，契约、代码证据、测试结果与
 > 剩余风险见
 > [`P4-M2-2-environment-query-api.md`](./P4-M2-2-environment-query-api.md)。
+> **P4-M2-3（Web 接入统一任务启动 + 环境选择）已于 2026-10-26 实施完成**，调用链、
+> 环境选择行为、测试结果与剩余风险见
+> [`P4-M2-3-web-task-launch.md`](./P4-M2-3-web-task-launch.md)。
 
 ## 阶段目标
 
@@ -38,8 +41,11 @@ P1–P3 保证"能跑"，但用户无法清楚地操作与观察时，主流程�
 **已完成**：
 
 - 机器页完整接通执行节点接口与环境预检结果展示（`lingting-agent-flow-ui/src/pages/machines/`）。
-- 任务页已接通任务 CRUD、工作流启动/取消/恢复与工作流进度面板
-  （`lingting-agent-flow-ui/src/pages/tasks/TasksPage.tsx`）。
+- 任务页已接通任务 CRUD、统一启动/取消/恢复与工作流进度面板
+  （`lingting-agent-flow-ui/src/pages/tasks/TasksPage.tsx`）；新任务的启动入口已是
+  `POST /tasks/{id}/start`（P4-M2-3），`execute-workflow` 不再用于新任务启动。
+- 任务创建弹窗的语言环境与版本来自 `GET /api/v1/environments?host_id=…`，只有服务端
+  标记 `usable=true` 的版本可选（P4-M2-3）。
 - 后端已具备统一任务启动、计划生成、单步骤执行、顺序执行、开发—验证闭环、修复周期、
   确定性验证、任务级工作流编排、显式重试、续跑资格、代码保存核验、执行记录查询的
   服务与 HTTP 入口（`internal/httpapi/`，完整清单见 P4-M1 §4.1）。
@@ -49,6 +55,8 @@ P1–P3 保证"能跑"，但用户无法清楚地操作与观察时，主流程�
 - **P0 端到端阻塞**：
   - G1 统一启动 `POST /tasks/{id}/start` 未接入 Web；任务页直接调 `execute-workflow`，
     对 `queued` 新任务必然 409（`domain.CheckWorkflowStart` 要求已有容器与已持久化步骤）。
+    **M2-3 已闭合**：任务页"启动"改走统一启动，`execute-workflow` 已从新任务启动流程移除；
+    上述描述保留为 P4-M1 盘点时的现场记录。
   - G2 角色初始化与角色查询 —— **M2-1 已闭合后端部分**：`agentflow server` 启动时在数据库
     打开后按 `app.RoleSeeds` + `storage.RoleSeeder.SeedRoles` 导入初始角色（只在空表时），
     新增只读 `GET /api/v1/roles`。剩余部分是角色变更入口（CRUD 或显式同步）与前端角色
@@ -93,7 +101,7 @@ P1–P3 保证"能跑"，但用户无法清楚地操作与观察时，主流程�
 | ID | 名称 | 状态 | 依赖 |
 |---|---|---|---|
 | P4-M1 | 盘点当前 API 与 Web 业务操作能力的缺口 | `completed`（2026-10-26，基于 `master` HEAD `70f82b1`） | P3 退出 |
-| P4-M2 | 提供完整任务生命周期的必要操作入口 | `in_progress`（M2-1、M2-2 已完成；M2-3 起待实施） | P4-M1 |
+| P4-M2 | 提供完整任务生命周期的必要操作入口 | `in_progress`（M2-1、M2-2、M2-3 已完成；M2-4 起待实施） | P4-M1 |
 | P4-M3 | 展示阶段进度、验证结果、失败原因和恢复状态 | `pending` | P4-M1、P4-M2（部分工作项需 M2 先补 API） |
 | P4-M4 | 支持必要的继续执行、取消、恢复和结果查看操作 | `pending` | P4-M2、P4-M3 |
 | P4-M5 | 根据真实使用问题或可测量数据推进性能、并发、存储与架构优化 | `pending` | P4-M2、P4-M3、P4-M4 |
@@ -114,9 +122,10 @@ P1–P3 保证"能跑"，但用户无法清楚地操作与观察时，主流程�
 ## 下一步选择规则
 
 M1 已完成，M2-1 已完成（角色初始化 + `GET /api/v1/roles`），M2-2 已完成（环境查询
-HTTP API）。**下一步是 M2-3 前端接入统一启动 `POST /tasks/{id}/start`**（覆盖 G1），
-并复用 M2-2 的接口展示真实环境与构建状态。G2 与 G3 的后端断链均已解除：全新数据库启动后
-角色会被真实写入，环境与版本可从 HTTP 读取。其余 M2 工作项在核心链路打通后再补齐。
+HTTP API），M2-3 已完成（Web 接入统一启动 + 环境选择）。**下一步是 M2-4：创建任务弹窗
+复用 `fetchHosts` 与角色接口，移除手填的执行节点与角色标识**（覆盖 G4 与 G2 的前端部分）。
+G1、G2、G3 的端到端断链均已解除：全新数据库启动后角色会被真实写入，环境与版本可从 HTTP
+读取，新任务可从 Web 显式启动并真实推进工作流。
 
 M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、M5（基于实测数据的优化）。
 
@@ -147,7 +156,9 @@ M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、
 - **状态**：`in_progress`（M2-1 于 2026-10-26 完成，交付物
   [`P4-M2-1-role-initialization-api.md`](./P4-M2-1-role-initialization-api.md)；
   M2-2 于 2026-10-26 完成，交付物
-  [`P4-M2-2-environment-query-api.md`](./P4-M2-2-environment-query-api.md)；M2-3 起待实施）
+  [`P4-M2-2-environment-query-api.md`](./P4-M2-2-environment-query-api.md)；M2-3 于
+  2026-10-26 完成，交付物
+  [`P4-M2-3-web-task-launch.md`](./P4-M2-3-web-task-launch.md)；M2-4 起待实施）
 - **必要性**：G2/G1/G3 是端到端阻塞，不解除则用户无法从 Web 开始任何任务。
 - **前置依赖**：P4-M1。
 - **工作项（按交付顺序）**：
@@ -158,9 +169,12 @@ M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、
   2. **M2-2** 环境查询 HTTP 接口（列表 + 版本 + 构建状态）。覆盖 G3。**已完成**
      （2026-10-26，见
      [`P4-M2-2-environment-query-api.md`](./P4-M2-2-environment-query-api.md)）。
-     仍缺：前端接入（随 M2-3）与环境构建 Web 入口（未排期）。
+     前端接入已随 M2-3 完成（见 [`P4-M2-3-web-task-launch.md`](./P4-M2-3-web-task-launch.md)）；
+    仍缺：环境构建 Web 入口（未排期）。
   3. **M2-3** 前端接入统一启动 `POST /tasks/{id}/start`，展示真实 `stage` /
-     `workflow_started`。覆盖 G1。
+     `workflow_started`。覆盖 G1。**已完成**（2026-10-26，见
+     [`P4-M2-3-web-task-launch.md`](./P4-M2-3-web-task-launch.md)）。同时把任务创建
+     弹窗的环境与版本改为服务端数据驱动的选择器。仍缺：环境构建 Web 入口。
   4. **M2-4** 创建任务弹窗复用 `fetchHosts` 与角色接口，移除手填文案。覆盖 G4、G2。
   5. **M2-5** 验证失败反馈查询 API（存储层已具备）。覆盖 G6 的 API 部分。
   6. **M2-6** 代码保存记录列表 API（让 `recordID` 可获取）。覆盖 G8 的 API 部分。

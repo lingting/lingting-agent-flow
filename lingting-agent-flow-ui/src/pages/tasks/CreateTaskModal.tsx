@@ -1,7 +1,10 @@
 import { Alert, Form, Input, Modal, Select, Space, Switch, Typography } from "antd";
 import { useMemo, useState } from "react";
 
-import { ApiError, createTask, type CreateTaskRequest } from "@/lib/api";
+import { ApiError, createTask, type CreateTaskRequest, type Environment } from "@/lib/api";
+import { EnvironmentSelector } from "@/pages/tasks/EnvironmentSelector";
+import { resolveEnvironmentSelection } from "@/pages/tasks/environments";
+import { useEnvironments } from "@/pages/tasks/useEnvironments";
 
 /** 表单字段：与接口请求体保持一致，数组类字段以换行分隔输入 */
 type CreateTaskFormValues = {
@@ -81,18 +84,46 @@ export type CreateTaskModalProps = {
 /**
  * 创建任务弹窗。
  *
- * 任务创建只落库，不会触发执行：表单不提供状态、开始时间等执行期字段。
- * 执行节点与角色目前没有查询接口，只能填写标识，因此明确标注为需要手填。
+ * 任务创建只落库，不会触发执行：表单不提供状态、开始时间等执行期字段，创建成功后
+ * 由用户在任务列表显式发起统一启动（`POST /tasks/{id}/start`）。
+ *
+ * 语言环境与版本来自真实的环境查询接口，不再手工填写名称：
+ *   - 环境列表按当前执行节点查询，节点变化时重新加载并清空旧选择；
+ *   - 只有 `usable=true` 的版本可以被选中，不可用版本展示构建状态但被禁用；
+ *   - 没有合法可用版本时阻止提交，不猜测一个"看起来合适"的配置。
+ *
+ * 执行节点与角色仍沿用现有手工填写方式（正式选择器归 P4-M2-4）。
  */
 export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalProps) {
   const [form] = Form.useForm<CreateTaskFormValues>();
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
+  // 表单是唯一取值来源：选择器只写表单，展示值由 useWatch 派生。
+  // 执行节点直接决定环境查询，节点变化时 useEnvironments 会自动重新加载。
+  const watchedHostID = Form.useWatch("host_id", form);
+  const selectedEnvironment = Form.useWatch("environment", form);
+  const selectedVersion = Form.useWatch("environment_version", form);
+  const environments = useEnvironments(watchedHostID);
 
   const initialValues = useMemo<Partial<CreateTaskFormValues>>(
     () => ({ merge_after_push: false, priority: "normal" }),
     [],
   );
+
+  /**
+   * 执行节点变化时清除与旧节点关联的环境与版本选择。
+   *
+   * 只在节点字段本身变化时触发：环境选择器写入的字段不会连带清空自己。
+   */
+  const handleValuesChange = (changed: Partial<CreateTaskFormValues>) => {
+    if ("host_id" in changed) {
+      form.setFieldsValue({ environment: undefined, environment_version: undefined });
+    }
+  };
+  /** 环境变化：版本必须重新选择，旧环境的版本不适用于新环境 */
+  const handleEnvironmentChange = (environment?: Environment) => {
+    form.setFieldsValue({ environment: environment?.name, environment_version: undefined });
+  };
 
   const handleOk = async () => {
     setError(undefined);
@@ -103,9 +134,25 @@ export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalPr
       // 校验失败时 Form 已经在字段下方给出提示，这里不再重复提示。
       return;
     }
+    const selection = resolveEnvironmentSelection({
+      environments: environments.environments,
+      loaded: environments.status === "ready",
+      name: values.environment,
+      version: values.environment_version,
+    });
+    if (!selection.ok) {
+      setError(selection.error);
+      return;
+    }
     setSubmitting(true);
     try {
-      await createTask(toCreateTaskRequest(values));
+      await createTask(
+        toCreateTaskRequest({
+          ...values,
+          environment: selection.environment,
+          environment_version: selection.environment_version,
+        }),
+      );
       form.resetFields();
       await onCreated();
     } catch (cause) {
@@ -114,7 +161,6 @@ export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalPr
       setSubmitting(false);
     }
   };
-
   return (
     <Modal
       cancelText="取消"
@@ -131,7 +177,13 @@ export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalPr
       onOk={() => void handleOk()}
     >
       {error && <Alert showIcon description={error} style={{ marginBottom: 16 }} type="error" />}
-      <Form form={form} initialValues={initialValues} layout="vertical" preserve={false}>
+      <Form
+        form={form}
+        initialValues={initialValues}
+        layout="vertical"
+        preserve={false}
+        onValuesChange={handleValuesChange}
+      >
         <Form.Item
           label="任务名称"
           name="name"
@@ -166,7 +218,8 @@ export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalPr
 
         <Typography.Text strong>执行配置</Typography.Text>
         <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
-          执行节点与角色目前没有查询接口，需要手工填写标识。这些配置只被保存，本步骤不会触发执行。
+          执行节点与角色仍需要手工填写标识（正式选择器归 P4-M2-4）。这些配置只被保存，
+          创建任务不会触发执行；创建成功后需在任务列表显式点击"启动"。
         </Typography.Paragraph>
         <Form.Item
           label="执行节点标识"
@@ -191,18 +244,24 @@ export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalPr
           >
             <Input placeholder="main" />
           </Form.Item>
-          <Form.Item
-            label="语言环境"
-            name="environment"
-            rules={[{ message: "请输入语言环境名称", required: true }]}
-            style={{ flex: 1 }}
-          >
-            <Input placeholder="例如 go、node" />
-          </Form.Item>
-          <Form.Item label="环境版本（可选）" name="environment_version" style={{ flex: 1 }}>
-            <Input placeholder="例如 v0001" />
-          </Form.Item>
         </Space>
+        <Form.Item label="语言环境与版本" required>
+          <EnvironmentSelector
+            environment={selectedEnvironment}
+            hostID={watchedHostID}
+            query={environments}
+            version={selectedVersion}
+            onEnvironmentChange={handleEnvironmentChange}
+            onVersionChange={(value) => form.setFieldsValue({ environment_version: value })}
+          />
+        </Form.Item>
+        {/* 环境与版本仍作为表单字段保存，但只能由上面的选择器写入，不接受手工输入。 */}
+        <Form.Item hidden name="environment">
+          <Input />
+        </Form.Item>
+        <Form.Item hidden name="environment_version">
+          <Input />
+        </Form.Item>
         <Space align="start" size="middle" style={{ display: "flex" }}>
           <Form.Item
             label="规划角色标识"

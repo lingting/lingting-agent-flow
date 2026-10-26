@@ -9,7 +9,13 @@ import type { ApiErrorBody, ApiErrorResponse } from "./client";
 import type {
   CreateHostRequest,
   CreateTaskRequest,
+  Environment,
+  EnvironmentListResponse,
+  EnvironmentType,
+  EnvironmentVersion,
   ResumeWorkflowRequest,
+  StartTaskRequest,
+  StartTaskResponse,
   StartWorkflowRequest,
   WorkflowRun,
   WorkflowStatusResponse,
@@ -64,7 +70,17 @@ export function taskWorkflowPath(taskID: string): string {
   return `${taskPath(taskID)}/workflow`;
 }
 
-/** 启动任务级工作流的路径 */
+/** 统一任务启动的路径：准备容器 → 初始化工作区 → 生成计划 → 启动工作流 */
+export function taskStartPath(taskID: string): string {
+  return `${taskPath(taskID)}/start`;
+}
+
+/**
+ * 启动任务级工作流的路径。
+ *
+ * 它要求任务已有受管理容器与已持久化步骤，只能用于继续推进既有现场；
+ * 新任务的显式启动必须走 `taskStartPath`（统一启动），否则必然 409。
+ */
 export function taskExecuteWorkflowPath(taskID: string): string {
   return `${taskPath(taskID)}/execute-workflow`;
 }
@@ -82,6 +98,32 @@ export function taskResumeWorkflowPath(taskID: string): string {
 /** 查询任务当前的工作流进度；任务从未启动过工作流时 has_run 为 false */
 export function fetchTaskWorkflow(taskID: string, options: ApiRequestOptions = {}) {
   return apiRequest<WorkflowStatusResponse>(taskWorkflowPath(taskID), options);
+}
+
+/**
+ * 统一启动任务：准备容器 → 初始化工作区 → 生成计划 → 启动工作流。
+ *
+ * 服务端只在启动流程得出真实结论后才返回响应，成功时是 202（表示"已受理并得出
+ * 结论"，不表示任务已完成）。响应中的 `workflow_started` 才是"工作流真的启动了"
+ * 的唯一依据；失败时服务端返回非 2xx 与统一错误结构，因此调用方不会拿到伪造的成功。
+ *
+ * 该操作有外部副作用（可能创建容器、初始化远程工作区、调用 Planner），因此调用方
+ * 不得自动重试。
+ */
+export function startTask(
+  taskID: string,
+  body: StartTaskRequest = {},
+  options: ApiRequestOptions = {},
+) {
+  return apiRequest<StartTaskResponse>(taskStartPath(taskID), {
+    ...options,
+    body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json", ...options.headers },
+    method: "POST",
+    // 启动流程包含远程容器准备与 Planner 调用，耗时远超普通请求，因此不设客户端超时；
+    // 超时与取消由服务端流程自身管理，避免客户端提前断开后留下"未知状态"的现场。
+    timeoutMs: options.timeoutMs ?? 0,
+  });
 }
 
 /**
@@ -273,6 +315,97 @@ export function updateHost(
  */
 export function validateHost(hostID: string, options: ApiRequestOptions = {}) {
   return apiRequest<Host>(hostValidatePath(hostID), { ...options, method: "POST" });
+}
+
+/** 环境集合路径 */
+export const ENVIRONMENTS_PATH = `${API_PREFIX}/environments`;
+
+/**
+ * 单个环境版本的路径。
+ *
+ * 环境引用由 `type` 与 `name` 两个路径段表达（与 Go 端 `httpapi` 的解析规则一致），
+ * 不使用 `type/name` 单段形式：斜杠在 URL 中是路径分隔符，拼成单段会依赖隐式的
+ * 转义解码规则。
+ */
+export function environmentVersionPath(
+  type: EnvironmentType,
+  name: string,
+  number: number,
+): string {
+  if (!name.trim()) {
+    throw new Error("环境名称不能为空");
+  }
+  if (!Number.isInteger(number) || number <= 0) {
+    throw new Error(`环境版本号必须是正整数: ${number}`);
+  }
+  return `${ENVIRONMENTS_PATH}/${encodeURIComponent(type)}/${encodeURIComponent(
+    name,
+  )}/versions/${number}`;
+}
+
+/**
+ * 查询指定执行节点上的环境与全部版本。
+ *
+ * `host_id` 是唯一节点定位方式，缺失时服务端返回 400；调用方不应在未填写执行节点时
+ * 发起请求。查询是纯读取：不建立 SSH / Docker 连接，也不产生远程副作用。
+ */
+export function fetchEnvironments(hostID: string, options: ApiRequestOptions = {}) {
+  const trimmed = hostID.trim();
+  if (!trimmed) {
+    throw new Error("执行节点标识不能为空");
+  }
+  const params = new URLSearchParams({ host_id: trimmed });
+  return apiRequest<EnvironmentListResponse>(`${ENVIRONMENTS_PATH}?${params.toString()}`, options);
+}
+
+/** 查询单个环境版本的构建状态与元数据 */
+export function fetchEnvironmentVersion(
+  hostID: string,
+  type: EnvironmentType,
+  name: string,
+  number: number,
+  options: ApiRequestOptions = {},
+) {
+  const trimmed = hostID.trim();
+  if (!trimmed) {
+    throw new Error("执行节点标识不能为空");
+  }
+  const params = new URLSearchParams({ host_id: trimmed });
+  return apiRequest<EnvironmentVersion>(
+    `${environmentVersionPath(type, name, number)}?${params.toString()}`,
+    options,
+  );
+}
+
+/**
+ * 从环境记录中取可用于任务启动的版本。
+ *
+ * 只有服务端标记 `usable` 的版本才可以被选中；`current_version` 是服务端计算的
+ * 当前可用版本，`latest_version` 只是最新创建版本，二者不能混用。找不到可用版本时
+ * 返回 undefined，调用方必须提示"该环境暂不可用"，不得猜测一个版本。
+ */
+export function usableEnvironmentVersions(environment: Environment): EnvironmentVersion[] {
+  return environment.versions.filter((version) => version.usable);
+}
+
+/**
+ * 取环境的默认可用版本：优先服务端给出的 `current_version`，否则取最后一个可用版本。
+ *
+ * 返回值仍必须是 `usable` 的版本，绝不会退回到构建中或构建失败的版本。
+ */
+export function defaultUsableVersion(environment: Environment): EnvironmentVersion | undefined {
+  const usable = usableEnvironmentVersions(environment);
+  if (usable.length === 0) {
+    return undefined;
+  }
+  const current = environment.current_version;
+  if (current) {
+    const matched = usable.find((version) => version.version === current);
+    if (matched) {
+      return matched;
+    }
+  }
+  return usable[usable.length - 1];
 }
 
 /**

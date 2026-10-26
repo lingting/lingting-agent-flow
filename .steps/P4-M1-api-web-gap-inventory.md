@@ -430,7 +430,7 @@ HTTP 只有 `POST .../code-saves/{recordID}/verify-code-save`，而 `recordID` �
 |---|---|---|---|
 | M2-1 角色初始化接入启动流程 + `GET /api/v1/roles` | G2 | 无 | **已完成（2026-10-26）**：见 [`P4-M2-1-role-initialization-api.md`](./P4-M2-1-role-initialization-api.md)；剩余角色变更入口与前端选择器（M2-4） |
 | M2-2 环境查询 HTTP 接口 | G3 | 无 | 只读列表 + 版本 + 构建状态优先；构建入口次之。**已完成**（查询部分，见 [`P4-M2-2-environment-query-api.md`](./P4-M2-2-environment-query-api.md)） |
-| M2-3 前端接入统一启动 `/start` | G1 | M2-1、M2-2 | 替换"执行工作流"按钮语义，或明确区分"启动"与"续跑" |
+| M2-3 前端接入统一启动 `/start` | G1 | M2-1、M2-2 | **已完成（2026-10-26）**：任务页"启动"走 `POST /tasks/{id}/start`，`execute-workflow` 不再用于新任务；环境选择接入 M2-2 接口。见 [`P4-M2-3-web-task-launch.md`](./P4-M2-3-web-task-launch.md) |
 | M2-4 创建任务弹窗复用 `fetchHosts` 与角色接口 | G4、G2 | M2-1 | 纯前端 + 已有接口 |
 | M2-5 验证失败反馈查询 API | G6（部分） | 无 | 存储层已具备，只缺 HTTP |
 | M2-6 代码保存记录列表 API | G8（部分） | 无 | 让 `recordID` 可获取 |

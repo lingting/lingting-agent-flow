@@ -187,6 +187,34 @@ test.describe("任务操作", () => {
         total: created ? 1 : 0,
       },
     }));
+    // 语言环境与版本来自真实环境查询：不可用版本不会被选中，因此这里返回一个可用版本
+    await page.route("**/api/v1/environments?*", (route) =>
+      route.fulfill({
+        body: JSON.stringify({
+          records: [
+            {
+              current_version: "v0001",
+              latest_version: "v0001",
+              name: "go",
+              type: "language",
+              versions: [
+                {
+                  build_status: "succeeded",
+                  created_at: "2026-10-26T08:00:00Z",
+                  image_ref: "agentflow-language-go:v0001-abcdefabcdef",
+                  number: 1,
+                  usable: true,
+                  version: "v0001",
+                },
+              ],
+            },
+          ],
+          total: 1,
+        }),
+        contentType: "application/json",
+        status: 200,
+      }),
+    );
 
     await page.goto("/tasks");
     await page.getByRole("button", { name: "创建任务" }).click();
@@ -196,7 +224,13 @@ test.describe("任务操作", () => {
     await page.getByLabel("执行节点标识").fill("host-1");
     await page.getByLabel("仓库地址").fill("ssh://git.example.com/team/repo");
     await page.getByRole("textbox", { name: "* 基础分支" }).fill("main");
-    await page.getByLabel("语言环境").fill("go");
+    await page.getByLabel("语言环境").click();
+    await page.locator(".ant-select-dropdown:visible").getByTitle(/^go/).click();
+    await page.getByLabel("环境版本").click();
+    await page
+      .locator(".ant-select-dropdown:visible")
+      .getByTitle(/^v0001/)
+      .click();
     await page.getByLabel("规划角色标识").fill("planner");
     await page.getByLabel("开发角色标识").fill("developer");
 
