@@ -25,6 +25,9 @@
 > **P4-M2-7（Web 接入计划生成、步骤执行与验证修复操作）已于 2026-10-26 实施完成**，操作
 > 矩阵与代码证据、实施顺序、前端 API 与操作界面结构、测试结果、未通过项与剩余风险见
 > [`P4-M2-7-web-execution-operations.md`](./P4-M2-7-web-execution-operations.md)。
+> **P4-M3-3（任务最终结论与收尾闭环展示）已于 2026-10-26 实施完成**，真实契约核实、
+> M3-1 / M3-2 核验结论、改动文件、测试结果、未执行项与剩余风险见
+> [`P4-M3-3-task-closeout-display.md`](./P4-M3-3-task-closeout-display.md)。
 
 ## 阶段目标
 
@@ -86,11 +89,15 @@ P1–P3 保证"能跑"，但用户无法清楚地操作与观察时，主流程�
     `GET /api/v1/environments/{type}/{name}/versions/{number}?host_id=…`，
     返回真实构建状态、`image_ref`、服务端计算的可用性与版本元数据；纯读取不再要求
     SSH / Docker 依赖。剩余部分是前端接入（M2-3）与环境构建 Web 入口（未排期）。
-- **P1 业务决策阻塞**：G5 重试无入口、G7 步骤/Attempt/Session
-  历史不可见、G9 容器处置无 HTTP、G10 收尾结论未展示（前端类型
-  缺字段）、G11 续跑阻塞原因不可见。**G6 验证失败反馈查询的 API 部分已由 M2-5 闭合**
-  （新增只读 `GET …/validations/{runID}/feedback`，应用层校验完整归属链；前端验证历史
-  视图仍归 P4-M3 M3-2）。**G8 代码保存列表的 API 部分已由 M2-6 闭合**
+- **P1 业务决策阻塞**：G5 重试无入口、G9 容器处置无 HTTP、G11 续跑阻塞原因不可见。
+  **G7 步骤 / Attempt / Session 历史视图已由 M2-7 交付，M3-3 核实为部分满足**：步骤、
+  尝试与会话（执行 / 归档 / 导出三态分列）均已展示，仍缺尝试的
+  `timed_out` / `cancelled` / `error_class` / `failure_stage` 与会话归档 / 导出状态的中文
+  标签。**G10 收尾结论展示已于 M3-3 闭合**（`types.ts` 补齐 `final_result` / `closeout` /
+  `closeout_summary`，任务详情把任务状态、最终业务结论与收尾闭环拆成三行独立事实，缺省与
+  未知取值不误报成功）。**G6 验证失败反馈查询的 API 部分已由 M2-5 闭合**
+  （新增只读 `GET …/validations/{runID}/feedback`，应用层校验完整归属链），**其前端验证历史
+  视图已由 M2-7 交付，M3-3 核实为满足**。**G8 代码保存列表的 API 部分已由 M2-6 闭合**
   （新增只读 `GET /tasks/{taskID}/code-saves`，让 Web 取得真实 `recordID`；提交 / 推送 /
   合并三阶段与 `persist_status` / `recovery_status` 分别输出；查询只依赖存储，不复用强制
   要求 SSH 的 `ContainerService`。前端三阶段展示仍归 M3-5，核验操作入口归 M4-2）。
@@ -126,7 +133,7 @@ P1–P3 保证"能跑"，但用户无法清楚地操作与观察时，主流程�
 |---|---|---|---|
 | P4-M1 | 盘点当前 API 与 Web 业务操作能力的缺口 | `completed`（2026-10-26，基于 `master` HEAD `70f82b1`） | P3 退出 |
 | P4-M2 | 提供完整任务生命周期的必要操作入口 | `completed`（M2-1 至 M2-7 全部完成，2026-10-26） | P4-M1 |
-| P4-M3 | 展示阶段进度、验证结果、失败原因和恢复状态 | `pending` | P4-M1、P4-M2（部分工作项需 M2 先补 API） |
+| P4-M3 | 展示阶段进度、验证结果、失败原因和恢复状态 | `in_progress`（M3-2 经核实已由 M2-7 满足；M3-3 于 2026-10-26 完成；M3-1 部分满足，M3-4 至 M3-8 待做） | P4-M1、P4-M2（部分工作项需 M2 先补 API） |
 | P4-M4 | 支持必要的继续执行、取消、恢复和结果查看操作 | `pending` | P4-M2、P4-M3 |
 | P4-M5 | 根据真实使用问题或可测量数据推进性能、并发、存储与架构优化 | `pending` | P4-M2、P4-M3、P4-M4 |
 
@@ -154,6 +161,14 @@ M2-6 已完成（代码保存记录列表 API，覆盖 G8 的 API 部分），M2
 原因和恢复状态）。
 G1、G2、G3、G4 的端到端断链均已解除：全新数据库启动后角色会被真实写入，环境与版本可从
 HTTP 读取，新任务可从 Web 显式启动并真实推进工作流，创建任务不再需要手抄任何资源 ID。
+
+**P4-M3 已进入实施**（2026-10-26 按当前代码核实）：M3-3 已完成（任务最终结论与收尾闭环
+展示，覆盖 G10，交付物
+[`P4-M3-3-task-closeout-display.md`](./P4-M3-3-task-closeout-display.md)）；M3-2 经核实已由
+P4-M2-7 满足（验证历史、逐项检查与失败反馈视图齐备）；M3-1 部分满足，剩余字段级补全
+（尝试的 `timed_out` / `cancelled` / `error_class` / `failure_stage` 与会话归档 / 导出状态的
+中文标签）。M3-4 至 M3-8 尚未开始，其中 M3-6、M3-8 需要先补后端能力。
+建议顺序：M3-5（只读接口已就绪）→ M3-4 → M3-1 的剩余字段 → M3-7 → M3-6 / M3-8。
 
 M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、M5（基于实测数据的优化）。
 
@@ -252,14 +267,29 @@ M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、
 ### P4-M3 展示阶段进度、验证结果、失败原因和恢复状态
 
 - **ID**：`P4-M3`
-- **状态**：`pending`
+- **状态**：`in_progress`（2026-10-26 核实的子项状态：M3-2 已由 P4-M2-7 满足；M3-3 完成；
+  M3-1 部分满足；M3-4 至 M3-8 未开始）
 - **必要性**：用户看不到真实进度与失败原因，就无法判断任务为何卡住。
 - **前置依赖**：P4-M1；M2-5、M2-6（需先有对应查询 API）。
 - **工作项**：
-  1. **M3-1** 步骤 / Attempt / Session 历史视图。覆盖 G7。
-  2. **M3-2** 验证历史与逐项检查结果视图。覆盖 G6。
+  1. **M3-1** 步骤 / Attempt / Session 历史视图。覆盖 G7。**部分满足**（由 P4-M2-7 交付）：
+     步骤列表、尝试列表、会话列表（含执行 / 归档 / 导出三个独立状态）与四态展示均已实现，
+     仍缺字段级补全——尝试的 `timed_out` / `cancelled` / `error_class` / `failure_stage`
+     未渲染，会话的 `archive_status` / `export_status` 未字典化为中文标签。
+     证据见 [`P4-M3-3-task-closeout-display.md`](./P4-M3-3-task-closeout-display.md) §1.1。
+  2. **M3-2** 验证历史与逐项检查结果视图。覆盖 G6。**已满足**（由 P4-M2-7 交付）：
+     验证历史、流程状态与结论分列、逐项检查、语义审查摘要与失败反馈（含 `404` 语义）
+     均已实现，无需重复开发。证据见同一文档 §1.2。
   3. **M3-3** 任务最终结论与收尾闭环展示（含 `types.ts` 补 `final_result` /
-     `closeout` / `closeout_summary`）。覆盖 G10。
+     `closeout` / `closeout_summary`）。覆盖 G10。**已完成**（2026-10-26，交付物
+     [`P4-M3-3-task-closeout-display.md`](./P4-M3-3-task-closeout-display.md)）：
+     前端 `Task` 与真实 `httpapi.TaskResponse` 契约一致（新增 `TaskResult` /
+     `TaskCloseoutState` 并保留未知取值分支）；任务详情把任务状态、最终业务结论与收尾闭环
+     拆成三行独立事实并按时给出警示；`completed` / `succeeded` / `confirmed` 三者未被混同，
+     `pending` / `unconfirmed` / `inconsistent` / 缺失值与未知值均有明确且不误报成功的文案。
+     **本轮未修改后端代码**；新增前端单元测试 27 个（`tests/unit/task-closeout.test.ts`）
+     与 E2E 10 个（`tests/e2e/task-closeout.spec.ts`），全量单元测试 218 通过，全量 E2E
+     80 通过 / 3 既有失败（经 `git stash -u` 基线对照确认）。
   4. **M3-4** 续跑资格与阻塞原因展示。覆盖 G11。
   5. **M3-5** 代码保存三阶段状态展示。覆盖 G8。
   6. **M3-6** 工作流步骤起止时间补全（服务端 `workflowStatusResponse` 未赋值）。覆盖 G18。

@@ -28,6 +28,12 @@ import {
   type WorkflowStatusResponse,
 } from "@/lib/api";
 import { CreateTaskModal } from "@/pages/tasks/CreateTaskModal";
+import {
+  closeoutDisplay,
+  closeoutSummary,
+  conclusionWarning,
+  taskResultDisplay,
+} from "@/pages/tasks/closeout";
 import { TaskExecutionPanel } from "@/pages/tasks/TaskExecutionPanel";
 import { canStartTask, describeLaunchResult } from "@/pages/tasks/launch";
 import {
@@ -72,35 +78,95 @@ function formatTime(value?: string): string {
   return parsed.toLocaleString();
 }
 
-/** 任务详情面板：只展示接口实际返回的字段 */
+/** 把展示结论的颜色映射到 Typography 的语义类型 */
+function textType(color: string): "success" | "warning" | "danger" | "secondary" {
+  switch (color) {
+    case "success":
+      return "success";
+    case "warning":
+    case "processing":
+      return "warning";
+    case "error":
+      return "danger";
+    default:
+      return "secondary";
+  }
+}
+
+/**
+ * 任务详情面板：只展示接口实际返回的字段。
+ *
+ * 任务状态、最终业务结论与收尾闭环是三行独立事实：
+ *   - 状态表达"处在哪个业务阶段"，不能当作结论；
+ *   - `final_result` 是服务端给出的最终业务结论，缺省时明确写"未提供"；
+ *   - `closeout` 与 `closeout_summary` 表达结论是否闭环，未确认时给出警示。
+ * 三者都不由前端推导，也不互相替代。
+ */
 function TaskDetail({ task }: { task: Task }) {
+  const result = taskResultDisplay(task.final_result, task.closeout);
+  const closeout = closeoutDisplay(task.closeout);
+  const warning = conclusionWarning(task);
   return (
-    <Descriptions column={1} size="small">
-      <Descriptions.Item label="任务标识">
-        <Typography.Text code>{task.id}</Typography.Text>
-      </Descriptions.Item>
-      <Descriptions.Item label="描述">{task.description}</Descriptions.Item>
-      <Descriptions.Item label="状态">
-        <DictTag dict={STATUS_DICT} value={task.status} />
-      </Descriptions.Item>
-      <Descriptions.Item label="关联项目">
-        {task.project_id || <Typography.Text type="secondary">未关联</Typography.Text>}
-      </Descriptions.Item>
-      <Descriptions.Item label="创建时间">{formatTime(task.created_at)}</Descriptions.Item>
-      <Descriptions.Item label="更新时间">{formatTime(task.updated_at)}</Descriptions.Item>
-      <Descriptions.Item label="开始时间">{formatTime(task.started_at)}</Descriptions.Item>
-      <Descriptions.Item label="结束时间">{formatTime(task.finished_at)}</Descriptions.Item>
-      {task.cancel_requested && (
-        <Descriptions.Item label="取消请求时间">
-          {formatTime(task.cancel_requested_at)}
+    <Flex gap="small" vertical>
+      <Descriptions column={1} size="small">
+        <Descriptions.Item label="任务标识">
+          <Typography.Text code>{task.id}</Typography.Text>
         </Descriptions.Item>
-      )}
-      {task.error && (
-        <Descriptions.Item label="错误摘要">
-          <Typography.Text type="danger">{task.error}</Typography.Text>
+        <Descriptions.Item label="描述">{task.description}</Descriptions.Item>
+        <Descriptions.Item label="任务状态">
+          <Space size={8} wrap>
+            <DictTag dict={STATUS_DICT} value={task.status} />
+            <Typography.Text type="secondary">状态只表达业务阶段，不代表最终结论</Typography.Text>
+          </Space>
         </Descriptions.Item>
+        <Descriptions.Item label="最终业务结论">
+          <Space size={8} wrap>
+            <Typography.Text type={textType(result.color)}>{result.label}</Typography.Text>
+            {task.final_result && !result.known && (
+              <Typography.Text type="secondary">服务端原始取值：{task.final_result}</Typography.Text>
+            )}
+          </Space>
+        </Descriptions.Item>
+        <Descriptions.Item label="收尾闭环">
+          <Space direction="vertical" size={2}>
+            <Space size={8} wrap>
+              <Typography.Text type={textType(closeout.color)}>{closeout.label}</Typography.Text>
+              {task.closeout && !closeout.known && (
+                <Typography.Text type="secondary">服务端原始取值：{task.closeout}</Typography.Text>
+              )}
+            </Space>
+            <Typography.Text type="secondary">{closeoutSummary(task)}</Typography.Text>
+          </Space>
+        </Descriptions.Item>
+        <Descriptions.Item label="关联项目">
+          {task.project_id || <Typography.Text type="secondary">未关联</Typography.Text>}
+        </Descriptions.Item>
+        <Descriptions.Item label="创建时间">{formatTime(task.created_at)}</Descriptions.Item>
+        <Descriptions.Item label="更新时间">{formatTime(task.updated_at)}</Descriptions.Item>
+        <Descriptions.Item label="开始时间">{formatTime(task.started_at)}</Descriptions.Item>
+        <Descriptions.Item label="结束时间">{formatTime(task.finished_at)}</Descriptions.Item>
+        {task.cancel_requested && (
+          <Descriptions.Item label="取消请求时间">
+            {formatTime(task.cancel_requested_at)}
+          </Descriptions.Item>
+        )}
+        {task.error && (
+          <Descriptions.Item label="错误摘要">
+            <Typography.Text type="danger">{task.error}</Typography.Text>
+          </Descriptions.Item>
+        )}
+      </Descriptions>
+      {warning && (
+        <Alert
+          description={warning}
+          showIcon
+          title={
+            task.closeout === "inconsistent" ? "收尾结论不一致，需要人工核验" : "任务尚未确认完成"
+          }
+          type={task.closeout === "inconsistent" ? "error" : "warning"}
+        />
       )}
-    </Descriptions>
+    </Flex>
   );
 }
 

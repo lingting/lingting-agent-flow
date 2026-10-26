@@ -63,6 +63,27 @@ export type TaskStatus =
   | "failed"
   | "cancelled";
 
+/**
+ * 任务的最终业务结论，与 Go 端 `domain.TaskResult` 一致。
+ *
+ * 它与 `TaskStatus` 是两件不同的事实：状态表达"处在哪个业务阶段"，结论表达
+ * "这次执行的结果是什么"。空字符串表示服务端尚未提供最终结论，不得由状态推断。
+ */
+export type TaskResult = "succeeded" | "failed" | "cancelled";
+
+/**
+ * 任务的收尾闭环派生结论，与 Go 端 `domain.TaskCloseoutState` 一致。
+ *
+ * 它是只读视图而不是第二套状态：取值由 `status`、`final_result` 与最近一次工作流
+ * 执行记录派生。`completed` + `inconsistent` 这类现场必须按"待人工核验"理解。
+ */
+export type TaskCloseoutState =
+  | "confirmed"
+  | "pending"
+  | "unconfirmed"
+  | "inconsistent"
+  | "cancelled";
+
 /** 任务对外表示，与 Go 端 `httpapi.TaskResponse` 一一对应 */
 export type Task = {
   id: string;
@@ -73,6 +94,21 @@ export type Task = {
   status_terminal: boolean;
   /** 任务是否已停止执行，用于决定取消与删除是否可用；`failed` 也属于已停止 */
   status_finished: boolean;
+  /**
+   * 最终业务结论；服务端未提供时该字段缺省（Go 端为 `omitempty`）。
+   *
+   * 缺省表示"未提供最终结论"，不能据此推断任务成功或失败。
+   * 未知取值按原始字符串处理，界面原样展示。
+   */
+  final_result?: TaskResult | (string & {});
+  /**
+   * 收尾闭环结论；Go 端没有 `omitempty`，因此正常情况下总是存在。
+   *
+   * 类型保留 `string` 分支：服务端新增取值时界面仍能原样展示，不因类型假设隐藏真实数据。
+   */
+  closeout?: TaskCloseoutState | (string & {});
+  /** 收尾闭环结论的可读说明；缺省时界面使用中性提示，不自行编造 */
+  closeout_summary?: string;
   /** 关联项目标识，未关联时为空字符串 */
   project_id: string;
   cancel_requested: boolean;

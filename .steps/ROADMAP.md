@@ -59,7 +59,15 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > 计划生成、单步骤执行、顺序执行、开发—验证闭环、指定 Attempt 确定性验证、代码初始化与
 > 显式开启修复周期；先按真实路由核实 8 项操作的 DTO / 前置条件 / 成功语义 / 失败映射，
 > 未修改任何后端代码；新增前端单元测试 51 个、E2E 20 个，全量 E2E 70 通过 / 3 既有失败），
-> P4-M2 因此标记为 `completed`）。P1 证据见
+> P4-M2 因此标记为 `completed`；**P4-M3-3 于 2026-10-26 完成**（任务最终结论与收尾闭环
+> 展示：核实 `TaskResponse` 已输出 `final_result` / `closeout` / `closeout_summary`，
+> 前端补齐 `TaskResult` / `TaskCloseoutState` 类型并把任务详情拆成"任务状态 / 最终业务结论 /
+> 收尾闭环"三行独立事实；`completed`、`succeeded` 与 `confirmed` 未被混同，
+> `pending` / `unconfirmed` / `inconsistent` / 缺失值与未知值均不误报成功；未修改任何后端
+> 代码，新增前端单元测试 27 个、E2E 10 个，全量单元测试 218 通过、全量 E2E 80 通过 /
+> 3 既有失败）。**P4-M3 仍为 `in_progress`**：同轮核验 M3-2 已由 P4-M2-7 满足、M3-1
+> 部分满足（缺尝试的 `timed_out` / `cancelled` / `error_class` / `failure_stage` 与会话
+> 归档 / 导出状态的中文标签），M3-4 至 M3-8 未开始。P1 证据见
 > `P1-single-task-e2e.md` 的对应"完成记录"；P2-M1 证据见
 > `P2-M1-recovery-boundaries.md`；P2-M2 证据见 `P2-M2-interruption-semantics.md`；
 > P2-M3 与 P2-M4 证据见 `P2-reliability-recovery.md` 的对应里程碑详情。
@@ -290,6 +298,12 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
   [`P2-M1-recovery-boundaries.md`](./P2-M1-recovery-boundaries.md)。
 - Web 任务页：创建/查看/取消/删除、启动/取消/恢复工作流与进度面板
   （`lingting-agent-flow-ui/src/pages/tasks/TasksPage.tsx`）。
+- **Web 任务最终结论与收尾闭环展示**（P4-M3-3）：任务详情把"任务状态 / 最终业务结论 /
+  收尾闭环"拆成三行独立事实（`lingting-agent-flow-ui/src/pages/tasks/closeout.ts` 的
+  `TASK_RESULT_META` / `TASK_CLOSEOUT_META` / `taskResultDisplay` / `closeoutDisplay` /
+  `closeoutSummary` / `conclusionWarning`），`closeout != confirmed` 时给出明确警示，
+  缺省与未知取值不误报成功；`types.ts` 的 `Task` 补齐 `final_result` / `closeout` /
+  `closeout_summary` 并保留未知取值分支。
 - **验证失败修复与重新验证闭环**（P1-M3）：`app.StepWorkflowService.ExecuteAndValidate`
   驱动 `runRepairLoop`（`internal/app/step_workflow_repair.go`），每轮复用
   `StepExecutor.Execute(DeferCompletion)` + `ValidationService.Validate`，每轮新建
@@ -425,14 +439,19 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
     `GET /api/v1/tasks/{taskID}/steps/{stepID}/validations/{runID}/feedback`，由
     `app.ExecutionRecordService.GetValidationFailureFeedback` 校验任务 → 步骤 → 验证记录 →
     反馈的完整归属链，返回已持久化并已脱敏的逐项失败检查；没有反馈时返回 `404`，不构造
-    空反馈，也不把缺失当作验证通过。前端验证历史视图仍归 P4-M3（M3-2）。
+    空反馈，也不把缺失当作验证通过。前端验证历史视图已由 P4-M2-7 交付，并经 P4-M3-3
+    核实为满足 M3-2（见 `P4-M3-3-task-closeout-display.md` §1.2）。
   - **G8 代码保存列表的 API 部分已于 P4-M2-6 闭合**：新增只读
     `GET /api/v1/tasks/{taskID}/code-saves`，返回真实 `recordID` 与提交 / 推送 / 合并三阶段
     的独立状态、记录写入可信度（`persist_status`）与核验结论（`recovery_status`）；查询由
     只依赖存储的 `app.CodeSaveQueryService` 承担，不复用强制要求 SSH 的 `ContainerService`。
     前端三阶段展示仍归 P4-M3（M3-5），核验操作入口归 P4-M4（M4-2）。
-  - 其余 P1 业务决策阻塞六项：G5 重试、G7 执行记录历史、G9 容器处置、G10 收尾结论展示、
-    G11 续跑阻塞原因。
+  - 其余 P1 业务决策阻塞四项：G5 重试、G9 容器处置、G11 续跑阻塞原因，以及 G7 执行记录
+    历史的字段级剩余（P4-M3-3 核实：步骤 / 尝试 / 会话已展示，仍缺尝试的 `timed_out` /
+    `cancelled` / `error_class` / `failure_stage` 与会话归档 / 导出状态的中文标签）。
+    **G10 收尾结论展示已于 P4-M3-3 闭合**（`types.ts` 补齐三个字段，任务详情拆成任务状态 /
+    最终业务结论 / 收尾闭环三行独立事实，见
+    `P4-M3-3-task-closeout-display.md`）。
   - P2 六项：G12 项目后端能力缺失（无表、无服务）、G13 计划生成入口、G14 单步诊断入口、
   - P2 六项：G12 项目后端能力缺失（无表、无服务）；**G13 计划生成入口已于 P4-M2-7
     闭合**（`POST /tasks/{id}/plan` 接入 Web，按 `persisted` / `failure_stage` 展示真实
@@ -554,3 +573,5 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - [P4-M2-4-task-creation-selectors.md](./P4-M2-4-task-creation-selectors.md)
 - [P4-M2-5-validation-feedback-api.md](./P4-M2-5-validation-feedback-api.md)
 - [P4-M2-6-code-save-records-api.md](./P4-M2-6-code-save-records-api.md)
+- [P4-M2-7-web-execution-operations.md](./P4-M2-7-web-execution-operations.md)
+- [P4-M3-3-task-closeout-display.md](./P4-M3-3-task-closeout-display.md)

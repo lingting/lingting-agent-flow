@@ -26,7 +26,11 @@
 ## 当前阶段与当前里程碑
 
 - **当前阶段**：P4 —— 产品操作体验与针对性优化。
-- **当前里程碑**：`P4-M2` —— 提供完整任务生命周期的必要操作入口，状态 `completed`
+- **当前里程碑**：`P4-M3` —— 展示阶段进度、验证结果、失败原因和恢复状态，状态
+  `in_progress`（M3-3 已完成、M3-2 已由 M2-7 满足、M3-1 部分满足，M3-4 至 M3-8 未开始）。
+  详见下方"当前里程碑"详述与
+  [`P4-M3-3-task-closeout-display.md`](./P4-M3-3-task-closeout-display.md)。
+- **上一里程碑**：`P4-M2` —— 提供完整任务生命周期的必要操作入口，状态 `completed`
   （M2-1 至 M2-7 全部完成）。
   子任务 **M2-1（角色初始化 + `GET /api/v1/roles`）已于 2026-10-26 完成**，交付物为
   [`P4-M2-1-role-initialization-api.md`](./P4-M2-1-role-initialization-api.md)：角色初始化
@@ -80,7 +84,24 @@
   单元测试 191 通过，新增 E2E 20/20 通过，全量 E2E 70 通过 / 3 失败（失败项经
   `git stash -u` 基线对照确认为既有问题）。P4-M2 的 7 个子任务至此全部完成。详见
   [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
-- **上一里程碑**：`P4-M1` —— 盘点 API 与 Web 业务操作能力的缺口，状态 `completed`
+- **当前里程碑**：`P4-M3` —— 展示阶段进度、验证结果、失败原因和恢复状态，状态
+  `in_progress`。2026-10-26 按当前代码核实并实施子任务 **M3-3（任务最终结论与收尾闭环
+  展示）**，交付物为
+  [`P4-M3-3-task-closeout-display.md`](./P4-M3-3-task-closeout-display.md)：先核实
+  `TaskResponse` 已输出 `final_result` / `closeout` / `closeout_summary`（`omitempty` 与
+  派生规则见 `domain.DecideTaskCloseoutView`），再补齐前端 `Task` 类型（新增 `TaskResult` /
+  `TaskCloseoutState`，未知取值保留原样展示分支），并把任务详情拆成"任务状态 / 最终业务
+  结论 / 收尾闭环"三行独立事实 + 按需警示；`completed`、`succeeded` 与 `confirmed` 未被
+  混同，`pending` / `unconfirmed` / `inconsistent` / 缺失值与未知值均不误报成功。
+  **本轮未修改任何后端代码**；新增前端单元测试 27 个与 E2E 10 个，全量单元测试 218 通过，
+  全量 E2E 80 通过 / 3 失败（失败项经 `git stash -u` 基线对照确认为既有问题）。
+  同轮核验：**M3-2 已由 P4-M2-7 满足**（验证历史、逐项检查与失败反馈视图齐备）；
+  **M3-1 部分满足**，仍缺尝试的 `timed_out` / `cancelled` / `error_class` /
+  `failure_stage` 与会话归档 / 导出状态的中文标签。M3-4 至 M3-8 未开始。
+- **上一里程碑**：`P4-M2` —— 提供完整任务生命周期的必要操作入口，状态 `completed`
+  （M2-1 至 M2-7 全部完成）。详见
+  [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
+- **更早里程碑**：`P4-M1` —— 盘点 API 与 Web 业务操作能力的缺口，状态 `completed`
   （2026-10-26，基于 `master` HEAD `70f82b1` 的实际代码核实）。交付物为
   [`P4-M1-api-web-gap-inventory.md`](./P4-M1-api-web-gap-inventory.md)。
   本次**未修改任何生产代码或前端功能代码**，只建立缺口清单与后续实施依据。核对结论：
@@ -103,10 +124,16 @@
   里程碑归属。本次未运行任何测试，全部结论为静态代码核实，已在文档 §9 如实记录。
   另外记录了 7 处历史文档与代码不符之处（README 仍称并发调度未实现、任务调度器未接入、
   项目/环境/容器/代码保存均无 HTTP 接口、任务页尚未接入步骤执行入口等）。
-- **下一步**：`P4-M3` —— 展示阶段进度、验证结果、失败原因和恢复状态（M3-1 至 M3-8）。
-  P4-M2 的 7 个子任务已全部完成，其中 M2-7 打通的执行现场只读接口与步骤/尝试/验证展示
-  已为 M3-1、M3-2 铺垫；M3 仍需补齐事件时间线、修复周期历史、收尾结论、续跑阻塞原因与
-  进度自动刷新。环境构建 Web 入口与角色变更入口是否上 Web 仍按产品取舍决定。详见
+- **下一步**：继续 `P4-M3`（展示阶段进度、验证结果、失败原因和恢复状态）的剩余子项。
+  2026-10-26 的核实结论：**M3-3 已完成**（任务最终结论与收尾闭环展示，见
+  [`P4-M3-3-task-closeout-display.md`](./P4-M3-3-task-closeout-display.md)）；**M3-2 已由
+  P4-M2-7 满足**（验证历史、逐项检查与失败反馈视图齐备，无需重复实现）；**M3-1 部分满足**
+  （步骤 / 尝试 / 会话历史已展示，仍缺尝试的 `timed_out` / `cancelled` / `error_class` /
+  `failure_stage` 与会话归档 / 导出状态的中文标签）。M3-4 至 M3-8 未开始，其中 M3-6（工作流
+  步骤起止时间）与 M3-8（事件时间线、修复周期历史）需要先补后端能力。
+  建议顺序：M3-5（代码保存三阶段，只读接口已就绪）→ M3-4（续跑资格与阻塞原因）→ M3-1 的
+  剩余字段 → M3-7（进度自动刷新）→ M3-6 / M3-8。
+  环境构建 Web 入口与角色变更入口是否上 Web 仍按产品取舍决定。详见
   [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
 - **更早里程碑**：`P3-M5` —— 验证多任务并发、冲突和资源回收行为，状态
   `completed`（2026-10-25，基于 `master` HEAD `abfdfd3` 之后的工作区核实与实施）。
@@ -300,6 +327,7 @@
 | [`P4-M2-5-validation-feedback-api.md`](./P4-M2-5-validation-feedback-api.md) | P4-M2-5：验证失败反馈查询 API 契约（路由、字段语义、完整归属校验、错误映射、最近反馈入口的范围决策、测试证据、剩余风险） |
 | [`P4-M2-6-code-save-records-api.md`](./P4-M2-6-code-save-records-api.md) | P4-M2-6：代码保存记录列表 API 契约（路由与 DTO、三阶段与记录可信度语义、应用层依赖边界、错误映射、只读边界、测试证据、剩余风险） |
 | [`P4-M2-7-web-execution-operations.md`](./P4-M2-7-web-execution-operations.md) | P4-M2-7：Web 接入计划生成、步骤执行与验证修复操作（8 项操作矩阵与代码证据、实施顺序、前端 API 与操作界面结构、测试证据、未通过项与剩余风险） |
+| [`P4-M3-3-task-closeout-display.md`](./P4-M3-3-task-closeout-display.md) | P4-M3-3：任务最终结论与收尾闭环展示（真实 DTO 契约、M3-1 / M3-2 核验结论、三行独立事实与警示、测试证据、未执行项与剩余风险） |
 
 ## 下一步工作的选择规则
 
