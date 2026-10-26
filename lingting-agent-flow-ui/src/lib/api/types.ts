@@ -525,3 +525,577 @@ export type RoleListResponse = {
   records: Role[];
   total: number;
 };
+
+/**
+ * 步骤状态，取值与 Go 端 `domain.StepStatus` 完全一致。
+ *
+ * `running` / `developing` / `verifying` 表示步骤正被一次执行占用；
+ * `completed` 只表示该步骤的执行与验证已收口，不代表任务通过验收。
+ */
+export type StepStatus =
+  | "pending"
+  | "running"
+  | "developing"
+  | "verifying"
+  | "completed"
+  | "failed"
+  | "retry_wait"
+  | "skipped"
+  | "cancelled"
+  | "recovery_required";
+
+/**
+ * 步骤的对外表示，与 Go 端 `httpapi.StepResponse` 一一对应。
+ *
+ * 字段全部来自数据库：`status_terminal` 是服务端派生的判据，前端不自行推断；
+ * `current_attempt_id` 为空表示当前没有执行占用。
+ */
+export type Step = {
+  id: string;
+  task_id: string;
+  /** 步骤类型，与 Go 端 `domain.StepType` 一致 */
+  step_type: string;
+  /** 步骤标题 */
+  name: string;
+  /** 步骤目标 */
+  objective: string;
+  sequence: number;
+  status: StepStatus;
+  /** 步骤是否已结束，前端据此决定是否需要轮询 */
+  status_terminal: boolean;
+  input_summary?: string;
+  output_summary?: string;
+  /** 失败原因摘要 */
+  error?: string;
+  /** 失败发生的阶段名 */
+  failure_stage?: string;
+  /** 当前正在执行的尝试，没有执行占用时缺省 */
+  current_attempt_id?: string;
+  created_at: string;
+  updated_at: string;
+  started_at?: string;
+  finished_at?: string;
+};
+
+/** `GET /api/v1/tasks/{taskID}/steps` 的分页响应 */
+export type StepListResponse = {
+  records: Step[];
+  total: number;
+  current: number;
+  size: number;
+};
+
+/**
+ * 尝试状态，取值与 Go 端 `domain.AttemptStatus` 完全一致。
+ *
+ * `unknown` 与 `recovery_required` 表示结果无法确认，必须先核验再决定下一步。
+ */
+export type AttemptStatus =
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "interrupted"
+  | "timed_out"
+  | "unknown"
+  | "recovery_required";
+
+/**
+ * 执行尝试的对外表示，与 Go 端 `httpapi.AttemptResponse` 一一对应。
+ *
+ * 一次尝试对应一次真实的 Agent 调用；`session_ids` 是该尝试关联的会话。
+ */
+export type Attempt = {
+  id: string;
+  task_id: string;
+  step_id: string;
+  attempt_number: number;
+  status: AttemptStatus;
+  status_terminal: boolean;
+  /** 主执行退出码，未能取得时为 -1 */
+  exit_code: number;
+  timed_out: boolean;
+  cancelled: boolean;
+  error_class?: string;
+  failure_stage?: string;
+  error?: string;
+  result_summary?: string;
+  /** 本次尝试的验证判定，与验证流程状态不同 */
+  verification_verdict?: string;
+  retry_reason?: string;
+  session_ids: string[];
+  created_at: string;
+  started_at: string;
+  finished_at?: string;
+};
+
+/** `GET /api/v1/tasks/{taskID}/steps/{stepID}/attempts` 的分页响应 */
+export type AttemptListResponse = {
+  records: Attempt[];
+  total: number;
+  current: number;
+  size: number;
+};
+
+/**
+ * Agent 会话的对外表示，与 Go 端 `httpapi.SessionResponse` 一一对应。
+ *
+ * 执行状态、归档状态与导出状态是三个独立事实，不得互相推导。
+ */
+export type Session = {
+  id: string;
+  task_id: string;
+  step_id?: string;
+  attempt_id?: string;
+  agent_role: string;
+  role_id: string;
+  provider: string;
+  model: string;
+  status: string;
+  status_terminal: boolean;
+  run_status?: string;
+  /** 外部运行器的会话标识 */
+  session_id?: string;
+  invocation_id?: string;
+  session_file_path?: string;
+  archive_status: string;
+  archive_path?: string;
+  export_status: string;
+  html_export_path?: string;
+  exit_code?: number;
+  error?: string;
+  created_at: string;
+  started_at: string;
+  finished_at?: string;
+};
+
+/** `GET /api/v1/tasks/{taskID}/steps/{stepID}/attempts/{attemptID}/sessions` 的分页响应 */
+export type SessionListResponse = {
+  records: Session[];
+  total: number;
+  current: number;
+  size: number;
+};
+
+/**
+ * 验证流程状态，与 Go 端 `domain.ValidationRunStatus` 一致。
+ *
+ * 它只表达"验证流程本身跑到哪一步"，与最终结论是两件事。
+ */
+export type ValidationRunStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "timed_out";
+
+/**
+ * 验证结论，与 Go 端 `domain.VerificationVerdict` 一致。
+ *
+ * `inconclusive` 表示没有拿到可用证据，不能当作通过。
+ */
+export type VerificationVerdict = "passed" | "failed" | "inconclusive";
+
+/** 单项检查的状态，与 Go 端 `domain.ValidationCheckStatus` 一致 */
+export type ValidationCheckResultStatus =
+  | "passed"
+  | "failed"
+  | "timed_out"
+  | "cancelled"
+  | "skipped"
+  | "error";
+
+/**
+ * 单项检查结果，与 Go 端 `httpapi.ValidateCheckResultResponse` 一一对应。
+ *
+ * 完整输出只通过 `stdout_path` / `stderr_path` 暴露，响应里只有摘要。
+ */
+export type ValidationCheckResult = {
+  check_id: string;
+  check_name: string;
+  required: boolean;
+  sequence: number;
+  status: ValidationCheckResultStatus;
+  exit_code: number;
+  timed_out: boolean;
+  cancelled: boolean;
+  /** 结果是否可信；为 false 时不得当作代码问题 */
+  certain: boolean;
+  required_passed: boolean;
+  duration_ms: number;
+  stdout_path?: string;
+  stderr_path?: string;
+  stdout_summary?: string;
+  stderr_summary?: string;
+  output_truncated: boolean;
+  output_archive_error?: string;
+  failure_reason?: string;
+  error_detail?: string;
+  started_at: string;
+  finished_at: string;
+};
+
+/** 语义审查的结构化评估，与 Go 端 `domain.AgentAssessment` 一一对应 */
+export type AgentAssessment = {
+  passed: boolean;
+  summary?: string;
+  findings?: string[];
+  evidence?: string[];
+  suggest_fix?: boolean;
+  needs_human_review?: boolean;
+};
+
+/**
+ * 一次验证记录，与 Go 端 `httpapi.ValidationRunResponse` 一一对应。
+ *
+ * `status`、`verdict` 与检查结果分别输出：调用方必须能区分"流程跑完了"、
+ * "结论是通过"与"哪些检查真实执行过"。
+ */
+export type ValidationRun = {
+  id: string;
+  task_id: string;
+  step_id: string;
+  attempt_id: string;
+  status: ValidationRunStatus;
+  verdict: VerificationVerdict;
+  summary?: string;
+  failure_summary?: string;
+  error_detail?: string;
+  passed_checks: number;
+  failed_checks: number;
+  skipped_checks: number;
+  total_checks: number;
+  execution_env?: string;
+  workspace?: string;
+  container_id?: string;
+  review_ran: boolean;
+  review_status?: string;
+  review_summary?: string;
+  validator_session_id?: string;
+  assessment?: AgentAssessment;
+  checks?: ValidationCheckResult[];
+  started_at: string;
+  finished_at?: string;
+};
+
+/**
+ * 某个步骤的验证历史，与 Go 端 `httpapi.ValidationHistoryResponse` 一一对应。
+ *
+ * `state` 是服务端从最新记录派生的验证状态，前端不自行从原始记录推断。
+ */
+export type ValidationHistoryResponse = {
+  step_id: string;
+  state: string;
+  latest?: ValidationRun;
+  records: ValidationRun[];
+  total: number;
+};
+
+/** 单条未通过检查的反馈，与 Go 端 `httpapi.ValidationCheckFeedbackResponse` 一一对应 */
+export type ValidationCheckFeedback = {
+  check_id: string;
+  check_name: string;
+  required: boolean;
+  status: string;
+  exit_code: number;
+  failure_reason?: string;
+  error_detail?: string;
+  stdout_summary?: string;
+  stderr_summary?: string;
+  timed_out: boolean;
+  cancelled: boolean;
+  infrastructure_error: boolean;
+  started_at: string;
+  finished_at: string;
+};
+
+/**
+ * 一次验证失败的反馈，与 Go 端 `httpapi.ValidationFailureFeedbackResponse` 一一对应。
+ *
+ * 它只描述"上一轮验证失败了什么"，不是当前验证结论。
+ */
+export type ValidationFailureFeedback = {
+  task_id: string;
+  step_id: string;
+  developer_attempt_id: string;
+  validation_run_id: string;
+  developer_session_ids?: string[];
+  verdict: VerificationVerdict;
+  summary?: string;
+  infrastructure_error: boolean;
+  checks: ValidationCheckFeedback[];
+  created_at: string;
+};
+
+/**
+ * 单步骤执行的结论，与 Go 端 `domain.StepExecutionOutcome` 一致。
+ *
+ * 它只描述"本次 Agent 调用如何结束"，不代表步骤验收通过。
+ */
+export type StepExecutionOutcome =
+  | "completed"
+  | "failed"
+  | "timed_out"
+  | "cancelled"
+  | "interrupted";
+
+/** 单步骤执行的请求体；只能传执行参数 */
+export type ExecuteStepRequest = {
+  prompt?: string;
+  timeout_seconds?: number;
+};
+
+/**
+ * `POST /api/v1/tasks/{taskID}/steps/{stepID}/execute` 的响应。
+ *
+ * `success` 只表示本次调用正常结束且状态已完整写入，不表示任务成功。
+ */
+export type ExecuteStepResponse = {
+  task_id: string;
+  step_id: string;
+  attempt_id: string;
+  attempt_number: number;
+  session_id?: string;
+  outcome: StepExecutionOutcome;
+  success: boolean;
+  summary?: string;
+  error?: string;
+  exit_code: number;
+  attempt_status: string;
+  step_status: string;
+  task_status: TaskStatus;
+  session_status?: string;
+  session_run_status?: string;
+  archive_status: string;
+  export_status: string;
+  finalized: boolean;
+  finalization_errors?: string[];
+  started_at: string;
+  finished_at: string;
+};
+
+/** 顺序执行的请求体；步骤顺序完全由服务端计划决定 */
+export type ExecuteStepsRequest = {
+  prompt?: string;
+  timeout_seconds?: number;
+};
+
+/** 顺序执行中单个步骤的结果 */
+export type ExecuteStepsStepResult = {
+  step_id: string;
+  sequence: number;
+  title: string;
+  skipped: boolean;
+  skip_reason?: string;
+  attempt_id?: string;
+  session_id?: string;
+  outcome?: StepExecutionOutcome;
+  step_status?: string;
+  summary?: string;
+  error?: string;
+  finalized: boolean;
+  started_at?: string;
+  finished_at?: string;
+};
+
+/**
+ * `POST /api/v1/tasks/{taskID}/execute-steps` 的响应。
+ *
+ * `stopped` 与 `success` 不能互相替代：前者表示是否提前停止，后者表示全部步骤
+ * 是否都以正常结束且状态已完整写入。
+ */
+export type ExecuteStepsResponse = {
+  task_id: string;
+  steps: ExecuteStepsStepResult[];
+  executed_steps: number;
+  stopped: boolean;
+  success: boolean;
+  stop_reason?: string;
+  stopped_step_id?: string;
+  task_status: TaskStatus;
+  started_at: string;
+  finished_at: string;
+};
+
+/** 开发—验证闭环的请求体；只能传执行参数 */
+export type ExecuteAndValidateStepRequest = {
+  prompt?: string;
+  timeout_seconds?: number;
+  validation_timeout_seconds?: number;
+};
+
+/**
+ * `POST /api/v1/tasks/{taskID}/steps/{stepID}/execute-and-validate` 的响应。
+ *
+ * 开发结论、验证是否发起、验证结论与最终状态分别输出；`verified` 只有在真实验证
+ * 通过时才为 true。
+ */
+export type ExecuteAndValidateStepResponse = {
+  task_id: string;
+  step_id: string;
+  attempt_id?: string;
+  attempt_number: number;
+  session_id?: string;
+  outcome: StepExecutionOutcome;
+  developer_summary?: string;
+  developer_error?: string;
+  exit_code: number;
+  developer_finalized: boolean;
+  developer_finalization_errors?: string[];
+  validation_ran: boolean;
+  validation_skip_reason?: string;
+  validation_run_id?: string;
+  validation_status?: ValidationRunStatus;
+  validation_verdict?: VerificationVerdict;
+  validation_passed: boolean;
+  validation_summary?: string;
+  validation_failure_summary?: string;
+  checks?: ValidationCheckResult[];
+  validation_persisted: boolean;
+  validation_persistence_errors?: string[];
+  review_ran: boolean;
+  review_status?: string;
+  review_summary?: string;
+  validator_session_id?: string;
+  assessment?: AgentAssessment;
+  infrastructure_error: boolean;
+  feedback_persisted: boolean;
+  verification_state: string;
+  step_status: StepStatus;
+  task_status: TaskStatus;
+  verified: boolean;
+  round: number;
+  attempts: number;
+  max_attempts: number;
+  /** 修复循环的下一步动作：retry / completed / stop */
+  repair_decision: string;
+  repair_class?: string;
+  repair_summary?: string;
+  finalized: boolean;
+  finalization_errors?: string[];
+  started_at: string;
+  finished_at: string;
+};
+
+/** 发起一次确定性验证的请求体；只能传验证参数 */
+export type ValidateAttemptRequest = {
+  timeout_seconds?: number;
+};
+
+/**
+ * `POST /api/v1/tasks/{taskID}/steps/{stepID}/attempts/{attemptID}/validate` 的响应。
+ *
+ * `status`、`verdict` 与 `persisted` 三者不能互相替代。
+ */
+export type ValidateAttemptResponse = {
+  validation_run_id: string;
+  task_id: string;
+  step_id: string;
+  attempt_id: string;
+  status: ValidationRunStatus;
+  verdict: VerificationVerdict;
+  passed: boolean;
+  summary?: string;
+  failure_summary?: string;
+  passed_checks: number;
+  failed_checks: number;
+  skipped_checks: number;
+  execution_env?: string;
+  workspace?: string;
+  container_id?: string;
+  persisted: boolean;
+  persistence_errors?: string[];
+  review_ran: boolean;
+  review_status?: string;
+  review_summary?: string;
+  validator_session_id?: string;
+  assessment?: AgentAssessment;
+  checks: ValidationCheckResult[];
+  started_at: string;
+  finished_at: string;
+};
+
+/** 初始化代码的请求体；容器与仓库地址都由服务端按记录生成 */
+export type InitializeCodeRequest = {
+  work_dir?: string;
+  timeout_seconds?: number;
+};
+
+/**
+ * `POST /api/v1/tasks/{taskID}/steps/{stepID}/attempts/{attemptID}/initialize-code` 的响应。
+ *
+ * `succeeded` 表示代码是否已就绪，`persisted` 表示记录是否可靠写入，两者独立。
+ */
+export type InitializeCodeResponse = {
+  record_id: string;
+  task_id: string;
+  step_id: string;
+  attempt_id: string;
+  source_type: string;
+  repository?: string;
+  status: string;
+  succeeded: boolean;
+  container_id: string;
+  work_dir: string;
+  base_branch?: string;
+  task_branch: string;
+  commit?: string;
+  stage?: string;
+  error_code?: string;
+  error?: string;
+  persisted: boolean;
+  persistence_errors?: string[];
+  started_at: string;
+  finished_at: string;
+};
+
+/**
+ * `POST /api/v1/tasks/{taskID}/steps/{stepID}/open-repair-cycle` 的响应。
+ *
+ * `opened` 语义由 HTTP 状态码表达：成功即已登记，失败返回统一错误结构；
+ * 该操作只登记新的预算作用域，不启动任何 Agent 调用。
+ */
+export type OpenRepairCycleResponse = {
+  task_id: string;
+  step_id: string;
+  cycle_id: string;
+  cycle_sequence: number;
+  max_attempts: number;
+  /** 上一周期已消耗的尝试数，用于说明"为什么允许重置" */
+  previous_consumed: number;
+  opened_at: string;
+};
+
+/**
+ * `POST /api/v1/tasks/{taskID}/plan` 的请求体；只能传执行参数
+ */
+export type PlanRequest = {
+  prompt?: string;
+  timeout_seconds?: number;
+};
+
+/**
+ * 计划中单个步骤的对外表示，与 Go 端 `httpapi.PlanStepResponse` 一一对应
+ * （与统一启动响应中的 `PlanStep` 同形，复用同一类型）。
+ */
+export type PlanStepResult = PlanStep;
+
+/**
+ * `POST /api/v1/tasks/{taskID}/plan` 的响应。
+ *
+ * `persisted` 为 false 时计划没有写入数据库，前端不得展示为"计划已就绪"；
+ * `failure_stage` / `failure` 说明失败发生在哪个阶段。
+ */
+export type PlanResponse = {
+  task_id: string;
+  task_status: TaskStatus;
+  persisted: boolean;
+  summary?: string;
+  steps: PlanStepResult[];
+  session_id?: string;
+  failure_stage?: string;
+  failure?: string;
+  started_at?: string;
+  finished_at?: string;
+};

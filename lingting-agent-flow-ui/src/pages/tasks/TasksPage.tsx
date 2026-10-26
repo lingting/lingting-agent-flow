@@ -28,6 +28,7 @@ import {
   type WorkflowStatusResponse,
 } from "@/lib/api";
 import { CreateTaskModal } from "@/pages/tasks/CreateTaskModal";
+import { TaskExecutionPanel } from "@/pages/tasks/TaskExecutionPanel";
 import { canStartTask, describeLaunchResult } from "@/pages/tasks/launch";
 import {
   canCancelTask,
@@ -203,6 +204,13 @@ export function TasksPage() {
   }>();
   /** 启动结论之后的刷新失败提示：不覆盖已得到的启动结论 */
   const [launchRefreshError, setLaunchRefreshError] = useState<string>();
+  /**
+   * 当前选中任务的最新副本。
+   *
+   * 执行动作的回调需要在异步完成后读取"当前选中的任务"，但闭包里的 state 是旧值，
+   * 因此用 ref 保存最新副本，避免把任务标识写死在回调依赖里。
+   */
+  const selectedRef = useRef<Task>(undefined);
 
   /** 重新拉取当前页真实数据 */
   const reload = useCallback(() => void actionRef.current?.reload(), []);
@@ -221,6 +229,28 @@ export function TasksPage() {
     }
   }, []);
 
+  /**
+   * 执行动作结束后重新读取任务与工作流状态。
+   *
+   * 只返回刷新失败的项：执行结论由动作面板单独保存，刷新失败不会覆盖它。
+   */
+  const refreshTaskDetail = useCallback(async (): Promise<string[]> => {
+    const failures: string[] = [];
+    try {
+      const { data } = await fetchTask(selectedRef.current?.id ?? "");
+      setSelected(data);
+    } catch (cause) {
+      failures.push(`任务详情（${describeError(cause)}）`);
+    }
+    try {
+      const { data } = await fetchTaskWorkflow(selectedRef.current?.id ?? "");
+      setWorkflow(data);
+    } catch (cause) {
+      failures.push(`工作流进度（${describeError(cause)}）`);
+    }
+    return failures;
+  }, []);
+
   const openDetail = useCallback(
     async (taskID: string) => {
       setDetailLoading(true);
@@ -228,8 +258,10 @@ export function TasksPage() {
       try {
         const { data } = await fetchTask(taskID);
         setSelected(data);
+        selectedRef.current = data;
       } catch (cause) {
         setSelected(undefined);
+        selectedRef.current = undefined;
         setActionError(describeError(cause));
       } finally {
         setDetailLoading(false);
@@ -253,6 +285,7 @@ export function TasksPage() {
       try {
         const { data } = await fetchTask(taskID);
         setSelected((current) => (current?.id === taskID ? data : current));
+        if (selectedRef.current?.id === taskID) selectedRef.current = data;
       } catch (cause) {
         failures.push(`任务详情（${describeError(cause)}）`);
       }
@@ -500,7 +533,15 @@ export function TasksPage() {
         <Flex gap="small" vertical>
           <Flex align="center" gap="small" justify="space-between">
             <Typography.Text strong>任务详情</Typography.Text>
-            <Button onClick={() => setSelected(undefined)} size="small" text="关闭" type="text" />
+            <Button
+              onClick={() => {
+                setSelected(undefined);
+                selectedRef.current = undefined;
+              }}
+              size="small"
+              text="关闭"
+              type="text"
+            />
           </Flex>
           {detailLoading ? (
             <Typography.Text type="secondary">正在加载详情…</Typography.Text>
@@ -534,6 +575,7 @@ export function TasksPage() {
           ) : (
             <Typography.Text type="secondary">尚未启动工作流</Typography.Text>
           )}
+          {selected && <TaskExecutionPanel onRefreshTask={refreshTaskDetail} task={selected} />}
         </Flex>
       )}
 

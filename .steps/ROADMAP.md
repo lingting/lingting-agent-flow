@@ -55,7 +55,11 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > `GET /tasks/{taskID}/steps/{stepID}/validations/{runID}/feedback`，应用层校验完整归属链），
 > **P4-M2-6 于 2026-10-26 完成**（代码保存记录列表 API：
 > `GET /tasks/{taskID}/code-saves`，让 Web 取得真实 `recordID`；查询服务只依赖存储，
-> 不复用强制要求 SSH 的 `ContainerService`），P4-M2 因此仍为 `in_progress`）。P1 证据见
+> 不复用强制要求 SSH 的 `ContainerService`），**P4-M2-7 于 2026-10-26 完成**（Web 接入
+> 计划生成、单步骤执行、顺序执行、开发—验证闭环、指定 Attempt 确定性验证、代码初始化与
+> 显式开启修复周期；先按真实路由核实 8 项操作的 DTO / 前置条件 / 成功语义 / 失败映射，
+> 未修改任何后端代码；新增前端单元测试 51 个、E2E 20 个，全量 E2E 70 通过 / 3 既有失败），
+> P4-M2 因此标记为 `completed`）。P1 证据见
 > `P1-single-task-e2e.md` 的对应"完成记录"；P2-M1 证据见
 > `P2-M1-recovery-boundaries.md`；P2-M2 证据见 `P2-M2-interruption-semantics.md`；
 > P2-M3 与 P2-M4 证据见 `P2-reliability-recovery.md` 的对应里程碑详情。
@@ -430,8 +434,13 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
   - 其余 P1 业务决策阻塞六项：G5 重试、G7 执行记录历史、G9 容器处置、G10 收尾结论展示、
     G11 续跑阻塞原因。
   - P2 六项：G12 项目后端能力缺失（无表、无服务）、G13 计划生成入口、G14 单步诊断入口、
-    G15 事件时间线、G16 修复周期历史、G18 工作流步骤起止时间恒为空。
-  - P3 三项：G17 调度名额可见性、G19 进度自动刷新、G20 单步诊断动作。
+  - P2 六项：G12 项目后端能力缺失（无表、无服务）；**G13 计划生成入口已于 P4-M2-7
+    闭合**（`POST /tasks/{id}/plan` 接入 Web，按 `persisted` / `failure_stage` 展示真实
+    结果，有步骤时不显示覆盖入口）；**G14 单步诊断入口已于 P4-M2-7 闭合**（单步骤执行、
+    顺序执行、开发—验证闭环、显式开启修复周期，全部只使用当前真实记录的标识）；G15 事件
+    时间线、G16 修复周期历史、G18 工作流步骤起止时间恒为空。
+  - P3 三项：G17 调度名额可见性、G19 进度自动刷新；**G20 的两项单步诊断动作（初始化代码、
+    确定性验证）已于 P4-M2-7 一并接入 Web**（随 G14 的步骤详情一起实现）。
   - 上述缺口**不影响后端执行链路的正确性**，只影响用户能否仅通过 Web 完成与观察业务
     流程；因此不改变 P1–P3 的完成结论。
 

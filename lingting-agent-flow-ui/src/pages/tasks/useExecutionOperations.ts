@@ -1,0 +1,214 @@
+/**
+ * 执行类操作的统一调用与状态管理。
+ *
+ * 设计约束：
+ *   - 每个动作独立记录"正在执行哪个目标"，同一时刻只允许一个动作在途，重复点击
+ *     不会发出第二个请求；
+ *   - 成功结论只来自服务端响应字段，请求失败时展示服务端返回的业务错误，不伪造成功；
+ *   - 动作结束后统一刷新执行现场；刷新失败单独记录，不覆盖已经取得的执行结论；
+ *   - 任何动作都不会自动重试：这些操作有真实副作用（容器内命令、Agent 调用、
+ *     Git 操作、预算登记），重放必须由用户基于最新状态显式触发。
+ */
+import { useCallback, useRef, useState } from "react";
+
+import {
+  executeAndValidateStep as callExecuteAndValidate,
+  executeStep as callExecuteStep,
+  executeSteps as callExecuteSteps,
+  generatePlan as callGeneratePlan,
+  initializeAttemptCode,
+  openRepairCycle as callOpenRepairCycle,
+  validateAttempt as callValidateAttempt,
+  type Attempt,
+  type ExecuteAndValidateStepRequest,
+  type ExecuteStepRequest,
+  type ExecuteStepsRequest,
+  type InitializeCodeRequest,
+  type PlanRequest,
+  type Step,
+  type ValidateAttemptRequest,
+} from "@/lib/api";
+import {
+  describeExecuteAndValidateResult,
+  describeExecuteStepResult,
+  describeExecuteStepsResult,
+  describeInitializeResult,
+  describeOpenRepairCycleResult,
+  describePlanResult,
+  describeValidateResult,
+  type OperationOutcome,
+} from "@/pages/tasks/steps";
+import { describeApiError } from "@/pages/tasks/useExecutionRecords";
+
+/** 可发起的执行类动作 */
+export type OperationKey =
+  | "plan"
+  | "execute-step"
+  | "execute-steps"
+  | "execute-and-validate"
+  | "validate"
+  | "initialize-code"
+  | "open-repair-cycle";
+
+/** 一次动作的目标：用于把结论与具体步骤 / 尝试对应起来 */
+export type OperationTarget = {
+  key: OperationKey;
+  stepID?: string;
+  attemptID?: string;
+};
+
+/** 动作区的完整状态 */
+export type ExecutionOperationsState = {
+  /** 正在执行的动作；存在时所有动作按钮都应禁用 */
+  running?: OperationTarget;
+  /** 最近一次成功结论 */
+  outcome?: OperationTarget & { result: OperationOutcome };
+  /** 最近一次请求失败的业务错误 */
+  failure?: OperationTarget & { message: string };
+  /** 动作后的现场刷新失败说明；不覆盖上面的结论 */
+  refreshError?: string;
+};
+
+/** 动作标题，用于按钮与结果面板 */
+export const OPERATION_LABEL: Record<OperationKey, string> = {
+  plan: "生成计划",
+  "execute-step": "执行步骤",
+  "execute-steps": "顺序执行",
+  "execute-and-validate": "开发—验证闭环",
+  validate: "确定性验证",
+  "initialize-code": "初始化代码",
+  "open-repair-cycle": "开启新执行周期",
+};
+
+/**
+ * 执行类操作的调用入口。
+ *
+ * `refresh` 由调用方提供：动作结束后必须重新读取步骤、尝试、验证与工作流状态，
+ * 返回值是刷新过程中失败的项，用于单独提示。
+ */
+export function useExecutionOperations(options: {
+  taskID?: string;
+  refresh: () => Promise<string[]>;
+}) {
+  const { taskID, refresh } = options;
+  const [state, setState] = useState<ExecutionOperationsState>({});
+  /** 同步的在途标记：同一帧内的连续点击不会让 state 及时更新 */
+  const runningRef = useRef(false);
+
+  const runOperation = useCallback(
+    async (target: OperationTarget, action: () => Promise<OperationOutcome>) => {
+      if (runningRef.current) return;
+      if (!taskID?.trim()) {
+        setState({
+          failure: { ...target, message: "缺少任务标识，无法发起操作" },
+        });
+        return;
+      }
+      runningRef.current = true;
+      setState({ running: target });
+      try {
+        const result = await action();
+        setState({ outcome: { ...target, result } });
+      } catch (cause) {
+        setState({ failure: { ...target, message: describeApiError(cause) } });
+      } finally {
+        let failures: string[] = [];
+        try {
+          failures = await refresh();
+        } catch (cause) {
+          failures = [describeApiError(cause)];
+        }
+        runningRef.current = false;
+        setState((current) => ({
+          ...current,
+          refreshError:
+            failures.length > 0
+              ? `动作已结束，但状态刷新失败：${failures.join("、")}。执行结论仍然有效，请手动刷新确认最新状态。`
+              : undefined,
+          running: undefined,
+        }));
+      }
+    },
+    [refresh, taskID],
+  );
+
+  const clear = useCallback(() => setState({}), []);
+
+  const plan = useCallback(
+    (body: PlanRequest = {}) =>
+      runOperation({ key: "plan" }, async () => {
+        const { data } = await callGeneratePlan(taskID ?? "", body);
+        return describePlanResult(data);
+      }),
+    [runOperation, taskID],
+  );
+
+  const executeStep = useCallback(
+    (step: Step, body: ExecuteStepRequest = {}) =>
+      runOperation({ key: "execute-step", stepID: step.id }, async () => {
+        const { data } = await callExecuteStep(taskID ?? "", step.id, body);
+        return describeExecuteStepResult(data);
+      }),
+    [runOperation, taskID],
+  );
+
+  const executeSteps = useCallback(
+    (body: ExecuteStepsRequest = {}) =>
+      runOperation({ key: "execute-steps" }, async () => {
+        const { data } = await callExecuteSteps(taskID ?? "", body);
+        return describeExecuteStepsResult(data);
+      }),
+    [runOperation, taskID],
+  );
+
+  const executeAndValidate = useCallback(
+    (step: Step, body: ExecuteAndValidateStepRequest = {}) =>
+      runOperation({ key: "execute-and-validate", stepID: step.id }, async () => {
+        const { data } = await callExecuteAndValidate(taskID ?? "", step.id, body);
+        return describeExecuteAndValidateResult(data);
+      }),
+    [runOperation, taskID],
+  );
+
+  const validate = useCallback(
+    (step: Step, attempt: Attempt, body: ValidateAttemptRequest = {}) =>
+      runOperation({ attemptID: attempt.id, key: "validate", stepID: step.id }, async () => {
+        const { data } = await callValidateAttempt(taskID ?? "", step.id, attempt.id, body);
+        return describeValidateResult(data);
+      }),
+    [runOperation, taskID],
+  );
+
+  const initializeCode = useCallback(
+    (step: Step, attempt: Attempt, body: InitializeCodeRequest = {}) =>
+      runOperation({ attemptID: attempt.id, key: "initialize-code", stepID: step.id }, async () => {
+        const { data } = await initializeAttemptCode(taskID ?? "", step.id, attempt.id, body);
+        return describeInitializeResult(data);
+      }),
+    [runOperation, taskID],
+  );
+
+  const openRepairCycle = useCallback(
+    (step: Step) =>
+      runOperation({ key: "open-repair-cycle", stepID: step.id }, async () => {
+        const { data } = await callOpenRepairCycle(taskID ?? "", step.id);
+        return describeOpenRepairCycleResult(data);
+      }),
+    [runOperation, taskID],
+  );
+
+  return {
+    clear,
+    executeAndValidate,
+    executeStep,
+    executeSteps,
+    initializeCode,
+    openRepairCycle,
+    plan,
+    state,
+    validate,
+  };
+}
+
+/** 动作 hook 的返回类型，供子组件声明属性 */
+export type ExecutionOperations = ReturnType<typeof useExecutionOperations>;

@@ -26,7 +26,8 @@
 ## 当前阶段与当前里程碑
 
 - **当前阶段**：P4 —— 产品操作体验与针对性优化。
-- **当前里程碑**：`P4-M2` —— 提供完整任务生命周期的必要操作入口，状态 `in_progress`。
+- **当前里程碑**：`P4-M2` —— 提供完整任务生命周期的必要操作入口，状态 `completed`
+  （M2-1 至 M2-7 全部完成）。
   子任务 **M2-1（角色初始化 + `GET /api/v1/roles`）已于 2026-10-26 完成**，交付物为
   [`P4-M2-1-role-initialization-api.md`](./P4-M2-1-role-initialization-api.md)：角色初始化
   成为 `agentflow server` 启动协议的一部分（数据库打开后、业务服务之前，复用
@@ -67,7 +68,17 @@
   `recovery_status` 分别表达"记录是否可信"与"核验结论"（空值按领域规则归一化为
   `persisted` / `unverified`）；查询由新增的 `app.CodeSaveQueryService` 承担，它只依赖存储，
   不复用强制要求 SSH 的 `ContainerService`，因此"看记录"不再需要远程能力。剩余工作项
-  M2-7 待实施。详见
+  不复用强制要求 SSH 的 `ContainerService`，因此"看记录"不再需要远程能力。子任务
+  **M2-7（Web 接入计划生成、步骤执行与验证修复操作）已于 2026-10-26 完成**，交付物为
+  [`P4-M2-7-web-execution-operations.md`](./P4-M2-7-web-execution-operations.md)：先按真实
+  路由核实 8 项操作的请求 DTO、前置条件、成功响应与失败映射（含"闭环未通过验证返回 500"
+  "顺序执行 200 但可能 `success=false`"两条易误判契约），再补齐前端 API 封装与操作界面——
+  任务详情 → 计划步骤 → 步骤详情 → 尝试与验证结果 → 明确后续动作；接入计划生成、单步骤
+  执行、顺序执行、开发—验证闭环、指定 Attempt 确定性验证、代码初始化与显式开启修复周期，
+  全部动作只使用当前真实记录的标识、动作在途时禁止重复提交、失败原样展示服务端原因、
+  刷新失败不覆盖已取得的执行结论、从不自动重试。**本轮未修改任何后端代码**；全量前端
+  单元测试 191 通过，新增 E2E 20/20 通过，全量 E2E 70 通过 / 3 失败（失败项经
+  `git stash -u` 基线对照确认为既有问题）。P4-M2 的 7 个子任务至此全部完成。详见
   [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
 - **上一里程碑**：`P4-M1` —— 盘点 API 与 Web 业务操作能力的缺口，状态 `completed`
   （2026-10-26，基于 `master` HEAD `70f82b1` 的实际代码核实）。交付物为
@@ -92,10 +103,10 @@
   里程碑归属。本次未运行任何测试，全部结论为静态代码核实，已在文档 §9 如实记录。
   另外记录了 7 处历史文档与代码不符之处（README 仍称并发调度未实现、任务调度器未接入、
   项目/环境/容器/代码保存均无 HTTP 接口、任务页尚未接入步骤执行入口等）。
-- **下一步**：`P4-M2-7` —— 单步骤执行、顺序执行、开发—验证闭环、修复周期与计划生成的
-  Web/API 操作入口，覆盖缺口 G14（单步诊断入口）与 G13（计划生成）。该阶段必须先盘点
-  现有后端路由与前端调用缺口，再按端到端主流程优先级排序实施，不要一次性把所有入口堆进
-  UI。环境构建 Web 入口与角色变更入口是否上 Web 仍按产品取舍决定。详见
+- **下一步**：`P4-M3` —— 展示阶段进度、验证结果、失败原因和恢复状态（M3-1 至 M3-8）。
+  P4-M2 的 7 个子任务已全部完成，其中 M2-7 打通的执行现场只读接口与步骤/尝试/验证展示
+  已为 M3-1、M3-2 铺垫；M3 仍需补齐事件时间线、修复周期历史、收尾结论、续跑阻塞原因与
+  进度自动刷新。环境构建 Web 入口与角色变更入口是否上 Web 仍按产品取舍决定。详见
   [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
 - **更早里程碑**：`P3-M5` —— 验证多任务并发、冲突和资源回收行为，状态
   `completed`（2026-10-25，基于 `master` HEAD `abfdfd3` 之后的工作区核实与实施）。
@@ -221,13 +232,18 @@
   `0023_code_fetch_active_unique.sql`、`VerifyCodeSave` 在容器缺失时降级为
   `unverifiable` 并落盘、新增 HTTP `verify-code-save` 与 `resume-eligibility`
   （CLI `task resume-status`）、`ensureNoPendingContainer` 阻止创建第二个容器。
-- **下一步**：P3 阶段已全部完成（M1–M5 均 `completed`），P4-M1 已完成，P4-M2-1、
-  M2-2、M2-3、M2-4、M2-5、M2-6 均已完成（见上方"当前阶段与当前里程碑"）。按
-  [`ROADMAP.md`](./ROADMAP.md) 的优先级规则，下一步是 **P4-M2-7 —— 单步骤执行、顺序
-  执行、开发—验证闭环、修复周期与计划生成的 Web/API 操作入口**，入口见
+- **下一步**：P3 阶段已全部完成（M1–M5 均 `completed`），P4-M1 已完成，P4-M2-1 至
+  M2-7 均已完成（见上方"当前阶段与当前里程碑"）。按
+  [`ROADMAP.md`](./ROADMAP.md) 的优先级规则，下一步是 **P4-M3 —— 展示阶段进度、验证结果、
+  失败原因和恢复状态**，入口见
   [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)；
   缺口依据见
   [`P4-M1-api-web-gap-inventory.md`](./P4-M1-api-web-gap-inventory.md)。
+  P4-M2-7 的剩余风险见
+  [`P4-M2-7-web-execution-operations.md`](./P4-M2-7-web-execution-operations.md) §6：
+  同步长请求没有进度推送（M3-7 补）、闭环未通过验证时结构化事实只在 500 错误体之外
+  （需后端调整契约才能展示完整结论）、修复周期可用性只能粗判（预算由服务端判定）、
+  计划不可覆盖、会话查询为按尝试的 N+1 请求。
   P3-M5 的交接事项见
   [`P3-M5-multi-task-acceptance.md`](./P3-M5-multi-task-acceptance.md) §8：并发上限是
   "同一份数据库上的名额上限"（跨库全局配额是明确的非目标）；数据库 fencing 不等于
@@ -283,6 +299,7 @@
 | [`P4-M2-4-task-creation-selectors.md`](./P4-M2-4-task-creation-selectors.md) | P4-M2-4：任务创建表单接入执行节点与角色选择器（接口契约、选择与校验规则、四态展示、测试证据、剩余风险） |
 | [`P4-M2-5-validation-feedback-api.md`](./P4-M2-5-validation-feedback-api.md) | P4-M2-5：验证失败反馈查询 API 契约（路由、字段语义、完整归属校验、错误映射、最近反馈入口的范围决策、测试证据、剩余风险） |
 | [`P4-M2-6-code-save-records-api.md`](./P4-M2-6-code-save-records-api.md) | P4-M2-6：代码保存记录列表 API 契约（路由与 DTO、三阶段与记录可信度语义、应用层依赖边界、错误映射、只读边界、测试证据、剩余风险） |
+| [`P4-M2-7-web-execution-operations.md`](./P4-M2-7-web-execution-operations.md) | P4-M2-7：Web 接入计划生成、步骤执行与验证修复操作（8 项操作矩阵与代码证据、实施顺序、前端 API 与操作界面结构、测试证据、未通过项与剩余风险） |
 
 ## 下一步工作的选择规则
 

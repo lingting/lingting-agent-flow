@@ -1,0 +1,132 @@
+/**
+ * 任务执行现场面板：计划、步骤、尝试、验证与操作入口。
+ *
+ * 组织方式对应真实业务链路：任务详情 → 计划步骤 → 步骤详情 → 尝试与验证结果 →
+ * 明确的后续动作。所有动作都只作用于当前真实记录，不接受手工输入的资源标识。
+ *
+ * 数据与动作的来源分工：
+ *   - 步骤列表来自 `GET /tasks/{id}/steps`；
+ *   - 尝试、验证历史与会话来自执行记录只读接口；
+ *   - 动作通过 `useExecutionOperations` 调用真实写接口；
+ *   - 动作结束后的刷新只更新展示，不改变已经取得的执行结论。
+ */
+import { Alert, Flex, Space, Typography } from "antd";
+import { Button, LinkButton } from "lingting-react-ui";
+import { useCallback, useMemo, useState } from "react";
+
+import type { Step, Task } from "@/lib/api";
+import { OperationOutcomePanel } from "@/pages/tasks/OperationOutcomePanel";
+import { StepDetailPanel } from "@/pages/tasks/StepDetailPanel";
+import { StepListPanel } from "@/pages/tasks/StepListPanel";
+import { canGeneratePlan, canRunSteps } from "@/pages/tasks/steps";
+import { useExecutionOperations, OPERATION_LABEL } from "@/pages/tasks/useExecutionOperations";
+import { describeApiError, useStepRecords, useTaskSteps } from "@/pages/tasks/useExecutionRecords";
+
+/**
+ * 任务执行面板。
+ *
+ * `onRefreshTask` 由父组件提供：动作之后任务状态与工作流进度都可能变化，必须重新
+ * 读取。它返回刷新失败的项说明，用于单独提示，不覆盖执行结论。
+ */
+export function TaskExecutionPanel({
+  onRefreshTask,
+  task,
+}: {
+  onRefreshTask: () => Promise<string[]>;
+  task: Task;
+}) {
+  const [selectedStepID, setSelectedStepID] = useState<string>();
+  const stepsState = useTaskSteps(task.id);
+  const records = useStepRecords(task.id, selectedStepID);
+
+  const steps = stepsState.state.status === "ready" ? stepsState.state.data : [];
+  const selectedStep = useMemo(
+    () => steps.find((step) => step.id === selectedStepID),
+    [selectedStepID, steps],
+  );
+
+  /** 动作结束后重新读取全部现场；失败项返回给调用方单独提示 */
+  const refreshAll = useCallback(async () => {
+    const failures: string[] = [];
+    stepsState.reload();
+    records.reload();
+    try {
+      const taskFailures = await onRefreshTask();
+      failures.push(...taskFailures);
+    } catch (cause) {
+      failures.push(`任务状态（${describeApiError(cause)}）`);
+    }
+    return failures;
+  }, [onRefreshTask, records.reload, stepsState.reload]);
+
+  const operations = useExecutionOperations({ refresh: refreshAll, taskID: task.id });
+
+  const clearOperation = operations.clear;
+  const handleSelectStep = useCallback(
+    (step: Step) => {
+      setSelectedStepID(step.id);
+      clearOperation();
+    },
+    [clearOperation],
+  );
+
+  const busy = operations.state.running !== undefined;
+
+  return (
+    <Flex gap="middle" vertical>
+      <Space align="center" size={8} wrap>
+        <Typography.Text strong>执行操作</Typography.Text>
+        <Button
+          disabled={busy || !canGeneratePlan(task, steps)}
+          loading={operations.state.running?.key === "plan"}
+          onClick={() => void operations.plan()}
+          size="small"
+          text={OPERATION_LABEL.plan}
+          tooltip="生成计划会真实调用 Planner，并要求任务已有受管理容器与规划角色；已有计划时服务端拒绝覆盖。"
+        />
+        <Button
+          disabled={busy || !canRunSteps(task, steps)}
+          loading={operations.state.running?.key === "execute-steps"}
+          onClick={() => void operations.executeSteps()}
+          size="small"
+          text={OPERATION_LABEL["execute-steps"]}
+          tooltip="按数据库中的计划顺序依次执行开发步骤，失败即停止；不包含验证、提交、推送与合并。"
+        />
+        <LinkButton onClick={stepsState.reload} text="刷新步骤" />
+      </Space>
+      <Typography.Text type="secondary">
+        新任务必须先通过任务列表的「启动」完成环境准备、计划生成与工作流启动；
+        这里的入口只用于在既有执行现场上做显式推进与诊断。
+      </Typography.Text>
+
+      <OperationOutcomePanel state={operations.state} />
+
+      <StepListPanel
+        onReload={stepsState.reload}
+        onSelect={handleSelectStep}
+        selectedStepID={selectedStepID}
+        state={stepsState.state}
+      />
+
+      {selectedStep ? (
+        <StepDetailPanel
+          key={selectedStep.id}
+          onReload={records.reload}
+          operations={operations}
+          records={records.state}
+          step={selectedStep}
+          task={task}
+        />
+      ) : (
+        steps.length > 0 && (
+          <Alert
+            description="点击上方步骤名称查看该步骤的执行尝试、验证历史与可发起的操作。"
+            showIcon
+            title="尚未选择步骤"
+            type="info"
+          />
+        )
+      )}
+    </Flex>
+  );
+}
