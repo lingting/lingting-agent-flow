@@ -18,6 +18,10 @@ const (
 
 // Deps 是构造 API 处理器所需的依赖。
 type Deps struct {
+	// Roles 是角色查询服务，为空时角色接口返回服务不可用。
+	//
+	// 角色只在首次初始化时从配置导入，接口本身只读。
+	Roles *app.RoleService
 	// Health 提供健康检查结果，为空时健康检查返回服务不可用。
 	Health *app.HealthService
 	// SystemInfo 返回系统信息，为空时接口返回服务不可用。
@@ -70,6 +74,7 @@ func NewHandler(deps Deps) http.Handler {
 		logger = slog.Default()
 	}
 	router := &router{
+		roles:      newRoleHandler(deps.Roles, logger),
 		health:     deps.Health,
 		systemInfo: deps.SystemInfo,
 		tasks:      newTaskHandler(deps.Tasks, logger),
@@ -92,6 +97,8 @@ func NewHandler(deps Deps) http.Handler {
 		logger:            logger,
 	}
 	mux := http.NewServeMux()
+	// 角色接口只有集合路径：本阶段不提供角色 CRUD，/roles 之下的其他路径统一 404。
+	mux.HandleFunc(PathRoles, router.rolesHandler)
 	mux.HandleFunc(PathHealth, router.healthHandler)
 	mux.HandleFunc(PathSystemInfo, router.systemInfoHandler)
 	// 任务集合路径与单任务路径分别注册：ServeMux 会按更具体的模式优先匹配。
@@ -106,6 +113,8 @@ func NewHandler(deps Deps) http.Handler {
 
 // router 持有 API 处理器依赖。
 type router struct {
+	// roles 处理角色只读查询；服务未初始化时接口返回 503。
+	roles             *roleHandler
 	health            *app.HealthService
 	systemInfo        func() app.SystemInfo
 	tasks             *taskHandler
@@ -309,6 +318,13 @@ func (rt *router) healthHandler(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusServiceUnavailable
 	}
 	writeJSON(w, r, rt.logger, status, health)
+}
+
+// rolesHandler 处理角色列表请求。
+//
+// 角色服务未初始化时返回 503，而不是伪造空列表。
+func (rt *router) rolesHandler(w http.ResponseWriter, r *http.Request) {
+	rt.roles.serve(w, r)
 }
 
 // systemInfoHandler 处理系统信息请求。

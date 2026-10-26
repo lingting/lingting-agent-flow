@@ -174,6 +174,8 @@ type Server struct {
 	validation *app.HostValidationService
 	// sessions 是所有 Agent 调用共享的会话服务。
 	sessions *app.SessionService
+	// roleQuery 是角色只读查询服务，由已打开的数据库构造。
+	roleQuery *app.RoleService
 	// executionRecords 是执行记录只读查询服务，由已打开的数据库构造。
 	executionRecords *app.ExecutionRecordService
 	// stepExecutor 是单步骤执行协调器，为空时不提供执行接口。
@@ -336,7 +338,11 @@ func (s *Server) openDatabase(ctx context.Context) error {
 		return fmt.Errorf("初始化数据库失败: %w", err)
 	}
 	s.store = store
-	// 会话服务是所有 Agent 调用的公共依赖：Session 记录先于进程启动写入。
+	// 角色初始化必须早于任何业务服务：全新数据库的 roles 为空时，创建任务会因
+	// 找不到角色直接失败。这里复用存储层的原子初始化，只在空表时导入。
+	if err := s.seedRoles(ctx, store); err != nil {
+		return err
+	}
 	root := app.SessionRoot(s.cfg)
 	if root == "" {
 		return fmt.Errorf("初始化 Session 目录失败: 无法从配置确定 Session 根目录")
@@ -514,11 +520,45 @@ func (s *Server) openDatabase(ctx context.Context) error {
 	return nil
 }
 
+// seedRoles 在角色表为空时导入配置中的初始角色。
+//
+// 语义由存储层的 RoleSeeder 保证：检查与写入在同一事务内完成，已有角色（含禁用
+// 角色）不会被覆盖，重复启动不会重复导入。普通启动不做任何角色同步，配置变化
+// 也不会隐式改写数据库中的角色。
+//
+// 配置为空或存储不支持角色初始化时直接失败：让服务带着空角色表进入可用状态，
+// 只会在用户创建任务时才暴露问题。
+func (s *Server) seedRoles(ctx context.Context, store storage.Store) error {
+	seeder, ok := store.(storage.RoleSeeder)
+	if !ok {
+		return fmt.Errorf("初始化角色失败: 存储不支持角色初始化")
+	}
+	seeds, err := app.RoleSeeds(s.cfg)
+	if err != nil {
+		return err
+	}
+	created, err := seeder.SeedRoles(ctx, seeds)
+	if err != nil {
+		return fmt.Errorf("初始化角色失败: %w", err)
+	}
+	if created > 0 {
+		s.report(fmt.Sprintf("已从配置导入 %d 个角色", created))
+	}
+	return nil
+}
+
 // startServices 构造执行节点服务与后台校验服务，并按注册顺序启动。
 //
 // 环境预检作为后台服务注册进统一生命周期：由这里启动与停止，不在 HTTP Handler
 // 内创建不受管理的长期 goroutine。
 func (s *Server) startServices(ctx context.Context) error {
+	// 角色查询服务只读已持久化的角色记录：角色导入发生在 openDatabase 阶段，
+	// 因此这里读到的一定是本次启动之后数据库中的真实状态。
+	roles, err := s.roleService()
+	if err != nil {
+		return err
+	}
+	s.roleQuery = roles
 	records, err := s.executionRecordService()
 	if err != nil {
 		return err
@@ -607,6 +647,20 @@ func (s *Server) startServices(ctx context.Context) error {
 // 包装后两者共用同一个 handler，输出目标与级别一致，不会产生第二套日志格式。
 func (s *Server) loggerWrapper() *logging.Logger {
 	return logging.FromSlog(s.logger)
+}
+
+// roleService 构造角色只读查询服务。
+//
+// 未打开数据库时返回 nil：角色接口随后返回 503，而不是伪造空列表。
+func (s *Server) roleService() (*app.RoleService, error) {
+	if s.store == nil {
+		return nil, nil
+	}
+	roles, err := app.NewRoleService(s.store)
+	if err != nil {
+		return nil, fmt.Errorf("初始化角色查询服务失败: %w", err)
+	}
+	return roles, nil
 }
 
 // executionRecordService 构造执行记录只读查询服务。
@@ -717,6 +771,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 	}
 	web, err := httpserver.New(httpserver.Options{
 		Address:           s.address,
+		Roles:             s.roleQuery,
 		Health:            app.NewHealthService(s.store),
 		SystemInfo:        s.systemInfo,
 		Tasks:             tasks,

@@ -4,6 +4,9 @@
 > **P4-M1 已按 `master` HEAD `70f82b1`（2026-10-26）的实际代码重新核实并改写**，
 > 缺口清单与代码证据见 [`P4-M1-api-web-gap-inventory.md`](./P4-M1-api-web-gap-inventory.md)。
 > M2–M5 的工作项直接来自该清单的 G1–G21，不再使用"待补充"的骨架描述。
+> **P4-M2-1（角色初始化 + `GET /api/v1/roles`）已于 2026-10-26 实施完成**，契约、代码证据、
+> 测试结果与剩余风险见
+> [`P4-M2-1-role-initialization-api.md`](./P4-M2-1-role-initialization-api.md)。
 
 ## 阶段目标
 
@@ -43,8 +46,11 @@ P1–P3 保证"能跑"，但用户无法清楚地操作与观察时，主流程�
 - **P0 端到端阻塞**：
   - G1 统一启动 `POST /tasks/{id}/start` 未接入 Web；任务页直接调 `execute-workflow`，
     对 `queued` 新任务必然 409（`domain.CheckWorkflowStart` 要求已有容器与已持久化步骤）。
-  - G2 角色初始化（`app.RoleSeeds` / `storage.RoleSeeder`）**生产代码零调用者**，且无角色
-    查询接口；全新数据库 `roles` 为空，`CreateTask` 必然失败。历史文档从未记录此断链。
+  - G2 角色初始化与角色查询 —— **M2-1 已闭合后端部分**：`agentflow server` 启动时在数据库
+    打开后按 `app.RoleSeeds` + `storage.RoleSeeder.SeedRoles` 导入初始角色（只在空表时），
+    新增只读 `GET /api/v1/roles`。剩余部分是角色变更入口（CRUD 或显式同步）与前端角色
+    选择器（M2-4）。详见
+    [`P4-M2-1-role-initialization-api.md`](./P4-M2-1-role-initialization-api.md)。
   - G3 环境（语言环境 / 版本 / 镜像）无 HTTP 入口，只有 CLI；`/start` 会在 `container`
     阶段失败。
 - **P1 业务决策阻塞**：G5 重试无入口、G6 验证失败反馈无查询接口、G7 步骤/Attempt/Session
@@ -81,7 +87,7 @@ P1–P3 保证"能跑"，但用户无法清楚地操作与观察时，主流程�
 | ID | 名称 | 状态 | 依赖 |
 |---|---|---|---|
 | P4-M1 | 盘点当前 API 与 Web 业务操作能力的缺口 | `completed`（2026-10-26，基于 `master` HEAD `70f82b1`） | P3 退出 |
-| P4-M2 | 提供完整任务生命周期的必要操作入口 | `pending` | P4-M1 |
+| P4-M2 | 提供完整任务生命周期的必要操作入口 | `in_progress`（M2-1 已完成；M2-2 起待实施） | P4-M1 |
 | P4-M3 | 展示阶段进度、验证结果、失败原因和恢复状态 | `pending` | P4-M1、P4-M2（部分工作项需 M2 先补 API） |
 | P4-M4 | 支持必要的继续执行、取消、恢复和结果查看操作 | `pending` | P4-M2、P4-M3 |
 | P4-M5 | 根据真实使用问题或可测量数据推进性能、并发、存储与架构优化 | `pending` | P4-M2、P4-M3、P4-M4 |
@@ -101,9 +107,10 @@ P1–P3 保证"能跑"，但用户无法清楚地操作与观察时，主流程�
 
 ## 下一步选择规则
 
-M1 已完成。下一步进入 **P4-M2**，且 M2 内部必须按 M2-1 → M2-2 → M2-3 的顺序推进：
-角色初始化与角色接口（G2）是唯一"不解除就任何任务都创建不出来"的断链，环境查询接口
-（G3）与统一启动接入（G1）紧随其后。其余 M2 工作项在核心链路打通后再补齐。
+M1 已完成，M2-1 已完成（角色初始化 + `GET /api/v1/roles`）。**下一步是 M2-2 环境查询
+HTTP API**（覆盖 G3），随后 M2-3 前端接入统一启动（覆盖 G1）。G2 的后端断链已解除：
+全新数据库启动后角色会被真实写入，`CreateTask` 不再因角色缺失而必然失败。其余 M2 工作项
+在核心链路打通后再补齐。
 
 M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、M5（基于实测数据的优化）。
 
@@ -131,12 +138,15 @@ M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、
 ### P4-M2 提供完整任务生命周期的必要操作入口
 
 - **ID**：`P4-M2`
-- **状态**：`pending`
+- **状态**：`in_progress`（M2-1 于 2026-10-26 完成，交付物
+  [`P4-M2-1-role-initialization-api.md`](./P4-M2-1-role-initialization-api.md)；M2-2 起待实施）
 - **必要性**：G2/G1/G3 是端到端阻塞，不解除则用户无法从 Web 开始任何任务。
 - **前置依赖**：P4-M1。
 - **工作项（按交付顺序）**：
   1. **M2-1** 角色初始化接入 `agentflow server` 启动流程（只在 `roles` 为空时导入）+
-     `GET /api/v1/roles`。覆盖 G2。**必须最先做**。
+     `GET /api/v1/roles`。覆盖 G2 的后端部分。**已完成**（2026-10-26，见
+     [`P4-M2-1-role-initialization-api.md`](./P4-M2-1-role-initialization-api.md)）。
+     仍缺：角色变更入口（CRUD 或显式同步），前端选择器归 M2-4。
   2. **M2-2** 环境查询 HTTP 接口（列表 + 版本 + 构建状态）。覆盖 G3。
   3. **M2-3** 前端接入统一启动 `POST /tasks/{id}/start`，展示真实 `stage` /
      `workflow_started`。覆盖 G1。

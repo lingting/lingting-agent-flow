@@ -70,6 +70,7 @@ Web 完成"新建任务 → 准备环境 → 获取代码 → 生成计划 → �
 |---|---|---|---|
 | GET | `/api/v1/health` | `router.healthHandler` | 是 |
 | GET | `/api/v1/system/info` | `router.systemInfoHandler` | 是 |
+| GET | `/api/v1/roles` | `roleHandler.list`（P4-M2-1 新增） | **否**（M2-4 接入） |
 | POST | `/api/v1/tasks` | `taskHandler.create` | 是 |
 | GET | `/api/v1/tasks` | `taskHandler.list` | 是 |
 | GET | `/api/v1/tasks/{taskID}` | `taskHandler.detail` | 是 |
@@ -153,7 +154,7 @@ Web 完成"新建任务 → 准备环境 → 获取代码 → 生成计划 → �
 | ID | 用户目标 | 后端业务能力 | HTTP API | 前端客户端 | Web 页面 | 业务阻塞 | 代码证据 | 后续里程碑 | 优先级 |
 |---|---|---|---|---|---|---|---|---|---|
 | **G1** | 新建任务后一键开始执行（准备容器 → 初始化工作区 → 生成计划 → 启动编排） | 已实现（`TaskLaunchService.Launch`） | `POST /tasks/{id}/start`（202，含 stage / task_status / plan_persisted / workflow_started） | **缺失** | **缺失**：任务页只有"执行工作流"，直接调 `execute-workflow` | **是**：新建任务为 `queued`、无容器、无步骤，`CheckWorkflowStart` 必然返回 409；用户无法从 Web 启动任何新任务 | `internal/app/task_launch_run.go:36`；`internal/domain/workflow_run.go:608`（要求 `task.ContainerID != ""` 且 `len(steps) > 0`）；`lingting-agent-flow-ui/src/pages/tasks/TasksPage.tsx:231` | P4-M2 | **P0** |
-| **G2** | 首次部署后能创建出可执行任务（角色存在且可选） | **部分实现且断链**：`storage.RoleStore` CRUD 存在，`app.RoleSeeds` 与 `storage.RoleSeeder.SeedRoles` 存在，但**生产代码无任何调用者**（`agentflow server` 启动不导入角色，无 CLI、无 app 服务） | **不存在**（无 `/roles`） | 缺失 | 缺失（创建任务需手填角色 ID） | **是**：全新数据库 `roles` 为空 → `CreateTask` → `ensureRoles` → `GetRole` 失败 → 任务无法创建 | `internal/app/roles.go:15`（仅测试调用）；`internal/storage/interfaces.go:651`；`internal/app/task.go:292`；`internal/server/server.go:333`（`openDatabase` 不导入角色） | P4-M2 | **P0** |
+| **G2** | 首次部署后能创建出可执行任务（角色存在且可选） | **已由 P4-M2-1 闭合后端部分**（启动期导入 + `GET /api/v1/roles`；本行保留 P4-M1 盘点时的现场）；原状态：**部分实现且断链**：`storage.RoleStore` CRUD 存在，`app.RoleSeeds` 与 `storage.RoleSeeder.SeedRoles` 存在，但**生产代码无任何调用者**（`agentflow server` 启动不导入角色，无 CLI、无 app 服务） | **不存在**（无 `/roles`） | 缺失 | 缺失（创建任务需手填角色 ID） | **是**：全新数据库 `roles` 为空 → `CreateTask` → `ensureRoles` → `GetRole` 失败 → 任务无法创建 | `internal/app/roles.go:15`（仅测试调用）；`internal/storage/interfaces.go:651`；`internal/app/task.go:292`；`internal/server/server.go:333`（`openDatabase` 不导入角色） | P4-M2 | **P0** |
 | **G3** | 选择/创建语言环境与可用环境版本（含镜像构建） | 已实现（`EnvironmentService.List/Get/History/CreateVersion/Build/ReadDockerfile`） | **不存在** | 缺失 | 占位页 | **是**：`PrepareForTask` → `validatePrepare` → `ResolveVersion` 要求已存在环境版本；无 Web 入口时用户必须先用 CLI `agentflow docker init` / `docker env build` 才能开始 | `internal/app/execenv_prepare.go:145-180`；`internal/app/environments_query.go:20,68,186`；`internal/app/environments_build.go:47` | P4-M2 | **P0** |
 | **G4** | 从可用执行节点中选择节点（而非手抄 ID） | 已实现（`ExecutionHostService`） | `GET /hosts` 已存在 | 已封装 `fetchHosts` | **部分接通**：`CreateTaskModal` 仍是自由文本 `Input`，未复用 `fetchHosts` | **否**（可手填，但易错且与已有能力脱节） | `lingting-agent-flow-ui/src/pages/tasks/CreateTaskModal.tsx:280-290`；`endpoints.ts` 的 `fetchHosts` | P4-M2 | **P1** |
 | **G5** | 失败任务显式重试（先看资格再决定） | 已实现（`TaskRetryService.Retry` / `Eligibility`，10 个稳定拒绝原因） | `POST /tasks/{id}/retry`、`GET /tasks/{id}/retry-eligibility` | **缺失** | **缺失** | **是（业务决策）**：`failed` 任务在 Web 上无任何后续动作；前端也不得自行推断可重试 | `internal/httpapi/task_retry.go`；`internal/domain/task_retry.go:22-49`；`lingting-agent-flow-ui/src/pages/tasks/status.ts`（无重试判定） | P4-M4 | **P1** |
@@ -202,6 +203,11 @@ Web 完成"新建任务 → 准备环境 → 获取代码 → 生成计划 → �
    `/plan` 的顺序编排调用。
 
 ### G2 角色初始化与角色管理没有生产入口（P0）
+
+> **状态更新（2026-10-26）**：本节描述的是 P4-M1 盘点时的现场。**P4-M2-1 已闭合后端
+> 部分**：`agentflow server` 启动时在数据库打开后导入初始角色（只在空表时），并新增只读
+> `GET /api/v1/roles`。仍缺：角色变更入口（CRUD 或显式同步）与前端角色选择器（M2-4）。
+> 契约与证据见 [`P4-M2-1-role-initialization-api.md`](./P4-M2-1-role-initialization-api.md)。
 
 **事实**：
 
@@ -411,7 +417,7 @@ HTTP 只有 `POST .../code-saves/{recordID}/verify-code-save`，而 `recordID` �
 
 | 工作项 | 覆盖缺口 | 前置 | 备注 |
 |---|---|---|---|
-| M2-1 角色初始化接入启动流程 + `GET /api/v1/roles` | G2 | 无 | **必须先做**：不做则后续所有任务创建都失败 |
+| M2-1 角色初始化接入启动流程 + `GET /api/v1/roles` | G2 | 无 | **已完成（2026-10-26）**：见 [`P4-M2-1-role-initialization-api.md`](./P4-M2-1-role-initialization-api.md)；剩余角色变更入口与前端选择器（M2-4） |
 | M2-2 环境查询 HTTP 接口 | G3 | 无 | 只读列表 + 版本 + 构建状态优先；构建入口次之 |
 | M2-3 前端接入统一启动 `/start` | G1 | M2-1、M2-2 | 替换"执行工作流"按钮语义，或明确区分"启动"与"续跑" |
 | M2-4 创建任务弹窗复用 `fetchHosts` 与角色接口 | G4、G2 | M2-1 | 纯前端 + 已有接口 |

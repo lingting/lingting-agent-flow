@@ -46,7 +46,8 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > **P3-M1 于 2026-10-25 完成，P3-M2 于 2026-10-25 完成，P3-M3 于 2026-10-26 完成
 > （文档记录日期；实际实施与本次 P3-M4 同在 2026-10-25，日期不自洽已记录在
 > `P3-M4-scheduler-recovery.md` §1.2），P3-M4 于 2026-10-25 完成，P3-M5 于 2026-10-25
-> 完成；P4-M1 于 2026-10-26 完成（基于 `master` HEAD `70f82b1`）**）。P1 证据见
+> 完成；P4-M1 于 2026-10-26 完成（基于 `master` HEAD `70f82b1`），**P4-M2-1 于 2026-10-26
+> 完成**（角色初始化 + `GET /api/v1/roles`，P4-M2 因此为 `in_progress`））。P1 证据见
 > `P1-single-task-e2e.md` 的对应"完成记录"；P2-M1 证据见
 > `P2-M1-recovery-boundaries.md`；P2-M2 证据见 `P2-M2-interruption-semantics.md`；
 > P2-M3 与 P2-M4 证据见 `P2-reliability-recovery.md` 的对应里程碑详情。
@@ -395,8 +396,10 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
   P2 退出条件据此仍需在真实远程环境复核这一类行为。
 - **P4-M1 核实的操作入口缺口**（P4 范围，见
   [`P4-M1-api-web-gap-inventory.md`](./P4-M1-api-web-gap-inventory.md) §5）：
-  - P0 端到端阻塞三项：G2 角色初始化无生产调用者且无 `/api/v1/roles`；G1 统一启动
-    `POST /tasks/{taskID}/start` 未接入 Web；G3 环境（语言/版本/镜像）无 HTTP 接口。
+  - P0 端到端阻塞三项：**G2 角色初始化与 `/api/v1/roles` —— 已于 P4-M2-1 闭合后端部分**
+    （启动时在数据库打开后导入初始角色，新增只读 `GET /api/v1/roles`；剩余角色变更入口与
+    前端选择器）；G1 统一启动 `POST /tasks/{taskID}/start` 未接入 Web；G3 环境
+    （语言/版本/镜像）无 HTTP 接口。
   - P1 业务决策阻塞七项：G5 重试、G6 验证失败反馈查询、G7 执行记录历史、G8 代码保存
     列表、G9 容器处置、G10 收尾结论展示、G11 续跑阻塞原因。
   - P2 六项：G12 项目后端能力缺失（无表、无服务）、G13 计划生成入口、G14 单步诊断入口、
@@ -509,3 +512,4 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - [P3-M5-multi-task-acceptance.md](./P3-M5-multi-task-acceptance.md)
 - [P4-product-experience-optimization.md](./P4-product-experience-optimization.md)
 - [P4-M1-api-web-gap-inventory.md](./P4-M1-api-web-gap-inventory.md)
+- [P4-M2-1-role-initialization-api.md](./P4-M2-1-role-initialization-api.md)

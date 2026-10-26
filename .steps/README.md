@@ -26,7 +26,16 @@
 ## 当前阶段与当前里程碑
 
 - **当前阶段**：P4 —— 产品操作体验与针对性优化。
-- **当前里程碑**：`P4-M1` —— 盘点 API 与 Web 业务操作能力的缺口，状态 `completed`
+- **当前里程碑**：`P4-M2` —— 提供完整任务生命周期的必要操作入口，状态 `in_progress`。
+  子任务 **M2-1（角色初始化 + `GET /api/v1/roles`）已于 2026-10-26 完成**，交付物为
+  [`P4-M2-1-role-initialization-api.md`](./P4-M2-1-role-initialization-api.md)：角色初始化
+  成为 `agentflow server` 启动协议的一部分（数据库打开后、业务服务之前，复用
+  `app.RoleSeeds` + `storage.RoleSeeder.SeedRoles`，只在空表时导入，失败即启动失败），
+  并新增只读角色列表接口（最小字段集、禁用角色如实返回、依赖缺失 503、存储错误不伪装成
+  空列表）。剩余子任务 M2-2（环境查询 HTTP API）→ M2-3（前端接入 `/start`）→ 其余
+  工作项待实施。详见
+  [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
+- **上一里程碑**：`P4-M1` —— 盘点 API 与 Web 业务操作能力的缺口，状态 `completed`
   （2026-10-26，基于 `master` HEAD `70f82b1` 的实际代码核实）。交付物为
   [`P4-M1-api-web-gap-inventory.md`](./P4-M1-api-web-gap-inventory.md)。
   本次**未修改任何生产代码或前端功能代码**，只建立缺口清单与后续实施依据。核对结论：
@@ -40,14 +49,16 @@
   调用者**，`agentflow server` 启动不导入角色、CLI 无角色命令、无 `/api/v1/roles`，全新
   数据库 `roles` 为空导致 `CreateTask` → `ensureRoles` 失败（历史文档从未记录该断链）；
   G3 环境（语言环境/版本/镜像）只有 CLI，无 HTTP，`/start` 会在 `container` 阶段失败。
+  **其中 G2 已在 P4-M2-1 闭合后端部分**（启动期导入初始角色 + `GET /api/v1/roles`），
+  上述描述保留为 P4-M1 盘点时的现场记录。
   另有 7 项 P1 业务决策阻塞（重试、验证失败反馈、执行记录历史、代码保存列表、容器处置、
   收尾结论、续跑阻塞原因）、6 项 P2、3 项 P3，共 21 项，逐项附代码证据、验收标准与
   里程碑归属。本次未运行任何测试，全部结论为静态代码核实，已在文档 §9 如实记录。
   另外记录了 7 处历史文档与代码不符之处（README 仍称并发调度未实现、任务调度器未接入、
   项目/环境/容器/代码保存均无 HTTP 接口、任务页尚未接入步骤执行入口等）。
-- **下一步**：`P4-M2` —— 提供完整任务生命周期的必要操作入口，内部必须按
-  M2-1（角色初始化 + `/api/v1/roles`）→ M2-2（环境查询接口）→ M2-3（接入 `/start`）
-  的顺序推进，其余工作项在核心链路打通后补齐。详见
+- **下一步**：`P4-M2-2` —— 环境查询 HTTP API（列表 + 版本 + 构建状态），覆盖缺口 G3；
+  随后 M2-3 前端接入统一启动 `POST /tasks/{id}/start`（覆盖 G1），其余 M2 工作项在核心
+  链路打通后补齐。详见
   [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
 - **更早里程碑**：`P3-M5` —— 验证多任务并发、冲突和资源回收行为，状态
   `completed`（2026-10-25，基于 `master` HEAD `abfdfd3` 之后的工作区核实与实施）。
@@ -173,9 +184,9 @@
   `0023_code_fetch_active_unique.sql`、`VerifyCodeSave` 在容器缺失时降级为
   `unverifiable` 并落盘、新增 HTTP `verify-code-save` 与 `resume-eligibility`
   （CLI `task resume-status`）、`ensureNoPendingContainer` 阻止创建第二个容器。
-- **下一步**：P3 阶段已全部完成（M1–M5 均 `completed`），P4-M1 亦已完成（见上方"当前
-  阶段与当前里程碑"）。按 [`ROADMAP.md`](./ROADMAP.md) 的优先级规则，下一步进入
-  **P4-M2 —— 提供完整任务生命周期的必要操作入口**，入口见
+- **下一步**：P3 阶段已全部完成（M1–M5 均 `completed`），P4-M1 已完成，P4-M2-1 已完成
+  （见上方"当前阶段与当前里程碑"）。按 [`ROADMAP.md`](./ROADMAP.md) 的优先级规则，
+  下一步是 **P4-M2-2 —— 环境查询 HTTP API**，入口见
   [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)；
   缺口依据见
   [`P4-M1-api-web-gap-inventory.md`](./P4-M1-api-web-gap-inventory.md)。
@@ -228,6 +239,7 @@
 | [`P3-M5-multi-task-acceptance.md`](./P3-M5-multi-task-acceptance.md) | P3-M5：多任务并发、冲突与资源回收的系统性验收（缺口矩阵、并发上限语义、4 个生产缺陷修复、真实远程证据） |
 | [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md) | P4：产品操作体验与针对性优化（M1–M5 工作项与依赖） |
 | [`P4-M1-api-web-gap-inventory.md`](./P4-M1-api-web-gap-inventory.md) | P4-M1：API 与 Web 业务操作能力缺口盘点（完整路由清单、21 项缺口矩阵与优先级、逐项验收标准、文档与代码冲突清单） |
+| [`P4-M2-1-role-initialization-api.md`](./P4-M2-1-role-initialization-api.md) | P4-M2-1：角色初始化接入启动协议与 `GET /api/v1/roles` 契约（调用位置、空表语义、失败处理、响应字段、测试证据、剩余风险） |
 
 ## 下一步工作的选择规则
 

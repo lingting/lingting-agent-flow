@@ -30,6 +30,10 @@ const (
 type Options struct {
 	// Address 是监听地址，形如 127.0.0.1:26380，必填。
 	Address string
+	// Roles 是角色查询服务，为空时角色接口报告服务不可用。
+	//
+	// 角色只在首次初始化时从配置导入，接口本身只读。
+	Roles *app.RoleService
 	// Health 是健康检查服务，为空时健康检查接口报告服务不可用。
 	Health *app.HealthService
 	// SystemInfo 返回系统信息，为空时该接口报告服务不可用。
@@ -100,6 +104,7 @@ func New(options Options) (*Server, error) {
 		timeout = DefaultShutdownTimeout
 	}
 	api := httpapi.NewHandler(httpapi.Deps{
+		Roles:             options.Roles,
 		Health:            options.Health,
 		SystemInfo:        options.SystemInfo,
 		Tasks:             options.Tasks,
