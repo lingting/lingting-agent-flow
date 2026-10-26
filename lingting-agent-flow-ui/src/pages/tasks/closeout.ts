@@ -160,7 +160,11 @@ export function conclusionWarning(task: Task): string | undefined {
   if (result.label === TASK_RESULT_MISSING_LABEL) {
     facts.push("服务端没有提供最终业务结论，任务状态不能替代结论");
   }
-  if (!isKnownTaskResult(task.final_result) && task.final_result !== undefined && task.final_result !== "") {
+  if (
+    !isKnownTaskResult(task.final_result) &&
+    task.final_result !== undefined &&
+    task.final_result !== ""
+  ) {
     facts.push(`最终结论取值 ${task.final_result} 未在当前版本中定义`);
   }
   if (!isKnownCloseout(task.closeout) && task.closeout !== undefined && task.closeout !== "") {

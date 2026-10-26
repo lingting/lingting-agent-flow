@@ -164,7 +164,9 @@ describe("收尾闭环展示", () => {
 describe("收尾说明", () => {
   it("优先使用服务端提供的说明", () => {
     expect(
-      closeoutSummary(task({ closeout: "confirmed", closeout_summary: "任务与执行记录一致确认收尾完成" })),
+      closeoutSummary(
+        task({ closeout: "confirmed", closeout_summary: "任务与执行记录一致确认收尾完成" }),
+      ),
     ).toBe("任务与执行记录一致确认收尾完成");
   });
 
@@ -196,7 +198,11 @@ describe("是否需要警示", () => {
   });
 
   it("inconsistent 明确要求人工核验", () => {
-    const value = task({ closeout: "inconsistent", final_result: "succeeded", status: "completed" });
+    const value = task({
+      closeout: "inconsistent",
+      final_result: "succeeded",
+      status: "completed",
+    });
     expect(conclusionWarning(value)).toContain("必须人工核验");
     expect(taskResultDisplay(value.final_result, value.closeout).color).not.toBe("success");
   });

@@ -270,7 +270,11 @@ test.describe("任务最终结论与收尾闭环", () => {
 
   test("任务详情加载失败时不伪造默认成功结论", async ({ page }) => {
     await stubTaskList(page);
-    await stubTaskDetail(page, { error: { code: "not_found", message: "任务不存在: task-1" } }, 404);
+    await stubTaskDetail(
+      page,
+      { error: { code: "not_found", message: "任务不存在: task-1" } },
+      404,
+    );
 
     await page.goto("/tasks");
     await page.getByText("实现登录接口").first().click();

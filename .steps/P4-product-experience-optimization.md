@@ -133,7 +133,7 @@ P1–P3 保证"能跑"，但用户无法清楚地操作与观察时，主流程�
 |---|---|---|---|
 | P4-M1 | 盘点当前 API 与 Web 业务操作能力的缺口 | `completed`（2026-10-26，基于 `master` HEAD `70f82b1`） | P3 退出 |
 | P4-M2 | 提供完整任务生命周期的必要操作入口 | `completed`（M2-1 至 M2-7 全部完成，2026-10-26） | P4-M1 |
-| P4-M3 | 展示阶段进度、验证结果、失败原因和恢复状态 | `in_progress`（M3-2 经核实已由 M2-7 满足；M3-3 于 2026-10-26 完成；M3-1 部分满足，M3-4 至 M3-8 待做） | P4-M1、P4-M2（部分工作项需 M2 先补 API） |
+| P4-M3 | 展示阶段进度、验证结果、失败原因和恢复状态 | `in_progress`（M3-2 经核实已由 M2-7 满足；M3-3、M3-4、M3-5 于 2026-10-26 完成；M3-1 部分满足，M3-6 至 M3-8 待做） | P4-M1、P4-M2（部分工作项需 M2 先补 API） |
 | P4-M4 | 支持必要的继续执行、取消、恢复和结果查看操作 | `pending` | P4-M2、P4-M3 |
 | P4-M5 | 根据真实使用问题或可测量数据推进性能、并发、存储与架构优化 | `pending` | P4-M2、P4-M3、P4-M4 |
 
@@ -169,10 +169,10 @@ HTTP 读取，新任务可从 Web 显式启动并真实推进工作流，创建�
 [`P4-M3-5-code-save-status-display.md`](./P4-M3-5-code-save-status-display.md)）；M3-2 经核实
 已由 P4-M2-7 满足（验证历史、逐项检查与失败反馈视图齐备）；M3-1 部分满足，剩余字段级补全
 （尝试的 `timed_out` / `cancelled` / `error_class` / `failure_stage` 与会话归档 / 导出状态的
-中文标签）。M3-4、M3-6、M3-7、M3-8 尚未开始，其中 M3-6、M3-8 需要先补后端能力。
-M3-5 已完成（代码保存三阶段状态展示，见
-[`P4-M3-5-code-save-status-display.md`](./P4-M3-5-code-save-status-display.md)）。
-建议顺序：M3-4（续跑资格与阻塞原因，只读接口已就绪）→ M3-1 的剩余字段 → M3-7 → M3-6 / M3-8。
+中文标签）。M3-4 已完成（续跑资格与阻塞原因展示，覆盖 G11，交付物
+[`P4-M3-4-resume-eligibility-display.md`](./P4-M3-4-resume-eligibility-display.md)）。
+M3-6、M3-7、M3-8 尚未开始，其中 M3-6、M3-8 需要先补后端能力。
+建议顺序：M3-1 的剩余字段 → M3-7 → M3-6 / M3-8。
 
 M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、M5（基于实测数据的优化）。
 
@@ -271,8 +271,8 @@ M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、
 ### P4-M3 展示阶段进度、验证结果、失败原因和恢复状态
 
 - **ID**：`P4-M3`
-- **状态**：`in_progress`（2026-10-26 核实的子项状态：M3-2 已由 P4-M2-7 满足；M3-3、M3-5
-  完成；M3-1 部分满足；M3-4、M3-6、M3-7、M3-8 未开始）
+- **状态**：`in_progress`（2026-10-26 核实的子项状态：M3-2 已由 P4-M2-7 满足；M3-3、M3-4、M3-5
+  完成；M3-1 部分满足；M3-6、M3-7、M3-8 未开始）
 - **必要性**：用户看不到真实进度与失败原因，就无法判断任务为何卡住。
 - **前置依赖**：P4-M1；M2-5、M2-6（需先有对应查询 API）。
 - **工作项**：
@@ -294,7 +294,18 @@ M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、
      **本轮未修改后端代码**；新增前端单元测试 27 个（`tests/unit/task-closeout.test.ts`）
      与 E2E 10 个（`tests/e2e/task-closeout.spec.ts`），全量单元测试 218 通过，全量 E2E
      80 通过 / 3 既有失败（经 `git stash -u` 基线对照确认）。
-  4. **M3-4** 续跑资格与阻塞原因展示。覆盖 G11。
+  4. **M3-4** 续跑资格与阻塞原因展示。覆盖 G11。**已完成**（2026-10-26，交付物
+     [`P4-M3-4-resume-eligibility-display.md`](./P4-M3-4-resume-eligibility-display.md)）：
+     前端补齐 `ResumeEligibilityResponse` / `ResumeEligibilityCodeSave` 类型与
+     `fetchTaskResumeEligibility`（`GET /api/v1/tasks/{taskID}/resume-eligibility`），任务详情
+     新增只读面板 `ResumeEligibilityPanel`；`can_resume` 只采用服务端结论，`blocking` 逐项展示
+     并为 9 个已核实分类给出中文解释、未知分类原样保留，`code_save_action` /
+     `code_save_summary` 与 `code_save_records` 的五个记录维度分别展示，`next_actions` 只展示
+     原文并标注 CLI 建议需人工执行；加载状态独立，查询失败不显示为允许续跑，刷新失败保留
+     上一次真实快照，切换任务丢弃迟到响应，恢复按钮仍由既有 `canResumeWorkflow` 判定。
+     **本轮未修改后端代码**；新增前端单元测试 34 个（`tests/unit/task-resume-eligibility.test.ts`）
+     与 E2E 16 个（`tests/e2e/task-resume-eligibility.spec.ts`），全量单元测试 282 通过，全量
+     E2E 110 通过 / 3 既有失败（经 `git stash -u` 基线对照确认）。
   5. **M3-5** 代码保存三阶段状态展示。覆盖 G8。**已完成**（2026-10-26，交付物
      [`P4-M3-5-code-save-status-display.md`](./P4-M3-5-code-save-status-display.md)）：
      前端补齐 `CodeSaveRecord` / `CodeSaveRecordListResponse` 与 `fetchTaskCodeSaves`

@@ -1251,3 +1251,92 @@ export type CodeSaveRecordListResponse = {
   records: CodeSaveRecord[];
   total: number;
 };
+
+/**
+ * 代码保存的续跑动作，与 Go 端 `domain.CodeSaveResumeAction` 一致。
+ *
+ * 取值含义（来自 `domain.DecideCodeSaveResume` 与 `domain.DecideTaskCodeSaveResume`）：
+ *   - `proceed`：没有结果不明的外部副作用，可以再次执行代码保存；
+ *   - `verify`：存在未决副作用或记录写入未确认，必须先做一次只读核验；
+ *   - `blocked`：已核验但无法取得可信事实，禁止自动重放，必须人工介入。
+ *
+ * `proceed` 只表示"没有未决副作用"，不代表整个工作流已经可以恢复；真正的副作用
+ * 仍由代码保存组件在执行前重新核验。
+ */
+export type CodeSaveResumeAction = "proceed" | "verify" | "blocked";
+
+/**
+ * 续跑资格中的阻塞分类。
+ *
+ * 取值来自服务端：`internal/app/resume_eligibility.go` 的 `blockingReasons` 会写入
+ * `task_deleted`、`cancel_requested`、`container_missing`、`container_detached`、
+ * `container_not_running`、`container_unreachable`、`prerequisite_unmet`，以及代码保存
+ * 判定给出的 `domain.CodeSaveResumeDecision.ErrorClass`
+ * （`code_save_unconfirmed`、`code_save_indeterminate`）。
+ *
+ * 类型保留 `string` 分支：服务端新增阻塞分类时界面原样展示，不省略、不归并。
+ */
+export type ResumeBlockingCode =
+  | "task_deleted"
+  | "cancel_requested"
+  | "container_missing"
+  | "container_detached"
+  | "container_not_running"
+  | "container_unreachable"
+  | "prerequisite_unmet"
+  | "code_save_unconfirmed"
+  | "code_save_indeterminate";
+
+/**
+ * 续跑资格中"需要关注的代码保存记录"，与 Go 端 `httpapi.ResumeEligibilityCodeSave` 一致。
+ *
+ * 与 `CodeSaveRecord` 的区别：这里只包含仍有未决副作用或记录写入未确认的记录，并且额外
+ * 携带服务端针对该记录给出的 `action` / `error_class` / `summary`。三个 Git 阶段与
+ * 记录维度的两个状态仍然是独立事实，`action` 不能替代它们。
+ */
+export type ResumeEligibilityCodeSave = {
+  record_id: string;
+  task_branch: string;
+  commit_status: CodeSaveCommitStatus | (string & {});
+  push_status: CodeSavePushStatus | (string & {});
+  merge_status: CodeSaveMergeStatus | (string & {});
+  persist_status: CodeSavePersistStatus | (string & {});
+  recovery_status: CodeSaveRecoveryStatus | (string & {});
+  /** 服务端对该记录给出的续跑动作 */
+  action: CodeSaveResumeAction | (string & {});
+  /** 记录级拒绝分类，`proceed` 时缺省 */
+  error_class?: string;
+  summary: string;
+};
+
+/**
+ * `GET /api/v1/tasks/{taskID}/resume-eligibility` 的响应。
+ *
+ * 这是服务端在查询时刻给出的只读资格结论：`can_resume` 只能由服务端决定，前端不得用
+ * 任务状态或工作流状态推导它。查询不写状态、不触发恢复，但可能核验远程容器，因此不适合
+ * 在每次渲染时调用。
+ *
+ * `blocking` 与 `next_actions` 在服务端为空时序列化为 `null`（Go 端 `append(nil, …)`），
+ * 因此类型保留 `null` 分支；消费方必须按"没有该项"处理，而不是当作成功。
+ */
+export type ResumeEligibilityResponse = {
+  task_id: string;
+  /** 任务业务状态，与 `domain.TaskStatus` 一致 */
+  task_status: TaskStatus | (string & {});
+  /** 最近一次工作流执行记录；服务端没有记录时缺省，不得由前端补造 */
+  run?: WorkflowRun;
+  /** 服务端当前的续跑资格结论 */
+  can_resume: boolean;
+  /** 阻塞项分类列表，空列表或 `null` 表示服务端没有给出阻塞项 */
+  blocking: string[] | null;
+  /** 任务级代码保存续跑判定 */
+  code_save_action: CodeSaveResumeAction | (string & {});
+  /** 代码保存判定的可读说明 */
+  code_save_summary: string;
+  /** 需要关注的代码保存记录 */
+  code_save_records: ResumeEligibilityCodeSave[];
+  /** 服务端给出的下一步动作建议；空列表或 `null` 表示没有建议 */
+  next_actions: string[] | null;
+  /** 整体结论摘要 */
+  summary: string;
+};

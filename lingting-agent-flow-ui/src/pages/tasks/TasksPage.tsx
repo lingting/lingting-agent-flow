@@ -35,6 +35,7 @@ import {
   taskResultDisplay,
 } from "@/pages/tasks/closeout";
 import { CodeSavePanel } from "@/pages/tasks/CodeSavePanel";
+import { ResumeEligibilityPanel } from "@/pages/tasks/ResumeEligibilityPanel";
 import { TaskExecutionPanel } from "@/pages/tasks/TaskExecutionPanel";
 import { canStartTask, describeLaunchResult } from "@/pages/tasks/launch";
 import {
@@ -124,7 +125,9 @@ function TaskDetail({ task }: { task: Task }) {
           <Space size={8} wrap>
             <Typography.Text type={textType(result.color)}>{result.label}</Typography.Text>
             {task.final_result && !result.known && (
-              <Typography.Text type="secondary">服务端原始取值：{task.final_result}</Typography.Text>
+              <Typography.Text type="secondary">
+                服务端原始取值：{task.final_result}
+              </Typography.Text>
             )}
           </Space>
         </Descriptions.Item>
@@ -644,6 +647,7 @@ export function TasksPage() {
           )}
           {selected && <TaskExecutionPanel onRefreshTask={refreshTaskDetail} task={selected} />}
           {selected && <CodeSavePanel task={selected} />}
+          {selected && <ResumeEligibilityPanel task={selected} />}
         </Flex>
       )}
 

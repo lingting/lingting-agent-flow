@@ -106,7 +106,10 @@ describe("列表响应解析", () => {
       record({ created_at: "2026-10-26T09:00:00Z", id: "record-new" }),
       record({ created_at: "2026-10-26T08:00:00Z", id: "record-old" }),
     ];
-    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ records, total: 2 })));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ records, total: 2 })),
+    );
 
     const { data } = await fetchTaskCodeSaves("task-1");
 
@@ -114,7 +117,10 @@ describe("列表响应解析", () => {
   });
 
   it("records: [] 是合法结果，不是错误", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ records: [], total: 0 })));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ records: [], total: 0 })),
+    );
 
     const { data } = await fetchTaskCodeSaves("task-1");
 
@@ -136,7 +142,10 @@ describe("列表响应解析", () => {
       ],
       total: 1,
     };
-    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(payload)));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse(payload)),
+    );
 
     const { data } = await fetchTaskCodeSaves("task-1");
     const item = data.records[0]!;
@@ -154,7 +163,10 @@ describe("查询错误处理", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
-        jsonResponse({ error: { code: "not_found", message: "任务不存在: task-1" } }, { status: 404 }),
+        jsonResponse(
+          { error: { code: "not_found", message: "任务不存在: task-1" } },
+          { status: 404 },
+        ),
       ),
     );
 
@@ -323,7 +335,11 @@ describe("三个 Git 阶段与记录维度的语义区别", () => {
   });
 
   it("推送成功不表示合并成功", () => {
-    const item = record({ merge_enabled: true, merge_status: "conflict", push_status: "succeeded" });
+    const item = record({
+      merge_enabled: true,
+      merge_status: "conflict",
+      push_status: "succeeded",
+    });
     expect(pushStatusMeta(item.push_status).label).toBe("推送成功");
     expect(mergeStatusMeta(item.merge_status).label).toBe("合并冲突");
     expect(mergeSummary(item)).toContain("冲突");
@@ -398,7 +414,10 @@ describe("多条记录与时间信息", () => {
       record({ id: "record-2", push_status: "unknown", recovery_status: "unverifiable" }),
       record({ id: "record-1", push_status: "succeeded", recovery_status: "confirmed_applied" }),
     ];
-    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ records, total: 2 })));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ records, total: 2 })),
+    );
 
     const { data } = await fetchTaskCodeSaves("task-1");
 

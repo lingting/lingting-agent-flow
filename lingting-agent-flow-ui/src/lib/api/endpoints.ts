@@ -14,6 +14,7 @@ import type {
   EnvironmentListResponse,
   EnvironmentType,
   EnvironmentVersion,
+  ResumeEligibilityResponse,
   ResumeWorkflowRequest,
   RoleListResponse,
   StartTaskRequest,
@@ -280,6 +281,32 @@ export function taskCodeSavesPath(taskID: string): string {
  */
 export function fetchTaskCodeSaves(taskID: string, options: ApiRequestOptions = {}) {
   return apiRequest<CodeSaveRecordListResponse>(taskCodeSavesPath(taskID), options);
+}
+
+/**
+ * 任务续跑资格查询路径。
+ *
+ * 形状与 Go 端 `httpapi.actionTaskID` 一致：`{taskID}/resume-eligibility` 两段才是资格
+ * 查询；它是只读动作路径，不是任务子资源集合。
+ */
+export function taskResumeEligibilityPath(taskID: string): string {
+  return `${taskPath(taskID)}/resume-eligibility`;
+}
+
+/**
+ * 查询任务当前的续跑资格与阻塞原因。
+ *
+ * 服务端 `app.ResumeEligibilityService.Get` 聚合任务、最近一次工作流执行记录、代码保存
+ * 记录与容器前置条件，给出统一的只读结论。三种结果必须区分：
+ *   - `200`：拿到了服务端结论，`can_resume` 才是唯一判据；
+ *   - `404`：任务不存在或已逻辑删除，不能当作"可以续跑"；
+ *   - 其他失败：查询失败，不能伪造"允许续跑"或"没有阻塞"。
+ *
+ * 该请求是 GET，不写状态、不触发恢复或核验；但服务端可能核验远程容器，因此调用方
+ * 不应在每次渲染时重复发起，也不得因为 `can_resume=true` 就自动恢复工作流。
+ */
+export function fetchTaskResumeEligibility(taskID: string, options: ApiRequestOptions = {}) {
+  return apiRequest<ResumeEligibilityResponse>(taskResumeEligibilityPath(taskID), options);
 }
 
 /** 执行节点集合路径 */

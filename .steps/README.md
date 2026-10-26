@@ -27,10 +27,10 @@
 
 - **当前阶段**：P4 —— 产品操作体验与针对性优化。
 - **当前里程碑**：`P4-M3` —— 展示阶段进度、验证结果、失败原因和恢复状态，状态
-  `in_progress`（M3-3、M3-5 已完成、M3-2 已由 M2-7 满足、M3-1 部分满足，M3-4、M3-6 至
+  `in_progress`（M3-3、M3-4、M3-5 已完成、M3-2 已由 M2-7 满足、M3-1 部分满足，M3-6 至
   M3-8 未开始）。
   详见下方"当前里程碑"详述与
-  [`P4-M3-3-task-closeout-display.md`](./P4-M3-3-task-closeout-display.md)。
+  [`P4-M3-4-resume-eligibility-display.md`](./P4-M3-4-resume-eligibility-display.md)。
 - **上一里程碑**：`P4-M2` —— 提供完整任务生命周期的必要操作入口，状态 `completed`
   （M2-1 至 M2-7 全部完成）。
   子任务 **M2-1（角色初始化 + `GET /api/v1/roles`）已于 2026-10-26 完成**，交付物为
@@ -107,7 +107,17 @@
   `not_requested` / `skipped` / `unconfirmed` / `unverifiable` 与未知取值均不误报成功，
   核验结论与 `stage` 一起呈现，空列表只说明没有记录。**本轮未修改任何后端代码**；新增前端
   单元测试 30 个与 E2E 14 个，全量单元测试 248 通过，全量 E2E 94 通过 / 3 失败（失败项经
-  `git stash -u` 基线对照确认为既有问题）。M3-4、M3-6 至 M3-8 未开始。
+  `git stash -u` 基线对照确认为既有问题）。同轮实施子任务 **M3-4（续跑资格与阻塞原因展示）**，
+  交付物为
+  [`P4-M3-4-resume-eligibility-display.md`](./P4-M3-4-resume-eligibility-display.md)：前端补齐
+  `ResumeEligibilityResponse` / `ResumeEligibilityCodeSave` 类型与 `fetchTaskResumeEligibility`
+  （`GET /api/v1/tasks/{taskID}/resume-eligibility`），任务详情新增只读面板
+  `ResumeEligibilityPanel`，把 `can_resume`、全部 `blocking`、`code_save_action` /
+  `code_save_summary`、`code_save_records` 与 `next_actions` 依据服务端响应如实展示；未知
+  阻塞分类与未知动作原样保留，查询失败不显示为允许续跑，刷新失败保留上一次真实快照，
+  切换任务丢弃迟到响应，`next_actions` 只展示原文而不自动执行。**本轮未修改任何后端代码**；
+  新增前端单元测试 34 个与 E2E 16 个，全量单元测试 282 通过，全量 E2E 110 通过 / 3 失败
+  （失败项经 `git stash -u` 基线对照确认为既有问题）。M3-6 至 M3-8 未开始。
 - **上一里程碑**：`P4-M2` —— 提供完整任务生命周期的必要操作入口，状态 `completed`
   （M2-1 至 M2-7 全部完成）。详见
   [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
@@ -141,10 +151,12 @@
   [`P4-M3-5-code-save-status-display.md`](./P4-M3-5-code-save-status-display.md)）；**M3-2 已由
   P4-M2-7 满足**（验证历史、逐项检查与失败反馈视图齐备，无需重复实现）；**M3-1 部分满足**
   （步骤 / 尝试 / 会话历史已展示，仍缺尝试的 `timed_out` / `cancelled` / `error_class` /
-  `failure_stage` 与会话归档 / 导出状态的中文标签）。M3-4、M3-6 至 M3-8 未开始，其中 M3-6
+  `failure_stage` 与会话归档 / 导出状态的中文标签）；**M3-4 已完成**（续跑资格与阻塞原因
+  展示，见
+  [`P4-M3-4-resume-eligibility-display.md`](./P4-M3-4-resume-eligibility-display.md)）。
+  M3-6 至 M3-8 未开始，其中 M3-6
   （工作流步骤起止时间）与 M3-8（事件时间线、修复周期历史）需要先补后端能力。
-  建议顺序：M3-4（续跑资格与阻塞原因，只读接口已就绪）→ M3-1 的剩余字段 → M3-7（进度自动
-  刷新）→ M3-6 / M3-8。
+  建议顺序：M3-1 的剩余字段 → M3-7（进度自动刷新）→ M3-6 / M3-8。
   环境构建 Web 入口与角色变更入口是否上 Web 仍按产品取舍决定。详见
   [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
 - **更早里程碑**：`P3-M5` —— 验证多任务并发、冲突和资源回收行为，状态
@@ -341,6 +353,7 @@
 | [`P4-M2-7-web-execution-operations.md`](./P4-M2-7-web-execution-operations.md) | P4-M2-7：Web 接入计划生成、步骤执行与验证修复操作（8 项操作矩阵与代码证据、实施顺序、前端 API 与操作界面结构、测试证据、未通过项与剩余风险） |
 | [`P4-M3-3-task-closeout-display.md`](./P4-M3-3-task-closeout-display.md) | P4-M3-3：任务最终结论与收尾闭环展示（真实 DTO 契约、M3-1 / M3-2 核验结论、三行独立事实与警示、测试证据、未执行项与剩余风险） |
 | [`P4-M3-5-code-save-status-display.md`](./P4-M3-5-code-save-status-display.md) | P4-M3-5：代码保存三阶段状态展示（后端 DTO 字段契约、前端类型与查询封装、五组独立事实与警示、测试证据、未执行项与剩余风险） |
+| [`P4-M3-4-resume-eligibility-display.md`](./P4-M3-4-resume-eligibility-display.md) | P4-M3-4：续跑资格与阻塞原因展示（后端查询契约与阻塞分类来源、前端类型与查询封装、资格结论与阻塞项展示规则、加载失败与竞态处理、测试证据、退出条件检查、剩余风险） |
 
 ## 下一步工作的选择规则
 

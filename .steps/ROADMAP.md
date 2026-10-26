@@ -70,9 +70,17 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > 只读面板 `CodeSavePanel`，提交 / 推送 / 合并 / 记录写入状态 / 核验结论五组事实分别展示，
 > `unknown` / `pending` / `not_requested` / `skipped` / `unconfirmed` / `unverifiable` 与未知
 > 取值均不误报成功；未修改任何后端代码，新增前端单元测试 30 个、E2E 14 个，全量单元测试
-> 248 通过、全量 E2E 94 通过 / 3 既有失败）。**P4-M3 仍为 `in_progress`**：同轮核验 M3-2
+> 248 通过、全量 E2E 94 通过 / 3 既有失败）；**P4-M3-4 于 2026-10-26 完成**（续跑资格与阻塞
+> 原因展示：前端补齐 `ResumeEligibilityResponse` / `ResumeEligibilityCodeSave` 类型与
+> `fetchTaskResumeEligibility`，任务详情新增只读面板 `ResumeEligibilityPanel`，
+> `can_resume`、全部 `blocking`、`code_save_action` / `code_save_summary`、
+> `code_save_records` 与 `next_actions` 依据服务端响应如实展示；未知阻塞分类与未知动作原样
+> 保留，查询失败不显示为允许续跑，刷新失败保留上一次真实快照，切换任务丢弃迟到响应，
+> 恢复按钮仍由既有 `canResumeWorkflow` 判定；未修改任何后端代码，新增前端单元测试 34 个、
+> E2E 16 个，全量单元测试 282 通过、全量 E2E 110 通过 / 3 既有失败）。**P4-M3 仍为
+> `in_progress`**：同轮核验 M3-2
 > 已由 P4-M2-7 满足、M3-1 部分满足（缺尝试的 `timed_out` / `cancelled` / `error_class` /
-> `failure_stage` 与会话归档 / 导出状态的中文标签），M3-4、M3-6、M3-7、M3-8 未开始。P1 证据见
+> `failure_stage` 与会话归档 / 导出状态的中文标签），M3-6、M3-7、M3-8 未开始。P1 证据见
 > `P1-single-task-e2e.md` 的对应"完成记录"；P2-M1 证据见
 > `P2-M1-recovery-boundaries.md`；P2-M2 证据见 `P2-M2-interruption-semantics.md`；
 > P2-M3 与 P2-M4 证据见 `P2-reliability-recovery.md` 的对应里程碑详情。
@@ -315,6 +323,15 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
   （`GET /api/v1/tasks/{taskID}/code-saves`）；提交 / 推送 / 合并 / 记录写入状态
   （`persist_status`）/ 核验结论（`recovery_status`）五组事实分别展示，核验结论与
   `stage` 一起读，空列表只说明没有记录。本轮不触发任何 Git 操作或核验。
+- **Web 续跑资格与阻塞原因展示**（P4-M3-4）：任务详情下的只读面板
+  `lingting-agent-flow-ui/src/pages/tasks/ResumeEligibilityPanel.tsx` 与展示元数据
+  `resumeEligibility.ts`，数据来自 `fetchTaskResumeEligibility`
+  （`GET /api/v1/tasks/{taskID}/resume-eligibility`）；`can_resume` 只采用服务端结论，
+  `blocking` 逐项展示（9 个已核实分类各有中文标签与解释，未知分类原样保留），
+  `code_save_action` / `code_save_summary` 与 `code_save_records` 的五个记录维度分别展示，
+  `next_actions` 只展示原文并标注 CLI 建议需人工执行；加载状态由
+  `useResumeEligibility.ts` 独立维护，查询失败不显示为允许续跑、刷新失败保留上一次快照、
+  切换任务丢弃迟到响应，恢复按钮仍由既有 `canResumeWorkflow` 判定。本轮不发起恢复或核验。
 - **验证失败修复与重新验证闭环**（P1-M3）：`app.StepWorkflowService.ExecuteAndValidate`
   驱动 `runRepairLoop`（`internal/app/step_workflow_repair.go`），每轮复用
   `StepExecutor.Execute(DeferCompletion)` + `ValidationService.Validate`，每轮新建
@@ -459,9 +476,12 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
     **前端三阶段展示已于 P4-M3-5 闭合**（任务详情只读面板按提交 / 推送 / 合并 / 记录可信度 /
     核验结论五组事实分别展示，见 `P4-M3-5-code-save-status-display.md`），核验操作入口仍归
     P4-M4（M4-2）。
-  - 其余 P1 业务决策阻塞四项：G5 重试、G9 容器处置、G11 续跑阻塞原因，以及 G7 执行记录
+  - 其余 P1 业务决策阻塞：G5 重试、G9 容器处置，以及 G7 执行记录
     历史的字段级剩余（P4-M3-3 核实：步骤 / 尝试 / 会话已展示，仍缺尝试的 `timed_out` /
     `cancelled` / `error_class` / `failure_stage` 与会话归档 / 导出状态的中文标签）。
+    **G11 续跑阻塞原因已于 P4-M3-4 闭合**（任务详情新增 `ResumeEligibilityPanel`，逐项展示
+    `blocking` 与 `next_actions`，未知分类原样保留，见
+    `P4-M3-4-resume-eligibility-display.md`）。
     **G10 收尾结论展示已于 P4-M3-3 闭合**（`types.ts` 补齐三个字段，任务详情拆成任务状态 /
     最终业务结论 / 收尾闭环三行独立事实，见
     `P4-M3-3-task-closeout-display.md`）。
@@ -589,3 +609,4 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - [P4-M2-7-web-execution-operations.md](./P4-M2-7-web-execution-operations.md)
 - [P4-M3-3-task-closeout-display.md](./P4-M3-3-task-closeout-display.md)
 - [P4-M3-5-code-save-status-display.md](./P4-M3-5-code-save-status-display.md)
+- [P4-M3-4-resume-eligibility-display.md](./P4-M3-4-resume-eligibility-display.md)

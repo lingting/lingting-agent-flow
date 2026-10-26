@@ -14,9 +14,10 @@
  * 本轮只读：不触发提交、推送、合并，也不发起核验或恢复动作。
  */
 import { Alert, Descriptions, Flex, Space, Typography } from "antd";
-import { Button, DictTag, type DictItem, LinkButton } from "lingting-react-ui";
+import { Button, LinkButton } from "lingting-react-ui";
 
 import type { CodeSaveRecord, Task } from "@/lib/api";
+import { CodeSaveStatusTag as StatusTag } from "@/pages/tasks/CodeSaveStatusTag";
 import {
   CODE_SAVE_COMMIT_DICT,
   CODE_SAVE_MERGE_DICT,
@@ -34,7 +35,6 @@ import {
   recoveryScope,
   recoveryStatusMeta,
   stageLabel,
-  type CodeSaveStatusMeta,
 } from "@/pages/tasks/codeSaves";
 import { useTaskCodeSaves } from "@/pages/tasks/useExecutionRecords";
 
@@ -44,41 +44,6 @@ function formatTime(value?: string): string {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return "—";
   return parsed.toLocaleString();
-}
-
-/** 把展示颜色映射到 Typography 的语义类型 */
-function textType(color: string): "success" | "warning" | "danger" | "secondary" {
-  switch (color) {
-    case "success":
-      return "success";
-    case "warning":
-    case "processing":
-      return "warning";
-    case "error":
-      return "danger";
-    default:
-      return "secondary";
-  }
-}
-
-/**
- * 状态标签。
- *
- * 已知取值用字典标签；未知取值原样展示，绝不因为字典缺项而渲染成空白。
- */
-function StatusTag({
-  dict,
-  meta,
-  value,
-}: {
-  dict: DictItem<string>[];
-  meta: CodeSaveStatusMeta;
-  value?: string;
-}) {
-  if (meta.known && value) {
-    return <DictTag dict={dict} value={value} />;
-  }
-  return <Typography.Text type={textType(meta.color)}>{meta.label}</Typography.Text>;
 }
 
 /** 单条记录的只读展示 */
@@ -183,7 +148,11 @@ function CodeSaveRecordBlock({ record }: { record: CodeSaveRecord }) {
         </Descriptions.Item>
         <Descriptions.Item label="核验结论">
           <Space direction="vertical" size={2}>
-            <StatusTag dict={CODE_SAVE_RECOVERY_DICT} meta={recovery} value={record.recovery_status} />
+            <StatusTag
+              dict={CODE_SAVE_RECOVERY_DICT}
+              meta={recovery}
+              value={record.recovery_status}
+            />
             <Typography.Text type="secondary">{recoveryScope(record)}</Typography.Text>
           </Space>
         </Descriptions.Item>
@@ -259,9 +228,7 @@ export function CodeSavePanel({ task }: { task: Task }) {
           </Typography.Text>
         ) : (
           <Flex gap="small" vertical>
-            <Typography.Text type="secondary">
-              {`共 ${state.data.length} 条记录`}
-            </Typography.Text>
+            <Typography.Text type="secondary">{`共 ${state.data.length} 条记录`}</Typography.Text>
             {state.data.map((record) => (
               <CodeSaveRecordBlock key={record.id} record={record} />
             ))}

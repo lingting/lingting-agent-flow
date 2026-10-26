@@ -48,6 +48,16 @@ export function taskStatusMeta(status: TaskStatus): TaskStatusMeta {
 }
 
 /**
+ * 判断某个任务状态取值是否为当前版本已知的取值。
+ *
+ * 只用于决定界面是否需要额外展示服务端原始取值：未知状态必须原样可见，不能被
+ * `taskStatusMeta` 的兜底文案掩盖成"看起来正常"的标签。
+ */
+export function isKnownTaskStatus(status: string): status is TaskStatus {
+  return Object.hasOwn(TASK_STATUS_META, status);
+}
+
+/**
  * 是否允许请求取消。
  *
  * 已停止执行的任务（含 `failed`）不能取消，否则服务端会返回 409；
@@ -107,6 +117,15 @@ export function workflowRunStatusMeta(status: WorkflowRunStatus): WorkflowRunSta
       terminal: false,
     }
   );
+}
+
+/**
+ * 判断某个工作流执行状态取值是否为当前版本已知的取值。
+ *
+ * 与 `isKnownTaskStatus` 同义：未知取值必须原样展示，不能靠字典兜底文案掩盖。
+ */
+export function isKnownWorkflowRunStatus(status: string): status is WorkflowRunStatus {
+  return Object.hasOwn(WORKFLOW_RUN_STATUS_META, status);
 }
 
 /**

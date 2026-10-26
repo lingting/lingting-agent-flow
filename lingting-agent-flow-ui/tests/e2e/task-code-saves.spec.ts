@@ -147,10 +147,38 @@ async function stubCodeSaves(
   return urls;
 }
 
+/**
+ * 拦截续跑资格查询。
+ *
+ * 本文件只验证代码保存面板，因此返回一份"没有代码保存关注记录"的资格快照；资格面板的
+ * 行为由 `task-resume-eligibility.spec.ts` 单独覆盖。缺少该拦截时请求会落到未启动的
+ * Go 服务上，使页面出现与代码保存无关的错误提示。
+ */
+async function stubEligibility(page: Page) {
+  await page.route("**/api/v1/tasks/task-1/resume-eligibility", (route: Route) =>
+    route.fulfill({
+      body: JSON.stringify({
+        blocking: null,
+        can_resume: true,
+        code_save_action: "proceed",
+        code_save_records: [],
+        code_save_summary: "代码保存记录中没有结果不明的外部副作用",
+        next_actions: ["agentflow task resume task-1"],
+        summary: "没有阻塞项，可以再次请求恢复推进",
+        task_id: "task-1",
+        task_status: "completed",
+      }),
+      contentType: "application/json",
+      status: 200,
+    }),
+  );
+}
+
 test.beforeEach(async ({ page }) => {
   await stubHealth(page);
   await stubWorkflowEmpty(page);
   await stubStepsEmpty(page);
+  await stubEligibility(page);
 });
 
 /** 打开任务详情 */
@@ -183,7 +211,8 @@ test.describe("代码保存记录展示", () => {
 
     await openDetail(page);
 
-    await expect(page.getByText("代码保存记录")).toBeVisible();
+    // 任务详情同时存在"续跑资格"面板，其说明文字也提到代码保存记录，因此这里按精确标题定位。
+    await expect(page.getByText("代码保存记录", { exact: true })).toBeVisible();
     expect(urls[0]).toContain("/api/v1/tasks/task-1/code-saves");
     // 三个阶段各自有独立标签，不出现"代码保存成功"这类总体状态
     await expect(page.getByText("提交成功")).toBeVisible();
@@ -277,9 +306,7 @@ test.describe("代码保存记录展示", () => {
     await stubTaskDetail(page, task);
     await stubCodeSaves(page, () => ({
       body: {
-        records: [
-          sampleRecord({ recovery_status: "confirmed_not_applied", stage: "push" }),
-        ],
+        records: [sampleRecord({ recovery_status: "confirmed_not_applied", stage: "push" })],
         total: 1,
       },
     }));
