@@ -66,6 +66,10 @@ type Options struct {
 	TaskLeases *app.TaskLeaseService
 	// Containers 是容器服务，提供代码保存的只读核验能力，为空时核验接口报告服务不可用。
 	Containers *app.ContainerService
+	// CodeSaveQueries 是代码保存记录只读查询服务，为空时列表接口报告服务不可用。
+	//
+	// 它只依赖存储：代码保存记录列表不需要 SSH 或 Docker，因此与 Containers 分开注入。
+	CodeSaveQueries *app.CodeSaveQueryService
 	// ResumeEligibility 计算任务的续跑资格，为空时该接口报告服务不可用。
 	ResumeEligibility *app.ResumeEligibilityService
 	// TaskRetry 是任务显式重试服务，为空时重试接口报告服务不可用。
@@ -123,6 +127,7 @@ func New(options Options) (*Server, error) {
 		TaskLaunch:        options.TaskLaunch,
 		TaskLeases:        options.TaskLeases,
 		Containers:        options.Containers,
+		CodeSaveQueries:   options.CodeSaveQueries,
 		ResumeEligibility: options.ResumeEligibility,
 		TaskRetry:         options.TaskRetry,
 		Logger:            logger,

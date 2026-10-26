@@ -178,6 +178,10 @@ type Server struct {
 	roleQuery *app.RoleService
 	// executionRecords 是执行记录只读查询服务，由已打开的数据库构造。
 	executionRecords *app.ExecutionRecordService
+	// codeSaveQueries 是代码保存记录只读查询服务，由已打开的数据库构造。
+	//
+	// 它只依赖存储，因此不需要 SSH 或 Docker：列表查询不会产生远程副作用。
+	codeSaveQueries *app.CodeSaveQueryService
 	// environments 是环境只读查询服务，由已打开的数据库构造。
 	//
 	// 它只读持久化元数据，因此不需要 SSH 或 Docker：环境查询接口不会产生远程副作用。
@@ -568,6 +572,13 @@ func (s *Server) startServices(ctx context.Context) error {
 		return err
 	}
 	s.executionRecords = records
+	// 代码保存记录列表只读持久化记录：它不核验容器、不执行 Git，也不建立 SSH 会话，
+	// 因此不能复用 ContainerService（它强制要求 SSH 依赖）。
+	codeSaves, codeSavesErr := codeSaveQueryService(s.store)
+	if codeSavesErr != nil {
+		return codeSavesErr
+	}
+	s.codeSaveQueries = codeSaves
 	// 环境只读查询只依赖已打开的数据库：环境与版本元数据都在 SQLite 中，
 	// 读取它们不需要 SSH 或 Docker，也不会触发构建或初始化。
 	environments, err := s.environmentQueryService()
@@ -686,6 +697,23 @@ func (s *Server) executionRecordService() (*app.ExecutionRecordService, error) {
 		return nil, fmt.Errorf("初始化执行记录服务失败: %w", err)
 	}
 	return records, nil
+}
+
+// codeSaveQueryService 构造代码保存记录只读查询服务。
+//
+// 只需要存储能力：该查询不建立 SSH / Docker 会话、不核验容器、不执行 Git 命令，
+// 因此不能复用强制要求 SSH 依赖的 ContainerService。
+//
+// 未打开数据库时返回 nil：列表接口随后返回 503，而不是伪造空列表。
+func codeSaveQueryService(store storage.Store) (*app.CodeSaveQueryService, error) {
+	if store == nil {
+		return nil, nil
+	}
+	queries, err := app.NewCodeSaveQueryService(app.CodeSaveQueryOptions{Store: store})
+	if err != nil {
+		return nil, fmt.Errorf("初始化代码保存记录查询服务失败: %w", err)
+	}
+	return queries, nil
 }
 
 // environmentQueryService 构造环境只读查询服务。
@@ -811,6 +839,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		TaskLaunch:        s.taskLaunch,
 		TaskLeases:        s.taskLeases,
 		Containers:        s.containerService,
+		CodeSaveQueries:   s.codeSaveQueries,
 		ResumeEligibility: s.resumeEligibility,
 		TaskRetry:         s.taskRetry,
 		CodeInitialize:    s.codeInitialize,

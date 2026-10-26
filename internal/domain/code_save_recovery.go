@@ -182,7 +182,7 @@ func DecideCodeSaveResume(record CodeSaveRecord) CodeSaveResumeDecision {
 			Summary: "代码保存记录中没有结果不明的外部副作用",
 		}
 	}
-	switch record.RecoveryStatus.normalized() {
+	switch record.RecoveryStatus.Normalized() {
 	case RecoveryStatusUnverifiable:
 		return CodeSaveResumeDecision{
 			Action:     CodeSaveResumeBlocked,
@@ -368,7 +368,7 @@ func (r CodeSaveRecord) ApplyRecovery(
 			return r, err
 		}
 	}
-	if updated.RecoveryStatus.normalized() != decision.Status.normalized() {
+	if updated.RecoveryStatus.Normalized() != decision.Status.Normalized() {
 		if err := updated.MarkRecovery(decision.Status, at); err != nil {
 			return r, err
 		}

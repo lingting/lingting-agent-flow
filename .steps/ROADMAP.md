@@ -53,7 +53,9 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > 2026-10-26 完成**（创建任务表单接入执行节点与角色选择器，`fetchRoles` + `fetchHosts`），
 > **P4-M2-5 于 2026-10-26 完成**（验证失败反馈查询 API：
 > `GET /tasks/{taskID}/steps/{stepID}/validations/{runID}/feedback`，应用层校验完整归属链），
-> P4-M2 因此仍为 `in_progress`）。P1 证据见
+> **P4-M2-6 于 2026-10-26 完成**（代码保存记录列表 API：
+> `GET /tasks/{taskID}/code-saves`，让 Web 取得真实 `recordID`；查询服务只依赖存储，
+> 不复用强制要求 SSH 的 `ContainerService`），P4-M2 因此仍为 `in_progress`）。P1 证据见
 > `P1-single-task-e2e.md` 的对应"完成记录"；P2-M1 证据见
 > `P2-M1-recovery-boundaries.md`；P2-M2 证据见 `P2-M2-interruption-semantics.md`；
 > P2-M3 与 P2-M4 证据见 `P2-reliability-recovery.md` 的对应里程碑详情。
@@ -420,8 +422,13 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
     `app.ExecutionRecordService.GetValidationFailureFeedback` 校验任务 → 步骤 → 验证记录 →
     反馈的完整归属链，返回已持久化并已脱敏的逐项失败检查；没有反馈时返回 `404`，不构造
     空反馈，也不把缺失当作验证通过。前端验证历史视图仍归 P4-M3（M3-2）。
-  - 其余 P1 业务决策阻塞六项：G5 重试、G7 执行记录历史、G8 代码保存
-    列表、G9 容器处置、G10 收尾结论展示、G11 续跑阻塞原因。
+  - **G8 代码保存列表的 API 部分已于 P4-M2-6 闭合**：新增只读
+    `GET /api/v1/tasks/{taskID}/code-saves`，返回真实 `recordID` 与提交 / 推送 / 合并三阶段
+    的独立状态、记录写入可信度（`persist_status`）与核验结论（`recovery_status`）；查询由
+    只依赖存储的 `app.CodeSaveQueryService` 承担，不复用强制要求 SSH 的 `ContainerService`。
+    前端三阶段展示仍归 P4-M3（M3-5），核验操作入口归 P4-M4（M4-2）。
+  - 其余 P1 业务决策阻塞六项：G5 重试、G7 执行记录历史、G9 容器处置、G10 收尾结论展示、
+    G11 续跑阻塞原因。
   - P2 六项：G12 项目后端能力缺失（无表、无服务）、G13 计划生成入口、G14 单步诊断入口、
     G15 事件时间线、G16 修复周期历史、G18 工作流步骤起止时间恒为空。
   - P3 三项：G17 调度名额可见性、G19 进度自动刷新、G20 单步诊断动作。
@@ -537,3 +544,4 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - [P4-M2-3-web-task-launch.md](./P4-M2-3-web-task-launch.md)
 - [P4-M2-4-task-creation-selectors.md](./P4-M2-4-task-creation-selectors.md)
 - [P4-M2-5-validation-feedback-api.md](./P4-M2-5-validation-feedback-api.md)
+- [P4-M2-6-code-save-records-api.md](./P4-M2-6-code-save-records-api.md)

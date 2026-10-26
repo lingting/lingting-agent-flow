@@ -338,11 +338,12 @@ func (s RecoveryStatus) Validate() error {
 	return invalidField("CodeSave", "recovery_status", "未知的恢复结论 "+string(s))
 }
 
-// normalized 把空值归一化为 unverified，其余取值原样返回。
+// Normalized 把空值归一化为 unverified，其余取值原样返回。
 //
 // 空值表示核验字段写入之前的记录，等价于"尚未核验"；它不是一条独立的取值，
-// 也不允许出现在状态迁移表里。
-func (s RecoveryStatus) normalized() RecoveryStatus {
+// 也不允许出现在状态迁移表里。对外输出必须经过它：否则"尚未核验"会以空字符串
+// 出现在响应里，被调用方误读为"核验结论未知的第三态"。
+func (s RecoveryStatus) Normalized() RecoveryStatus {
 	if strings.TrimSpace(string(s)) == "" {
 		return RecoveryStatusUnverified
 	}
@@ -830,7 +831,7 @@ func (r *CodeSaveRecord) MarkRecovery(status RecoveryStatus, at time.Time) error
 	if err := status.Validate(); err != nil {
 		return err
 	}
-	if err := recoveryStatusMachine.validate(string(r.RecoveryStatus.normalized()), string(status)); err != nil {
+	if err := recoveryStatusMachine.validate(string(r.RecoveryStatus.Normalized()), string(status)); err != nil {
 		return err
 	}
 	r.RecoveryStatus = status
@@ -897,7 +898,7 @@ func (r CodeSaveRecord) RequiresManualRecovery() bool {
 //   - confirmed_applied 只把已确认的阶段推进为终态，其余阶段仍需单独核验，因此
 //     仍按各阶段的取值判断。
 func (r CodeSaveRecord) HasUnresolvedSideEffect() bool {
-	if r.RecoveryStatus.normalized() == RecoveryStatusConfirmedNotApplied {
+	if r.RecoveryStatus.Normalized() == RecoveryStatusConfirmedNotApplied {
 		return false
 	}
 	switch r.CommitStatus {

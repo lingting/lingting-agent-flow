@@ -56,7 +56,16 @@ type Deps struct {
 	// Containers 是容器服务，提供代码保存的只读核验能力。
 	//
 	// 为空时核验接口返回服务不可用，而不是伪造"核验已通过"。
+	//
+	// 注意：代码保存记录的列表查询**不**使用它。ContainerService 由
+	// newRemoteDockerService 构造，强制要求 SSH 与存储同时存在，把只读列表查询
+	// 绑在它上面会让"看记录"也需要远程能力；列表查询使用只依赖存储的
+	// CodeSaveQueries。
 	Containers *app.ContainerService
+	// CodeSaveQueries 是代码保存记录只读查询服务，为空时列表接口返回服务不可用。
+	//
+	// 它只依赖存储：不建立 SSH / Docker 会话、不核验容器、不执行 Git 命令。
+	CodeSaveQueries *app.CodeSaveQueryService
 	// ResumeEligibility 计算任务的续跑资格，为空时该接口返回服务不可用。
 	ResumeEligibility *app.ResumeEligibilityService
 	// TaskRetry 是任务显式重试服务，为空时重试接口返回服务不可用。
@@ -97,6 +106,7 @@ func NewHandler(deps Deps) http.Handler {
 		taskLaunch:        deps.TaskLaunch,
 		taskLeases:        deps.TaskLeases,
 		containers:        deps.Containers,
+		codeSaves:         deps.CodeSaveQueries,
 		resumeEligibility: deps.ResumeEligibility,
 		taskRetry:         deps.TaskRetry,
 		logger:            logger,
@@ -129,15 +139,19 @@ type router struct {
 	tasks      *taskHandler
 	hosts      *hostHandler
 	// environments 处理环境只读查询；服务未初始化时接口返回 503。
-	environments      *environmentHandler
-	executions        *executionHandler
-	stepExec          *stepExecutionHandler
-	workflow          *app.TaskWorkflowService
-	validation        *validationHandler
-	codeInit          *codeInitializeHandler
-	taskLaunch        *app.TaskLaunchService
-	taskLeases        *app.TaskLeaseService
-	containers        *app.ContainerService
+	environments *environmentHandler
+	executions   *executionHandler
+	stepExec     *stepExecutionHandler
+	workflow     *app.TaskWorkflowService
+	validation   *validationHandler
+	codeInit     *codeInitializeHandler
+	taskLaunch   *app.TaskLaunchService
+	taskLeases   *app.TaskLeaseService
+	containers   *app.ContainerService
+	// codeSaves 是代码保存记录只读查询服务，为空时列表接口返回服务不可用。
+	//
+	// 它与 containers 分开持有：列表查询只依赖存储，不要求 SSH / Docker。
+	codeSaves         *app.CodeSaveQueryService
 	resumeEligibility *app.ResumeEligibilityService
 	// taskRetry 是任务显式重试服务，为空时重试接口返回服务不可用。
 	taskRetry *app.TaskRetryService
@@ -158,6 +172,16 @@ func (rt *router) tasksHandler(w http.ResponseWriter, r *http.Request) {
 	// 任务管理服务未初始化不应让重试接口返回误导性错误。
 	if isTaskRetryPath(r.URL.Path) {
 		rt.serveTaskRetry(w, r)
+		return
+	}
+	// 代码保存记录列表只依赖存储层查询服务，与任务管理服务无关：把它放在任务服务
+	// 可用性判定之前，依赖缺失时才会得到"代码保存记录查询服务未初始化"而不是
+	// 误导性的"任务服务未初始化"。
+	//
+	// 该判定只匹配 {taskID}/code-saves 两段形状；{taskID}/code-saves/{recordID}/
+	// verify-code-save 是 4 段，仍由后面的 isCodeRecoveryPath 接走。
+	if isCodeSaveListPath(r.URL.Path) {
+		rt.serveCodeSaveList(w, r)
 		return
 	}
 	if rt.tasks == nil || rt.tasks.tasks == nil {
