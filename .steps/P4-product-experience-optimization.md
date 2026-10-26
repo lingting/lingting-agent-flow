@@ -7,6 +7,9 @@
 > **P4-M2-1（角色初始化 + `GET /api/v1/roles`）已于 2026-10-26 实施完成**，契约、代码证据、
 > 测试结果与剩余风险见
 > [`P4-M2-1-role-initialization-api.md`](./P4-M2-1-role-initialization-api.md)。
+> **P4-M2-2（环境查询 HTTP API）已于 2026-10-26 实施完成**，契约、代码证据、测试结果与
+> 剩余风险见
+> [`P4-M2-2-environment-query-api.md`](./P4-M2-2-environment-query-api.md)。
 
 ## 阶段目标
 
@@ -51,8 +54,11 @@ P1–P3 保证"能跑"，但用户无法清楚地操作与观察时，主流程�
     新增只读 `GET /api/v1/roles`。剩余部分是角色变更入口（CRUD 或显式同步）与前端角色
     选择器（M2-4）。详见
     [`P4-M2-1-role-initialization-api.md`](./P4-M2-1-role-initialization-api.md)。
-  - G3 环境（语言环境 / 版本 / 镜像）无 HTTP 入口，只有 CLI；`/start` 会在 `container`
-    阶段失败。
+  - G3 环境（语言环境 / 版本 / 镜像）—— **M2-2 已闭合后端部分**：新增只读
+    `GET /api/v1/environments?host_id=…` 与
+    `GET /api/v1/environments/{type}/{name}/versions/{number}?host_id=…`，
+    返回真实构建状态、`image_ref`、服务端计算的可用性与版本元数据；纯读取不再要求
+    SSH / Docker 依赖。剩余部分是前端接入（M2-3）与环境构建 Web 入口（未排期）。
 - **P1 业务决策阻塞**：G5 重试无入口、G6 验证失败反馈无查询接口、G7 步骤/Attempt/Session
   历史不可见、G8 代码保存无列表接口、G9 容器处置无 HTTP、G10 收尾结论未展示（前端类型
   缺字段）、G11 续跑阻塞原因不可见。
@@ -87,7 +93,7 @@ P1–P3 保证"能跑"，但用户无法清楚地操作与观察时，主流程�
 | ID | 名称 | 状态 | 依赖 |
 |---|---|---|---|
 | P4-M1 | 盘点当前 API 与 Web 业务操作能力的缺口 | `completed`（2026-10-26，基于 `master` HEAD `70f82b1`） | P3 退出 |
-| P4-M2 | 提供完整任务生命周期的必要操作入口 | `in_progress`（M2-1 已完成；M2-2 起待实施） | P4-M1 |
+| P4-M2 | 提供完整任务生命周期的必要操作入口 | `in_progress`（M2-1、M2-2 已完成；M2-3 起待实施） | P4-M1 |
 | P4-M3 | 展示阶段进度、验证结果、失败原因和恢复状态 | `pending` | P4-M1、P4-M2（部分工作项需 M2 先补 API） |
 | P4-M4 | 支持必要的继续执行、取消、恢复和结果查看操作 | `pending` | P4-M2、P4-M3 |
 | P4-M5 | 根据真实使用问题或可测量数据推进性能、并发、存储与架构优化 | `pending` | P4-M2、P4-M3、P4-M4 |
@@ -107,10 +113,10 @@ P1–P3 保证"能跑"，但用户无法清楚地操作与观察时，主流程�
 
 ## 下一步选择规则
 
-M1 已完成，M2-1 已完成（角色初始化 + `GET /api/v1/roles`）。**下一步是 M2-2 环境查询
-HTTP API**（覆盖 G3），随后 M2-3 前端接入统一启动（覆盖 G1）。G2 的后端断链已解除：
-全新数据库启动后角色会被真实写入，`CreateTask` 不再因角色缺失而必然失败。其余 M2 工作项
-在核心链路打通后再补齐。
+M1 已完成，M2-1 已完成（角色初始化 + `GET /api/v1/roles`），M2-2 已完成（环境查询
+HTTP API）。**下一步是 M2-3 前端接入统一启动 `POST /tasks/{id}/start`**（覆盖 G1），
+并复用 M2-2 的接口展示真实环境与构建状态。G2 与 G3 的后端断链均已解除：全新数据库启动后
+角色会被真实写入，环境与版本可从 HTTP 读取。其余 M2 工作项在核心链路打通后再补齐。
 
 M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、M5（基于实测数据的优化）。
 
@@ -139,7 +145,9 @@ M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、
 
 - **ID**：`P4-M2`
 - **状态**：`in_progress`（M2-1 于 2026-10-26 完成，交付物
-  [`P4-M2-1-role-initialization-api.md`](./P4-M2-1-role-initialization-api.md)；M2-2 起待实施）
+  [`P4-M2-1-role-initialization-api.md`](./P4-M2-1-role-initialization-api.md)；
+  M2-2 于 2026-10-26 完成，交付物
+  [`P4-M2-2-environment-query-api.md`](./P4-M2-2-environment-query-api.md)；M2-3 起待实施）
 - **必要性**：G2/G1/G3 是端到端阻塞，不解除则用户无法从 Web 开始任何任务。
 - **前置依赖**：P4-M1。
 - **工作项（按交付顺序）**：
@@ -147,7 +155,10 @@ M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、
      `GET /api/v1/roles`。覆盖 G2 的后端部分。**已完成**（2026-10-26，见
      [`P4-M2-1-role-initialization-api.md`](./P4-M2-1-role-initialization-api.md)）。
      仍缺：角色变更入口（CRUD 或显式同步），前端选择器归 M2-4。
-  2. **M2-2** 环境查询 HTTP 接口（列表 + 版本 + 构建状态）。覆盖 G3。
+  2. **M2-2** 环境查询 HTTP 接口（列表 + 版本 + 构建状态）。覆盖 G3。**已完成**
+     （2026-10-26，见
+     [`P4-M2-2-environment-query-api.md`](./P4-M2-2-environment-query-api.md)）。
+     仍缺：前端接入（随 M2-3）与环境构建 Web 入口（未排期）。
   3. **M2-3** 前端接入统一启动 `POST /tasks/{id}/start`，展示真实 `stage` /
      `workflow_started`。覆盖 G1。
   4. **M2-4** 创建任务弹窗复用 `fetchHosts` 与角色接口，移除手填文案。覆盖 G4、G2。

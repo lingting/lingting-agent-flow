@@ -128,7 +128,40 @@ func newDockerEnvCommand(a *app.App) *cobra.Command {
 	return command
 }
 
-// withEnvironmentService 加载配置并执行一次环境服务调用。
+// withEnvironmentQuery 加载配置并执行一次环境只读查询。
+//
+// 只读查询只依赖存储能力：这里不构造 SSH 与 Docker 服务，因此不会建立远程连接，
+// 也不会触发任何远程副作用。
+func withEnvironmentQuery(
+	ctx context.Context,
+	a *app.App,
+	configPath string,
+	run func(ctx context.Context, service *app.EnvironmentQueryService) error,
+) error {
+	cfg, err := a.ValidateConfig(ctx, configPath)
+	if err != nil {
+		return err
+	}
+	store, err := a.OpenStore(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := store.Close(); closeErr != nil {
+			a.Logger().Slog().WarnContext(ctx, "关闭数据库失败", "error", closeErr)
+		}
+	}()
+	service, err := app.NewEnvironmentQueryService(store)
+	if err != nil {
+		return err
+	}
+	return run(ctx, service)
+}
+
+// withEnvironmentService 加载配置并执行一次环境变更服务调用。
+//
+// 只有初始化、创建版本与构建等有副作用的操作需要它：这些操作必须在远程工作空间内
+// 建立 SSH 与 Docker 会话，因此不能复用只读查询入口。
 func withEnvironmentService(
 	ctx context.Context,
 	a *app.App,

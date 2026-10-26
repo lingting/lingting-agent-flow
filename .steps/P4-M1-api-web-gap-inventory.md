@@ -71,6 +71,8 @@ Web 完成"新建任务 → 准备环境 → 获取代码 → 生成计划 → �
 | GET | `/api/v1/health` | `router.healthHandler` | 是 |
 | GET | `/api/v1/system/info` | `router.systemInfoHandler` | 是 |
 | GET | `/api/v1/roles` | `roleHandler.list`（P4-M2-1 新增） | **否**（M2-4 接入） |
+| GET | `/api/v1/environments` | `environmentHandler.serveList`（P4-M2-2 新增） | **否**（M2-3 接入） |
+| GET | `/api/v1/environments/{type}/{name}/versions/{number}` | `environmentHandler.serveVersion`（P4-M2-2 新增） | **否**（M2-3 接入） |
 | POST | `/api/v1/tasks` | `taskHandler.create` | 是 |
 | GET | `/api/v1/tasks` | `taskHandler.list` | 是 |
 | GET | `/api/v1/tasks/{taskID}` | `taskHandler.detail` | 是 |
@@ -110,7 +112,7 @@ Web 完成"新建任务 → 准备环境 → 获取代码 → 生成计划 → �
 |---|---|---|
 | 角色管理 | `storage.RoleStore`（`CreateRole`/`UpdateRole`/`DeleteRole`/`GetRole`/`ListRoles`） | **没有 app 服务层**，只有存储接口；无 HTTP、无 CLI |
 | 角色初始化 | `app.RoleSeeds`（`internal/app/roles.go:15`）、`storage.RoleSeeder.SeedRoles` | **生产代码零调用者**（仅测试调用） |
-| 环境定义与版本 | `app.EnvironmentService.List` / `Get` / `History` / `CreateVersion` / `Build` / `ReadDockerfile` / `DownloadBuildLog`（`internal/app/environments*.go`） | 只有 CLI（`agentflow docker env …`、`agentflow docker init`） |
+| 环境定义与版本 | `app.EnvironmentService`（`CreateVersion` / `Build` / `ReadDockerfile` / `DownloadBuildLog` / `Preflight` / `Init`）；查询部分已由 P4-M2-2 的 `app.EnvironmentQueryService`（`List` / `Get` / `GetVersion` / `History`）覆盖 | 查询已有 HTTP（P4-M2-2）；创建版本、构建、Dockerfile 读取仍只有 CLI（`agentflow docker env …`、`agentflow docker init`） |
 | 容器管理 | `app.ContainerService.ListContainers` / `InspectContainer` / `StartContainer` / `StopContainer` / `DeleteContainer` / `DetachContainer` / `ApplyLifecycle` / `RestartContainer` / `ContainerLogs`（`internal/app/containers_ops.go`） | 只有 CLI（`agentflow docker container …`） |
 | 代码保存记录查询 | `app.ContainerService.CodeSaveStatus`（`internal/app/code_save.go:145`） | 只有 CLI（`agentflow code status`）；**HTTP 只有按 recordID 的核验，没有列表** |
 | 执行环境准备 | `app.ExecutionEnvironmentService.PrepareForTask`（`internal/app/execenv_task.go:35`） | 只有 CLI（`agentflow execenv prepare-task`）；`/start` 内部会调用 |
@@ -155,7 +157,7 @@ Web 完成"新建任务 → 准备环境 → 获取代码 → 生成计划 → �
 |---|---|---|---|---|---|---|---|---|---|
 | **G1** | 新建任务后一键开始执行（准备容器 → 初始化工作区 → 生成计划 → 启动编排） | 已实现（`TaskLaunchService.Launch`） | `POST /tasks/{id}/start`（202，含 stage / task_status / plan_persisted / workflow_started） | **缺失** | **缺失**：任务页只有"执行工作流"，直接调 `execute-workflow` | **是**：新建任务为 `queued`、无容器、无步骤，`CheckWorkflowStart` 必然返回 409；用户无法从 Web 启动任何新任务 | `internal/app/task_launch_run.go:36`；`internal/domain/workflow_run.go:608`（要求 `task.ContainerID != ""` 且 `len(steps) > 0`）；`lingting-agent-flow-ui/src/pages/tasks/TasksPage.tsx:231` | P4-M2 | **P0** |
 | **G2** | 首次部署后能创建出可执行任务（角色存在且可选） | **已由 P4-M2-1 闭合后端部分**（启动期导入 + `GET /api/v1/roles`；本行保留 P4-M1 盘点时的现场）；原状态：**部分实现且断链**：`storage.RoleStore` CRUD 存在，`app.RoleSeeds` 与 `storage.RoleSeeder.SeedRoles` 存在，但**生产代码无任何调用者**（`agentflow server` 启动不导入角色，无 CLI、无 app 服务） | **不存在**（无 `/roles`） | 缺失 | 缺失（创建任务需手填角色 ID） | **是**：全新数据库 `roles` 为空 → `CreateTask` → `ensureRoles` → `GetRole` 失败 → 任务无法创建 | `internal/app/roles.go:15`（仅测试调用）；`internal/storage/interfaces.go:651`；`internal/app/task.go:292`；`internal/server/server.go:333`（`openDatabase` 不导入角色） | P4-M2 | **P0** |
-| **G3** | 选择/创建语言环境与可用环境版本（含镜像构建） | 已实现（`EnvironmentService.List/Get/History/CreateVersion/Build/ReadDockerfile`） | **不存在** | 缺失 | 占位页 | **是**：`PrepareForTask` → `validatePrepare` → `ResolveVersion` 要求已存在环境版本；无 Web 入口时用户必须先用 CLI `agentflow docker init` / `docker env build` 才能开始 | `internal/app/execenv_prepare.go:145-180`；`internal/app/environments_query.go:20,68,186`；`internal/app/environments_build.go:47` | P4-M2 | **P0** |
+| **G3** | 选择/创建语言环境与可用环境版本（含镜像构建） | **查询已由 P4-M2-2 闭合**（新增只依赖存储的 `app.EnvironmentQueryService`；初始化/创建版本/构建仍由 `EnvironmentService` 承担）；本行保留 P4-M1 盘点时的现场 | **查询已实现**：`GET /api/v1/environments?host_id=…`、`GET /api/v1/environments/{type}/{name}/versions/{number}?host_id=…`；构建/CRUD 仍**不存在** | 缺失 | 占位页 | **查询部分不再是阻塞**：环境与版本的构建状态、`image_ref`、服务端计算的可用性可从 HTTP 读取；剩余阻塞是前端接入（M2-3）与环境构建 Web 入口（未排期），CLI `agentflow docker init` / `docker env build` 仍是生成版本的唯一入口 | `internal/app/environments_query.go`（`EnvironmentQueryService`）；`internal/httpapi/environments.go`；`internal/app/execenv_prepare.go:145-180`；`internal/app/environments_build.go:47` | P4-M2（查询部分已完成，见 [`P4-M2-2-environment-query-api.md`](./P4-M2-2-environment-query-api.md)） | **P0** |
 | **G4** | 从可用执行节点中选择节点（而非手抄 ID） | 已实现（`ExecutionHostService`） | `GET /hosts` 已存在 | 已封装 `fetchHosts` | **部分接通**：`CreateTaskModal` 仍是自由文本 `Input`，未复用 `fetchHosts` | **否**（可手填，但易错且与已有能力脱节） | `lingting-agent-flow-ui/src/pages/tasks/CreateTaskModal.tsx:280-290`；`endpoints.ts` 的 `fetchHosts` | P4-M2 | **P1** |
 | **G5** | 失败任务显式重试（先看资格再决定） | 已实现（`TaskRetryService.Retry` / `Eligibility`，10 个稳定拒绝原因） | `POST /tasks/{id}/retry`、`GET /tasks/{id}/retry-eligibility` | **缺失** | **缺失** | **是（业务决策）**：`failed` 任务在 Web 上无任何后续动作；前端也不得自行推断可重试 | `internal/httpapi/task_retry.go`；`internal/domain/task_retry.go:22-49`；`lingting-agent-flow-ui/src/pages/tasks/status.ts`（无重试判定） | P4-M4 | **P1** |
 | **G6** | 看懂验证结果与失败原因（哪些检查失败、退出码、输出摘要、语义审查结论） | 部分实现：验证历史与检查结果可查；**失败反馈无查询入口** | `GET /tasks/{id}/steps/{sid}/validations` 已存在；**feedback 无 API** | **缺失** | **缺失** | **是（业务决策）**：用户无法判断"为什么没通过"，只能看到 `error_summary` | `internal/httpapi/executions.go:347`、`:105-132`；`internal/storage/interfaces.go:610-629`（无 HTTP） | P4-M3（+ P4-M2 补 feedback API） | **P1** |
@@ -239,6 +241,15 @@ Web 完成"新建任务 → 准备环境 → 获取代码 → 生成计划 → �
 4. 已有测试 `tests/unit/app/roles_test.go`、`tests/unit/store/roles_test.go` 的语义不被破坏。
 
 ### G3 环境（语言环境 / 版本 / 镜像）无 HTTP 入口（P0）
+
+> **状态更新（P4-M2-2，2026-10-26）**：查询部分已闭合。新增只依赖存储的
+> `app.EnvironmentQueryService`（`List` / `Get` / `GetVersion` / `History`）与两条只读路由
+> `GET /api/v1/environments?host_id=…`、`GET /api/v1/environments/{type}/{name}/versions/{number}?host_id=…`，
+> 返回真实构建状态、`image_ref`、服务端计算的可用性（`usable`）、当前可用版本
+> （`current_version`）与最新创建版本（`latest_version`）。CLI 的 `docker env list/show/history`
+> 同步改用该只读入口。构建、CRUD 与 Dockerfile 读取仍无 HTTP 入口，构建仍只有 CLI。
+> 契约与测试证据见 [`P4-M2-2-environment-query-api.md`](./P4-M2-2-environment-query-api.md)。
+> 以下为 P4-M1 盘点时的现场记录。
 
 **事实**：`app.EnvironmentService` 已有 `Preflight` / `Init` / `CreateVersion` / `Build` /
 `List` / `Get` / `History` / `ReadDockerfile` / `DownloadBuildLog`。全部只经 CLI 暴露
@@ -418,7 +429,7 @@ HTTP 只有 `POST .../code-saves/{recordID}/verify-code-save`，而 `recordID` �
 | 工作项 | 覆盖缺口 | 前置 | 备注 |
 |---|---|---|---|
 | M2-1 角色初始化接入启动流程 + `GET /api/v1/roles` | G2 | 无 | **已完成（2026-10-26）**：见 [`P4-M2-1-role-initialization-api.md`](./P4-M2-1-role-initialization-api.md)；剩余角色变更入口与前端选择器（M2-4） |
-| M2-2 环境查询 HTTP 接口 | G3 | 无 | 只读列表 + 版本 + 构建状态优先；构建入口次之 |
+| M2-2 环境查询 HTTP 接口 | G3 | 无 | 只读列表 + 版本 + 构建状态优先；构建入口次之。**已完成**（查询部分，见 [`P4-M2-2-environment-query-api.md`](./P4-M2-2-environment-query-api.md)） |
 | M2-3 前端接入统一启动 `/start` | G1 | M2-1、M2-2 | 替换"执行工作流"按钮语义，或明确区分"启动"与"续跑" |
 | M2-4 创建任务弹窗复用 `fetchHosts` 与角色接口 | G4、G2 | M2-1 | 纯前端 + 已有接口 |
 | M2-5 验证失败反馈查询 API | G6（部分） | 无 | 存储层已具备，只缺 HTTP |

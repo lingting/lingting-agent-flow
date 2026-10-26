@@ -42,6 +42,10 @@ type Options struct {
 	Tasks *app.TaskService
 	// Hosts 是执行节点服务，为空时执行节点接口报告服务不可用。
 	Hosts *app.ExecutionHostService
+	// Environments 是环境只读查询服务，为空时环境查询接口报告服务不可用。
+	//
+	// 它只读取持久化的环境与版本元数据：不建立 SSH / Docker 会话，也不会触发构建。
+	Environments *app.EnvironmentQueryService
 	// ExecutionRecords 是执行记录查询服务，为空时执行记录接口报告服务不可用。
 	ExecutionRecords *app.ExecutionRecordService
 	// StepExecutor 是单步骤执行协调器，为空时步骤执行接口报告服务不可用。
@@ -109,6 +113,7 @@ func New(options Options) (*Server, error) {
 		SystemInfo:        options.SystemInfo,
 		Tasks:             options.Tasks,
 		Hosts:             options.Hosts,
+		Environments:      options.Environments,
 		ExecutionRecords:  options.ExecutionRecords,
 		StepExecutor:      options.StepExecutor,
 		Validation:        options.Validation,

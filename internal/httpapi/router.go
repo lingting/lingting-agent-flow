@@ -30,6 +30,10 @@ type Deps struct {
 	Tasks *app.TaskService
 	// Hosts 是执行节点服务，为空时执行节点接口返回服务不可用。
 	Hosts *app.ExecutionHostService
+	// Environments 是环境只读查询服务，为空时环境查询接口返回服务不可用。
+	//
+	// 它只读取持久化的环境与版本元数据：不建立远程会话，也不会触发构建或初始化。
+	Environments *app.EnvironmentQueryService
 	// ExecutionRecords 是执行记录查询服务，为空时执行记录接口返回服务不可用。
 	ExecutionRecords *app.ExecutionRecordService
 	// StepExecutor 是单步骤执行协调器，为空时步骤执行接口返回服务不可用。
@@ -74,12 +78,13 @@ func NewHandler(deps Deps) http.Handler {
 		logger = slog.Default()
 	}
 	router := &router{
-		roles:      newRoleHandler(deps.Roles, logger),
-		health:     deps.Health,
-		systemInfo: deps.SystemInfo,
-		tasks:      newTaskHandler(deps.Tasks, logger),
-		hosts:      newHostHandler(deps.Hosts, logger),
-		executions: newExecutionHandler(deps.ExecutionRecords, logger),
+		roles:        newRoleHandler(deps.Roles, logger),
+		environments: newEnvironmentHandler(deps.Environments, logger),
+		health:       deps.Health,
+		systemInfo:   deps.SystemInfo,
+		tasks:        newTaskHandler(deps.Tasks, logger),
+		hosts:        newHostHandler(deps.Hosts, logger),
+		executions:   newExecutionHandler(deps.ExecutionRecords, logger),
 		stepExec: newStepExecutionHandler(
 			deps.StepExecutor,
 			deps.StepWorkflow,
@@ -99,6 +104,10 @@ func NewHandler(deps Deps) http.Handler {
 	mux := http.NewServeMux()
 	// 角色接口只有集合路径：本阶段不提供角色 CRUD，/roles 之下的其他路径统一 404。
 	mux.HandleFunc(PathRoles, router.rolesHandler)
+	// 环境查询只有集合路径与 "{type}/{name}/versions/{number}" 子路径：
+	// 本阶段不提供环境 CRUD、构建与 Dockerfile 接口。
+	mux.HandleFunc(PathEnvironments, router.environmentsHandler)
+	mux.HandleFunc(environmentPathPrefix, router.environmentsHandler)
 	mux.HandleFunc(PathHealth, router.healthHandler)
 	mux.HandleFunc(PathSystemInfo, router.systemInfoHandler)
 	// 任务集合路径与单任务路径分别注册：ServeMux 会按更具体的模式优先匹配。
@@ -114,11 +123,13 @@ func NewHandler(deps Deps) http.Handler {
 // router 持有 API 处理器依赖。
 type router struct {
 	// roles 处理角色只读查询；服务未初始化时接口返回 503。
-	roles             *roleHandler
-	health            *app.HealthService
-	systemInfo        func() app.SystemInfo
-	tasks             *taskHandler
-	hosts             *hostHandler
+	roles      *roleHandler
+	health     *app.HealthService
+	systemInfo func() app.SystemInfo
+	tasks      *taskHandler
+	hosts      *hostHandler
+	// environments 处理环境只读查询；服务未初始化时接口返回 503。
+	environments      *environmentHandler
 	executions        *executionHandler
 	stepExec          *stepExecutionHandler
 	workflow          *app.TaskWorkflowService
@@ -281,6 +292,13 @@ func isExecutionRecordPath(path string) bool {
 	default:
 		return false
 	}
+}
+
+// environmentsHandler 分发环境集合路径与版本子路径的请求。
+//
+// 环境查询服务未初始化时返回 503，而不是让请求落到 404 或前端页面上，也不伪造空列表。
+func (rt *router) environmentsHandler(w http.ResponseWriter, r *http.Request) {
+	rt.environments.serve(w, r)
 }
 
 // hostsHandler 分发执行节点集合路径与单节点路径的请求。

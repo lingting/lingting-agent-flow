@@ -178,6 +178,10 @@ type Server struct {
 	roleQuery *app.RoleService
 	// executionRecords 是执行记录只读查询服务，由已打开的数据库构造。
 	executionRecords *app.ExecutionRecordService
+	// environments 是环境只读查询服务，由已打开的数据库构造。
+	//
+	// 它只读持久化元数据，因此不需要 SSH 或 Docker：环境查询接口不会产生远程副作用。
+	environments *app.EnvironmentQueryService
 	// stepExecutor 是单步骤执行协调器，为空时不提供执行接口。
 	stepExecutor *app.StepExecutor
 	// validationEngine 是确定性验证引擎，为空时不提供验证接口。
@@ -564,6 +568,13 @@ func (s *Server) startServices(ctx context.Context) error {
 		return err
 	}
 	s.executionRecords = records
+	// 环境只读查询只依赖已打开的数据库：环境与版本元数据都在 SQLite 中，
+	// 读取它们不需要 SSH 或 Docker，也不会触发构建或初始化。
+	environments, err := s.environmentQueryService()
+	if err != nil {
+		return err
+	}
+	s.environments = environments
 	hosts, err := s.hostService()
 	if err != nil {
 		return err
@@ -677,6 +688,21 @@ func (s *Server) executionRecordService() (*app.ExecutionRecordService, error) {
 	return records, nil
 }
 
+// environmentQueryService 构造环境只读查询服务。
+//
+// 未打开数据库时返回 nil：环境查询接口随后返回 503，而不是伪造空列表。
+// 该服务只需要存储能力，因此不构造 SSH 或 Docker 依赖。
+func (s *Server) environmentQueryService() (*app.EnvironmentQueryService, error) {
+	if s.store == nil {
+		return nil, nil
+	}
+	environments, err := app.NewEnvironmentQueryService(s.store)
+	if err != nil {
+		return nil, fmt.Errorf("初始化环境查询服务失败: %w", err)
+	}
+	return environments, nil
+}
+
 // hostService 返回执行节点服务。
 //
 // 未显式注入时用已打开的数据库构造，并接入后台校验服务与同步校验器，
@@ -776,6 +802,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		SystemInfo:        s.systemInfo,
 		Tasks:             tasks,
 		Hosts:             s.hosts,
+		Environments:      s.environments,
 		ExecutionRecords:  s.executionRecords,
 		StepExecutor:      s.stepExecutor,
 		Validation:        s.validationEngine,

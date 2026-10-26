@@ -56,9 +56,9 @@ func newDockerEnvListCommand(a *app.App) *cobra.Command {
 		Short: "列出远程环境定义与版本",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return withEnvironmentService(cmd.Context(), a, hostConfigPath(cmd), func(
+			return withEnvironmentQuery(cmd.Context(), a, hostConfigPath(cmd), func(
 				ctx context.Context,
-				service *app.EnvironmentService,
+				service *app.EnvironmentQueryService,
 			) error {
 				summaries, err := service.List(ctx, app.ListRequest{MachineID: machine})
 				if err != nil {
@@ -113,9 +113,9 @@ func newDockerEnvShowCommand(a *app.App) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return withEnvironmentService(cmd.Context(), a, hostConfigPath(cmd), func(
+			queryErr := withEnvironmentQuery(cmd.Context(), a, hostConfigPath(cmd), func(
 				ctx context.Context,
-				service *app.EnvironmentService,
+				service *app.EnvironmentQueryService,
 			) error {
 				summary, err := service.Get(ctx, app.GetRequest{
 					MachineID: flags.Machine,
@@ -124,12 +124,17 @@ func newDockerEnvShowCommand(a *app.App) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if err := printEnvironmentSummary(a, summary); err != nil {
-					return err
-				}
-				if !withContent {
-					return nil
-				}
+				return printEnvironmentSummary(a, summary)
+			})
+			if queryErr != nil || !withContent {
+				return queryErr
+			}
+			// Dockerfile 正文只存在于远程工作空间，必须经由远程会话读取；
+			// 它是有副作用的远程访问，因此不能复用只读查询入口。
+			return withEnvironmentService(cmd.Context(), a, hostConfigPath(cmd), func(
+				ctx context.Context,
+				service *app.EnvironmentService,
+			) error {
 				content, readErr := service.ReadDockerfile(ctx, app.ReadDockerfileRequest{
 					MachineID:     flags.Machine,
 					Ref:           ref,
@@ -170,9 +175,9 @@ func newDockerEnvHistoryCommand(a *app.App) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return withEnvironmentService(cmd.Context(), a, hostConfigPath(cmd), func(
+			return withEnvironmentQuery(cmd.Context(), a, hostConfigPath(cmd), func(
 				ctx context.Context,
-				service *app.EnvironmentService,
+				service *app.EnvironmentQueryService,
 			) error {
 				versions, err := service.History(ctx, app.GetRequest{
 					MachineID: flags.Machine,
