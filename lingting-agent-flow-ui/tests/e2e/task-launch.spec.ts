@@ -113,6 +113,94 @@ async function stubLaunch(
   return calls;
 }
 
+/** 一份执行节点样本，字段与 Go 端 `httpapi.HostResponse` 一致 */
+function sampleHost(overrides: Record<string, unknown> = {}) {
+  return {
+    auth_method: "private_key",
+    created_at: "2026-10-26T08:00:00Z",
+    enabled: true,
+    host: "10.0.0.11",
+    id: "host-1",
+    is_default: true,
+    last_connect_status: "ok",
+    name: "构建机",
+    port: 22,
+    private_key_path: "/home/dev/.ssh/id_ed25519",
+    updated_at: "2026-10-26T08:00:00Z",
+    usable_for_remote_task: true,
+    username: "dev",
+    validation_generation: 1,
+    validation_status: "normal",
+    workspace_root: "/home/dev/agentflow",
+    ...overrides,
+  };
+}
+
+/** 一份角色样本，字段与 Go 端 `httpapi.RoleResponse` 一致 */
+function sampleRole(overrides: Record<string, unknown> = {}) {
+  return {
+    enabled: true,
+    id: "role-1",
+    model: "group/free",
+    name: "角色",
+    runner: "pi",
+    type: "planner",
+    ...overrides,
+  };
+}
+
+/** 拦截执行节点列表接口，默认返回一个可用节点 */
+async function stubHosts(
+  page: Page,
+  handler: () => { body: unknown; status?: number } = () => ({
+    body: { records: [sampleHost()], total: 1 },
+  }),
+) {
+  await page.route("**/api/v1/hosts", async (route: Route) => {
+    const result = handler();
+    await route.fulfill({
+      body: JSON.stringify(result.body),
+      contentType: "application/json",
+      status: result.status ?? 200,
+    });
+  });
+}
+
+/** 拦截角色列表接口，默认返回一个规划角色与一个开发角色 */
+async function stubRoles(
+  page: Page,
+  handler: () => { body: unknown; status?: number } = () => ({
+    body: {
+      records: [
+        sampleRole({ id: "planner", name: "规划角色" }),
+        sampleRole({ id: "developer", name: "开发角色", type: "developer" }),
+      ],
+      total: 2,
+    },
+  }),
+) {
+  await page.route("**/api/v1/roles", async (route: Route) => {
+    const result = handler();
+    await route.fulfill({
+      body: JSON.stringify(result.body),
+      contentType: "application/json",
+      status: result.status ?? 200,
+    });
+  });
+}
+
+/** 通过执行节点选择器选中指定节点（按名称匹配） */
+async function selectHost(page: Page, label: RegExp | string) {
+  await page.getByLabel("执行节点").click();
+  await page.locator(".ant-select-dropdown:visible").getByTitle(label).click();
+}
+
+/** 通过角色选择器选中指定角色（按 aria-label 与名称匹配） */
+async function selectRole(page: Page, ariaLabel: string, label: RegExp | string) {
+  await page.getByLabel(ariaLabel).click();
+  await page.locator(".ant-select-dropdown:visible").getByTitle(label).click();
+}
+
 /** 拦截环境查询接口，记录 host_id 参数 */
 async function stubEnvironments(
   page: Page,
@@ -434,9 +522,19 @@ test.describe("创建任务的环境选择", () => {
       body: { current: 1, records: [], size: 20, total: 0 },
     }));
 
+    await stubHosts(page, () => ({
+      body: {
+        records: [
+          sampleHost(),
+          sampleHost({ host: "10.0.0.12", id: "host-2", is_default: false, name: "第二台" }),
+        ],
+        total: 2,
+      },
+    }));
+    await stubRoles(page);
     await page.goto("/tasks");
     await page.getByRole("button", { name: "创建任务" }).click();
-    await page.getByLabel("执行节点标识").fill("host-1");
+    await selectHost(page, /构建机/);
 
     await expect.poll(() => hosts.at(-1)).toBe("host-1");
     // 选择环境与版本
@@ -444,7 +542,7 @@ test.describe("创建任务的环境选择", () => {
     await selectVersion(page, "v0001");
 
     // 切换执行节点后，旧的环境与版本被清除，并重新查询新节点
-    await page.getByLabel("执行节点标识").fill("host-2");
+    await selectHost(page, /第二台/);
     await expect.poll(() => hosts.at(-1)).toBe("host-2");
     await expect(page.getByText("选择真实环境")).toBeVisible();
     await expect(page.getByText("请先选择环境")).toBeVisible();
@@ -459,10 +557,11 @@ test.describe("创建任务的环境选择", () => {
       body: { current: 1, records: [], size: 20, total: 0 },
     }));
 
+    await stubHosts(page);
+    await stubRoles(page);
     await page.goto("/tasks");
     await page.getByRole("button", { name: "创建任务" }).click();
-    await page.getByLabel("执行节点标识").fill("host-1");
-
+    await selectHost(page, /构建机/);
     await expect(page.getByText("环境查询失败")).toBeVisible();
     await expect(page.getByText("执行节点不存在: host-1")).toBeVisible();
     await expect(page.getByText("没有可用的环境")).toHaveCount(0);
@@ -474,10 +573,11 @@ test.describe("创建任务的环境选择", () => {
       body: { current: 1, records: [], size: 20, total: 0 },
     }));
 
+    await stubHosts(page);
+    await stubRoles(page);
     await page.goto("/tasks");
     await page.getByRole("button", { name: "创建任务" }).click();
-    await page.getByLabel("执行节点标识").fill("host-1");
-
+    await selectHost(page, /构建机/);
     await expect(page.getByText("没有可用的环境")).toBeVisible();
   });
 
@@ -507,9 +607,11 @@ test.describe("创建任务的环境选择", () => {
       body: { current: 1, records: [], size: 20, total: 0 },
     }));
 
+    await stubHosts(page);
+    await stubRoles(page);
     await page.goto("/tasks");
     await page.getByRole("button", { name: "创建任务" }).click();
-    await page.getByLabel("执行节点标识").fill("host-1");
+    await selectHost(page, /构建机/);
     await expect(page.getByText("正在查询该执行节点上的环境…")).toBeHidden({ timeout: 5000 });
 
     await expect(page.getByText("没有可用的环境版本")).toBeVisible();
@@ -520,8 +622,8 @@ test.describe("创建任务的环境选择", () => {
     await page.getByLabel("任务描述").fill("描述内容");
     await page.getByLabel("仓库地址").fill("ssh://git.example.com/team/repo");
     await page.getByRole("textbox", { name: "* 基础分支" }).fill("main");
-    await page.getByLabel("规划角色标识").fill("planner");
-    await page.getByLabel("开发角色标识").fill("developer");
+    await selectRole(page, "规划角色", /规划角色/);
+    await selectRole(page, "开发角色", /开发角色/);
     await page.getByRole("button", { name: "创 建" }).click();
 
     await expect(page.getByText("请选择语言环境")).toBeVisible();
@@ -568,9 +670,11 @@ test.describe("创建任务的环境选择", () => {
       });
     });
 
+    await stubHosts(page);
+    await stubRoles(page);
     await page.goto("/tasks");
     await page.getByRole("button", { name: "创建任务" }).click();
-    await page.getByLabel("执行节点标识").fill("host-1");
+    await selectHost(page, /构建机/);
     await expect(page.getByText("选择真实环境")).toBeVisible({ timeout: 5000 });
 
     await selectEnvironment(page, "go");
@@ -580,8 +684,8 @@ test.describe("创建任务的环境选择", () => {
     await page.getByLabel("任务描述").fill("描述内容");
     await page.getByLabel("仓库地址").fill("ssh://git.example.com/team/repo");
     await page.getByRole("textbox", { name: "* 基础分支" }).fill("main");
-    await page.getByLabel("规划角色标识").fill("planner");
-    await page.getByLabel("开发角色标识").fill("developer");
+    await selectRole(page, "规划角色", /规划角色/);
+    await selectRole(page, "开发角色", /开发角色/);
     await page.getByRole("button", { name: "创 建" }).click();
 
     await expect.poll(() => created?.environment).toBe("go");

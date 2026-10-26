@@ -14,6 +14,7 @@ import type {
   EnvironmentType,
   EnvironmentVersion,
   ResumeWorkflowRequest,
+  RoleListResponse,
   StartTaskRequest,
   StartTaskResponse,
   StartWorkflowRequest,
@@ -282,6 +283,19 @@ export function fetchHosts(options: ApiRequestOptions = {}) {
 /** 查询单个执行节点 */
 export function fetchHost(hostID: string, options: ApiRequestOptions = {}) {
   return apiRequest<Host>(hostPath(hostID), options);
+}
+
+/** 角色集合路径；本阶段只提供只读查询，不存在角色 CRUD */
+export const ROLES_PATH = `${API_PREFIX}/roles`;
+
+/**
+ * 查询全部角色。
+ *
+ * 已禁用角色也会返回（`enabled=false`），用于诊断；创建任务的角色选择器必须自行
+ * 排除它们，不能仅因为接口返回了记录就认为该角色可用于新任务。
+ */
+export function fetchRoles(options: ApiRequestOptions = {}) {
+  return apiRequest<RoleListResponse>(ROLES_PATH, options);
 }
 
 /** 新增执行节点；成功时返回 201 与真实初始状态（checking） */

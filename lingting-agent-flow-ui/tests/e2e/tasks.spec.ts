@@ -66,6 +66,70 @@ async function stubTaskList(
   return requests;
 }
 
+/** 拦截执行节点列表接口，返回一个可用节点 */
+async function stubHosts(page: Page) {
+  await page.route("**/api/v1/hosts", (route: Route) =>
+    route.fulfill({
+      body: JSON.stringify({
+        records: [
+          {
+            auth_method: "private_key",
+            created_at: "2026-10-26T08:00:00Z",
+            enabled: true,
+            host: "10.0.0.11",
+            id: "host-1",
+            is_default: true,
+            last_connect_status: "ok",
+            name: "构建机",
+            port: 22,
+            private_key_path: "/home/dev/.ssh/id_ed25519",
+            updated_at: "2026-10-26T08:00:00Z",
+            usable_for_remote_task: true,
+            username: "dev",
+            validation_generation: 1,
+            validation_status: "normal",
+            workspace_root: "/home/dev/agentflow",
+          },
+        ],
+        total: 1,
+      }),
+      contentType: "application/json",
+      status: 200,
+    }),
+  );
+}
+
+/** 拦截角色列表接口，返回一个规划角色与一个开发角色 */
+async function stubRoles(page: Page) {
+  await page.route("**/api/v1/roles", (route: Route) =>
+    route.fulfill({
+      body: JSON.stringify({
+        records: [
+          {
+            enabled: true,
+            id: "planner",
+            model: "group/free",
+            name: "规划角色",
+            runner: "pi",
+            type: "planner",
+          },
+          {
+            enabled: true,
+            id: "developer",
+            model: "group/free",
+            name: "开发角色",
+            runner: "pi",
+            type: "developer",
+          },
+        ],
+        total: 2,
+      }),
+      contentType: "application/json",
+      status: 200,
+    }),
+  );
+}
+
 test.beforeEach(async ({ page }) => {
   await stubHealth(page);
 });
@@ -216,12 +280,18 @@ test.describe("任务操作", () => {
       }),
     );
 
+    await stubHosts(page);
+    await stubRoles(page);
     await page.goto("/tasks");
     await page.getByRole("button", { name: "创建任务" }).click();
 
     await page.getByLabel("任务名称").fill("新建任务");
     await page.getByLabel("任务描述").fill("描述内容");
-    await page.getByLabel("执行节点标识").fill("host-1");
+    await page.getByLabel("执行节点").click();
+    await page
+      .locator(".ant-select-dropdown:visible")
+      .getByTitle(/构建机/)
+      .click();
     await page.getByLabel("仓库地址").fill("ssh://git.example.com/team/repo");
     await page.getByRole("textbox", { name: "* 基础分支" }).fill("main");
     await page.getByLabel("语言环境").click();
@@ -231,8 +301,16 @@ test.describe("任务操作", () => {
       .locator(".ant-select-dropdown:visible")
       .getByTitle(/^v0001/)
       .click();
-    await page.getByLabel("规划角色标识").fill("planner");
-    await page.getByLabel("开发角色标识").fill("developer");
+    await page.getByLabel("规划角色").click();
+    await page
+      .locator(".ant-select-dropdown:visible")
+      .getByTitle(/规划角色/)
+      .click();
+    await page.getByLabel("开发角色").click();
+    await page
+      .locator(".ant-select-dropdown:visible")
+      .getByTitle(/开发角色/)
+      .click();
 
     await page.getByRole("button", { name: "创 建" }).click();
 

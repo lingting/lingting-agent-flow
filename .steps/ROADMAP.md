@@ -49,8 +49,9 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > 完成；P4-M1 于 2026-10-26 完成（基于 `master` HEAD `70f82b1`），**P4-M2-1 于 2026-10-26
 > 完成**（角色初始化 + `GET /api/v1/roles`），**P4-M2-2 于 2026-10-26 完成**（环境查询
 > HTTP API：列表与单版本、真实构建状态与服务端计算的可用性），**P4-M2-3 于 2026-10-26
-> 完成**（Web 接入统一任务启动 `POST /tasks/{id}/start` 与环境选择），P4-M2 因此仍为
-> `in_progress`）。P1 证据见
+> 完成**（Web 接入统一任务启动 `POST /tasks/{id}/start` 与环境选择），**P4-M2-4 于
+> 2026-10-26 完成**（创建任务表单接入执行节点与角色选择器，`fetchRoles` + `fetchHosts`），
+> P4-M2 因此仍为 `in_progress`）。P1 证据见
 > `P1-single-task-e2e.md` 的对应"完成记录"；P2-M1 证据见
 > `P2-M1-recovery-boundaries.md`；P2-M2 证据见 `P2-M2-interruption-semantics.md`；
 > P2-M3 与 P2-M4 证据见 `P2-reliability-recovery.md` 的对应里程碑详情。
@@ -407,6 +408,11 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
     `GET /api/v1/environments/{type}/{name}/versions/{number}?host_id=…`，返回真实构建
     状态、`image_ref` 与服务端计算的 `usable`），**其前端接入已于 P4-M2-3 完成**（创建
     弹窗的环境与版本来自该接口，只有 `usable=true` 的版本可选；构建与 CRUD 仍只有 CLI）。
+  - **G4 执行节点未复用已有接口与 G2 的前端部分已于 P4-M2-4 闭合**：创建任务弹窗改为
+    `fetchHosts()` + 新增 `fetchRoles()` 驱动的选择器，节点只允许已启用且
+    `usable_for_remote_task` 的记录，角色按 `type` 分类并排除 `enabled=false`；节点切换
+    清空旧环境与版本并重新查询；加载中 / 失败 / 空列表 / 某类无启用角色分别呈现且带重试
+    入口。仍缺：角色变更入口（CRUD 或显式同步）与环境构建 Web 入口。
   - P1 业务决策阻塞七项：G5 重试、G6 验证失败反馈查询、G7 执行记录历史、G8 代码保存
     列表、G9 容器处置、G10 收尾结论展示、G11 续跑阻塞原因。
   - P2 六项：G12 项目后端能力缺失（无表、无服务）、G13 计划生成入口、G14 单步诊断入口、
@@ -522,3 +528,4 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - [P4-M2-1-role-initialization-api.md](./P4-M2-1-role-initialization-api.md)
 - [P4-M2-2-environment-query-api.md](./P4-M2-2-environment-query-api.md)
 - [P4-M2-3-web-task-launch.md](./P4-M2-3-web-task-launch.md)
+- [P4-M2-4-task-creation-selectors.md](./P4-M2-4-task-creation-selectors.md)

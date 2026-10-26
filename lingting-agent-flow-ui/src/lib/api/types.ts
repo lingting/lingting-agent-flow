@@ -492,3 +492,36 @@ export type EnvironmentListResponse = {
   records: Environment[];
   total: number;
 };
+
+/**
+ * 角色类型。
+ *
+ * 取值与 Go 端 `domain.RoleType` 完全一致：`planner` 规划、`developer` 开发、
+ * `validator` 验证。创建任务时按类型分别选择对应角色，不得混用。
+ */
+export type RoleType = "planner" | "developer" | "validator";
+
+/**
+ * 角色的对外表示，与 Go 端 `httpapi.RoleResponse` 一一对应。
+ *
+ * 只包含创建任务选择角色所需的最小字段：`system_prompt`、工具策略与时间戳不在接口
+ * 响应中，前端也不得请求或展示它们。已禁用角色仍会返回，调用方必须按 `enabled`
+ * 自行排除。
+ */
+export type Role = {
+  id: string;
+  name: string;
+  type: RoleType;
+  /** 执行器标识 */
+  runner: string;
+  /** 模型标识 */
+  model: string;
+  /** 角色是否启用；为 false 时不可用于新任务 */
+  enabled: boolean;
+};
+
+/** `GET /api/v1/roles` 的响应 */
+export type RoleListResponse = {
+  records: Role[];
+  total: number;
+};

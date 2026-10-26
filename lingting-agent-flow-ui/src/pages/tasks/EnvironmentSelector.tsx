@@ -37,9 +37,9 @@ function QueryNotice({ hostID, query }: { hostID?: string; query: EnvironmentQue
     return (
       <Alert
         showIcon
-        description="填写执行节点标识后会自动查询该节点上真实存在的环境与构建状态。"
+        description="选择执行节点后会自动查询该节点上真实存在的环境与构建状态。"
         style={{ marginBottom: 16 }}
-        title="尚未填写执行节点"
+        title="尚未选择执行节点"
         type="info"
       />
     );
