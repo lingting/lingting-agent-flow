@@ -164,11 +164,15 @@ HTTP 读取，新任务可从 Web 显式启动并真实推进工作流，创建�
 
 **P4-M3 已进入实施**（2026-10-26 按当前代码核实）：M3-3 已完成（任务最终结论与收尾闭环
 展示，覆盖 G10，交付物
-[`P4-M3-3-task-closeout-display.md`](./P4-M3-3-task-closeout-display.md)）；M3-2 经核实已由
-P4-M2-7 满足（验证历史、逐项检查与失败反馈视图齐备）；M3-1 部分满足，剩余字段级补全
+[`P4-M3-3-task-closeout-display.md`](./P4-M3-3-task-closeout-display.md)）；M3-5 已完成
+（代码保存三阶段状态展示，覆盖 G8 的前端部分，交付物
+[`P4-M3-5-code-save-status-display.md`](./P4-M3-5-code-save-status-display.md)）；M3-2 经核实
+已由 P4-M2-7 满足（验证历史、逐项检查与失败反馈视图齐备）；M3-1 部分满足，剩余字段级补全
 （尝试的 `timed_out` / `cancelled` / `error_class` / `failure_stage` 与会话归档 / 导出状态的
-中文标签）。M3-4 至 M3-8 尚未开始，其中 M3-6、M3-8 需要先补后端能力。
-建议顺序：M3-5（只读接口已就绪）→ M3-4 → M3-1 的剩余字段 → M3-7 → M3-6 / M3-8。
+中文标签）。M3-4、M3-6、M3-7、M3-8 尚未开始，其中 M3-6、M3-8 需要先补后端能力。
+M3-5 已完成（代码保存三阶段状态展示，见
+[`P4-M3-5-code-save-status-display.md`](./P4-M3-5-code-save-status-display.md)）。
+建议顺序：M3-4（续跑资格与阻塞原因，只读接口已就绪）→ M3-1 的剩余字段 → M3-7 → M3-6 / M3-8。
 
 M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、M5（基于实测数据的优化）。
 
@@ -267,8 +271,8 @@ M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、
 ### P4-M3 展示阶段进度、验证结果、失败原因和恢复状态
 
 - **ID**：`P4-M3`
-- **状态**：`in_progress`（2026-10-26 核实的子项状态：M3-2 已由 P4-M2-7 满足；M3-3 完成；
-  M3-1 部分满足；M3-4 至 M3-8 未开始）
+- **状态**：`in_progress`（2026-10-26 核实的子项状态：M3-2 已由 P4-M2-7 满足；M3-3、M3-5
+  完成；M3-1 部分满足；M3-4、M3-6、M3-7、M3-8 未开始）
 - **必要性**：用户看不到真实进度与失败原因，就无法判断任务为何卡住。
 - **前置依赖**：P4-M1；M2-5、M2-6（需先有对应查询 API）。
 - **工作项**：
@@ -291,7 +295,16 @@ M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、
      与 E2E 10 个（`tests/e2e/task-closeout.spec.ts`），全量单元测试 218 通过，全量 E2E
      80 通过 / 3 既有失败（经 `git stash -u` 基线对照确认）。
   4. **M3-4** 续跑资格与阻塞原因展示。覆盖 G11。
-  5. **M3-5** 代码保存三阶段状态展示。覆盖 G8。
+  5. **M3-5** 代码保存三阶段状态展示。覆盖 G8。**已完成**（2026-10-26，交付物
+     [`P4-M3-5-code-save-status-display.md`](./P4-M3-5-code-save-status-display.md)）：
+     前端补齐 `CodeSaveRecord` / `CodeSaveRecordListResponse` 与 `fetchTaskCodeSaves`
+     （`GET /api/v1/tasks/{taskID}/code-saves`），任务详情新增只读面板
+     `CodeSavePanel`，提交 / 推送 / 合并 / 记录写入状态 / 核验结论五组事实分别展示，
+     `unknown` / `pending` / `not_requested` / `skipped` / `unconfirmed` / `unverifiable`
+     与未知取值均不误报成功；核验结论与 `stage` 一起呈现，空列表只说明没有记录。
+     **本轮未修改后端代码**；新增前端单元测试 30 个（`tests/unit/task-code-saves.test.ts`）
+     与 E2E 14 个（`tests/e2e/task-code-saves.spec.ts`），全量单元测试 248 通过，全量 E2E
+     94 通过 / 3 既有失败（经 `git stash -u` 基线对照确认）。
   6. **M3-6** 工作流步骤起止时间补全（服务端 `workflowStatusResponse` 未赋值）。覆盖 G18。
   7. **M3-7** 进度自动刷新。覆盖 G19。
   8. **M3-8** 事件时间线与修复周期历史（需先补 API）。覆盖 G15、G16。

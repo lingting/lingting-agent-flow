@@ -7,6 +7,7 @@
 import { API_PREFIX, ApiError, apiRequest, type ApiRequestOptions } from "./client";
 import type { ApiErrorBody, ApiErrorResponse } from "./client";
 import type {
+  CodeSaveRecordListResponse,
   CreateHostRequest,
   CreateTaskRequest,
   Environment,
@@ -257,6 +258,28 @@ export async function deleteTask(taskID: string, options: ApiRequestOptions = {}
   } finally {
     externalSignal?.removeEventListener("abort", abortFromCaller);
   }
+}
+
+/**
+ * 任务代码保存记录集合路径。
+ *
+ * 形状与 Go 端 `httpapi.isCodeSaveListPath` 一致：只有 `{taskID}/code-saves` 两段
+ * 才是列表；`{taskID}/code-saves/{recordID}/verify-code-save` 是核验动作，不在本模块。
+ */
+export function taskCodeSavesPath(taskID: string): string {
+  return `${taskPath(taskID)}/code-saves`;
+}
+
+/**
+ * 查询指定任务的代码保存记录。
+ *
+ * 只读：服务端不建立 SSH / Docker 连接，也不执行任何 Git 操作。三种结果必须区分：
+ *   - `200` + 空 `records`：该任务当前没有代码保存记录；
+ *   - `404`：任务不存在或已逻辑删除，不能当作空列表；
+ *   - 其他失败：查询失败，不能伪造空记录或成功状态。
+ */
+export function fetchTaskCodeSaves(taskID: string, options: ApiRequestOptions = {}) {
+  return apiRequest<CodeSaveRecordListResponse>(taskCodeSavesPath(taskID), options);
 }
 
 /** 执行节点集合路径 */

@@ -17,9 +17,11 @@ import {
   fetchAttemptSessions,
   fetchStepAttempts,
   fetchStepValidations,
+  fetchTaskCodeSaves,
   fetchTaskSteps,
   fetchValidationFeedback,
   type Attempt,
+  type CodeSaveRecord,
   type Session,
   type Step,
   type ValidationFailureFeedback,
@@ -114,6 +116,29 @@ export function useTaskSteps(taskID?: string): {
     trimmed
       ? (signal) =>
           fetchTaskSteps(trimmed, { size: 100 }, { signal }).then(({ data }) => data.records)
+      : undefined,
+    [trimmed],
+  );
+  return { reload, state };
+}
+
+/**
+ * 加载任务的代码保存记录。
+ *
+ * 记录属于任务维度（不是某个步骤），因此这里只按任务标识查询。返回顺序完全采用
+ * 服务端顺序（创建时间倒序），前端不重新排序。
+ *
+ * 空数组是合法结果（该任务还没有保存过代码），与查询失败、任务不存在必须区分：
+ * 后两者走 `error` 分支，页面不得显示为"暂无记录"。
+ */
+export function useTaskCodeSaves(taskID?: string): {
+  state: LoadState<CodeSaveRecord[]>;
+  reload: () => void;
+} {
+  const trimmed = taskID?.trim() ?? "";
+  const { state, reload } = useLoader<CodeSaveRecord[]>(
+    trimmed
+      ? (signal) => fetchTaskCodeSaves(trimmed, { signal }).then(({ data }) => data.records)
       : undefined,
     [trimmed],
   );

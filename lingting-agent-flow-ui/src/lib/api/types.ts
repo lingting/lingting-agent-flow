@@ -1135,3 +1135,119 @@ export type PlanResponse = {
   started_at?: string;
   finished_at?: string;
 };
+
+/**
+ * 代码保存中 Git 提交的结果，与 Go 端 `domain.CommitStatus` 一致。
+ *
+ * 它只表达提交这一件事：`succeeded` 不表示推送成功，`no_changes` 也不表示任务
+ * 无需保存代码。未知取值必须原样保留，不能回落到某个已知状态。
+ */
+export type CodeSaveCommitStatus =
+  | "pending"
+  | "not_attempted"
+  | "no_changes"
+  | "succeeded"
+  | "failed"
+  | "unknown";
+
+/** 代码保存中推送的结果，与 Go 端 `domain.PushStatus` 一致 */
+export type CodeSavePushStatus =
+  | "pending"
+  | "not_attempted"
+  | "succeeded"
+  | "failed"
+  | "conflict"
+  | "unknown";
+
+/**
+ * 代码保存中合并的结果，与 Go 端 `domain.MergeStatus` 一致。
+ *
+ * `not_requested` 表示没有请求合并（既不是失败也不是已合并），`skipped` 表示请求了
+ * 但没有执行。二者与 `failed`、`conflict`、`succeeded` 是不同事实。
+ */
+export type CodeSaveMergeStatus =
+  | "pending"
+  | "not_requested"
+  | "skipped"
+  | "succeeded"
+  | "failed"
+  | "conflict"
+  | "unknown";
+
+/**
+ * 代码保存记录自身的写入可信度，与 Go 端 `domain.PersistStatus` 一致。
+ *
+ * 它描述"这条记录是否被可靠写入"，与 Git 到底做了什么无关：
+ * `unconfirmed` 表示记录可能落后于真实 Git 现场。
+ */
+export type CodeSavePersistStatus = "persisted" | "unconfirmed";
+
+/**
+ * 代码保存记录的只读核验结论，与 Go 端 `domain.RecoveryStatus` 一致。
+ *
+ * 它只针对 `stage` 指向的那一个阶段：`unverified` 是"尚未核验"，`unverifiable`
+ * 是"核验过但无法取得可信事实"，两者都不得读成成功或失败。
+ */
+export type CodeSaveRecoveryStatus =
+  | "unverified"
+  | "confirmed_applied"
+  | "confirmed_not_applied"
+  | "unverifiable";
+
+/**
+ * 一条代码保存记录，与 Go 端 `httpapi.CodeSaveRecordListEntryResponse` 一一对应。
+ *
+ * 三条硬约束：
+ *   - 提交、推送、合并是三个独立事实，各自有独立字段，不能合并成一个总体状态；
+ *   - `persist_status` 表达记录可信度，`recovery_status` 表达核验结论，二者都与
+ *     Git 操作结果不同；
+ *   - 所有枚举字段都保留 `string` 分支：服务端新增取值时界面原样展示，不猜测语义。
+ */
+export type CodeSaveRecord = {
+  /** 记录标识；后续只读核验需要它 */
+  id: string;
+  task_id: string;
+  project_id?: string;
+  container_id: string;
+  docker_id?: string;
+  /** 发起本次保存的执行尝试；缺失表示没有关联到具体尝试 */
+  attempt_id?: string;
+  remote_name: string;
+  /** 已脱敏的仓库地址 */
+  repository?: string;
+  task_branch: string;
+  base_branch?: string;
+  commit_status: CodeSaveCommitStatus | (string & {});
+  commit_sha?: string;
+  commit_message?: string;
+  push_status: CodeSavePushStatus | (string & {});
+  remote_commit_sha?: string;
+  /** 是否请求了推送后合并基础分支；开启代码保存本身不代表同意合并 */
+  merge_enabled: boolean;
+  merge_status: CodeSaveMergeStatus | (string & {});
+  merge_sha?: string;
+  /** 最后进入的操作阶段：`commit`、`push`、`merge`，用于理解 `recovery_status` */
+  stage?: string;
+  error_code?: string;
+  error_summary?: string;
+  created_at: string;
+  started_at?: string;
+  finished_at?: string;
+  updated_at: string;
+  baseline_commit_sha?: string;
+  baseline_base_commit_sha?: string;
+  persist_status: CodeSavePersistStatus | (string & {});
+  persist_error?: string;
+  recovery_status: CodeSaveRecoveryStatus | (string & {});
+};
+
+/**
+ * `GET /api/v1/tasks/{taskID}/code-saves` 的响应。
+ *
+ * 代码保存记录按任务归属、数量有限，因此没有分页：`total` 即本次返回的记录数，
+ * 顺序由服务端给出（创建时间倒序），前端不重新排序。
+ */
+export type CodeSaveRecordListResponse = {
+  records: CodeSaveRecord[];
+  total: number;
+};

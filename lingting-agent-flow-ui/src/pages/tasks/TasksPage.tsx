@@ -34,6 +34,7 @@ import {
   conclusionWarning,
   taskResultDisplay,
 } from "@/pages/tasks/closeout";
+import { CodeSavePanel } from "@/pages/tasks/CodeSavePanel";
 import { TaskExecutionPanel } from "@/pages/tasks/TaskExecutionPanel";
 import { canStartTask, describeLaunchResult } from "@/pages/tasks/launch";
 import {
@@ -642,6 +643,7 @@ export function TasksPage() {
             <Typography.Text type="secondary">尚未启动工作流</Typography.Text>
           )}
           {selected && <TaskExecutionPanel onRefreshTask={refreshTaskDetail} task={selected} />}
+          {selected && <CodeSavePanel task={selected} />}
         </Flex>
       )}
 
