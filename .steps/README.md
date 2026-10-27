@@ -27,7 +27,7 @@
 
 - **当前阶段**：P4 —— 产品操作体验与针对性优化。
 - **当前里程碑**：`P4-M4` —— 支持必要的继续执行、取消、恢复和结果查看操作，状态
-  `in_progress`（M4-1 已完成，M4-2 / M4-3 / M4-4 / M4-5 未开始）。子任务 **M4-1（失败任务
+  `in_progress`（M4-1、M4-2 已完成，M4-3 / M4-4 / M4-5 未开始）。子任务 **M4-1（失败任务
   显式重试 Web 入口）已于 2026-10-27 完成**，交付物为
   [`P4-M4-1-task-retry-web-entry.md`](./P4-M4-1-task-retry-web-entry.md)：前端补齐
   `RetryEligibilityResponse` / `RetryTaskResponse` / `RetryTaskRequest` 类型与
@@ -39,6 +39,20 @@
   重新提交**。**本轮未修改任何 Go 代码，未改动重试领域规则，也未新增第二套工作流**；新增前端
   单元测试 34 个与 E2E 10 个，`pnpm test:unit:safe` 443 通过，`pnpm test:e2e:safe` 155 通过 /
   0 失败，`pnpm check` 与 `pnpm build` 通过。
+- 子任务 **M4-2（代码保存核验 Web 操作入口）已于 2026-10-27 完成**，交付物为
+  [`P4-M4-2-code-save-verification-web-action.md`](./P4-M4-2-code-save-verification-web-action.md)：
+  前端补齐 `CodeSaveVerifyRequest` / `CodeSaveObservation` / `CodeSaveDecision` /
+  `CodeSaveRecordView` / `CodeSaveVerifyResponse` 类型与 `verifyCodeSave`
+  （`POST /api/v1/tasks/{taskID}/code-saves/{recordID}/verify-code-save`），代码保存面板为每条
+  记录新增显式核验入口（按真实 `record.id` 发起，请求体固定为 `{}`），核验结果按"现场观察 /
+  核验判定 / 核验后记录 / 结果持久化"四块分别展示：`read_failed`、`decision.status` + `stage` +
+  `summary` + `safe_to_retry`、`record` 与 `updated` 的逐维度前后对照、`persisted` 互不替代；
+  `persisted=true` 不被显示为核验通过，`persisted=false` 时仍保留响应中真实的观察与判定；
+  未知状态与缺失字段均有中性展示，缺失 commit 不会被读成"没有变化"。核验只由用户点击触发，
+  同一记录在途时拒绝重复提交，不同记录状态互不影响，切换任务或记录后丢弃迟到响应，请求失败与
+  结果不确定分别提示且**不自动重发**，也不进入 5 秒自动刷新循环。**本轮未修改任何 Go 代码，
+  未改动核验领域规则**；新增前端单元测试 42 个与 E2E 10 个，`pnpm test:unit:safe` 485 通过，
+  `pnpm test:e2e:safe` 165 通过 / 0 失败，`pnpm check` 与 `pnpm build` 通过。
 - **上一里程碑**：`P4-M3` —— 展示阶段进度、验证结果、失败原因和恢复状态，状态
   `completed`（M3-1、M3-3、M3-4、M3-5、M3-6、M3-7、M3-8 已完成，M3-2 已由 M2-7 满足）。
   详见下方"当前里程碑"详述与
@@ -223,8 +237,15 @@
   `GET|POST /api/v1/tasks/{taskID}/retry[-eligibility]`，可用性只来自服务端 `can_retry`，
   阻塞分类逐项展示、未知取值原样保留，`workflow_started=false` 不被显示为已启动，请求失败
   与结果不确定分别提示且不自动重发；**未修改任何 Go 代码、重试领域规则与工作流编排**。见
-  [`P4-M4-1-task-retry-web-entry.md`](./P4-M4-1-task-retry-web-entry.md)。剩余子项：
-  M4-2（代码保存核验入口）、M4-3（容器 `delete` / `detach`，需先补 HTTP 接口）、
+  [`P4-M4-1-task-retry-web-entry.md`](./P4-M4-1-task-retry-web-entry.md)。
+  **M4-2（代码保存核验 Web 操作入口，2026-10-27 完成）**：前端接入
+  `POST /api/v1/tasks/{taskID}/code-saves/{recordID}/verify-code-save`，每条记录按真实
+  `record.id` 提供显式核验入口（请求体固定为 `{}`，容器与工作区由服务端确定），结果按现场
+  观察 / 核验判定 / 核验后记录 / 结果持久化四块分别展示，`read_failed`、`decision.*` 与
+  `persisted` 互不替代，`persisted=false` 时仍保留真实判定，请求失败与结果不确定分别提示且
+  不自动重发；**未修改任何 Go 代码与核验领域规则**。见
+  [`P4-M4-2-code-save-verification-web-action.md`](./P4-M4-2-code-save-verification-web-action.md)。
+  剩余子项：M4-3（容器 `delete` / `detach`，需先补 HTTP 接口）、
   M4-4（`resume-eligibility` 驱动的恢复入口）、M4-5（单步诊断动作）。
   环境构建 Web 入口与角色变更入口是否上 Web 仍按产品取舍决定。详见
   [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
@@ -463,6 +484,7 @@
 | [`P4-M3-7-progress-auto-refresh.md`](./P4-M3-7-progress-auto-refresh.md) | P4-M3-7：任务执行进度自动刷新（活动状态判定的领域证据、5 秒周期与串行调度、启动窗口、后台暂停与恢复、请求票据与迟到响应、子面板按字段变化重载的成本取舍、测试证据、基线失败对照、剩余风险） |
 | [`P4-M3-8-event-timeline-repair-cycle-history.md`](./P4-M3-8-event-timeline-repair-cycle-history.md) | P4-M3-8：事件时间线与修复周期历史（事件模型与 payload 安全核查、排序与分页契约、归属校验、白名单摘要、前端两面板的刷新与竞态策略、测试证据、剩余风险） |
 | [`P4-M4-1-task-retry-web-entry.md`](./P4-M4-1-task-retry-web-entry.md) | P4-M4-1：失败任务显式重试 Web 入口（真实路由与 DTO 契约、资格唯一判据 `can_retry`、10 个阻塞分类、同步请求与超时语义、操作防重与结果语义、竞态处理、测试证据、剩余风险） |
+| [`P4-M4-2-code-save-verification-web-action.md`](./P4-M4-2-code-save-verification-web-action.md) | P4-M4-2：代码保存核验 Web 操作入口（真实路由与双 DTO 差异、请求参数可信来源与"不猜测容器/工作区"依据、五组事实互不替代、`persisted` 与 `safe_to_retry` 语义、竞态与防重、测试证据、剩余风险） |
 | [`P4-frontend-test-resource-governance.md`](./P4-frontend-test-resource-governance.md) | P4 工程质量：前端测试并发治理（真实资源模型核实、Playwright worker 4 / Vitest worker 4 默认值、非法输入拒绝、资源受限入口、能力边界、验收命令与既有失败隔离） |
 
 ## 下一步工作的选择规则

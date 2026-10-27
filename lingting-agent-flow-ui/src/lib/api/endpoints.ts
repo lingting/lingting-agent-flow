@@ -8,6 +8,8 @@ import { API_PREFIX, ApiError, apiRequest, type ApiRequestOptions } from "./clie
 import type { ApiErrorBody, ApiErrorResponse } from "./client";
 import type {
   CodeSaveRecordListResponse,
+  CodeSaveVerifyRequest,
+  CodeSaveVerifyResponse,
   CreateHostRequest,
   CreateTaskRequest,
   Environment,
@@ -338,6 +340,56 @@ export function taskCodeSavesPath(taskID: string): string {
  */
 export function fetchTaskCodeSaves(taskID: string, options: ApiRequestOptions = {}) {
   return apiRequest<CodeSaveRecordListResponse>(taskCodeSavesPath(taskID), options);
+}
+
+/**
+ * 单条代码保存记录的只读核验路径。
+ *
+ * 形状与 Go 端 `httpapi.nestedPathID` 一致：`{taskID}/code-saves/{recordID}/verify-code-save`
+ * 四段，最后一段固定是动作名。任务标识与记录标识都必须编码，空值直接拒绝而不是拼出
+ * 无效路径；记录归属哪个任务由服务端读取记录后校验，前端不能借路径越权。
+ */
+export function taskCodeSaveVerifyPath(taskID: string, recordID: string): string {
+  const record = recordID.trim();
+  if (!record) {
+    throw new Error("代码保存记录标识不能为空");
+  }
+  return `${taskCodeSavesPath(taskID)}/${encodeURIComponent(record)}/verify-code-save`;
+}
+
+/**
+ * 只读核验一条代码保存记录对应的真实仓库状态。
+ *
+ * 语义来自 `ContainerService.VerifyCodeSave`：服务端打开已登记容器、在容器内执行只读
+ * Git 查询（rev-parse / ls-remote / rev-list），再由 `domain.DecideCodeSaveRecovery`
+ * 给出判定，最后按"读取时的恢复结论"为条件把结论写回记录。它**不**提交、不推送、
+ * 不合并、不删除或接管容器。
+ *
+ * 因此该请求虽然会写回核验结论，但没有任何 Git 副作用；调用方仍然只能由用户显式触发：
+ *   - 不自动重发：超时、网络中断、取消后都由用户决定是否重新核验；
+ *   - 不设客户端超时（服务端可能需要在远程容器内多次执行 Git 查询），避免客户端提前
+ *     断开后留下"无法确认结论是否已写回"的现场；
+ *   - 请求体固定为空对象：容器与工作区由服务端从记录与服务端默认值确定。
+ *
+ * 失败语义：非 2xx 抛出 `ApiError`；`404` 表示任务或记录不存在、记录不属于该任务；
+ * `400` 表示请求参数不合法；`412` 表示核验无法开始（服务未初始化等）。这些情况下
+ * 响应里没有 `observation` / `decision`，调用方不得虚构核验结论。
+ */
+export function verifyCodeSave(
+  taskID: string,
+  recordID: string,
+  body: CodeSaveVerifyRequest = {},
+  options: ApiRequestOptions = {},
+) {
+  return apiRequest<CodeSaveVerifyResponse>(taskCodeSaveVerifyPath(taskID, recordID), {
+    ...options,
+    body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json", ...options.headers },
+    method: "POST",
+    // 核验要在远程容器内执行多次只读 Git 查询，耗时超过普通请求；不设客户端超时，
+    // 超时与取消由服务端流程自身管理。
+    timeoutMs: options.timeoutMs ?? 0,
+  });
 }
 
 /**

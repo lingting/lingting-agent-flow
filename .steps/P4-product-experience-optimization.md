@@ -103,7 +103,7 @@ P1–P3 保证"能跑"，但用户无法清楚地操作与观察时，主流程�
   视图已由 M2-7 交付，M3-3 核实为满足**。**G8 代码保存列表的 API 部分已由 M2-6 闭合**
   （新增只读 `GET /tasks/{taskID}/code-saves`，让 Web 取得真实 `recordID`；提交 / 推送 /
   合并三阶段与 `persist_status` / `recovery_status` 分别输出；查询只依赖存储，不复用强制
-  要求 SSH 的 `ContainerService`。前端三阶段展示仍归 M3-5，核验操作入口归 M4-2）。
+  要求 SSH 的 `ContainerService`。前端三阶段展示已由 M3-5 完成，核验操作入口由 M4-2 完成）。
 - **P2 管理/诊断能力**：G12 项目后端能力不存在（无表、无服务）、G13 计划生成、G14 单步
   诊断入口（**G15 事件时间线与 G16 修复周期历史已于 P4-M3-8 闭合**；G18 工作流步骤起止
   时间恒为空已于 P4-M3-6 闭合）。
@@ -138,7 +138,7 @@ P1–P3 保证"能跑"，但用户无法清楚地操作与观察时，主流程�
 | P4-M1 | 盘点当前 API 与 Web 业务操作能力的缺口 | `completed`（2026-10-26，基于 `master` HEAD `70f82b1`） | P3 退出 |
 | P4-M2 | 提供完整任务生命周期的必要操作入口 | `completed`（M2-1 至 M2-7 全部完成，2026-10-26） | P4-M1 |
 | P4-M3 | 展示阶段进度、验证结果、失败原因和恢复状态 | `completed`（M3-2 经核实已由 M2-7 满足；M3-1、M3-3、M3-4、M3-5、M3-6、M3-7、M3-8 全部完成） | P4-M1、P4-M2（部分工作项需 M2 先补 API） |
-| P4-M4 | 支持必要的继续执行、取消、恢复和结果查看操作 | `in_progress`（M4-1 已完成，M4-2 至 M4-5 未开始） | P4-M2、P4-M3 |
+| P4-M4 | 支持必要的继续执行、取消、恢复和结果查看操作 | `in_progress`（M4-1、M4-2 已完成，M4-3 至 M4-5 未开始） | P4-M2、P4-M3 |
 | P4-M5 | 根据真实使用问题或可测量数据推进性能、并发、存储与架构优化 | `pending` | P4-M2、P4-M3、P4-M4 |
 
 ## 阶段退出条件
@@ -257,7 +257,7 @@ M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、
      新增只读 `GET /tasks/{taskID}/code-saves`，逐字段映射 `domain.CodeSaveRecord`，
      提交 / 推送 / 合并三阶段与 `persist_status` / `recovery_status` 分别输出；查询由只依赖
      存储的 `app.CodeSaveQueryService` 承担，不复用强制要求 SSH 的 `ContainerService`。
-     仍缺：前端三阶段展示（归 P4-M3 M3-5）、核验操作入口（归 P4-M4 M4-2）。
+     前端三阶段展示已由 P4-M3 M3-5 完成，核验操作入口已由 P4-M4 M4-2 完成。
   7. **M2-7** 单步骤 / 顺序执行 / 闭环 / 修复周期 / 计划生成入口。覆盖 G14、G13。
      **已完成**（2026-10-26，见
      [`P4-M2-7-web-execution-operations.md`](./P4-M2-7-web-execution-operations.md)）。
@@ -377,7 +377,7 @@ M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、
 ### P4-M4 支持必要的继续执行、取消、恢复和结果查看操作
 
 - **ID**：`P4-M4`
-- **状态**：`in_progress`（**M4-1 已于 2026-10-27 完成**，M4-2 / M4-3 / M4-4 / M4-5 未开始）
+- **状态**：`in_progress`（**M4-1、M4-2 已于 2026-10-27 完成**，M4-3 / M4-4 / M4-5 未开始）
 - **必要性**：这些是任务管理闭环的必要操作。
 - **前置依赖**：P4-M2、P4-M3。
 - **工作项**：
@@ -392,7 +392,24 @@ M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、
      Go 代码与重试领域规则**；新增前端单元测试 34 个与 E2E 10 个，`pnpm test:unit:safe` 443
      通过、`pnpm test:e2e:safe` 155 通过 / 0 失败、`pnpm check` 与 `pnpm build` 通过。交付物
      [`P4-M4-1-task-retry-web-entry.md`](./P4-M4-1-task-retry-web-entry.md)。
-  2. **M4-2** 代码保存核验操作入口。覆盖 G8。
+  2. **M4-2** 代码保存核验操作入口。覆盖 G8。**已完成**（2026-10-27）：核实
+     `POST /tasks/{taskID}/code-saves/{recordID}/verify-code-save` 的请求 DTO 只有可选的
+     `container_id` / `work_dir`（缺省分别取记录上的容器与 `domain.DefaultContainerWorkDir`），
+     因此前端始终发送空请求体 `{}`，不猜测任何远程参数；响应的 `record` / `updated` 使用
+     `CodeSaveRecordResponse`（主键 `record_id`、无 `stage`），与列表的
+     `CodeSaveRecordListEntryResponse` **不是同一个 DTO**，故新增独立类型
+     `CodeSaveRecordView`。前端新增 `taskCodeSaveVerifyPath` / `verifyCodeSave`、纯函数模块
+     `codeSaveVerification.ts`、唯一状态 Hook `useCodeSaveVerification.ts` 与单条记录区块
+     `CodeSaveVerificationSection`，代码保存面板为每条记录按真实 `record.id` 提供显式核验入口；
+     结果按现场观察 / 核验判定 / 核验后记录 / 结果持久化四块分别展示，`read_failed`、
+     `decision.status` + `stage` + `summary` + `safe_to_retry`、`record` 与 `updated` 的逐维度
+     前后对照、`persisted` 互不替代；`persisted=true` 不被显示为核验通过，`persisted=false`
+     时仍保留真实观察与判定，缺失 commit 不被读成"没有变化"。核验只在用户点击时发起，同一
+     记录在途防重、跨记录状态互不影响、切换任务丢弃迟到响应、失败与结果不确定不自动重发，
+     也不进入 5 秒自动刷新。**未修改任何 Go 代码与核验领域规则**；新增前端单元测试 42 个与
+     E2E 10 个，`pnpm test:unit:safe` 485 通过、`pnpm test:e2e:safe` 165 通过 / 0 失败、
+     `pnpm check` 与 `pnpm build` 通过。交付物
+     [`P4-M4-2-code-save-verification-web-action.md`](./P4-M4-2-code-save-verification-web-action.md)。
   3. **M4-3** 容器记录查看与显式 `delete` / `detach`（需先补 HTTP 接口）。覆盖 G9。
   4. **M4-4** 继续执行 / 恢复工作流的可用性来自 `resume-eligibility`。覆盖 G11。
   5. **M4-5** 单步诊断动作（初始化代码、确定性验证）。覆盖 G20。

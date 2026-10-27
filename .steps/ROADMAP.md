@@ -92,7 +92,7 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > 失败保留上一次成功快照且不改变策略；步骤 / 代码保存 / 续跑资格三个子面板只在服务端真实
 > 字段变化时重载；未修改任何后端代码，未新增或修改任何 HTTP API，新增前端单元测试 35 个、
 > E2E 11 个，全量单元测试 361 通过、全量 E2E 129 通过 / 0 失败）。
-> **P4-M4 状态为 `in_progress`**（M4-1 已完成，M4-2 / M4-3 / M4-4 / M4-5 未开始）。
+> **P4-M4 状态为 `in_progress`**（M4-1、M4-2 已完成，M4-3 / M4-4 / M4-5 未开始）。
 > **M4-1（失败任务显式重试 Web 入口）于 2026-10-27 完成**：核实
 > `POST /tasks/{id}/retry`（同步、成功 202）与 `GET /tasks/{id}/retry-eligibility`（只读）的
 > 真实 DTO、10 个稳定拒绝分类、同步与超时语义，然后只接入前端——新增
@@ -106,6 +106,25 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > **未修改任何 Go 代码、重试领域规则与工作流编排**；新增前端单元测试 34 个、E2E 10 个，
 > `pnpm test:unit:safe` 443 通过、`pnpm test:e2e:safe` 155 通过 / 0 失败、`pnpm check` 与
 > `pnpm build` 通过。证据见 `P4-M4-1-task-retry-web-entry.md`。
+> **M4-2（代码保存核验 Web 操作入口）于 2026-10-27 完成**：先核实
+> `POST /tasks/{taskID}/code-saves/{recordID}/verify-code-save` 的真实契约——请求 DTO 只有
+> 可选的 `container_id` / `work_dir`，两者缺省时分别取记录上的容器与
+> `domain.DefaultContainerWorkDir`，因此前端始终发送空请求体 `{}`，不猜测任何远程参数；
+> 响应由 `record` / `observation` / `decision` / `updated` / `persisted` 五部分组成，其中
+> `CodeSaveRecordResponse` 与列表的 `CodeSaveRecordListEntryResponse` **不是同一个 DTO**
+> （主键名 `record_id`、无 `stage` 与基线字段），故新增独立类型 `CodeSaveRecordView`。
+> 前端新增 `taskCodeSaveVerifyPath` / `verifyCodeSave`、纯函数模块 `codeSaveVerification.ts`、
+> 唯一状态 Hook `useCodeSaveVerification.ts` 与单条记录的核验区块
+> `CodeSaveVerificationSection`，代码保存面板为每条记录按真实 `record.id` 提供显式核验入口；
+> 结果按"现场观察 / 核验判定 / 核验后记录 / 结果持久化"四块分别展示，`read_failed`、
+> `decision.status` + `stage` + `summary` + `safe_to_retry`、`record` 与 `updated` 的前后对照、
+> `persisted` 互不替代；`persisted=true` 不被显示为核验通过，`persisted=false` 时仍保留真实
+> 观察与判定，缺失 commit 不被读成"没有变化"。核验只在用户点击时发起，同一记录在途拒绝重复
+> 提交、不同记录状态互不影响、切换任务丢弃迟到响应、请求失败与结果不确定分别提示且不自动
+> 重发，也不进入 5 秒自动刷新。**未修改任何 Go 代码与核验领域规则**；新增前端单元测试 42 个、
+> E2E 10 个，`pnpm test:unit:safe` 485 通过、`pnpm test:e2e:safe` 165 通过 / 0 失败、
+> `pnpm check` 与 `pnpm build` 通过。证据见
+> `P4-M4-2-code-save-verification-web-action.md`。
 > **P4-M3 已为 `completed`**：M3-2 已由 P4-M2-7 满足，M3-1、M3-3、M3-4、M3-5、
 > M3-6、M3-7 与 M3-8 全部完成。**M3-8（事件时间线与修复周期历史）于 2026-10-27 完成**：
 > 核实出 `ListEventsByTask` 生产代码零调用者且排序只有 `ORDER BY id`、`EventFilter`
@@ -370,6 +389,17 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
   `next_actions` 只展示原文并标注 CLI 建议需人工执行；加载状态由
   `useResumeEligibility.ts` 独立维护，查询失败不显示为允许续跑、刷新失败保留上一次快照、
   切换任务丢弃迟到响应，恢复按钮仍由既有 `canResumeWorkflow` 判定。本轮不发起恢复或核验。
+- **Web 代码保存核验操作入口**（P4-M4-2）：任务详情代码保存面板里每条记录各自的显式核验
+  入口，展示逻辑在 `lingting-agent-flow-ui/src/pages/tasks/codeSaveVerification.ts`，唯一状态
+  实现在 `useCodeSaveVerification.ts`，结果展示在 `CodeSaveVerificationSection.tsx`，数据来自
+  `verifyCodeSave`（`POST /api/v1/tasks/{taskID}/code-saves/{recordID}/verify-code-save`）。
+  请求体固定为 `{}`：容器取记录上的 `container_id`，工作区取 `domain.DefaultContainerWorkDir`，
+  前端不猜测也不伪造；结果按现场观察（`read_failed` / `read_error` / 三个 commit）与核验判定
+  （`status` / `stage` / `summary` / `safe_to_retry`）与核验后记录（`record` ↔ `updated` 逐维度
+  对照）与结果持久化（`persisted`）四块分开呈现，`persisted=true` 不等于核验通过、
+  `persisted=false` 不抹除已取得的判定；核验只由用户点击触发，同一记录在途防重、跨记录互不
+  串线、切换任务丢弃迟到响应、失败与结果不确定不自动重发，也不进入 5 秒自动刷新循环。本轮
+  未修改任何 Go 代码与核验领域规则。
 - **Web 失败任务显式重试入口**（P4-M4-1）：任务详情下的面板
   `lingting-agent-flow-ui/src/pages/tasks/RetryTaskPanel.tsx`，展示元数据与竞态判定在
   `retry.ts`，唯一状态实现在 `useTaskRetry.ts`，数据来自
@@ -522,8 +552,11 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
     的独立状态、记录写入可信度（`persist_status`）与核验结论（`recovery_status`）；查询由
     只依赖存储的 `app.CodeSaveQueryService` 承担，不复用强制要求 SSH 的 `ContainerService`。
     **前端三阶段展示已于 P4-M3-5 闭合**（任务详情只读面板按提交 / 推送 / 合并 / 记录可信度 /
-    核验结论五组事实分别展示，见 `P4-M3-5-code-save-status-display.md`），核验操作入口仍归
-    P4-M4（M4-2）。
+    核验结论五组事实分别展示，见 `P4-M3-5-code-save-status-display.md`）；**核验操作入口已于
+    P4-M4-2 闭合**（每条记录按真实 `record.id` 提供显式核验入口，请求体固定为 `{}`，结果按
+    现场观察 / 核验判定 / 核验后记录 / 结果持久化四块分别展示，`persisted` 与 `safe_to_retry`
+    不被读成核验通过或自动重试许可，见
+    `P4-M4-2-code-save-verification-web-action.md`）。
   - 其余 P1 业务决策阻塞：G9 容器处置，以及 G7 执行记录历史的字段级剩余
     （**已闭合**：P4-M3-1 补齐尝试的 `timed_out` / `cancelled` / `error_class` /
     `failure_stage` 与会话归档 / 导出状态的中文标签）。

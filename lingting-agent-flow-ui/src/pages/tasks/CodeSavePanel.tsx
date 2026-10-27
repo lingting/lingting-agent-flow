@@ -1,5 +1,5 @@
 /**
- * 任务代码保存记录面板（只读）。
+ * 任务代码保存记录面板。
  *
  * 记录属于任务维度，不属于某一个被选中的步骤：一条记录通过 `attempt_id` 与执行
  * 历史关联，但展示位置固定在任务详情下，避免把"代码保存"错误地挂到某个步骤。
@@ -11,13 +11,16 @@
  *   4. 合并结果（`merge_enabled` + `merge_status` + `merge_sha`）；
  *   5. 记录可信度与核验结论（`persist_status` / `recovery_status`）。
  *
- * 本轮只读：不触发提交、推送、合并，也不发起核验或恢复动作。
+ * 面板本身不提交、不推送、不合并，也不自动核验：每条记录各自提供一个显式核验入口，
+ * 由用户点击后调用 `POST …/code-saves/{recordID}/verify-code-save`，结果按记录标识归档
+ * 并展示在记录自己的区域里。
  */
 import { Alert, Descriptions, Flex, Space, Typography } from "antd";
 import { Button, LinkButton } from "lingting-react-ui";
 
 import type { CodeSaveRecord, Task } from "@/lib/api";
 import { CodeSaveStatusTag as StatusTag } from "@/pages/tasks/CodeSaveStatusTag";
+import { CodeSaveVerificationSection } from "@/pages/tasks/CodeSaveVerificationSection";
 import {
   CODE_SAVE_COMMIT_DICT,
   CODE_SAVE_MERGE_DICT,
@@ -36,6 +39,8 @@ import {
   recoveryStatusMeta,
   stageLabel,
 } from "@/pages/tasks/codeSaves";
+import type { CodeSaveVerifyEntry } from "@/pages/tasks/codeSaveVerification";
+import { useCodeSaveVerification } from "@/pages/tasks/useCodeSaveVerification";
 import { useTaskCodeSaves } from "@/pages/tasks/useExecutionRecords";
 
 /** 时间展示：使用本地时区，缺省显示占位符 */
@@ -46,8 +51,23 @@ function formatTime(value?: string): string {
   return parsed.toLocaleString();
 }
 
-/** 单条记录的只读展示 */
-function CodeSaveRecordBlock({ record }: { record: CodeSaveRecord }) {
+/**
+ * 单条记录的展示。
+ *
+ * 记录自身的五组事实与核验结果是两块独立内容：核验只补充"现场看到了什么、判定是什么、
+ * 结论有没有落盘"，不会改写记录本身的字段，也不会影响其他记录。
+ */
+function CodeSaveRecordBlock({
+  entry,
+  onClearVerify,
+  onVerify,
+  record,
+}: {
+  entry?: CodeSaveVerifyEntry;
+  onClearVerify: () => void;
+  onVerify: () => void;
+  record: CodeSaveRecord;
+}) {
   const commit = commitStatusMeta(record.commit_status);
   const push = pushStatusMeta(record.push_status);
   const merge = mergeStatusMeta(record.merge_status);
@@ -174,6 +194,8 @@ function CodeSaveRecordBlock({ record }: { record: CodeSaveRecord }) {
           {warning}
         </Typography.Text>
       ))}
+
+      <CodeSaveVerificationSection entry={entry} onClear={onClearVerify} onVerify={onVerify} />
     </Flex>
   );
 }
@@ -186,6 +208,8 @@ function CodeSaveRecordBlock({ record }: { record: CodeSaveRecord }) {
  */
 export function CodeSavePanel({ task, token }: { task: Task; token?: number }) {
   const { state, reload } = useTaskCodeSaves(task.id, token);
+  // 核验是独立的操作状态：它不会写入记录列表，也不会因为列表刷新失败而丢失。
+  const verification = useCodeSaveVerification({ refresh: reload, taskID: task.id });
 
   return (
     <Flex gap="small" vertical>
@@ -195,7 +219,7 @@ export function CodeSavePanel({ task, token }: { task: Task; token?: number }) {
       </Space>
       <Typography.Text type="secondary">
         记录按服务端顺序展示（最新在前）。提交、推送、合并是三个独立事实；记录写入状态与
-        核验结论同样独立，本面板不触发任何 Git 操作或核验。
+        核验结论同样独立。每条记录可以单独发起只读核验，本面板不触发任何 Git 操作。
       </Typography.Text>
 
       {state.status === "loading" && (
@@ -230,7 +254,13 @@ export function CodeSavePanel({ task, token }: { task: Task; token?: number }) {
           <Flex gap="small" vertical>
             <Typography.Text type="secondary">{`共 ${state.data.length} 条记录`}</Typography.Text>
             {state.data.map((record) => (
-              <CodeSaveRecordBlock key={record.id} record={record} />
+              <CodeSaveRecordBlock
+                entry={verification.entries[record.id]}
+                key={record.id}
+                onClearVerify={() => verification.clearEntry(record.id)}
+                onVerify={() => void verification.verify(record.id)}
+                record={record}
+              />
             ))}
           </Flex>
         ))}

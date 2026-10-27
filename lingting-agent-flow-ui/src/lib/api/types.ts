@@ -1479,3 +1479,105 @@ export type RetryEligibilityResponse = {
   /** 服务端给出的可读说明；缺省时界面使用中性提示，不编造结论 */
   summary: string;
 };
+
+/**
+ * 代码保存核验的请求体，与 Go 端 `httpapi.CodeSaveVerifyRequest` 一致。
+ *
+ * 只有两个字段，都可省略：服务端从记录本身读取容器登记记录，容器内工作区缺省为
+ * `domain.DefaultContainerWorkDir`。记录、任务、分支、基线等"已核验事实"全部来自数据库，
+ * 调用方不能指定。前端既不猜测也不伪造这两个值，因此始终发送空请求体 `{}`。
+ */
+export type CodeSaveVerifyRequest = {
+  /** 可选覆盖的容器登记记录标识；省略时使用记录中的容器 */
+  container_id?: string;
+  /** 容器内 Git 工作区路径；省略时使用服务端默认项目目录 */
+  work_dir?: string;
+};
+
+/**
+ * 只读核验得到的现场事实，与 Go 端 `httpapi.CodeSaveObservationResponse` 一致。
+ *
+ * 每个字段对应一次独立的只读查询，`read_failed=true` 表示本次核验本身没有完成，
+ * 其余字段一律不可信；空值表示"查询成功但没有结果"（例如远程分支不存在），
+ * 与"查询失败"不是同一件事。因此不得把字段缺失解释为"没有变化"或"远程与本地一致"。
+ */
+export type CodeSaveObservation = {
+  /** 本次只读核验是否失败（容器不可访问、远程不可达等） */
+  read_failed: boolean;
+  /** 核验失败的可读原因；已脱敏并裁剪，仅在服务端给出时存在 */
+  read_error?: string;
+  /** 任务分支当前 HEAD 指向的 commit；缺失表示无法读取 */
+  head_commit?: string;
+  /** 远程任务分支当前指向的 commit；缺失表示远程分支不存在 */
+  remote_task_commit?: string;
+  /** 远程基础分支当前指向的 commit；缺失表示远程分支不存在 */
+  remote_base_commit?: string;
+};
+
+/**
+ * 恢复判定的结论，与 Go 端 `httpapi.CodeSaveDecisionResponse` 一致。
+ *
+ * `status` 来自 `domain.RecoveryStatus`，`stage` 说明结论针对哪一个 Git 阶段
+ * （`commit` / `push` / `merge`，空值表示不针对具体阶段）。`safe_to_retry` 是服务端
+ * 判定字段：只有"确认操作没有发生"且"记录本身可信"才为 true，前端不得据此自动重试。
+ */
+export type CodeSaveDecision = {
+  /** 恢复结论；未知取值原样保留，不得映射为成功 */
+  status: CodeSaveRecoveryStatus | (string & {});
+  /** 结论针对的阶段；缺失表示不针对具体阶段 */
+  stage?: string;
+  /** 面向用户与日志的判定说明 */
+  summary: string;
+  /** 服务端判定是否可以安全地重新执行对应操作 */
+  safe_to_retry: boolean;
+};
+
+/**
+ * 核验响应中的记录视图，与 Go 端 `httpapi.CodeSaveRecordResponse` 一致。
+ *
+ * 它与列表接口的 `CodeSaveRecord`（`httpapi.CodeSaveRecordListEntryResponse`）**不是同一个
+ * DTO**：这里没有 `merge_enabled`、`stage`、`baseline_*`、`persist_error` 与各时间字段，
+ * 主键字段名是 `record_id` 而不是 `id`。因此不得把两者互相赋值，也不得用本视图覆盖列表
+ * 里其他记录；核验之后的最新完整记录仍以列表接口为准。
+ */
+export type CodeSaveRecordView = {
+  record_id: string;
+  task_id: string;
+  task_branch: string;
+  commit_status: CodeSaveCommitStatus | (string & {});
+  commit_sha?: string;
+  push_status: CodeSavePushStatus | (string & {});
+  remote_commit_sha?: string;
+  merge_status: CodeSaveMergeStatus | (string & {});
+  merge_sha?: string;
+  /** 记录写入状态；服务端已按领域规则归一化（空值等价于 persisted） */
+  persist_status: CodeSavePersistStatus | (string & {});
+  /** 核验结论；服务端已按领域规则归一化（空值等价于 unverified） */
+  recovery_status: CodeSaveRecoveryStatus | (string & {});
+  error_summary?: string;
+};
+/**
+ * 一次只读核验的结果，与 Go 端 `httpapi.CodeSaveVerifyResponse` 一致。
+ *
+ * 五个事实必须分别读取，任何两个都不能互相替代：
+ *   - `record`：核验**之前**从数据库读到的记录；
+ *   - `observation`：现场只读查询结果；
+ *   - `decision`：依据记录与现场得出的领域判定；
+ *   - `updated`：写入核验结论**之后**读取到的记录；写入失败或冲突时是数据库中的真实记录；
+ *   - `persisted`：核验结论是否已写回数据库。
+ *
+ * `persisted=true` 只说明结论按接口契约落盘，不等于核验通过；`persisted=false` 也不代表
+ * 响应里没有结论——`observation` 与 `decision` 仍然是本次核验取得的真实事实。
+ */
+export type CodeSaveVerifyResponse = {
+  /** 核验前的记录视图 */
+  record: CodeSaveRecordView;
+  /** 现场只读查询结果 */
+  observation: CodeSaveObservation;
+  /** 领域判定结论 */
+  decision: CodeSaveDecision;
+  /** 核验结论写回后的记录视图；写入失败时是数据库中的真实记录 */
+  updated: CodeSaveRecordView;
+  /** 核验结论是否成功持久化 */
+  persisted: boolean;
+};
