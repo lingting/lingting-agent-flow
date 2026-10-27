@@ -92,7 +92,7 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > 失败保留上一次成功快照且不改变策略；步骤 / 代码保存 / 续跑资格三个子面板只在服务端真实
 > 字段变化时重载；未修改任何后端代码，未新增或修改任何 HTTP API，新增前端单元测试 35 个、
 > E2E 11 个，全量单元测试 361 通过、全量 E2E 129 通过 / 0 失败）。
-> **P4-M4 状态为 `in_progress`**（M4-1、M4-2 已完成，M4-3 / M4-4 / M4-5 未开始）。
+> **P4-M4 状态为 `in_progress`**（M4-1、M4-2、M4-3 已完成，M4-4 / M4-5 未开始）。
 > **M4-1（失败任务显式重试 Web 入口）于 2026-10-27 完成**：核实
 > `POST /tasks/{id}/retry`（同步、成功 202）与 `GET /tasks/{id}/retry-eligibility`（只读）的
 > 真实 DTO、10 个稳定拒绝分类、同步与超时语义，然后只接入前端——新增
@@ -125,6 +125,37 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > E2E 10 个，`pnpm test:unit:safe` 485 通过、`pnpm test:e2e:safe` 165 通过 / 0 失败、
 > `pnpm check` 与 `pnpm build` 通过。证据见
 > `P4-M4-2-code-save-verification-web-action.md`。
+> **M4-3（容器 delete / detach 的 HTTP API 与 Web 操作入口）于 2026-10-27 完成**：核实出
+> G9 的 HTTP 入口**完全不存在**——`ContainerService.DeleteContainer` / `DetachContainer` 与
+> CLI 两条命令早已齐全，`internal/httpapi` 却没有任何容器路由，前端也没有容器类型。同时核实到
+> 既有的归属校验 `domain.DecideContainerOwnership`（由 `app.loadOwnedContainer` 使用）要求
+> 记录正好是任务 `container_id` 引用的那条且未脱离、未删除，**恰好拒绝处置旧容器的核心现场**，
+> 因此不能直接复用它，也不能在 Handler 或前端放宽校验。本轮新增纯函数
+> `domain.DecideContainerDisposal`（处置校验：允许历史代次，仍拒绝跨任务、跨节点、已脱离管理
+> 与已删除后的重复 detach；已删除请求 delete 交给容器服务按幂等处理）与
+> `app.TaskContainerDisposalService`（读取任务与记录、调用容器服务、重读真实记录、归类
+> 5 类错误），并新增三条路由：
+> `GET /api/v1/tasks/{taskID}/containers`（只读、含 `origin` 区分当前/历史代次）、
+> `POST .../containers/{containerID}/delete`、`POST .../containers/{containerID}/detach`
+> （两个独立动作、无请求体、不接受任意 Session 路径 / 工作目录 / 远程参数，删除原因固定为
+> `manual`）。错误映射：400 参数、404 任务或记录不存在、409 归属或状态不允许、500 远程失败或
+> 结果不确定（`execution_failed`）、503 服务未装配；失败**不返回 2xx**；响应不泄露
+> `docker_id` / `image_id` / `build_config_sha256` / `host_id` / 工作区与凭据。前端新增
+> `TaskContainer` / `ContainerDisposalAction` / `ContainerDisposalResponse` 等类型、
+> `taskContainersPath` / `taskContainerDisposalPath` / `fetchTaskContainers` /
+> `disposeTaskContainer`、纯函数模块 `containers.ts`、唯一状态 Hook
+> `useTaskContainers.ts` 与 `TaskContainerPanel`：两个动作在路径、响应 `action`、确认文案与
+> 后果说明上完全分开（没有"清理"按钮），确认框显示真实容器标识与所属任务，未知状态与未知关联
+> 方式原样展示，已脱离管理的容器两个动作都禁用并说明"如需清理请人工处理"，同一容器在途防重、
+> 切换任务丢弃迟到响应、刷新失败保留上一次真实结论、结果不确定明确提示且不自动重发，处置成功
+> 后**不**重试任务、**不**启动工作流。**本轮修改了 Go 生产代码**（新增上述领域判定与应用服务
+> 以及路由 / 依赖装配），未改动 `ContainerService`、容器状态机、生命周期策略、工作流编排，
+> 未新增表或迁移，也未新增绕过凭据与主机配置的远程连接路径（复用 `server` 已构造的
+> `*app.ContainerService`）。新增 Go 测试 25 个（domain 9 + httpapi 16）、前端单元测试 37 个
+> 与 E2E 18 个；`go test ./tests/unit/... ./tests/integration/local/...` 2239 通过、
+> `go test ./tests/e2e/...` 58 通过、`pnpm test:unit:safe` 522 通过、
+> `pnpm test:e2e:safe` 183 通过 / 0 失败，`gofmt`、`go vet`、`pnpm check` 与 `pnpm build`
+> 通过。证据见 `P4-M4-3-container-delete-detach-web-actions.md`。
 > **P4-M3 已为 `completed`**：M3-2 已由 P4-M2-7 满足，M3-1、M3-3、M3-4、M3-5、
 > M3-6、M3-7 与 M3-8 全部完成。**M3-8（事件时间线与修复周期历史）于 2026-10-27 完成**：
 > 核实出 `ListEventsByTask` 生产代码零调用者且排序只有 `ORDER BY id`、`EventFilter`
@@ -400,6 +431,17 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
   `persisted=false` 不抹除已取得的判定；核验只由用户点击触发，同一记录在途防重、跨记录互不
   串线、切换任务丢弃迟到响应、失败与结果不确定不自动重发，也不进入 5 秒自动刷新循环。本轮
   未修改任何 Go 代码与核验领域规则。
+- **Web 容器处置入口**（P4-M4-3）：任务详情下的面板
+  `lingting-agent-flow-ui/src/pages/tasks/TaskContainerPanel.tsx`，展示元数据与竞态判定在
+  `containers.ts`，唯一状态实现在 `useTaskContainers.ts`，数据来自 `fetchTaskContainers`
+  （`GET /api/v1/tasks/{taskID}/containers`）与 `disposeTaskContainer`
+  （`POST /api/v1/tasks/{taskID}/containers/{containerID}/{delete|detach}`）。服务端新增
+  `app.TaskContainerDisposalService` 与纯函数 `domain.DecideContainerDisposal`：处置校验允许
+  历史代次但仍拒绝跨任务、跨节点、已脱离管理与已删除后的重复 detach，删除仍由
+  `ContainerService` 完成远程所有权核验。两个动作在路径、响应 `action`、确认文案与后果说明上
+  完全分开，未知状态与未知关联方式原样展示，已脱离管理的容器两个动作都禁用，同一容器在途防重、
+  切换任务丢弃迟到响应、刷新失败保留上一次真实结论、结果不确定不自动重发；处置成功后不重试
+  任务、不启动工作流，也不泄露 `docker_id` / `image_id` / `host_id` 与凭据。
 - **Web 失败任务显式重试入口**（P4-M4-1）：任务详情下的面板
   `lingting-agent-flow-ui/src/pages/tasks/RetryTaskPanel.tsx`，展示元数据与竞态判定在
   `retry.ts`，唯一状态实现在 `useTaskRetry.ts`，数据来自
@@ -557,9 +599,14 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
     现场观察 / 核验判定 / 核验后记录 / 结果持久化四块分别展示，`persisted` 与 `safe_to_retry`
     不被读成核验通过或自动重试许可，见
     `P4-M4-2-code-save-verification-web-action.md`）。
-  - 其余 P1 业务决策阻塞：G9 容器处置，以及 G7 执行记录历史的字段级剩余
-    （**已闭合**：P4-M3-1 补齐尝试的 `timed_out` / `cancelled` / `error_class` /
-    `failure_stage` 与会话归档 / 导出状态的中文标签）。
+  - 其余 P1 业务决策阻塞：原列出的 G9 容器处置与 G7 执行记录历史的字段级剩余
+    （**均已闭合**：G7 由 P4-M3-1 补齐尝试的 `timed_out` / `cancelled` / `error_class` /
+    `failure_stage` 与会话归档 / 导出状态的中文标签；**G9 已于 P4-M4-3 闭合**，见下方）。
+    **G9 旧容器 delete / detach 的 HTTP API 与 Web 入口已于 P4-M4-3 闭合**（新增
+    `GET /tasks/{id}/containers` 与 `POST .../containers/{cid}/{delete|detach}`，任务详情新增
+    `TaskContainerPanel`；两个动作语义完全分开，跨任务 / 跨节点 409，已脱离管理的容器两个
+    动作都禁用，处置成功后不重试任务、不启动工作流，见
+    `P4-M4-3-container-delete-detach-web-actions.md`）。
     **G5 失败任务重试入口已于 P4-M4-1 闭合**（任务详情新增 `RetryTaskPanel`，可用性只来自
     `GET /retry-eligibility` 的 `can_retry`，阻塞分类逐项展示且未知取值原样保留，结果按
     `workflow_started` 区分，不自动重发，见 `P4-M4-1-task-retry-web-entry.md`）。
@@ -569,7 +616,6 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
     **G10 收尾结论展示已于 P4-M3-3 闭合**（`types.ts` 补齐三个字段，任务详情拆成任务状态 /
     最终业务结论 / 收尾闭环三行独立事实，见
     `P4-M3-3-task-closeout-display.md`）。
-  - P2 六项：G12 项目后端能力缺失（无表、无服务）、G13 计划生成入口、G14 单步诊断入口、
   - P2 六项：G12 项目后端能力缺失（无表、无服务）；**G13 计划生成入口已于 P4-M2-7
     闭合**（`POST /tasks/{id}/plan` 接入 Web，按 `persisted` / `failure_stage` 展示真实
     结果，有步骤时不显示覆盖入口）；**G14 单步诊断入口已于 P4-M2-7 闭合**（单步骤执行、

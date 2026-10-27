@@ -27,7 +27,7 @@
 
 - **当前阶段**：P4 —— 产品操作体验与针对性优化。
 - **当前里程碑**：`P4-M4` —— 支持必要的继续执行、取消、恢复和结果查看操作，状态
-  `in_progress`（M4-1、M4-2 已完成，M4-3 / M4-4 / M4-5 未开始）。子任务 **M4-1（失败任务
+  `in_progress`（M4-1、M4-2、M4-3 已完成，M4-4 / M4-5 未开始）。子任务 **M4-1（失败任务
   显式重试 Web 入口）已于 2026-10-27 完成**，交付物为
   [`P4-M4-1-task-retry-web-entry.md`](./P4-M4-1-task-retry-web-entry.md)：前端补齐
   `RetryEligibilityResponse` / `RetryTaskResponse` / `RetryTaskRequest` 类型与
@@ -53,6 +53,28 @@
   结果不确定分别提示且**不自动重发**，也不进入 5 秒自动刷新循环。**本轮未修改任何 Go 代码，
   未改动核验领域规则**；新增前端单元测试 42 个与 E2E 10 个，`pnpm test:unit:safe` 485 通过，
   `pnpm test:e2e:safe` 165 通过 / 0 失败，`pnpm check` 与 `pnpm build` 通过。
+- 子任务 **M4-3（容器 `delete`/`detach` 的 HTTP API 与 Web 操作入口）已于 2026-10-27 完成**，
+  交付物为
+  [`P4-M4-3-container-delete-detach-web-actions.md`](./P4-M4-3-container-delete-detach-web-actions.md)：
+  G9 的 HTTP 入口与 Web 操作**完全不存在**，本轮补齐三条路由
+  （`GET /api/v1/tasks/{taskID}/containers`、
+  `POST .../containers/{containerID}/delete`、`POST .../containers/{containerID}/detach`）与
+  任务详情中的容器面板。**本轮修改了 Go 生产代码**：新增纯函数
+  `domain.DecideContainerDisposal`（处置校验与归属校验是两个不同问题：处置允许历史代次，
+  但仍拒绝已脱离管理与已删除后的重复 detach）与 `app.TaskContainerDisposalService`
+  （复用 `ContainerService` 的远程所有权核验，不在 Handler 拼 Docker 命令，也不新开远程连接
+  路径）。两个动作在路径、请求、响应 `action` 与确认文案上完全分开，界面上没有"清理"按钮；
+  删除请求不接受请求体、原因固定为 `manual`，响应不泄露 `docker_id` / `image_id` /
+  `host_id` / 工作区与凭据；跨任务与跨节点处置返回 409，记录不存在 404，远程操作失败或结果
+  不确定 500 `execution_failed`，从不返回 2xx 伪装成功。前端新增 `TaskContainer` /
+  `ContainerDisposalResponse` 等类型、`containers.ts` 纯函数模块、`useTaskContainers` 唯一
+  状态 Hook 与 `TaskContainerPanel`；未知状态与未知关联方式原样展示，已脱离管理的容器两个动作
+  都禁用，同一容器在途防重、切换任务丢弃迟到响应、刷新失败保留上一次真实结论、
+  结果不确定明确提示且不自动重发，处置成功后**不**重试任务、**不**启动工作流。新增 Go 测试
+  25 个（domain 9 + httpapi 16）、前端单元测试 37 个与 E2E 18 个；`go test ./tests/unit/...
+  ./tests/integration/local/...` 2239 通过、`go test ./tests/e2e/...` 58 通过、
+  `pnpm test:unit:safe` 522 通过、`pnpm test:e2e:safe` 183 通过 / 0 失败，`gofmt`、`go vet`、
+  `pnpm check` 与 `pnpm build` 通过。
 - **上一里程碑**：`P4-M3` —— 展示阶段进度、验证结果、失败原因和恢复状态，状态
   `completed`（M3-1、M3-3、M3-4、M3-5、M3-6、M3-7、M3-8 已完成，M3-2 已由 M2-7 满足）。
   详见下方"当前里程碑"详述与
@@ -245,8 +267,18 @@
   `persisted` 互不替代，`persisted=false` 时仍保留真实判定，请求失败与结果不确定分别提示且
   不自动重发；**未修改任何 Go 代码与核验领域规则**。见
   [`P4-M4-2-code-save-verification-web-action.md`](./P4-M4-2-code-save-verification-web-action.md)。
-  剩余子项：M4-3（容器 `delete` / `detach`，需先补 HTTP 接口）、
-  M4-4（`resume-eligibility` 驱动的恢复入口）、M4-5（单步诊断动作）。
+  **M4-3（容器 `delete` / `detach` 的 HTTP API 与 Web 操作入口，2026-10-27 完成）**：G9 的
+  HTTP 入口**完全不存在**，本轮补齐
+  `GET /api/v1/tasks/{taskID}/containers`（只读登记记录，含 `origin` 区分当前/历史代次）与
+  `POST .../containers/{containerID}/{delete|detach}`（两个独立动作、无请求体、不接受远程参数），
+  并在任务详情新增 `TaskContainerPanel`。删除与脱离管理在路径、响应 `action`、确认文案与后果
+  说明上完全分开；跨任务/跨节点处置 409，记录不存在 404，远程失败或结果不确定 500
+  `execution_failed`，从不返回 2xx 伪装成功；已脱离管理的容器两个动作都禁用（终态只能人工处理），
+  处置成功后**不**重试任务、**不**启动工作流。**本轮修改了 Go 生产代码**（新增
+  `domain.DecideContainerDisposal` 与 `app.TaskContainerDisposalService`，复用既有
+  `ContainerService` 的所有权核验与远程会话路径），未改动容器状态机、生命周期策略与工作流编排。
+  见 [`P4-M4-3-container-delete-detach-web-actions.md`](./P4-M4-3-container-delete-detach-web-actions.md)。
+  剩余子项：M4-4（`resume-eligibility` 驱动的恢复入口）、M4-5（单步诊断动作）。
   环境构建 Web 入口与角色变更入口是否上 Web 仍按产品取舍决定。详见
   [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
 - **P4-M3 收尾时的核实记录**（M4 开始前）：`P4-M3`（展示阶段进度、验证结果、失败原因和
@@ -485,6 +517,7 @@
 | [`P4-M3-8-event-timeline-repair-cycle-history.md`](./P4-M3-8-event-timeline-repair-cycle-history.md) | P4-M3-8：事件时间线与修复周期历史（事件模型与 payload 安全核查、排序与分页契约、归属校验、白名单摘要、前端两面板的刷新与竞态策略、测试证据、剩余风险） |
 | [`P4-M4-1-task-retry-web-entry.md`](./P4-M4-1-task-retry-web-entry.md) | P4-M4-1：失败任务显式重试 Web 入口（真实路由与 DTO 契约、资格唯一判据 `can_retry`、10 个阻塞分类、同步请求与超时语义、操作防重与结果语义、竞态处理、测试证据、剩余风险） |
 | [`P4-M4-2-code-save-verification-web-action.md`](./P4-M4-2-code-save-verification-web-action.md) | P4-M4-2：代码保存核验 Web 操作入口（真实路由与双 DTO 差异、请求参数可信来源与"不猜测容器/工作区"依据、五组事实互不替代、`persisted` 与 `safe_to_retry` 语义、竞态与防重、测试证据、剩余风险） |
+| [`P4-M4-3-container-delete-detach-web-actions.md`](./P4-M4-3-container-delete-detach-web-actions.md) | P4-M4-3：容器 delete / detach 的 HTTP API 与 Web 操作入口（HTTP 缺口核实、三条新路由与 DTO 契约、处置校验与归属校验的区别、两层所有权核验、delete 与 detach 的边界、结果不确定语义、竞态与防重、测试证据、剩余风险） |
 | [`P4-frontend-test-resource-governance.md`](./P4-frontend-test-resource-governance.md) | P4 工程质量：前端测试并发治理（真实资源模型核实、Playwright worker 4 / Vitest worker 4 默认值、非法输入拒绝、资源受限入口、能力边界、验收命令与既有失败隔离） |
 
 ## 下一步工作的选择规则

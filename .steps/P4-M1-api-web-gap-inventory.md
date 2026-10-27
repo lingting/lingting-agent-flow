@@ -163,7 +163,7 @@ Web 完成"新建任务 → 准备环境 → 获取代码 → 生成计划 → �
 | **G6** | 看懂验证结果与失败原因（哪些检查失败、退出码、输出摘要、语义审查结论） | 部分实现：验证历史与检查结果可查；失败反馈查询 API 已补齐（P4-M2-5），前端视图仍缺 | `GET /tasks/{id}/steps/{sid}/validations`；`GET …/validations/{runID}/feedback`（P4-M2-5） | **缺失** | **缺失** | **是（业务决策）**：用户无法判断"为什么没通过"，只能看到 `error_summary` | `internal/httpapi/executions.go`、`internal/httpapi/execution_feedback.go`（P4-M2-5）、`internal/app/execution_feedback.go`（P4-M2-5） | P4-M3（M3-2 前端视图） | **P1** |
 | **G7** | 查看步骤 / Attempt / Session 历史（含归档与导出状态） | 已实现（`ExecutionRecordService`） | `GET /tasks/{id}/steps`、`.../attempts`、`.../sessions`、`/tasks/{id}/sessions/{sid}` | **缺失** | **缺失** | **是（业务决策）**：无法查看历史尝试与失败记录 | `internal/httpapi/executions.go:237-256`、`:258-330`、`:419` | P4-M3 | **P1** |
 | **G8** | 查看代码保存（提交/推送/合并）记录并核验 | 部分实现：记录查询与核验都在，但**没有列表 API**，`recordID` 在 Web 上不可获得 | `POST .../code-saves/{recordID}/verify-code-save`、`GET .../resume-eligibility`（其中含未决记录） | **缺失** | **缺失** | **是（业务决策）**：用户无法确认代码是否真的推送到远端 | `internal/app/code_save.go:145`（仅 CLI）；`internal/httpapi/code_recovery.go:145`、`:227` | P4-M3（列表 API）+ P4-M4（核验操作） | **P1** |
-| **G9** | 处置旧容器（`delete` / `detach`）以便重新开始 | 已实现（`ContainerService` 全套） | **不存在** | 缺失 | 缺失 | **是**：重新开始/重试的错误信息直接要求用户执行 `agentflow docker container inspect/delete/detach`，Web 无对应入口 | `internal/app/execenv_task.go:272-283`（错误文本）；`internal/app/containers_ops.go:29-401` | P4-M4（+ 需补 HTTP） | **P1** |
+| **G9** | 处置旧容器（`delete` / `detach`）以便重新开始 | 已实现（`ContainerService` 全套；**HTTP 入口已由 P4-M4-3 补齐**） | `GET /tasks/{id}/containers`、`POST …/containers/{cid}/delete`、`POST …/containers/{cid}/detach`（P4-M4-3） | **已接通**（P4-M4-3） | **已接通**（P4-M4-3，`TaskContainerPanel`） | 否（已闭合） | `internal/app/execenv_task.go:272-283`（错误文本）；`internal/app/containers_ops.go:29-401`；`internal/app/task_container_disposal.go`（P4-M4-3）；`internal/httpapi/task_containers.go`（P4-M4-3） | P4-M4（**已完成**） | **P1** |
 | **G10** | 看懂任务最终结论与收尾闭环状态 | 已实现（`DecideTaskCloseoutView`） | 任务响应已含 `final_result` / `closeout` / `closeout_summary` | **类型缺失**：`types.ts` 的 `Task` 无这三个字段 | **缺失**：详情面板不展示 | **是（业务决策）**：无法区分"步骤全通过但收尾未确认"与真正成功 | `internal/httpapi/tasks.go:52-66`、`:381-405`；`lingting-agent-flow-ui/src/lib/api/types.ts:60-95`（缺字段）；`TasksPage.tsx` 的 `TaskDetail` | P4-M3 | **P1** |
 | **G11** | 看懂"为什么不能继续"以及下一步该做什么 | 已实现（`ResumeEligibilityService`，含 `blocking` / `next_actions` / 逐记录动作） | `GET /tasks/{id}/resume-eligibility` | **缺失** | **缺失** | **是（业务决策）**：`blocked` / `recovery_required` 下用户无任何指引 | `internal/app/resume_eligibility.go:98-136`、`:227-266`；`internal/httpapi/code_recovery.go:227` | P4-M3 | **P1** |
 | **G12** | 管理项目（环境、版本、缓存、工作目录） | **缺失**：只有 `domain.ProjectConfig` 校验与 `docker.Layout.ProjectConfigPath`，**无存储表、无 app 服务** | 不存在 | 缺失 | 占位页 | 否（`project_id` 可选，缺失只影响缓存共享与目录命名） | `internal/domain/project.go:183-283`；`internal/docker/layout.go:143`；`internal/app/task_management.go:117`（仅校验书写） | P4-M2（后端能力需先立项） | **P2** |
@@ -358,6 +358,10 @@ HTTP 只有 `POST .../code-saves/{recordID}/verify-code-save`，而 `recordID` �
 
 ### G9 容器管理无 HTTP 入口（P1）
 
+> **已于 P4-M4-3 闭合**（2026-10-27）：新增三条路由与 `TaskContainerPanel`，本节保留为问题
+> 记录。闭合证据与安全边界见
+> [`P4-M4-3-container-delete-detach-web-actions.md`](./P4-M4-3-container-delete-detach-web-actions.md)。
+
 **事实**：容器全套操作只在 CLI（`internal/cli/docker_container.go`、
 `docker_container_lifecycle.go`）。而重新开始/重试的阻塞信息直接要求用户执行 CLI：
 
@@ -479,7 +483,7 @@ HTTP 只有 `POST .../code-saves/{recordID}/verify-code-save`，而 `recordID` �
 |---|---|
 | M4-1 重试入口（资格前置，禁止前端推断） | G5 |
 | M4-2 代码保存核验操作入口 | G8 |
-| M4-3 容器记录查看与显式 `delete` / `detach`（需先补 HTTP） | G9 |
+| M4-3 容器记录查看与显式 `delete` / `detach`（需先补 HTTP）——**已完成**（2026-10-27） | G9 |
 | M4-4 继续执行 / 恢复工作流的可用性来自 `resume-eligibility` | G11 |
 | M4-5 单步诊断动作（初始化代码、确定性验证） | G20 |
 
@@ -525,7 +529,7 @@ HTTP 只有 `POST .../code-saves/{recordID}/verify-code-save`，而 `recordID` �
 | R1 | G2 的结论依赖"生产代码无角色导入调用者"。若存在未纳入本仓库的部署脚本（例如手工 `sqlite3` 插入角色），实际影响会降低；但这本身说明产品缺少正式入口，仍应补齐 |
 | R2 | G3 的具体产品取舍（Web 是否应支持"创建环境版本 + 构建镜像"）尚未确定。只读查询是必要条件，写操作是否进 Web 需要用户确认 |
 | R3 | G12（项目）需要新表与迁移，属后端立项，不能在 M2 里"顺手加个页面" |
-| R4 | G9 的容器 `delete` 属破坏性操作，是否进 Web 需与"未推送代码不得丢失"的既有约束一起评审 |
+| R4 | G9 的容器 `delete` 属破坏性操作，是否进 Web 需与"未推送代码不得丢失"的既有约束一起评审。**已由 P4-M4-3 处理**：删除与脱离管理拆成两个独立动作、各自确认并写明后果；已脱离管理的容器两动作都禁用（终态只能人工处理）；删除不触碰共享镜像 / 缓存卷 / 远程项目配置目录；处置成功后不重试任务、不启动工作流 |
 | R5 | 前端 `Task` 类型缺 `final_result` / `closeout` 属类型漂移，说明前后端字段同步缺少检查手段；是否引入类型生成需评估 |
 | R6 | `WorkflowStepResponse.started_at` / `finished_at` 长期为空，可能已有其他读取方假设它为空，补全前需确认（**P4-M3-6 已补全**：P4-M3-6 交付文档 §7 记录了补全后的语义与风险） |
 | R7 | 本次未执行任何测试，G1 的"必然 409"结论来自 `CheckWorkflowStart` 的静态判定；若存在绕过路径（例如任务在创建时即带容器），需在 M2 实施时复核 |
@@ -536,5 +540,7 @@ HTTP 只有 `POST .../code-saves/{recordID}/verify-code-save`，而 `recordID` �
    正式入口"的结论）。
 2. Web 是否需要"创建环境版本 / 触发镜像构建"的写入口，还是只读选择即可（G3 范围）。
 3. 项目（G12）是否真的需要独立实体，还是继续以"受校验的标识 + 缓存范围"存在即可。
-4. 容器 `delete` / `detach` 是否应进 Web，以及需要哪些额外确认（G9）。
+4. ~~容器 `delete` / `detach` 是否应进 Web，以及需要哪些额外确认（G9）。~~
+   **已决（P4-M4-3）**：两者都进 Web，但必须是两个独立动作，各自需要显式确认并写明后果；
+   已脱离管理的容器不提供任何 Web 处置入口。
 5. 修复周期历史（G16）与事件时间线（G15）在 M3 中是否同批交付。

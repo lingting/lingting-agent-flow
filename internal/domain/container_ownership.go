@@ -151,3 +151,113 @@ func CheckContainerOwnership(task Task, container Container) error {
 		decision.Detail,
 	)
 }
+
+// DecideContainerDisposal 判断一条容器记录能否被当前任务显式处置（delete / detach）。
+//
+// 它与 DecideContainerOwnership 回答的是不同问题，不能互相替代：
+//   - 归属校验回答"这个容器能不能被当作任务的执行容器使用"，因此要求任务记录里
+//     的 container_id 正好指向它、并且容器仍可执行（未脱离、未删除、有 Docker ID）；
+//   - 处置校验回答"这个旧容器能不能被这个任务处置"，因此额外允许处置任务的历史
+//     代次（登记了任务归属但不是当前引用的那条），但仍保留"终态容器不再自动操作"
+//     的既有约束。
+//
+// 规则顺序固定，只在 domain 中定义一次：
+//  1. 记录未登记任务归属 → 拒绝：无法证明它属于任何任务；
+//  2. 记录登记的是另一个任务 → 拒绝：这是跨任务操作的唯一可核验防线；
+//  3. 记录所属执行节点与任务不一致 → 拒绝：远程操作会打在错误的机器上；
+//  4. 状态为 detached 但缺少 detached 标记 → 拒绝：记录自相矛盾，必须先人工核验；
+//  5. 已脱离管理 → 拒绝：delete 与 detach 都拒绝。容器服务既有的自动管理约束不允许
+//     删除或重复脱离已脱离管理的容器，处置层不得放宽该约束（否则 Web 请求会让终态
+//     容器重新进入自动操作流程）；
+//  6. 已删除时请求 detach → 拒绝：已删除的容器不能被报告为成功脱离。
+//
+// 已删除的容器请求 delete 仍然允许：容器服务把重复删除视为幂等成功，这是"确认远程
+// 确实已不存在"的正常路径，不会产生任何新的远程副作用。
+//
+// 该函数是纯函数：不读数据库、不建立远程会话，也不修改任何状态。
+func DecideContainerDisposal(
+	task Task,
+	container Container,
+	action RestartDisposition,
+) ContainerOwnershipDecision {
+	if err := action.Validate(); err != nil {
+		return ContainerOwnershipDecision{Reason: ContainerOwnershipUnassigned, Detail: err.Error()}
+	}
+	if container.TaskID == nil {
+		return ContainerOwnershipDecision{
+			Reason: ContainerOwnershipUnassigned,
+			Detail: fmt.Sprintf("容器 %s 没有登记任务归属", container.ID),
+		}
+	}
+	if *container.TaskID != task.ID {
+		return ContainerOwnershipDecision{
+			Reason: ContainerOwnershipTaskMismatch,
+			Detail: fmt.Sprintf(
+				"容器 %s 登记的是任务 %s，不是任务 %s",
+				container.ID,
+				*container.TaskID,
+				task.ID,
+			),
+		}
+	}
+	if task.HostID != nil && *task.HostID != container.HostID {
+		return ContainerOwnershipDecision{
+			Reason: ContainerOwnershipHostMismatch,
+			Detail: fmt.Sprintf(
+				"容器 %s 属于执行节点 %s，与任务 %s 的节点 %s 不一致",
+				container.ID,
+				container.HostID,
+				task.ID,
+				*task.HostID,
+			),
+		}
+	}
+	if container.State == ContainerStateDetached && !container.Detached {
+		return ContainerOwnershipDecision{
+			Reason: ContainerOwnershipDetached,
+			Detail: fmt.Sprintf(
+				"容器 %s 的状态是 detached 但缺少脱离标记，记录自相矛盾，请先人工核验",
+				container.ID,
+			),
+		}
+	}
+	if container.Detached {
+		// 已脱离管理是终态：容器服务的既有约束拒绝任何自动删除与重复脱离，
+		// 处置层不得放宽。
+		return ContainerOwnershipDecision{
+			Reason: ContainerOwnershipDetached,
+			Detail: fmt.Sprintf(
+				"容器 %s 已脱离 AgentFlow 自动管理，不再接受自动删除或重复脱离；如需清理请人工处理",
+				container.ID,
+			),
+		}
+	}
+	if action == RestartDispositionDetach && container.State == ContainerStateRemoved {
+		return ContainerOwnershipDecision{
+			Reason: ContainerOwnershipRemoved,
+			Detail: fmt.Sprintf("容器 %s 已被删除，无法脱离管理", container.ID),
+		}
+	}
+	return ContainerOwnershipDecision{Allowed: true}
+}
+
+// CheckContainerDisposal 判断容器能否被该任务显式处置，不成立时返回可诊断错误。
+//
+// 错误包装 ErrInvalidState，调用方据此映射为前置条件或冲突类别，不得改写成
+// "容器不可用"这类掩盖真实原因的说法。
+func CheckContainerDisposal(
+	task Task,
+	container Container,
+	action RestartDisposition,
+) error {
+	decision := DecideContainerDisposal(task, container, action)
+	if decision.Allowed {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: %s: %s",
+		ErrInvalidState,
+		decision.Reason,
+		decision.Detail,
+	)
+}

@@ -10,6 +10,8 @@ import type {
   CodeSaveRecordListResponse,
   CodeSaveVerifyRequest,
   CodeSaveVerifyResponse,
+  ContainerDisposalAction,
+  ContainerDisposalResponse,
   CreateHostRequest,
   CreateTaskRequest,
   Environment,
@@ -25,6 +27,7 @@ import type {
   StartTaskRequest,
   StartTaskResponse,
   StartWorkflowRequest,
+  TaskContainerListResponse,
   WorkflowRun,
   WorkflowStatusResponse,
   HealthResponse,
@@ -633,4 +636,82 @@ export async function deleteHost(hostID: string, options: ApiRequestOptions = {}
   } finally {
     externalSignal?.removeEventListener("abort", abortFromCaller);
   }
+}
+
+/**
+ * 任务下容器记录的集合路径。
+ *
+ * 形状与 Go 端 `httpapi.actionTaskID(path, "containers")` 一致：`{taskID}/containers` 两段。
+ * 该接口只读，返回数据库中的真实容器登记记录；它不建立 SSH / Docker 会话。
+ */
+export function taskContainersPath(taskID: string): string {
+  return `${taskPath(taskID)}/containers`;
+}
+
+/**
+ * 单条任务容器的显式处置路径。
+ *
+ * 形状与 Go 端 `httpapi.parseContainerDisposalPath` 一致：
+ * `{taskID}/containers/{containerID}/{delete|detach}` 四段。
+ *
+ * 路径里同时出现任务与容器两个标识**不代表**关联成立：归属由服务端读取容器登记记录后
+ * 校验（任务归属、执行节点、终态约束），前端不得据此假定该容器属于该任务。
+ */
+export function taskContainerDisposalPath(
+  taskID: string,
+  containerID: string,
+  action: ContainerDisposalAction,
+): string {
+  const container = containerID.trim();
+  if (!container) {
+    throw new Error("容器标识不能为空");
+  }
+  if (action !== "delete" && action !== "detach") {
+    throw new Error(`不支持的容器处置动作: ${String(action)}`);
+  }
+  return `${taskContainersPath(taskID)}/${encodeURIComponent(container)}/${action}`;
+}
+
+/**
+ * 查询任务关联的容器记录。
+ *
+ * 只读：不建立远程会话、不修改记录、不推进任务状态。返回的每条记录都带有 `origin`
+ * （当前代次 / 历史代次），界面据此区分"任务正在使用的容器"与"待处置的旧容器"，
+ * 不得自行按记录顺序或状态猜测。
+ */
+export function fetchTaskContainers(taskID: string, options: ApiRequestOptions = {}) {
+  return apiRequest<TaskContainerListResponse>(taskContainersPath(taskID), options);
+}
+
+/**
+ * 显式处置一条任务容器（delete 或 detach）。
+ *
+ * 语义由服务端决定，前端只传递真实记录标识与动作：
+ *   - `delete` 删除容器以及服务端规则允许清理的任务级临时资源，不删除共享镜像、共享缓存卷
+ *     与远程项目配置目录；已脱离管理的容器不会被删除；
+ *   - `detach` 先核验远程容器确实属于 AgentFlow，再保留现场并放弃自动管理权。
+ *
+ * 该操作有真实远程副作用，因此调用方只能由用户显式触发，且不得自动重发：
+ *   - 删除与脱离管理是两个独立动作，不得合并成一个"清理"；
+ *   - 不设客户端超时：删除需要远程 Docker 与远程登记清单写入，客户端提前断开会让
+ *     "是否已经处置"变成未知状态；
+ *   - 处置成功后**不**自动重试任务、不自动启动工作流。
+ */
+export function disposeTaskContainer(
+  taskID: string,
+  containerID: string,
+  action: ContainerDisposalAction,
+  options: ApiRequestOptions = {},
+) {
+  return apiRequest<ContainerDisposalResponse>(
+    taskContainerDisposalPath(taskID, containerID, action),
+    {
+      ...options,
+      headers: { Accept: "application/json", ...options.headers },
+      method: "POST",
+      // 远程操作耗时可能超过默认 10 秒：超时会被误判为"结果不确定"，
+      // 因此交由服务端流程自身管理超时。
+      timeoutMs: options.timeoutMs ?? 0,
+    },
+  );
 }

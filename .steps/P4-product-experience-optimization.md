@@ -92,7 +92,8 @@ P1–P3 保证"能跑"，但用户无法清楚地操作与观察时，主流程�
     `GET /api/v1/environments/{type}/{name}/versions/{number}?host_id=…`，
     返回真实构建状态、`image_ref`、服务端计算的可用性与版本元数据；纯读取不再要求
     SSH / Docker 依赖。剩余部分是前端接入（M2-3）与环境构建 Web 入口（未排期）。
-- **P1 业务决策阻塞**：G5 重试无入口、G9 容器处置无 HTTP、G11 续跑阻塞原因不可见。
+- **P1 业务决策阻塞**：G5 重试无入口、G9 容器处置无 HTTP（**G9 已由 M4-3 闭合**，见下）、
+  G11 续跑阻塞原因不可见。
   **G7 步骤 / Attempt / Session 历史视图已由 M2-7 交付，M3-3 核实为部分满足**：步骤、
   尝试与会话（执行 / 归档 / 导出三态分列）均已展示，仍缺尝试的
   `timed_out` / `cancelled` / `error_class` / `failure_stage` 与会话归档 / 导出状态的中文
@@ -104,6 +105,15 @@ P1–P3 保证"能跑"，但用户无法清楚地操作与观察时，主流程�
   （新增只读 `GET /tasks/{taskID}/code-saves`，让 Web 取得真实 `recordID`；提交 / 推送 /
   合并三阶段与 `persist_status` / `recovery_status` 分别输出；查询只依赖存储，不复用强制
   要求 SSH 的 `ContainerService`。前端三阶段展示已由 M3-5 完成，核验操作入口由 M4-2 完成）。
+  **G9 旧容器 `delete` / `detach` 已于 M4-3 闭合**：新增
+  `GET /tasks/{taskID}/containers` 与 `POST …/containers/{containerID}/{delete|detach}`，
+  任务详情新增 `TaskContainerPanel`；两个动作在路径、响应 `action`、确认文案与后果说明上
+  完全分开，跨任务 / 跨节点处置返回 409，已脱离管理的容器两个动作都禁用（终态只能人工处理），
+  删除请求不接受请求体、原因固定为 `manual`，响应不泄露 `docker_id` / `image_id` /
+  `host_id` 与凭据；处置成功后不重试任务、不启动工作流。这一步**修改了 Go 生产代码**：既有的
+  归属校验 `domain.DecideContainerOwnership` 恰好拒绝"处置历史代次 / 终态容器"这一核心现场，
+  因此在应用层补了 `domain.DecideContainerDisposal` 与 `app.TaskContainerDisposalService`，
+  复用 `ContainerService` 的远程所有权核验，未改容器状态机与生命周期策略。
 - **P2 管理/诊断能力**：G12 项目后端能力不存在（无表、无服务）、G13 计划生成、G14 单步
   诊断入口（**G15 事件时间线与 G16 修复周期历史已于 P4-M3-8 闭合**；G18 工作流步骤起止
   时间恒为空已于 P4-M3-6 闭合）。
@@ -138,7 +148,7 @@ P1–P3 保证"能跑"，但用户无法清楚地操作与观察时，主流程�
 | P4-M1 | 盘点当前 API 与 Web 业务操作能力的缺口 | `completed`（2026-10-26，基于 `master` HEAD `70f82b1`） | P3 退出 |
 | P4-M2 | 提供完整任务生命周期的必要操作入口 | `completed`（M2-1 至 M2-7 全部完成，2026-10-26） | P4-M1 |
 | P4-M3 | 展示阶段进度、验证结果、失败原因和恢复状态 | `completed`（M3-2 经核实已由 M2-7 满足；M3-1、M3-3、M3-4、M3-5、M3-6、M3-7、M3-8 全部完成） | P4-M1、P4-M2（部分工作项需 M2 先补 API） |
-| P4-M4 | 支持必要的继续执行、取消、恢复和结果查看操作 | `in_progress`（M4-1、M4-2 已完成，M4-3 至 M4-5 未开始） | P4-M2、P4-M3 |
+| P4-M4 | 支持必要的继续执行、取消、恢复和结果查看操作 | `in_progress`（M4-1、M4-2、M4-3 已完成，M4-4 / M4-5 未开始） | P4-M2、P4-M3 |
 | P4-M5 | 根据真实使用问题或可测量数据推进性能、并发、存储与架构优化 | `pending` | P4-M2、P4-M3、P4-M4 |
 
 ## 阶段退出条件
@@ -377,7 +387,7 @@ M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、
 ### P4-M4 支持必要的继续执行、取消、恢复和结果查看操作
 
 - **ID**：`P4-M4`
-- **状态**：`in_progress`（**M4-1、M4-2 已于 2026-10-27 完成**，M4-3 / M4-4 / M4-5 未开始）
+- **状态**：`in_progress`（**M4-1、M4-2、M4-3 已于 2026-10-27 完成**，M4-4 / M4-5 未开始）
 - **必要性**：这些是任务管理闭环的必要操作。
 - **前置依赖**：P4-M2、P4-M3。
 - **工作项**：
@@ -410,7 +420,29 @@ M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、
      E2E 10 个，`pnpm test:unit:safe` 485 通过、`pnpm test:e2e:safe` 165 通过 / 0 失败、
      `pnpm check` 与 `pnpm build` 通过。交付物
      [`P4-M4-2-code-save-verification-web-action.md`](./P4-M4-2-code-save-verification-web-action.md)。
-  3. **M4-3** 容器记录查看与显式 `delete` / `detach`（需先补 HTTP 接口）。覆盖 G9。
+  3. **M4-3** 容器记录查看与显式 `delete` / `detach`（需先补 HTTP 接口）。覆盖 G9。**已完成**
+     （2026-10-27）：核实出 G9 的 HTTP 入口**完全不存在**——`ContainerService.DeleteContainer` /
+     `DetachContainer` 与 CLI 命令早已齐全，`internal/httpapi` 却没有任何容器路由，前端也没有
+     容器类型；同时核实到既有归属校验 `domain.DecideContainerOwnership` 要求记录正好是任务
+     `container_id` 引用的那条且未脱离、未删除，**恰好拒绝处置旧容器的核心现场**。因此新增纯
+     函数 `domain.DecideContainerDisposal`（允许历史代次，仍拒绝跨任务、跨节点、已脱离管理与
+     已删除后的重复 detach）与 `app.TaskContainerDisposalService`（复用 `ContainerService` 的
+     远程所有权核验，不在 Handler 拼 Docker 命令），并新增三条路由：
+     `GET /api/v1/tasks/{taskID}/containers`（只读、含 `origin` 区分当前 / 历史代次）、
+     `POST …/containers/{containerID}/delete`、`POST …/containers/{containerID}/detach`
+     （两个独立动作、无请求体、不接受远程参数，删除原因固定为 `manual`）。错误映射 400 / 404 /
+     409 / 500（`execution_failed`）/ 503，失败不返回 2xx；响应不泄露 `docker_id` / `image_id` /
+     `build_config_sha256` / `host_id` / 工作区与凭据。前端新增 `TaskContainer` /
+     `ContainerDisposalResponse` 等类型、`containers.ts` 纯函数模块、`useTaskContainers` 唯一
+     状态 Hook 与 `TaskContainerPanel`：两个动作在路径、响应 `action`、确认文案与后果说明上完全
+     分开（没有"清理"按钮），未知状态与未知关联方式原样展示，已脱离管理的容器两个动作都禁用，
+     同一容器在途防重、切换任务丢弃迟到响应、刷新失败保留上一次真实结论、结果不确定明确提示且
+     不自动重发，处置成功后**不**重试任务、**不**启动工作流。**本轮修改了 Go 生产代码**，未改动
+     容器状态机、生命周期策略与工作流编排，未新增表或迁移。新增 Go 测试 25 个、前端单元测试
+     37 个与 E2E 18 个；`go test ./tests/unit/... ./tests/integration/local/...` 2239 通过、
+     `go test ./tests/e2e/...` 58 通过、`pnpm test:unit:safe` 522 通过、`pnpm test:e2e:safe`
+     183 通过 / 0 失败，`gofmt`、`go vet`、`pnpm check` 与 `pnpm build` 通过。交付物
+     [`P4-M4-3-container-delete-detach-web-actions.md`](./P4-M4-3-container-delete-detach-web-actions.md)。
   4. **M4-4** 继续执行 / 恢复工作流的可用性来自 `resume-eligibility`。覆盖 G11。
   5. **M4-5** 单步诊断动作（初始化代码、确定性验证）。覆盖 G20。
 - **完成定义**：`failed` / `blocked` / `recovery_required` 三类现场都能在 Web 上被理解

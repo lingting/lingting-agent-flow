@@ -224,6 +224,10 @@ type Server struct {
 	codeInitialize *app.CodeInitializeService
 	// containerService 提供代码保存的只读核验能力，为空时核验接口返回 503。
 	containerService *app.ContainerService
+	// taskContainers 提供任务容器的只读查询与显式处置。
+	//
+	// 查询部分只依赖存储；处置部分在容器服务缺失时返回服务不可用，不会伪造结论。
+	taskContainers *app.TaskContainerDisposalService
 	// resumeEligibility 计算任务续跑资格，为空时该接口返回 503。
 	resumeEligibility *app.ResumeEligibilityService
 	// historyQueries 提供事件时间线与修复周期历史的只读查询。
@@ -445,6 +449,20 @@ func (s *Server) openDatabase(ctx context.Context) error {
 		return fmt.Errorf("初始化容器残留收敛服务失败: %w", containerErr)
 	}
 	s.containerRecovery = containerRecovery
+	// 任务容器的查询与显式处置：查询只依赖存储，处置复用容器服务（可能为空）。
+	// 缺少 SSH 能力时容器服务为空，此时列表仍可读、处置接口返回服务不可用，
+	// 而不是伪造"已处置"或退化成只读猜测。
+	taskContainers, disposalErr := app.NewTaskContainerDisposalService(
+		app.TaskContainerDisposalOptions{
+			Store:      store,
+			Containers: observation,
+			Logger:     s.logger,
+		},
+	)
+	if disposalErr != nil {
+		return fmt.Errorf("初始化任务容器处置服务失败: %w", disposalErr)
+	}
+	s.taskContainers = taskContainers
 	// 尝试级代码获取残留收敛只依赖已打开的数据库：启动时把没有执行者的
 	// pending / running 记录收敛为 uncertain，不重放任何容器内 Git 操作。
 	codeFetchRecovery, fetchErr := app.NewCodeFetchRecoveryService(app.CodeFetchRecoveryOptions{
@@ -866,6 +884,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		ResumeEligibility: s.resumeEligibility,
 		History:           s.historyQueries,
 		TaskRetry:         s.taskRetry,
+		TaskContainers:    s.taskContainers,
 		CodeInitialize:    s.codeInitialize,
 		RequireWebUI:      s.requireWeb,
 		ShutdownTimeout:   s.shutdownTimeout,

@@ -78,6 +78,11 @@ type Deps struct {
 	// 重试入口只在领域规则判定通过后才把 failed 任务重开为新的执行周期；它复用
 	// 统一启动流程，不实现第二套启动逻辑。
 	TaskRetry *app.TaskRetryService
+	// TaskContainers 提供任务容器的只读查询与显式处置（delete / detach）。
+	//
+	// 为空时两个接口返回服务不可用。它与 Containers 分开注入：容器列表只依赖存储，
+	// 处置则要求容器服务存在，两者不是同一种依赖。
+	TaskContainers *app.TaskContainerDisposalService
 	// Logger 是日志器，为空时使用 slog.Default。
 	Logger *slog.Logger
 }
@@ -115,6 +120,7 @@ func NewHandler(deps Deps) http.Handler {
 		resumeEligibility: deps.ResumeEligibility,
 		history:           newHistoryHandler(deps.History, logger),
 		taskRetry:         deps.TaskRetry,
+		taskContainers:    deps.TaskContainers,
 		logger:            logger,
 	}
 	mux := http.NewServeMux()
@@ -161,6 +167,8 @@ type router struct {
 	resumeEligibility *app.ResumeEligibilityService
 	// taskRetry 是任务显式重试服务，为空时重试接口返回服务不可用。
 	taskRetry *app.TaskRetryService
+	// taskContainers 提供任务容器的查询与显式处置，为空时接口返回服务不可用。
+	taskContainers *app.TaskContainerDisposalService
 	// history 处理事件时间线与修复周期历史的只读查询。
 	history *historyHandler
 	logger  *slog.Logger
@@ -180,6 +188,12 @@ func (rt *router) tasksHandler(w http.ResponseWriter, r *http.Request) {
 	// 任务管理服务未初始化不应让重试接口返回误导性错误。
 	if isTaskRetryPath(r.URL.Path) {
 		rt.serveTaskRetry(w, r)
+		return
+	}
+	// 任务容器查询与处置挂在单任务之下，形状与任务详情、其他子资源都不重叠：
+	// 先判定它们，未知形状仍由任务处理器给出 404 / 405。
+	if isTaskContainerPath(r.URL.Path) {
+		rt.serveTaskContainers(w, r)
 		return
 	}
 	// 代码保存记录列表只依赖存储层查询服务，与任务管理服务无关：把它放在任务服务

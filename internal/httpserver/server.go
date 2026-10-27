@@ -76,6 +76,8 @@ type Options struct {
 	History *app.HistoryQueryService
 	// TaskRetry 是任务显式重试服务，为空时重试接口报告服务不可用。
 	TaskRetry *app.TaskRetryService
+	// TaskContainers 提供任务容器的只读查询与显式处置，为空时两个接口报告服务不可用。
+	TaskContainers *app.TaskContainerDisposalService
 	// Files 是前端静态资源文件系统，为空时使用嵌入资源。
 	Files fs.FS
 	// RequireWebUI 为 true 时，缺少前端构建产物将导致构造失败。
@@ -133,6 +135,7 @@ func New(options Options) (*Server, error) {
 		ResumeEligibility: options.ResumeEligibility,
 		History:           options.History,
 		TaskRetry:         options.TaskRetry,
+		TaskContainers:    options.TaskContainers,
 		Logger:            logger,
 	})
 	web, err := buildWebHandler(options.Files, options.RequireWebUI, logger)

@@ -1581,3 +1581,87 @@ export type CodeSaveVerifyResponse = {
   /** 核验结论是否成功持久化 */
   persisted: boolean;
 };
+
+/**
+ * 一条任务容器记录，与 Go 端 `httpapi.TaskContainerResponse` 一致。
+ *
+ * 字段全部来自数据库中的容器登记记录，只描述"处置时需要看到的事实"：
+ *   - `state` 是 AgentFlow 的容器管理状态，`docker_state` 是最近一次观测到的 Docker 状态，
+ *     两者是不同事实，不得互相推导；
+ *   - `detached` 表示容器已脱离 AgentFlow 自动管理，`detached_at` 是脱离时间；
+ *   - `end_reason` 是生命周期结束原因，未结束时为空字符串；
+ *   - `origin` 说明这条记录与任务的关联方式：`current` 是任务当前引用的代次，
+ *     `history` 是同一任务的历史代次（重新开始 / 重试之前的旧容器）。
+ *
+ * 未知取值一律以原始字符串处理，界面原样展示，不猜测语义。
+ */
+export type TaskContainer = {
+  /** 容器登记记录标识，也是两个处置动作路径里的标识 */
+  id: string;
+  /** 登记的任务归属，未登记时缺省 */
+  task_id?: string;
+  /** 容器名称 */
+  name: string;
+  /** AgentFlow 的容器管理状态 */
+  state: string;
+  /** 最近一次观测到的 Docker 状态 */
+  docker_state: string;
+  /** 容器是否已脱离 AgentFlow 自动管理 */
+  detached: boolean;
+  /** 脱离管理的时间，未脱离时缺省 */
+  detached_at?: string;
+  /** 生命周期结束原因，未结束时为空字符串 */
+  end_reason: string;
+  /** 该记录与任务的关联方式：current 或 history */
+  origin: string;
+  created_at: string;
+  /** 生命周期结束时间，未结束时缺省 */
+  finished_at?: string;
+  updated_at: string;
+};
+
+/**
+ * 任务下容器记录的列表响应，与 Go 端 `httpapi.TaskContainerListResponse` 一致。
+ *
+ * 与前端的代码保存记录列表一致使用 `records` + `total`：容器记录按任务归属且数量有限，
+ * 因此服务端不引入分页，`total` 即本次返回的记录数。
+ */
+export type TaskContainerListResponse = {
+  records: TaskContainer[];
+  total: number;
+};
+
+/**
+ * 容器处置动作。
+ *
+ * 两个动作语义完全不同，不得合并为一个"清理"：
+ *   - `delete` 删除容器以及服务端规则允许清理的任务级临时资源；
+ *   - `detach` 保留容器现场，但 AgentFlow 不再自动管理它（不是删除，也不等于已停止）。
+ */
+export type ContainerDisposalAction = "delete" | "detach";
+
+/**
+ * 一次容器处置的应用层结论，与 Go 端 `app.ContainerDisposalOutcome` 一致。
+ *
+ * `completed` 只说明容器服务报告处置成功；容器是否真的删除或脱离，必须以同一次响应里的
+ * `container.state` / `container.detached` 为准。
+ */
+export type ContainerDisposalOutcome = "completed" | "failed" | "uncertain";
+
+/**
+ * 一次显式容器处置的响应，与 Go 端 `httpapi.ContainerDisposalResponse` 一致。
+ *
+ * 三个事实分别输出，不得互相替代：
+ *   - `outcome` 是本次处置的应用层结论；
+ *   - `action` 使响应自证语义（delete 还是 detach），不与"停止"混淆；
+ *   - `container` 是处置后重新读取的真实记录，而不是请求前的旧副本。
+ */
+export type ContainerDisposalResponse = {
+  task_id: string;
+  action: ContainerDisposalAction | (string & {});
+  outcome: ContainerDisposalOutcome | (string & {});
+  /** 可读说明；失败时是服务端真实原因 */
+  detail?: string;
+  /** 处置后的容器登记记录 */
+  container: TaskContainer;
+};
