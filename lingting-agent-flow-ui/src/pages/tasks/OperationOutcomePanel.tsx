@@ -20,8 +20,8 @@ function describeTarget(key: keyof typeof OPERATION_LABEL, stepID?: string): str
 
 /** 执行结论面板 */
 export function OperationOutcomePanel({ state }: { state: ExecutionOperationsState }) {
-  const { failure, outcome, refreshError, running } = state;
-  if (!running && !outcome && !failure && !refreshError) return null;
+  const { failure, outcome, refreshError, running, uncertain } = state;
+  if (!running && !outcome && !failure && !refreshError && !uncertain) return null;
 
   return (
     <Flex gap="small" vertical>
@@ -54,6 +54,10 @@ export function OperationOutcomePanel({ state }: { state: ExecutionOperationsSta
           title={`${describeTarget(failure.key, failure.stepID)}失败`}
           type="error"
         />
+      )}
+      {/* 结果不确定与服务端拒绝分别提示：前者意味着请求可能已经生效，不得自动重发 */}
+      {uncertain && (
+        <Alert description={uncertain} showIcon title="操作结果无法确认" type="warning" />
       )}
       {refreshError && (
         <Alert description={refreshError} showIcon title="状态刷新失败" type="warning" />

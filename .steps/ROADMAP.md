@@ -92,7 +92,7 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > 失败保留上一次成功快照且不改变策略；步骤 / 代码保存 / 续跑资格三个子面板只在服务端真实
 > 字段变化时重载；未修改任何后端代码，未新增或修改任何 HTTP API，新增前端单元测试 35 个、
 > E2E 11 个，全量单元测试 361 通过、全量 E2E 129 通过 / 0 失败）。
-> **P4-M4 状态为 `in_progress`**（M4-1、M4-2、M4-3、M4-4 已完成，M4-5 未开始）。
+> **P4-M4 状态为 `completed`**（M4-1、M4-2、M4-3、M4-4、M4-5 全部完成）。
 > **M4-1（失败任务显式重试 Web 入口）于 2026-10-27 完成**：核实
 > `POST /tasks/{id}/retry`（同步、成功 202）与 `GET /tasks/{id}/retry-eligibility`（只读）的
 > 真实 DTO、10 个稳定拒绝分类、同步与超时语义，然后只接入前端——新增
@@ -173,6 +173,24 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > 单元测试 25 个与 E2E 14 个；`pnpm test:unit:safe` 547 通过、`pnpm test:e2e:safe` 197 通过 /
 > 0 失败，`pnpm check` 与 `pnpm build` 通过。证据见
 > `P4-M4-4-resume-eligibility-web-action.md`。
+> **M4-5（单步诊断动作：初始化代码、确定性验证）于 2026-10-27 完成**：核实出 M2-7 已交付
+> "动作可用"（入口、路径逐段编码、按钮准入对齐服务端契约、在途防重齐备），M4-5 的真实缺口
+> 在结果语义与竞态边界，共 5 处：(1) `describeValidateResult` 用 `passed` 出二元结论，
+> `inconclusive` 与未知判定被显示为"验证未通过"、判定缺失被显示为"验证通过"；
+> (2) 响应已提供的 `checks[]` 前端零读取，`certain=false` 的"基础设施异常不当作代码问题"
+> 语义完全丢失；(3) `runOperation` 把 `timeout`/`network`/`aborted` 与 4xx 业务拒绝压成同一
+> 种"失败"，而这两个动作有真实副作用；(4) `runOperation` 无任务归属判定，切换任务后迟到
+> 响应会写进新任务界面并触发属于旧任务的现场刷新（同模块内 `useTaskContainers` /
+> `useTaskLiveSnapshot` / `useResumeEligibility` 都已有票据判定，执行操作 hook 是唯一遗漏点）；
+> (5) `task_branch` 为空被渲染成空值、`CodeFetchStatusUncertain` 无任何提示。本轮**只改前端
+> 3 个生产文件与 2 个测试文件**：新增 `validationVerdictLabel` / `verdictOutcome` 使 `verdict`
+> 成为结论唯一来源，新增 `describeCheckFact` 逐项输出检查事实，重写 `describeValidateResult`
+> 与 `describeInitializeResult`；`ExecutionOperationsState` 新增 `uncertain` 并以"票据 +
+> `activeTaskRef` + `mountedRef`"丢弃迟到响应与迟到刷新；结果面板新增独立的"操作结果无法
+> 确认"提示块。**未修改任何 Go 代码、HTTP 契约、Attempt 状态机、验证规则、容器生命周期与
+> 代码初始化业务规则，未新增接口、Hook 或刷新循环**。新增前端单元测试 10 个与 E2E 8 个；
+> `pnpm test:unit:safe` 557 通过、`pnpm test:e2e:safe` 205 通过 / 0 失败，`pnpm check` 与
+> `pnpm build` 通过。证据见 `P4-M4-5-single-step-diagnostic-actions.md`。
 > **P4-M3 已为 `completed`**：M3-2 已由 P4-M2-7 满足，M3-1、M3-3、M3-4、M3-5、
 > M3-6、M3-7 与 M3-8 全部完成。**M3-8（事件时间线与修复周期历史）于 2026-10-27 完成**：
 > 核实出 `ListEventsByTask` 生产代码零调用者且排序只有 `ORDER BY id`、`EventFilter`
@@ -469,6 +487,21 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
   迟到响应；结果按 `workflow_started` 区分"已启动工作流"与"任务已重开但工作流没有启动"，
   请求失败如实展示服务端错误，超时 / 网络中断提示"无法确认"且**不自动重发**。资格查询不进入
   5 秒自动刷新循环，本轮未修改任何 Go 代码与领域规则。
+- **Web 单步诊断动作的结果语义**（P4-M4-5）：`初始化代码` 与 `确定性验证` 两个入口由
+  P4-M2-7 接入（`StepDetailPanel.tsx` 的 `AttemptBlock` 按真实 `Attempt` 渲染，路径由
+  `attemptValidatePath` / `attemptInitializeCodePath` 逐段编码，无手填标识入口），本轮补齐
+  结果语义与竞态边界。结论翻译在 `steps.ts`：`validationVerdictLabel` / `verdictOutcome` 使
+  `verdict` 成为结论唯一来源（`inconclusive`、未知取值与缺省一律"无法判定"，`passed` 不再
+  参与判定）；`describeCheckFact` 逐项输出 `check_name` / `required` / `status` / `exit_code` /
+  `timed_out` / `cancelled` / `certain` / `failure_reason` / `stderr_summary` /
+  `output_truncated`，其中 `certain=false` 明确标注"不能当作代码问题"；
+  `describeInitializeResult` 对空 `task_branch` 输出"服务端未提供"并对 `uncertain` 提示先核验
+  现场。动作层在 `useExecutionOperations.ts`：`ExecutionOperationsState` 新增 `uncertain`，
+  `runOperation` 以"票据 + `activeTaskRef` + `mountedRef`"判定响应归属（切换任务后迟到响应与
+  迟到刷新一律丢弃），`ApiError` 的 `timeout` / `network` / `aborted` 归类为结果不确定并附
+  `OPERATION_UNKNOWN_OUTCOME_HINT`，`clear()` 在途时不清空在途标记。展示层在
+  `OperationOutcomePanel.tsx`：结果不确定、服务端拒绝、动作后刷新失败三块分别呈现。本轮未修改
+  任何 Go 代码与 HTTP 契约，未新增接口、Hook 或刷新循环。
 - **验证失败修复与重新验证闭环**（P1-M3）：`app.StepWorkflowService.ExecuteAndValidate`
   驱动 `runRepairLoop`（`internal/app/step_workflow_repair.go`），每轮复用
   `StepExecutor.Execute(DeferCompletion)` + `ValidationService.Validate`，每轮新建
@@ -650,7 +683,10 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
     进度按 5 秒周期自动刷新，活动状态判定依据 `domain.WorkflowRunStatus.IsActive()` 与
     `TaskStatus.IsActive()`，终态与等待人工处置后停止，页面隐藏暂停、恢复前台立即刷新，
     刷新失败保留上一次成功快照且不被当作工作流终止，全程只读）；**G20 的两项单步诊断动作
-    （初始化代码、确定性验证）已于 P4-M2-7 一并接入 Web**（随 G14 的步骤详情一起实现）。
+    （初始化代码、确定性验证）已于 P4-M2-7 一并接入 Web**（随 G14 的步骤详情一起实现），
+    **其结果语义与竞态边界已于 P4-M4-5 闭合**（验证结论改由 `verdict` 唯一决定，逐项输出
+    检查事实且 `certain=false` 不当作代码问题，初始化结果补齐缺失分支占位与 `uncertain`
+    核验提示，动作结果不确定与服务端拒绝分别提示，切换任务后迟到响应被票据判定丢弃）。
   - 上述缺口**不影响后端执行链路的正确性**，只影响用户能否仅通过 Web 完成与观察业务
     流程；因此不改变 P1–P3 的完成结论。
 

@@ -13,6 +13,7 @@ import type {
   Task,
   TaskStatus,
   ValidateAttemptResponse,
+  ValidationCheckResult,
 } from "../../src/lib/api";
 import {
   ATTEMPT_STATUS_META,
@@ -38,6 +39,8 @@ import {
   taskAllowsPlanning,
   taskAllowsStepExecution,
   taskAllowsValidation,
+  isUncertainOperationError,
+  OPERATION_UNKNOWN_OUTCOME_HINT,
   validationStateLabel,
   verdictMeta,
 } from "../../src/pages/tasks/steps";
@@ -580,6 +583,186 @@ describe("执行结论翻译", () => {
     expect(outcome.kind).toBe("success");
     expect(outcome.details.join(" ")).toContain("不会自动执行");
     expect(outcome.details.join(" ")).toContain("上一周期已消耗：3 次");
+  });
+});
+describe("单步诊断动作结论的诚实性", () => {
+  /** 一份最简验证响应；只覆盖用例关心的事实 */
+  function validationResult(
+    overrides: Partial<ValidateAttemptResponse> = {},
+  ): ValidateAttemptResponse {
+    return {
+      attempt_id: "attempt-1",
+      checks: [],
+      failed_checks: 0,
+      finished_at: "2026-10-26T08:03:00Z",
+      passed: true,
+      passed_checks: 1,
+      persisted: true,
+      review_ran: false,
+      skipped_checks: 0,
+      started_at: "2026-10-26T08:02:00Z",
+      status: "completed",
+      step_id: "step-1",
+      task_id: "task-1",
+      validation_run_id: "run-1",
+      verdict: "passed",
+      ...overrides,
+    };
+  }
+
+  it("只有判定为 passed 才展示验证通过", () => {
+    expect(describeValidateResult(validationResult()).title).toBe("验证通过");
+    expect(describeValidateResult(validationResult()).kind).toBe("success");
+  });
+
+  it("判定 inconclusive 与未知取值都不展示为通过", () => {
+    const inconclusive = describeValidateResult(
+      validationResult({ passed: false, verdict: "inconclusive" }),
+    );
+    expect(inconclusive.kind).toBe("warning");
+    expect(inconclusive.title).toBe("验证结论无法判定");
+
+    // 服务端新增取值时如实展示原始文本，不回落成"通过"或"未通过"
+    const unknown = describeValidateResult(
+      validationResult({ passed: false, verdict: "needs_review" as never }),
+    );
+    expect(unknown.kind).toBe("warning");
+    expect(unknown.title).toBe("验证结论无法判定");
+    expect(unknown.details.join(" ")).toContain("needs_review");
+  });
+
+  it("判定缺失时说明服务端未提供，而不是展示为通过", () => {
+    const outcome = describeValidateResult(
+      validationResult({ passed: false, verdict: undefined as never }),
+    );
+    expect(outcome.kind).toBe("warning");
+    expect(outcome.title).toBe("验证结论无法判定");
+    expect(outcome.details.join(" ")).toContain("验证结论：服务端未提供");
+  });
+
+  it("逐项检查结果按真实字段展示，结果不可确认不被当作代码问题", () => {
+    const check: ValidationCheckResult = {
+      cancelled: false,
+      certain: false,
+      check_id: "build",
+      check_name: "构建",
+      duration_ms: 1200,
+      exit_code: -1,
+      finished_at: "2026-10-26T08:03:00Z",
+      output_truncated: true,
+      required: true,
+      required_passed: false,
+      sequence: 1,
+      started_at: "2026-10-26T08:02:00Z",
+      status: "error",
+      stderr_summary: "连接容器超时",
+      timed_out: false,
+    };
+    const outcome = describeValidateResult(
+      validationResult({ checks: [check], failed_checks: 1, passed: false, verdict: "failed" }),
+    );
+    const text = outcome.details.join(" ");
+    expect(text).toContain("逐项检查（共 1 项）");
+    expect(text).toContain("检查「构建」（必需）");
+    expect(text).toContain("状态 执行出错");
+    expect(text).toContain("退出码 -1");
+    expect(text).toContain("结果不可确认，不能当作代码问题");
+    expect(text).toContain("stderr 摘要 连接容器超时");
+    expect(text).toContain("输出已截断");
+  });
+
+  it("结果未持久化时仍保留真实判定，且不展示为通过", () => {
+    const outcome = describeValidateResult(
+      validationResult({
+        passed: false,
+        persistence_errors: ["写入失败"],
+        persisted: false,
+        verdict: "failed",
+      }),
+    );
+    expect(outcome.title).toBe("验证未通过");
+    expect(outcome.details.join(" ")).toContain("结果是否可靠写入：否");
+    expect(outcome.details.join(" ")).toContain("写入失败");
+  });
+
+  it("语义审查要求人工复核时明确说明不能视为通过", () => {
+    const outcome = describeValidateResult(
+      validationResult({ assessment: { needs_human_review: true, passed: true } }),
+    );
+    expect(outcome.details.join(" ")).toContain("要求人工复核");
+  });
+
+  it("代码初始化只把就绪与持久化同时成立看作成功", () => {
+    const base: InitializeCodeResponse = {
+      attempt_id: "attempt-1",
+      container_id: "container-1",
+      finished_at: "2026-10-26T08:04:00Z",
+      persisted: true,
+      record_id: "record-1",
+      source_type: "git",
+      started_at: "2026-10-26T08:00:00Z",
+      status: "succeeded",
+      step_id: "step-1",
+      succeeded: true,
+      task_branch: "agent/task-1",
+      task_id: "task-1",
+      work_dir: "/workspace/project",
+    };
+    expect(describeInitializeResult(base).kind).toBe("success");
+
+    // persisted 只说明记录写入，不等于初始化成功
+    const persistedOnly = describeInitializeResult({ ...base, succeeded: false, status: "failed" });
+    expect(persistedOnly.kind).toBe("warning");
+    expect(persistedOnly.title).toBe("代码初始化未成功");
+  });
+
+  it("代码初始化缺失分支与提交时不补造取值", () => {
+    const outcome = describeInitializeResult({
+      attempt_id: "attempt-1",
+      container_id: "container-1",
+      finished_at: "2026-10-26T08:04:00Z",
+      persisted: true,
+      record_id: "record-1",
+      source_type: "git",
+      started_at: "2026-10-26T08:00:00Z",
+      status: "succeeded",
+      step_id: "step-1",
+      succeeded: true,
+      task_branch: "",
+      task_id: "task-1",
+      work_dir: "/workspace/project",
+    });
+    const text = outcome.details.join(" ");
+    expect(text).toContain("任务分支：服务端未提供");
+    expect(text).not.toContain("检出 commit");
+  });
+
+  it("初始化结果不确定时要求先核验现场", () => {
+    const outcome = describeInitializeResult({
+      attempt_id: "attempt-1",
+      container_id: "container-1",
+      finished_at: "2026-10-26T08:04:00Z",
+      persisted: false,
+      record_id: "record-1",
+      source_type: "git",
+      started_at: "2026-10-26T08:00:00Z",
+      status: "uncertain",
+      step_id: "step-1",
+      succeeded: false,
+      task_branch: "agent/task-1",
+      task_id: "task-1",
+      work_dir: "/workspace/project",
+    });
+    expect(outcome.kind).toBe("warning");
+    expect(outcome.details.join(" ")).toContain("请先重新读取现场核验容器内实际状态");
+  });
+
+  it("超时、网络中断与取消被判定为结果不确定，服务端拒绝不是", () => {
+    expect(isUncertainOperationError("timeout")).toBe(true);
+    expect(isUncertainOperationError("network")).toBe(true);
+    expect(isUncertainOperationError("aborted")).toBe(true);
+    expect(isUncertainOperationError("http")).toBe(false);
+    expect(OPERATION_UNKNOWN_OUTCOME_HINT).toContain("不会自动重试");
   });
 });
 

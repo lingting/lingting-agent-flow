@@ -728,6 +728,408 @@ test.describe("验证与诊断操作", () => {
     await expect(page.getByText(/代码已初始化/)).toBeVisible();
     await expect(page.getByText(/任务分支：agent\/task-1/)).toBeVisible();
   });
+
+  test("判定 inconclusive 时展示为无法判定，不显示为验证通过", async ({ page }) => {
+    await stubTaskList(page);
+    await stubTaskDetail(page);
+    await stubWorkflow(page);
+    await stubSteps(page);
+    await stubAttempts(page);
+    await stubValidations(page, []);
+    await stubSessions(page);
+
+    await page.route(
+      "**/api/v1/tasks/task-1/steps/step-1/attempts/attempt-1/validate",
+      (route: Route) =>
+        route.fulfill({
+          body: JSON.stringify({
+            attempt_id: "attempt-1",
+            checks: [],
+            failed_checks: 0,
+            finished_at: "2026-10-26T08:03:00Z",
+            passed: false,
+            passed_checks: 1,
+            persisted: true,
+            review_ran: true,
+            review_status: "needs_human_review",
+            skipped_checks: 0,
+            started_at: "2026-10-26T08:02:00Z",
+            status: "completed",
+            step_id: "step-1",
+            task_id: "task-1",
+            validation_run_id: "run-2",
+            verdict: "inconclusive",
+          }),
+          contentType: "application/json",
+          status: 200,
+        }),
+    );
+
+    await openDetail(page);
+    await selectStep(page);
+    await page.getByRole("button", { name: "确定性验证" }).click();
+
+    await expect(page.getByText(/验证结论无法判定/)).toBeVisible();
+    // 不得出现"验证通过"这一结论
+    await expect(page.getByText(/确定性验证：验证通过/)).toHaveCount(0);
+  });
+
+  test("验证逐项检查结果按真实字段展示", async ({ page }) => {
+    await stubTaskList(page);
+    await stubTaskDetail(page);
+    await stubWorkflow(page);
+    await stubSteps(page);
+    await stubAttempts(page);
+    await stubValidations(page, []);
+    await stubSessions(page);
+
+    await page.route(
+      "**/api/v1/tasks/task-1/steps/step-1/attempts/attempt-1/validate",
+      (route: Route) =>
+        route.fulfill({
+          body: JSON.stringify({
+            attempt_id: "attempt-1",
+            checks: [
+              {
+                cancelled: false,
+                certain: false,
+                check_id: "build",
+                check_name: "构建",
+                duration_ms: 1200,
+                exit_code: -1,
+                finished_at: "2026-10-26T08:03:00Z",
+                output_truncated: false,
+                required: true,
+                required_passed: false,
+                sequence: 1,
+                started_at: "2026-10-26T08:02:00Z",
+                status: "error",
+                timed_out: false,
+              },
+            ],
+            failed_checks: 1,
+            finished_at: "2026-10-26T08:03:00Z",
+            passed: false,
+            passed_checks: 0,
+            persisted: true,
+            review_ran: false,
+            skipped_checks: 0,
+            started_at: "2026-10-26T08:02:00Z",
+            status: "completed",
+            step_id: "step-1",
+            task_id: "task-1",
+            validation_run_id: "run-2",
+            verdict: "failed",
+          }),
+          contentType: "application/json",
+          status: 200,
+        }),
+    );
+
+    await openDetail(page);
+    await selectStep(page);
+    await page.getByRole("button", { name: "确定性验证" }).click();
+
+    await expect(page.getByText(/验证未通过/)).toBeVisible();
+    await expect(page.getByText(/检查「构建」（必需）/)).toBeVisible();
+    await expect(page.getByText(/结果不可确认，不能当作代码问题/)).toBeVisible();
+  });
+
+  test("验证请求结果不确定时与业务拒绝分别提示，且不自动重发", async ({ page }) => {
+    await stubTaskList(page);
+    await stubTaskDetail(page);
+    await stubWorkflow(page);
+    await stubSteps(page);
+    await stubAttempts(page);
+    await stubValidations(page, []);
+    await stubSessions(page);
+
+    let calls = 0;
+    await page.route(
+      "**/api/v1/tasks/task-1/steps/step-1/attempts/attempt-1/validate",
+      (route: Route) => {
+        calls += 1;
+        // 连接中断：结果无法确认
+        return route.abort("connectionreset");
+      },
+    );
+
+    await openDetail(page);
+    await selectStep(page);
+    await page.getByRole("button", { name: "确定性验证" }).click();
+
+    await expect(page.getByText("操作结果无法确认", { exact: true })).toBeVisible();
+    await expect(page.getByText(/页面不会自动重试/)).toBeVisible();
+    // 没有任何自动重发
+    expect(calls).toBe(1);
+  });
+
+  test("服务端拒绝时展示真实业务错误，不提示结果无法确认", async ({ page }) => {
+    await stubTaskList(page);
+    await stubTaskDetail(page);
+    await stubWorkflow(page);
+    await stubSteps(page);
+    await stubAttempts(page);
+    await stubValidations(page, []);
+    await stubSessions(page);
+
+    await page.route(
+      "**/api/v1/tasks/task-1/steps/step-1/attempts/attempt-1/validate",
+      (route: Route) =>
+        route.fulfill({
+          body: JSON.stringify({
+            error: { code: "precondition_failed", message: "任务容器未运行，不能执行验证" },
+          }),
+          contentType: "application/json",
+          status: 412,
+        }),
+    );
+
+    await openDetail(page);
+    await selectStep(page);
+    await page.getByRole("button", { name: "确定性验证" }).click();
+
+    await expect(page.getByText("确定性验证（步骤 step-1）失败")).toBeVisible();
+    await expect(page.getByText(/任务容器未运行，不能执行验证/)).toBeVisible();
+    await expect(page.getByText("操作结果无法确认", { exact: true })).toHaveCount(0);
+  });
+
+  test("初始化代码结果不确定时要求先核验现场，不提示成功", async ({ page }) => {
+    await stubTaskList(page);
+    await stubTaskDetail(page);
+    await stubWorkflow(page);
+    await stubSteps(page, [sampleStep({ status: "failed" })]);
+    await stubAttempts(page, [sampleAttempt({ status: "failed" })]);
+    await stubValidations(page, []);
+    await stubSessions(page);
+
+    await page.route(
+      "**/api/v1/tasks/task-1/steps/step-1/attempts/attempt-1/initialize-code",
+      (route: Route) =>
+        route.fulfill({
+          body: JSON.stringify({
+            attempt_id: "attempt-1",
+            container_id: "container-1",
+            finished_at: "2026-10-26T08:04:00Z",
+            persisted: true,
+            record_id: "record-1",
+            source_type: "git",
+            started_at: "2026-10-26T08:00:00Z",
+            status: "uncertain",
+            step_id: "step-1",
+            succeeded: false,
+            task_branch: "agent/task-1",
+            task_id: "task-1",
+            work_dir: "/workspace/project",
+          }),
+          contentType: "application/json",
+          status: 200,
+        }),
+    );
+
+    await openDetail(page);
+    await selectStep(page);
+    await page.getByRole("button", { name: "初始化代码" }).click();
+
+    await expect(page.getByText(/代码初始化未成功/)).toBeVisible();
+    await expect(page.getByText(/请先重新读取现场核验容器内实际状态/)).toBeVisible();
+    await expect(page.getByText(/代码已初始化$/)).toHaveCount(0);
+  });
+
+  test("诊断动作成功后刷新失败时保留真实结论并单独提示", async ({ page }) => {
+    await stubTaskList(page);
+    await stubWorkflow(page);
+    await stubSteps(page);
+    await stubAttempts(page);
+    await stubValidations(page, []);
+    await stubSessions(page);
+
+    // 任务详情第一次成功，动作之后的刷新失败
+    let detailCalls = 0;
+    await page.route("**/api/v1/tasks/task-1", (route: Route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      detailCalls += 1;
+      if (detailCalls === 1) {
+        return route.fulfill({
+          body: JSON.stringify(sampleTask()),
+          contentType: "application/json",
+          status: 200,
+        });
+      }
+      return route.fulfill({
+        body: JSON.stringify({ error: { code: "internal_error", message: "服务内部错误" } }),
+        contentType: "application/json",
+        status: 500,
+      });
+    });
+
+    await page.route(
+      "**/api/v1/tasks/task-1/steps/step-1/attempts/attempt-1/validate",
+      (route: Route) =>
+        route.fulfill({
+          body: JSON.stringify({
+            attempt_id: "attempt-1",
+            checks: [],
+            failed_checks: 0,
+            finished_at: "2026-10-26T08:03:00Z",
+            passed: true,
+            passed_checks: 1,
+            persisted: true,
+            review_ran: false,
+            skipped_checks: 0,
+            started_at: "2026-10-26T08:02:00Z",
+            status: "completed",
+            step_id: "step-1",
+            task_id: "task-1",
+            validation_run_id: "run-2",
+            verdict: "passed",
+          }),
+          contentType: "application/json",
+          status: 200,
+        }),
+    );
+
+    await openDetail(page);
+    await selectStep(page);
+    await page.getByRole("button", { name: "确定性验证" }).click();
+
+    // 真实结论保留
+    await expect(page.getByText(/确定性验证（步骤 step-1）：验证通过/)).toBeVisible();
+    // 刷新失败单独提示，且不覆盖结论
+    await expect(page.getByText("状态刷新失败", { exact: true })).toBeVisible();
+    await expect(page.getByText(/执行结论仍然有效/)).toBeVisible();
+  });
+
+  test("诊断动作进行中重复点击只发出一次请求", async ({ page }) => {
+    await stubTaskList(page);
+    await stubTaskDetail(page);
+    await stubWorkflow(page);
+    await stubSteps(page);
+    await stubAttempts(page);
+    await stubValidations(page, []);
+    await stubSessions(page);
+
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const calls: string[] = [];
+    await page.route(
+      "**/api/v1/tasks/task-1/steps/step-1/attempts/attempt-1/validate",
+      async (route: Route) => {
+        calls.push(route.request().url());
+        await gate;
+        await route.fulfill({
+          body: JSON.stringify({
+            attempt_id: "attempt-1",
+            checks: [],
+            failed_checks: 0,
+            finished_at: "2026-10-26T08:03:00Z",
+            passed: true,
+            passed_checks: 1,
+            persisted: true,
+            review_ran: false,
+            skipped_checks: 0,
+            started_at: "2026-10-26T08:02:00Z",
+            status: "completed",
+            step_id: "step-1",
+            task_id: "task-1",
+            validation_run_id: "run-2",
+            verdict: "passed",
+          }),
+          contentType: "application/json",
+          status: 200,
+        });
+      },
+    );
+
+    await openDetail(page);
+    await selectStep(page);
+    const button = page.getByRole("button", { name: "确定性验证" });
+    await button.click();
+    await expect(page.getByText(/正在执行：确定性验证/)).toBeVisible();
+    await button.click({ force: true });
+    expect(calls).toHaveLength(1);
+
+    release();
+    await expect(page.getByText(/验证通过/)).toBeVisible();
+    expect(calls).toHaveLength(1);
+  });
+
+  test("切换任务后旧的诊断结论不会污染新任务", async ({ page }) => {
+    const first = sampleTask();
+    const second = sampleTask({ id: "task-2", name: "补充接口测试" });
+    await stubTaskList(page, first);
+    // 列表包含两个任务，但详情各自独立
+    await page.unroute("**/api/v1/tasks?*");
+    await page.route("**/api/v1/tasks?*", (route: Route) =>
+      route.fulfill({
+        body: JSON.stringify({ current: 1, records: [first, second], size: 20, total: 2 }),
+        contentType: "application/json",
+        status: 200,
+      }),
+    );
+    await stubTaskDetail(page, first);
+    await page.route("**/api/v1/tasks/task-2", (route: Route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      return route.fulfill({
+        body: JSON.stringify(second),
+        contentType: "application/json",
+        status: 200,
+      });
+    });
+    await stubWorkflow(page);
+    await stubSteps(page);
+    await stubAttempts(page);
+    await stubValidations(page, []);
+    await stubSessions(page);
+
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route(
+      "**/api/v1/tasks/task-1/steps/step-1/attempts/attempt-1/validate",
+      async (route: Route) => {
+        await gate;
+        await route.fulfill({
+          body: JSON.stringify({
+            attempt_id: "attempt-1",
+            checks: [],
+            failed_checks: 0,
+            finished_at: "2026-10-26T08:03:00Z",
+            passed: true,
+            passed_checks: 1,
+            persisted: true,
+            review_ran: false,
+            skipped_checks: 0,
+            started_at: "2026-10-26T08:02:00Z",
+            status: "completed",
+            step_id: "step-1",
+            task_id: "task-1",
+            validation_run_id: "run-2",
+            verdict: "passed",
+          }),
+          contentType: "application/json",
+          status: 200,
+        });
+      },
+    );
+
+    await openDetail(page);
+    await selectStep(page);
+    await page.getByRole("button", { name: "确定性验证" }).click();
+    await expect(page.getByText(/正在执行：确定性验证/)).toBeVisible();
+
+    // 在请求仍未返回时切换任务
+    await page.getByText("补充接口测试").first().click();
+    await expect(page.getByText("执行操作")).toBeVisible();
+
+    // 迟到响应返回后不得把旧任务的结论写进新任务
+    release();
+    await expect(page.getByText(/正在执行：确定性验证/)).toHaveCount(0);
+    await expect(page.getByText(/验证通过/)).toHaveCount(0);
+  });
 });
 
 test.describe("尝试与会话历史展示", () => {

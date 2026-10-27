@@ -149,7 +149,7 @@ P1–P3 保证"能跑"，但用户无法清楚地操作与观察时，主流程�
 | P4-M1 | 盘点当前 API 与 Web 业务操作能力的缺口 | `completed`（2026-10-26，基于 `master` HEAD `70f82b1`） | P3 退出 |
 | P4-M2 | 提供完整任务生命周期的必要操作入口 | `completed`（M2-1 至 M2-7 全部完成，2026-10-26） | P4-M1 |
 | P4-M3 | 展示阶段进度、验证结果、失败原因和恢复状态 | `completed`（M3-2 经核实已由 M2-7 满足；M3-1、M3-3、M3-4、M3-5、M3-6、M3-7、M3-8 全部完成） | P4-M1、P4-M2（部分工作项需 M2 先补 API） |
-| P4-M4 | 支持必要的继续执行、取消、恢复和结果查看操作 | `in_progress`（M4-1、M4-2、M4-3、M4-4 已完成，M4-5 未开始） | P4-M2、P4-M3 |
+| P4-M4 | 支持必要的继续执行、取消、恢复和结果查看操作 | `completed`（M4-1 至 M4-5 全部完成，2026-10-27） | P4-M2、P4-M3 |
 | P4-M5 | 根据真实使用问题或可测量数据推进性能、并发、存储与架构优化 | `pending` | P4-M2、P4-M3、P4-M4 |
 
 ## 阶段退出条件
@@ -196,17 +196,29 @@ HTTP 读取，新任务可从 Web 显式启动并真实推进工作流，创建�
 [`P4-M3-8-event-timeline-repair-cycle-history.md`](./P4-M3-8-event-timeline-repair-cycle-history.md)）。
 至此 **P4-M3 全部子项完成**。
 
-**P4-M4 已进入实施**（2026-10-27 按当前代码核实）：M4-1 已完成（失败任务显式重试 Web 入口，
-覆盖 G5）、M4-2 已完成（代码保存核验 Web 操作入口，覆盖 G8 的操作侧）、M4-3 已完成（容器
-`delete` / `detach` 的 HTTP API 与 Web 操作入口，覆盖 G9）、M4-4 已完成（基于服务端续跑资格的
-工作流恢复操作，覆盖 G11 的操作侧，交付物
-[`P4-M4-4-resume-eligibility-web-action.md`](./P4-M4-4-resume-eligibility-web-action.md)）。
-剩余子项：M4-5（单步诊断动作，覆盖 G20）。M4-4 的关键结论是"恢复入口的可用性只能来自
-`resume-eligibility` 的 `can_resume`"——原有的 `canResumeWorkflow(workflow.run)` 是前端自己
-复制服务端续跑规则的实例，本轮已删除，恢复结果也按受理 / 拒绝 / 结果不确定 / 刷新失败四类
-分别呈现。
+**P4-M4 已全部完成**（2026-10-27 按当前代码核实）：M4-1 完成（失败任务显式重试 Web 入口，
+覆盖 G5）、M4-2 完成（代码保存核验 Web 操作入口，覆盖 G8 的操作侧）、M4-3 完成（容器
+`delete` / `detach` 的 HTTP API 与 Web 操作入口，覆盖 G9）、M4-4 完成（基于服务端续跑资格的
+工作流恢复操作，覆盖 G11 的操作侧）、M4-5 完成（单步诊断动作的结果语义与竞态边界，覆盖 G20，
+交付物
+[`P4-M4-5-single-step-diagnostic-actions.md`](./P4-M4-5-single-step-diagnostic-actions.md)）。
 
-M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、M5（基于实测数据的优化）。
+M4-4 的关键结论是"恢复入口的可用性只能来自 `resume-eligibility` 的 `can_resume`"——原有的
+`canResumeWorkflow(workflow.run)` 是前端自己复制服务端续跑规则的实例，已删除，恢复结果也按
+受理 / 拒绝 / 结果不确定 / 刷新失败四类分别呈现。
+
+M4-5 的关键结论是"M2-7 已交付**动作可用**，M4-5 的剩余目标是**结果诚实**"：核实出 5 处真实
+缺口——验证结论被 `passed` 二元化（`inconclusive` 与未知判定显示为"验证未通过"、判定缺失显示为
+"验证通过"）、响应已提供的 `checks[]` 前端零读取（`certain=false` 的语义丢失）、动作的
+`timeout`/`network`/`aborted` 与 4xx 业务拒绝被压成同一种"失败"、`runOperation` 无任务归属判定
+（切换任务后迟到响应污染新任务界面并触发属于旧任务的刷新）、初始化结果的空 `task_branch` 与
+`uncertain` 状态无说明。修复后验证结论只由 `verdict` 决定、逐项检查事实完整输出、结果不确定与
+服务端拒绝分别提示、迟到响应被票据判定丢弃。**未修改任何 Go 代码与 HTTP 契约**：服务端已提供
+修复所需的全部字段与语义。
+
+M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验），M4 至此闭合；M5（基于实测数据的优化）
+仍为 `pending`，其前置依赖已满足，但按 M5 的定义必须由真实测量数据驱动，不因 M4 完成而自动启动。
+
 
 ---
 
@@ -398,7 +410,7 @@ M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、
 ### P4-M4 支持必要的继续执行、取消、恢复和结果查看操作
 
 - **ID**：`P4-M4`
-- **状态**：`in_progress`（**M4-1、M4-2、M4-3、M4-4 已于 2026-10-27 完成**，M4-5 未开始）
+- **状态**：`completed`（**M4-1 至 M4-5 已于 2026-10-27 全部完成**）
 - **必要性**：这些是任务管理闭环的必要操作。
 - **前置依赖**：P4-M2、P4-M3。
 - **工作项**：
@@ -470,7 +482,29 @@ M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、
      单元测试 25 个与 E2E 14 个，`pnpm test:unit:safe` 547 通过、`pnpm test:e2e:safe` 197 通过 /
      0 失败，`pnpm check` 与 `pnpm build` 通过。交付物
      [`P4-M4-4-resume-eligibility-web-action.md`](./P4-M4-4-resume-eligibility-web-action.md)。
-  5. **M4-5** 单步诊断动作（初始化代码、确定性验证）。覆盖 G20。
+  5. **M4-5** 单步诊断动作（初始化代码、确定性验证）。覆盖 G20。**已完成**（2026-10-27）：
+     核实出 M2-7 已交付"动作可用"（`AttemptBlock` 按真实 `Attempt` 渲染入口、路径逐段编码、
+     按钮准入对齐 `domain.CanValidateAttempt` 与 `checkCodeInitAllowed`、同步 `runningRef`
+     在途防重齐备），M4-5 的真实缺口共 5 处在**结果语义与竞态边界**：
+     (1) `describeValidateResult` 用 `passed` 出二元结论，`inconclusive` 与未知判定被显示为
+     "验证未通过"、判定缺失被显示为"验证通过"；(2) 响应已提供的 `checks[]` 前端零读取，
+     `certain=false` 的"基础设施异常不当作代码问题"语义完全丢失；(3) `runOperation` 把
+     `timeout`/`network`/`aborted` 与 4xx 业务拒绝压成同一种"失败"，而这两个动作有真实副作用
+     （容器内 Git Clone / 检查命令、写 `code_fetches` / `validation_runs`）；
+     (4) `runOperation` 无任务归属判定——`refresh` 引用在切换任务时不变，因此在途 `finally`
+     会把旧任务结论写进新任务界面并触发属于旧任务的刷新（同模块内 `useTaskContainers` /
+     `useTaskLiveSnapshot` / `useResumeEligibility` 都已有票据判定，执行操作 hook 是唯一
+     遗漏点）；(5) 初始化结果的空 `task_branch` 被渲染成空值、`CodeFetchStatusUncertain`
+     无任何提示。本轮新增 `validationVerdictLabel` / `verdictOutcome`（`verdict` 成为结论
+     唯一来源）与 `describeCheckFact`（逐项检查事实，含 `certain=false` 与截断标记），重写
+     `describeValidateResult` 与 `describeInitializeResult`；`ExecutionOperationsState` 新增
+     `uncertain`，`runOperation` 以"票据 + `activeTaskRef` + `mountedRef`"丢弃迟到响应与
+     迟到刷新，`clear()` 在途时不清空在途标记；`OperationOutcomePanel` 新增独立的"操作结果
+     无法确认"提示块。**未修改任何 Go 代码、HTTP 契约、Attempt 状态机、验证规则、容器生命
+     周期与代码初始化业务规则，未新增接口、Hook 或刷新循环**。新增前端单元测试 10 个与
+     E2E 8 个；`pnpm test:unit:safe` 557 通过、`pnpm test:e2e:safe` 205 通过 / 0 失败，
+     `pnpm check` 与 `pnpm build` 通过。交付物
+     [`P4-M4-5-single-step-diagnostic-actions.md`](./P4-M4-5-single-step-diagnostic-actions.md)。
 - **完成定义**：`failed` / `blocked` / `recovery_required` 三类现场都能在 Web 上被理解
   并处置；所有有副作用的操作都需要用户显式触发，不自动重放提交、推送、合并或其他
   不确定操作。

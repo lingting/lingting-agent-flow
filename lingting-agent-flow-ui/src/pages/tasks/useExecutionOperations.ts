@@ -9,9 +9,10 @@
  *   - 任何动作都不会自动重试：这些操作有真实副作用（容器内命令、Agent 调用、
  *     Git 操作、预算登记），重放必须由用户基于最新状态显式触发。
  */
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
+  ApiError,
   executeAndValidateStep as callExecuteAndValidate,
   executeStep as callExecuteStep,
   executeSteps as callExecuteSteps,
@@ -36,6 +37,8 @@ import {
   describeOpenRepairCycleResult,
   describePlanResult,
   describeValidateResult,
+  isUncertainOperationError,
+  OPERATION_UNKNOWN_OUTCOME_HINT,
   type OperationOutcome,
 } from "@/pages/tasks/steps";
 import { describeApiError } from "@/pages/tasks/useExecutionRecords";
@@ -65,6 +68,13 @@ export type ExecutionOperationsState = {
   outcome?: OperationTarget & { result: OperationOutcome };
   /** 最近一次请求失败的业务错误 */
   failure?: OperationTarget & { message: string };
+  /**
+   * 请求结果无法确认（超时、网络中断或调用方取消）。
+   *
+   * 它与 `failure` 同时存在：`failure` 给出底层错误说明，本字段明确"结果不确定，不得重发"，
+   * 从而与明确的服务端拒绝区分开来。
+   */
+  uncertain?: string;
   /** 动作后的现场刷新失败说明；不覆盖上面的结论 */
   refreshError?: string;
 };
@@ -91,48 +101,95 @@ export function useExecutionOperations(options: {
   refresh: () => Promise<string[]>;
 }) {
   const { taskID, refresh } = options;
+  const trimmedTaskID = taskID?.trim() ?? "";
   const [state, setState] = useState<ExecutionOperationsState>({});
   /** 同步的在途标记：同一帧内的连续点击不会让 state 及时更新 */
   const runningRef = useRef(false);
+  /** 动作票据：任务切换后旧任务的迟到响应一律丢弃，不会归属到新任务 */
+  const ticketRef = useRef(0);
+  /** 当前打开的任务标识：供异步回调判断是否已切换任务 */
+  const activeTaskRef = useRef(trimmedTaskID);
+  activeTaskRef.current = trimmedTaskID;
+  /** 卸载标记：卸载后不再用迟到响应更新界面 */
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  /**
+   * 任务切换（含关闭详情）时，上一个任务的动作结论立刻失效。
+   *
+   * 票据同时递增：仍在途的请求返回后不会把结论写进新任务的界面，也不会触发一次属于
+   * 旧任务的现场刷新。切换任务不等于取消请求，服务端可能已经执行了该操作。
+   */
+  useEffect(() => {
+    ticketRef.current += 1;
+    runningRef.current = false;
+    setState({});
+  }, [trimmedTaskID]);
 
   const runOperation = useCallback(
     async (target: OperationTarget, action: () => Promise<OperationOutcome>) => {
       if (runningRef.current) return;
-      if (!taskID?.trim()) {
+      if (!trimmedTaskID) {
         setState({
           failure: { ...target, message: "缺少任务标识，无法发起操作" },
         });
         return;
       }
+      const startedFor = trimmedTaskID;
+      const ticket = ticketRef.current + 1;
+      ticketRef.current = ticket;
+      // 任务切换后票据递增且 activeTaskRef 变化，迟到的响应与刷新都会被丢弃。
+      const accepted = () =>
+        mountedRef.current && ticketRef.current === ticket && activeTaskRef.current === startedFor;
       runningRef.current = true;
       setState({ running: target });
       try {
         const result = await action();
-        setState({ outcome: { ...target, result } });
+        if (accepted()) setState({ outcome: { ...target, result } });
       } catch (cause) {
-        setState({ failure: { ...target, message: describeApiError(cause) } });
-      } finally {
-        let failures: string[] = [];
-        try {
-          failures = await refresh();
-        } catch (cause) {
-          failures = [describeApiError(cause)];
+        if (accepted()) {
+          // 超时、网络中断与取消意味着"服务端可能已经执行"：必须与明确的服务端拒绝区分，
+          // 并明确提示不自动重发。
+          const uncertain =
+            cause instanceof ApiError && isUncertainOperationError(cause.kind)
+              ? OPERATION_UNKNOWN_OUTCOME_HINT
+              : undefined;
+          setState({ failure: { ...target, message: describeApiError(cause) }, uncertain });
         }
+      } finally {
         runningRef.current = false;
-        setState((current) => ({
-          ...current,
-          refreshError:
-            failures.length > 0
-              ? `动作已结束，但状态刷新失败：${failures.join("、")}。执行结论仍然有效，请手动刷新确认最新状态。`
-              : undefined,
-          running: undefined,
-        }));
+        // 已切换任务或已卸载时不再刷新：那次刷新属于旧任务的现场。
+        if (accepted()) {
+          let failures: string[] = [];
+          try {
+            failures = await refresh();
+          } catch (cause) {
+            failures = [describeApiError(cause)];
+          }
+          setState((current) => ({
+            ...current,
+            refreshError:
+              failures.length > 0
+                ? `动作已结束，但状态刷新失败：${failures.join("、")}。执行结论仍然有效，请手动刷新确认最新状态。`
+                : undefined,
+            running: undefined,
+          }));
+        }
       }
     },
-    [refresh, taskID],
+    [refresh, trimmedTaskID],
   );
 
-  const clear = useCallback(() => setState({}), []);
+  const clear = useCallback(() => {
+    if (runningRef.current) return;
+    setState({});
+  }, []);
 
   const plan = useCallback(
     (body: PlanRequest = {}) =>

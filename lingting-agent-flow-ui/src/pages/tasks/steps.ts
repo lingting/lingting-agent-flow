@@ -21,6 +21,7 @@ import type {
   StepStatus,
   Task,
   ValidateAttemptResponse,
+  ValidationCheckResult,
   VerificationVerdict,
 } from "@/lib/api";
 
@@ -348,6 +349,28 @@ export function verdictMeta(verdict?: string): VerdictMeta {
   return VERDICT_META[verdict as VerificationVerdict] ?? { color: "default", label: verdict };
 }
 
+/**
+ * 读取验证判定标签。
+ *
+ * 缺省说明服务端没有提供判定（不能读作通过，也不能读作未通过）；未知取值原样展示。
+ */
+export function validationVerdictLabel(verdict?: string): string {
+  if (!verdict) return "服务端未提供";
+  return VERDICT_META[verdict as VerificationVerdict]?.label ?? verdict;
+}
+
+/**
+ * 验证判定到结论标题与语义类型的映射。
+ *
+ * 判定是结论的唯一来源：`passed` 只是便捷布尔值，`inconclusive`、未知取值与缺省
+ * 一律是"无法判定"，既不是通过也不是"验证未通过"。
+ */
+function verdictOutcome(verdict?: string): Pick<OperationOutcome, "kind" | "title"> {
+  if (verdict === "passed") return { kind: "success", title: "验证通过" };
+  if (verdict === "failed") return { kind: "warning", title: "验证未通过" };
+  return { kind: "warning", title: "验证结论无法判定" };
+}
+
 /** 单项检查状态标签 */
 export const CHECK_STATUS_LABEL: Record<string, string> = {
   passed: "通过",
@@ -362,6 +385,42 @@ export const CHECK_STATUS_LABEL: Record<string, string> = {
 export function checkStatusLabel(status?: string): string {
   if (!status) return "—";
   return CHECK_STATUS_LABEL[status] ?? status;
+}
+/**
+ * 单条检查结果的一行事实说明。
+ *
+ * 状态、退出码、超时、取消、结果是否可信与输出摘要是各自独立的事实：任一项都不能由
+ * 其他项推导，`certain=false` 更不能被当作代码问题。
+ */
+function describeCheckFact(check: ValidationCheckResult): string {
+  const name = check.check_name || check.check_id;
+  const facts = [
+    `检查「${name}」（${check.required ? "必需" : "可选"}）`,
+    `状态 ${checkStatusLabel(check.status)}`,
+    `退出码 ${check.exit_code}`,
+  ];
+  if (check.timed_out) facts.push("已超时");
+  if (check.cancelled) facts.push("已取消");
+  if (check.certain === false) facts.push("结果不可确认，不能当作代码问题");
+  if (check.failure_reason) facts.push(`失败原因 ${check.failure_reason}`);
+  if (check.stderr_summary) facts.push(`stderr 摘要 ${check.stderr_summary}`);
+  if (check.output_truncated) facts.push("输出已截断");
+  return facts.join("，");
+}
+
+/**
+ * 有副作用的操作结果无法确认时的固定提示。
+ *
+ * 客户端超时、网络中断与调用方取消都意味着"服务端可能已经执行了这次有副作用的操作"，
+ * 因此必须与明确的服务端拒绝区分，并要求先核验现场、不自动重发。
+ */
+export const OPERATION_UNKNOWN_OUTCOME_HINT =
+  "无法确认服务端是否已完成本次操作：连接中断、超时或被取消，请求可能已经生效，也可能没有。" +
+  "页面不会自动重试，请先重新读取现场核验真实状态，再由你决定是否重新发起。";
+
+/** 判断错误类别是否属于"结果无法确认"（超时、网络中断或调用方取消） */
+export function isUncertainOperationError(kind: string): boolean {
+  return kind === "timeout" || kind === "network" || kind === "aborted";
 }
 
 /** 修复循环下一步动作标签，取值来自服务端 `repair_decision` */
@@ -654,35 +713,51 @@ export function describeExecuteAndValidateResult(
   };
 }
 
-/** 把验证响应翻译为用户可读结论：流程状态、结论与持久化分别说明 */
+/**
+ * 把验证响应翻译为用户可读结论。
+ *
+ * 只陈述响应里真实存在的字段：流程状态、判定、检查统计、逐项检查结果与持久化结果互不
+ * 替代。判定是结论的唯一来源——`inconclusive`、未知取值与缺省都不得被展示为"验证通过"，
+ * HTTP 请求成功也不等于验证通过。
+ */
 export function describeValidateResult(result: ValidateAttemptResponse): OperationOutcome {
   const details = [
     `验证流程状态：${validationStatusLabel(result.status)}`,
-    `验证结论：${verdictMeta(result.verdict).label}`,
+    `验证结论：${validationVerdictLabel(result.verdict)}`,
     `检查统计：通过 ${result.passed_checks} 项、未通过 ${result.failed_checks} 项、跳过 ${result.skipped_checks} 项`,
     `结果是否可靠写入：${result.persisted ? "是" : "否"}`,
   ];
   if (result.summary) details.push(`摘要：${result.summary}`);
   if (result.failure_summary) details.push(`失败摘要：${result.failure_summary}`);
+  if (result.assessment?.needs_human_review) {
+    details.push("语义审查要求人工复核：该轮验证不能视为已通过。");
+  }
+  const checks = result.checks ?? [];
+  if (checks.length > 0) {
+    details.push(`逐项检查（共 ${checks.length} 项）：`);
+    for (const check of checks) details.push(describeCheckFact(check));
+  }
   if (!result.persisted) {
     details.push(
       `写入失败原因：${(result.persistence_errors ?? []).join("；") || "服务端未给出原因"}`,
     );
   }
-  return {
-    details,
-    kind: result.passed ? "success" : "warning",
-    title: result.passed ? "验证通过" : "验证未通过",
-  };
+  return { details, ...verdictOutcome(result.verdict) };
 }
 
-/** 把代码初始化响应翻译为用户可读结论：`succeeded` 与 `persisted` 分别说明 */
+/**
+ * 把代码初始化响应翻译为用户可读结论。
+ *
+ * `status`、`succeeded`、`task_branch`、`commit` 与 `persisted` 是各自独立的事实：
+ * `persisted=true` 只说明记录写入了数据库，不说明初始化成功；`succeeded=true` 也不代表
+ * 记录已可靠写入。缺失的分支与提交不补造，`uncertain` 一律要求先核验现场。
+ */
 export function describeInitializeResult(result: InitializeCodeResponse): OperationOutcome {
   const details = [
     `初始化状态：${result.status}`,
     `代码是否就绪：${result.succeeded ? "是" : "否"}`,
     `工作目录：${result.work_dir}`,
-    `任务分支：${result.task_branch}`,
+    `任务分支：${result.task_branch || "服务端未提供"}`,
   ];
   if (result.commit) details.push(`检出 commit：${result.commit}`);
   if (result.stage) details.push(`阶段：${result.stage}`);
@@ -691,6 +766,11 @@ export function describeInitializeResult(result: InitializeCodeResponse): Operat
   if (!result.persisted) {
     details.push(
       `记录未完整写入：${(result.persistence_errors ?? []).join("；") || "服务端未给出原因"}`,
+    );
+  }
+  if (result.status === "uncertain") {
+    details.push(
+      "服务端没有确认初始化结果：请先重新读取现场核验容器内实际状态，再决定是否再次操作。",
     );
   }
   return {

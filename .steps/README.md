@@ -27,7 +27,11 @@
 
 - **当前阶段**：P4 —— 产品操作体验与针对性优化。
 - **当前里程碑**：`P4-M4` —— 支持必要的继续执行、取消、恢复和结果查看操作，状态
-  `in_progress`（M4-1、M4-2、M4-3、M4-4 已完成，M4-5 未开始）。子任务 **M4-1（失败任务
+  `completed`（M4-1、M4-2、M4-3、M4-4、M4-5 全部完成）。**P4-M4 的退出条件已重新核对**：
+  `failed` / `blocked` / `recovery_required` 三类现场都能在 Web 上被理解并处置（M4-1 重试、
+  M4-2 核验、M4-3 容器处置、M4-4 恢复、M4-5 单步诊断共同覆盖），且所有有副作用的操作都需要
+  用户显式触发、不自动重放。**P4 整体仍不是 `completed`**：`P4-M5`（基于实测数据的优化）仍为
+  `pending`，其余 P4 子任务均已闭合。子任务 **M4-1（失败任务
   [`P4-M4-1-task-retry-web-entry.md`](./P4-M4-1-task-retry-web-entry.md)：前端补齐
   `RetryEligibilityResponse` / `RetryTaskResponse` / `RetryTaskRequest` 类型与
   `fetchTaskRetryEligibility` / `retryTask`（`GET|POST /api/v1/tasks/{taskID}/retry[-eligibility]`），
@@ -90,6 +94,20 @@
   计划摘要、`CheckWorkflowStart`、容器、执行节点与代码保存副作用的完整校验，`can_resume`
   只是查询时刻快照而非执行授权。新增前端单元测试 25 个与 E2E 14 个；`pnpm test:unit:safe`
   547 通过、`pnpm test:e2e:safe` 197 通过 / 0 失败，`pnpm check` 与 `pnpm build` 通过。
+- 子任务 **M4-5（单步诊断动作：初始化代码、确定性验证）已于 2026-10-27 完成**，交付物为
+  [`P4-M4-5-single-step-diagnostic-actions.md`](./P4-M4-5-single-step-diagnostic-actions.md)：
+  核实出 M2-7 已交付"动作可用"（入口、路径、按钮准入、在途防重均已具备），M4-5 的真实缺口
+  在**结果语义与竞态边界**——`describeValidateResult` 用 `passed` 出二元结论，导致
+  `inconclusive`/未知判定被显示为"验证未通过"、判定缺失被显示为"验证通过"；响应已提供的
+  `checks[]` 前端零读取；`runOperation` 无任务归属判定，切换任务后迟到响应会写进新任务界面
+  并触发属于旧任务的刷新；`timeout`/`network`/`aborted` 与 4xx 业务拒绝被压成同一种"失败"
+  （同页面其它 4 个操作已区分，唯独执行操作 hook 遗漏）。本轮**只改前端 3 个生产文件与 2 个
+  测试文件**：验证结论改由 `verdict` 唯一决定并逐项输出检查事实（含 `certain=false` 不得
+  当作代码问题），`describeInitializeResult` 补齐缺失分支占位与 `uncertain` 核验提示，
+  `runOperation` 增加"票据 + activeTaskRef + mountedRef"三重判定并把结果不确定单独表达，
+  结果面板新增独立的"操作结果无法确认"提示块。**未修改任何 Go 代码与 HTTP 契约，未新增
+  接口、Hook 或刷新循环**。新增前端单元测试 10 个与 E2E 8 个；`pnpm test:unit:safe` 557 通过、
+  `pnpm test:e2e:safe` 205 通过 / 0 失败，`pnpm check` 与 `pnpm build` 通过。
 - **上一里程碑**：`P4-M3` —— 展示阶段进度、验证结果、失败原因和恢复状态，状态
   `completed`（M3-1、M3-3、M3-4、M3-5、M3-6、M3-7、M3-8 已完成，M3-2 已由 M2-7 满足）。
   详见下方"当前里程碑"详述与
@@ -304,7 +322,15 @@
   超时中断与刷新失败分别提示且不自动重发。**未修改任何 Go 生产代码**：恢复接口已在应用层
   重新核验租约、计划摘要、`CheckWorkflowStart`、容器、执行节点与代码保存副作用。见
   [`P4-M4-4-resume-eligibility-web-action.md`](./P4-M4-4-resume-eligibility-web-action.md)。
-  剩余子项：M4-5（单步诊断动作）。
+  **M4-5（单步诊断动作：初始化代码、确定性验证，2026-10-27 完成）**：核实 M2-7 已交付
+  "动作可用"，真实缺口在结果语义与竞态边界——验证结论被 `passed` 二元化（`inconclusive` 与
+  未知判定显示为"验证未通过"、判定缺失显示为"验证通过"）、响应已提供的 `checks[]` 未被读取、
+  切换任务后迟到响应会污染新任务界面并触发属于旧任务的刷新、`timeout`/`network`/`aborted`
+  与 4xx 业务拒绝被压成同一种"失败"。本轮只改前端：验证结论改由 `verdict` 唯一决定并逐项
+  输出检查事实，初始化结果补齐缺失分支占位与 `uncertain` 核验提示，`runOperation` 增加票据 +
+  任务归属 + 卸载三重判定并把结果不确定单独表达。**未修改任何 Go 代码与 HTTP 契约，未新增
+  接口、Hook 或刷新循环**。见
+  [`P4-M4-5-single-step-diagnostic-actions.md`](./P4-M4-5-single-step-diagnostic-actions.md)。
   环境构建 Web 入口与角色变更入口是否上 Web 仍按产品取舍决定。详见
   [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
 - **P4-M3 收尾时的核实记录**（M4 开始前）：`P4-M3`（展示阶段进度、验证结果、失败原因和
@@ -545,6 +571,7 @@
 | [`P4-M4-2-code-save-verification-web-action.md`](./P4-M4-2-code-save-verification-web-action.md) | P4-M4-2：代码保存核验 Web 操作入口（真实路由与双 DTO 差异、请求参数可信来源与"不猜测容器/工作区"依据、五组事实互不替代、`persisted` 与 `safe_to_retry` 语义、竞态与防重、测试证据、剩余风险） |
 | [`P4-M4-3-container-delete-detach-web-actions.md`](./P4-M4-3-container-delete-detach-web-actions.md) | P4-M4-3：容器 delete / detach 的 HTTP API 与 Web 操作入口（HTTP 缺口核实、三条新路由与 DTO 契约、处置校验与归属校验的区别、两层所有权核验、delete 与 detach 的边界、结果不确定语义、竞态与防重、测试证据、剩余风险） |
 | [`P4-M4-4-resume-eligibility-web-action.md`](./P4-M4-4-resume-eligibility-web-action.md) | P4-M4-4：基于服务端续跑资格的工作流恢复操作（实施前资格/入口/服务端前置条件的代码证据、恢复入口脱钩的四个真实缺口、判定顺序与"不读取任务状态"依据、受理 ≠ 成功 ≠ 完成的语义拆分、任务切换与刷新失败边界、测试证据、剩余风险） |
+| [`P4-M4-5-single-step-diagnostic-actions.md`](./P4-M4-5-single-step-diagnostic-actions.md) | P4-M4-5：单步诊断动作（初始化代码、确定性验证）（M2-7 已交付能力与 M4-5 剩余目标的边界、5 处真实缺口的代码证据、判定唯一决定结论的依据、逐项检查事实、结果不确定与服务端拒绝的区分、任务切换的票据判定、未改 Go 代码的理由、测试证据、剩余风险） |
 | [`P4-frontend-test-resource-governance.md`](./P4-frontend-test-resource-governance.md) | P4 工程质量：前端测试并发治理（真实资源模型核实、Playwright worker 4 / Vitest worker 4 默认值、非法输入拒绝、资源受限入口、能力边界、验收命令与既有失败隔离） |
 
 ## 下一步工作的选择规则
