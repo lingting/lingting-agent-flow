@@ -286,8 +286,8 @@ function ResumeEligibilityBody({ data }: { data: ResumeEligibilityResponse }) {
  * 加载中、查询成功、查询失败（带重试）、刷新失败（保留旧快照）四种状态分别呈现：
  * 查询失败绝不显示为"允许续跑"，刷新失败也不会抹掉上一次真实结果。
  */
-export function ResumeEligibilityPanel({ task }: { task: Task }) {
-  const { state, reload } = useResumeEligibility(task.id);
+export function ResumeEligibilityPanel({ task, token }: { task: Task; token?: number }) {
+  const { state, reload } = useResumeEligibility(task.id, token);
 
   return (
     <Flex gap="small" vertical>

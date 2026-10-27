@@ -27,17 +27,22 @@ import { describeApiError, useStepRecords, useTaskSteps } from "@/pages/tasks/us
  *
  * `onRefreshTask` 由父组件提供：动作之后任务状态与工作流进度都可能变化，必须重新
  * 读取。它返回刷新失败的项说明，用于单独提示，不覆盖执行结论。
+ *
+ * `stepsToken` 由父组件的自动刷新提供：只有服务端返回的步骤相关事实真的变化时才会递增，
+ * 因此本面板不自行建定时器，也不会按固定周期无条件重复请求步骤与执行记录。
  */
 export function TaskExecutionPanel({
   onRefreshTask,
+  stepsToken,
   task,
 }: {
   onRefreshTask: () => Promise<string[]>;
+  stepsToken?: number;
   task: Task;
 }) {
   const [selectedStepID, setSelectedStepID] = useState<string>();
-  const stepsState = useTaskSteps(task.id);
-  const records = useStepRecords(task.id, selectedStepID);
+  const stepsState = useTaskSteps(task.id, stepsToken);
+  const records = useStepRecords(task.id, selectedStepID, stepsToken);
 
   const steps = stepsState.state.status === "ready" ? stepsState.state.data : [];
   const selectedStep = useMemo(

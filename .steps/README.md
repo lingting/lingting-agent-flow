@@ -27,7 +27,8 @@
 
 - **当前阶段**：P4 —— 产品操作体验与针对性优化。
 - **当前里程碑**：`P4-M3` —— 展示阶段进度、验证结果、失败原因和恢复状态，状态
-  `in_progress`（M3-1、M3-3、M3-4、M3-5 已完成、M3-2 已由 M2-7 满足，M3-6 至 M3-8 未开始）。
+  `in_progress`（M3-1、M3-3、M3-4、M3-5、M3-7 已完成、M3-2 已由 M2-7 满足，
+  M3-6 与 M3-8 未开始，两者都需先补后端能力）。
   详见下方"当前里程碑"详述与
   [`P4-M3-1-attempt-session-history.md`](./P4-M3-1-attempt-session-history.md)。
 - **上一里程碑**：`P4-M2` —— 提供完整任务生命周期的必要操作入口，状态 `completed`
@@ -126,8 +127,25 @@
   用三张**互不复用**的映射表把归档 / 导出 / 执行状态中文化（未知值原样、缺省用中性占位符
   `未提供`）。**本轮未修改任何后端代码，也未新增或修改任何 HTTP API**；新增前端单元测试
   30 个与 E2E 6 个，全量单元测试 326 通过，全量 E2E 116 通过 / 3 失败（失败项经
-  `git stash -u` 基线对照确认为既有问题）。至此 **M3-1 已完成**，字段缺口全部闭合，
-  M3-6 至 M3-8 未开始。
+  `git stash -u` 基线对照确认为既有问题）。至此 **M3-1 已完成**，字段缺口全部闭合。
+  同轮实施子任务 **M3-7（任务执行进度自动刷新）**，交付物为
+  [`P4-M3-7-progress-auto-refresh.md`](./P4-M3-7-progress-auto-refresh.md)：先按当前代码核实
+  活动状态判定依据（`domain.WorkflowRunStatus.IsActive()` 只含 `running` /
+  `cancel_requested`，`terminal` 只含 `completed` / `cancelled` / `failed`，`blocked` 与
+  `recovery_required` 两者都不是、需人工处置；`TaskStatus.IsActive()` 与前端
+  `TASK_STATUS_META.active` 取值集合一致），再实现唯一自动刷新入口
+  `src/pages/tasks/useTaskLiveSnapshot.ts` + `autoRefresh.ts`：5 秒周期、递归 `setTimeout`
+  串行调度、上一轮结算后才排下一轮、`pending` 与"已进入执行阶段无执行记录"只在 12 轮启动
+  窗口内刷新、页面隐藏暂停 / 恢复前台立即刷新、关闭详情与卸载清理定时器与监听、请求票据按
+  「序号 + 任务标识」丢弃迟到响应、刷新失败保留上一次成功快照且**不改变策略**（因此不会被
+  误认为工作流终止）。步骤 / 代码保存 / 续跑资格三个子面板不各自建定时器，只在服务端真实
+  字段变化时重载；续跑资格因需核验远程容器，只在获得停止刷新结论时刷新一次。修复实施中
+  发现的两个真实缺陷：手动刷新清掉定时器后未接回节奏（会让自动刷新悄悄停掉）、详情首次
+  加载失败时仍渲染空详情框。**本轮未修改后端代码，未新增或修改任何 HTTP API**；新增前端
+  单元测试 35 个（`tests/unit/task-progress-auto-refresh.test.ts`）与 E2E 11 个
+  （`tests/e2e/task-progress-auto-refresh.spec.ts`），全量单元测试 361 通过，全量 E2E
+  129 通过 / 0 失败（其中 2 个既有失败 `layout.spec.ts:43` 与 `:64` 已按用户决定移除正文
+  断言并记录待恢复项，见交付文档 §7.2）。至此 **M3-7 已完成**，M3-6 与 M3-8 未开始。
 - **上一里程碑**：`P4-M2` —— 提供完整任务生命周期的必要操作入口，状态 `completed`
   （M2-1 至 M2-7 全部完成）。详见
   [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
@@ -164,10 +182,12 @@
   `failure_stage` 与会话归档 / 导出状态的中文标签全部闭合，见
   [`P4-M3-1-attempt-session-history.md`](./P4-M3-1-attempt-session-history.md)）；**M3-4 已完成**
   （续跑资格与阻塞原因展示，见
-  [`P4-M3-4-resume-eligibility-display.md`](./P4-M3-4-resume-eligibility-display.md)）。
-  M3-6 至 M3-8 未开始，其中 M3-6
+  [`P4-M3-4-resume-eligibility-display.md`](./P4-M3-4-resume-eligibility-display.md)）；**M3-7 已完成**
+  （任务执行进度自动刷新，见
+  [`P4-M3-7-progress-auto-refresh.md`](./P4-M3-7-progress-auto-refresh.md)）。
+  M3-6 与 M3-8 未开始，其中 M3-6
   （工作流步骤起止时间）与 M3-8（事件时间线、修复周期历史）需要先补后端能力。
-  建议顺序：M3-7（进度自动刷新）→ M3-6 / M3-8。
+  建议顺序：M3-6 / M3-8。
   环境构建 Web 入口与角色变更入口是否上 Web 仍按产品取舍决定。详见
   [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
 - **更早里程碑**：`P3-M5` —— 验证多任务并发、冲突和资源回收行为，状态
@@ -319,7 +339,8 @@
   [`P4-M1-api-web-gap-inventory.md`](./P4-M1-api-web-gap-inventory.md)。
   P4-M2-7 的剩余风险见
   [`P4-M2-7-web-execution-operations.md`](./P4-M2-7-web-execution-operations.md) §6：
-  同步长请求没有进度推送（M3-7 补）、闭环未通过验证时结构化事实只在 500 错误体之外
+  同步长请求没有**流式**进度推送（轮询已由 M3-7 交付，SSE 仍未实现）、闭环未通过验证时
+  结构化事实只在 500 错误体之外
   （需后端调整契约才能展示完整结论）、修复周期可用性只能粗判（预算由服务端判定）、
   计划不可覆盖、会话查询为按尝试的 N+1 请求。
   P3-M5 的交接事项见
@@ -382,6 +403,7 @@
 | [`P4-M3-3-task-closeout-display.md`](./P4-M3-3-task-closeout-display.md) | P4-M3-3：任务最终结论与收尾闭环展示（真实 DTO 契约、M3-1 / M3-2 核验结论、三行独立事实与警示、测试证据、未执行项与剩余风险） |
 | [`P4-M3-5-code-save-status-display.md`](./P4-M3-5-code-save-status-display.md) | P4-M3-5：代码保存三阶段状态展示（后端 DTO 字段契约、前端类型与查询封装、五组独立事实与警示、测试证据、未执行项与剩余风险） |
 | [`P4-M3-4-resume-eligibility-display.md`](./P4-M3-4-resume-eligibility-display.md) | P4-M3-4：续跑资格与阻塞原因展示（后端查询契约与阻塞分类来源、前端类型与查询封装、资格结论与阻塞项展示规则、加载失败与竞态处理、测试证据、退出条件检查、剩余风险） |
+| [`P4-M3-7-progress-auto-refresh.md`](./P4-M3-7-progress-auto-refresh.md) | P4-M3-7：任务执行进度自动刷新（活动状态判定的领域证据、5 秒周期与串行调度、启动窗口、后台暂停与恢复、请求票据与迟到响应、子面板按字段变化重载的成本取舍、测试证据、基线失败对照、剩余风险） |
 | [`P4-frontend-test-resource-governance.md`](./P4-frontend-test-resource-governance.md) | P4 工程质量：前端测试并发治理（真实资源模型核实、Playwright worker 4 / Vitest worker 4 默认值、非法输入拒绝、资源受限入口、能力边界、验收命令与既有失败隔离） |
 
 ## 下一步工作的选择规则

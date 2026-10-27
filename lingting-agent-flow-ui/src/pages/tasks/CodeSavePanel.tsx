@@ -184,8 +184,8 @@ function CodeSaveRecordBlock({ record }: { record: CodeSaveRecord }) {
  * 加载中、加载失败（带重试）、空记录、有记录、刷新失败但保留旧数据五种状态分别
  * 呈现：空记录只说明"该任务当前没有代码保存记录"，不代表任务成功或工作流完成。
  */
-export function CodeSavePanel({ task }: { task: Task }) {
-  const { state, reload } = useTaskCodeSaves(task.id);
+export function CodeSavePanel({ task, token }: { task: Task; token?: number }) {
+  const { state, reload } = useTaskCodeSaves(task.id, token);
 
   return (
     <Flex gap="small" vertical>

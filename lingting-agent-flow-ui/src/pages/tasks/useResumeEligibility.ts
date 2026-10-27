@@ -108,7 +108,10 @@ export function resumeResponseAccepted(
  *
  * 返回的 `reload` 是用户显式刷新入口；它不会清除已取得的快照，刷新失败时只附加错误。
  */
-export function useResumeEligibility(taskID?: string): {
+export function useResumeEligibility(
+  taskID?: string,
+  token?: number,
+): {
   state: ResumeEligibilityState;
   reload: () => void;
 } {
@@ -153,7 +156,7 @@ export function useResumeEligibility(taskID?: string): {
         setState(applied.state);
       });
     return () => controller.abort();
-  }, [trimmed, nonce]);
+  }, [trimmed, nonce, token]);
 
   return { reload, state };
 }

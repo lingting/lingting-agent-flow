@@ -18,8 +18,6 @@ import {
   cancelTask,
   cancelTaskWorkflow,
   deleteTask,
-  fetchTask,
-  fetchTaskWorkflow,
   fetchTasks,
   resumeTaskWorkflow,
   startTask,
@@ -46,6 +44,7 @@ import {
   TASK_STATUS_META,
   WORKFLOW_RUN_STATUS_DICT,
 } from "@/pages/tasks/status";
+import { useTaskLiveSnapshot } from "@/pages/tasks/useTaskLiveSnapshot";
 
 /** 默认页大小，与后端默认值一致 */
 const DEFAULT_PAGE_SIZE = 20;
@@ -253,11 +252,14 @@ export function TasksPage() {
   const [statuses, setStatuses] = useState<TaskStatus[]>([]);
   const [loadError, setLoadError] = useState<string>();
   const [actionError, setActionError] = useState<string>();
-  const [selected, setSelected] = useState<Task>();
-  const [detailLoading, setDetailLoading] = useState(false);
+  /**
+   * 当前打开的任务标识。
+   *
+   * 任务详情与工作流进度全部由 `useTaskLiveSnapshot` 按这个标识维护：打开详情即开始
+   * 自动刷新，关闭详情（置空）立即停止。这里不再保存详情快照，避免出现两份数据源。
+   */
+  const [selectedTaskID, setSelectedTaskID] = useState<string>();
   const [createOpen, setCreateOpen] = useState(false);
-  const [workflow, setWorkflow] = useState<WorkflowStatusResponse>();
-  const [workflowLoading, setWorkflowLoading] = useState(false);
   /** 正在启动的任务标识：用于阻止重复提交并给出进行中反馈 */
   const [startingTaskID, setStartingTaskID] = useState<string>();
   /**
@@ -274,72 +276,46 @@ export function TasksPage() {
   }>();
   /** 启动结论之后的刷新失败提示：不覆盖已得到的启动结论 */
   const [launchRefreshError, setLaunchRefreshError] = useState<string>();
+
   /**
-   * 当前选中任务的最新副本。
+   * 任务详情与工作流进度的唯一数据源。
    *
-   * 执行动作的回调需要在异步完成后读取"当前选中的任务"，但闭包里的 state 是旧值，
-   * 因此用 ref 保存最新副本，避免把任务标识写死在回调依赖里。
+   * 自动刷新只读取状态：不启动、不取消、不恢复、不重试，也不会把刷新失败当作工作流终止。
    */
+  const { autoRefreshOn, refreshHint, refreshNow, refreshTask, snapshot, tokens } =
+    useTaskLiveSnapshot(selectedTaskID);
+  const selected = snapshot.task;
+  const workflow = snapshot.workflow;
+  const detailLoading =
+    snapshot.loading || (selected === undefined && snapshot.error === undefined);
+  const workflowLoading = snapshot.loading;
+
+  /** 当前选中任务的最新副本：供 Actions 读取，避免闭包读到旧值 */
   const selectedRef = useRef<Task>(undefined);
+  selectedRef.current = selected;
 
   /** 重新拉取当前页真实数据 */
   const reload = useCallback(() => void actionRef.current?.reload(), []);
 
-  const loadWorkflow = useCallback(async (taskID: string) => {
-    setWorkflowLoading(true);
-    try {
-      const { data } = await fetchTaskWorkflow(taskID);
-      setWorkflow(data);
-    } catch (cause) {
-      // 工作流状态查询失败不影响任务详情展示，但必须如实提示，不伪造进度。
-      setWorkflow(undefined);
-      setActionError(describeError(cause));
-    } finally {
-      setWorkflowLoading(false);
-    }
-  }, []);
-
   /**
    * 执行动作结束后重新读取任务与工作流状态。
    *
-   * 只返回刷新失败的项：执行结论由动作面板单独保存，刷新失败不会覆盖它。
+   * 与自动刷新共用同一套读取实现：只返回刷新失败的项，执行结论由动作面板单独保存，
+   * 刷新失败不会覆盖它，也不会被当作工作流终止。
    */
-  const refreshTaskDetail = useCallback(async (): Promise<string[]> => {
-    const failures: string[] = [];
-    try {
-      const { data } = await fetchTask(selectedRef.current?.id ?? "");
-      setSelected(data);
-    } catch (cause) {
-      failures.push(`任务详情（${describeError(cause)}）`);
-    }
-    try {
-      const { data } = await fetchTaskWorkflow(selectedRef.current?.id ?? "");
-      setWorkflow(data);
-    } catch (cause) {
-      failures.push(`工作流进度（${describeError(cause)}）`);
-    }
-    return failures;
-  }, []);
+  const refreshTaskDetail = useCallback(async (): Promise<string[]> => refreshNow(), [refreshNow]);
 
-  const openDetail = useCallback(
-    async (taskID: string) => {
-      setDetailLoading(true);
-      setActionError(undefined);
-      try {
-        const { data } = await fetchTask(taskID);
-        setSelected(data);
-        selectedRef.current = data;
-      } catch (cause) {
-        setSelected(undefined);
-        selectedRef.current = undefined;
-        setActionError(describeError(cause));
-      } finally {
-        setDetailLoading(false);
-      }
-      await loadWorkflow(taskID);
-    },
-    [loadWorkflow],
-  );
+  /**
+   * 打开任务详情。
+   *
+   * 这里只记录任务标识：任务详情、工作流进度与自动刷新周期都由 `useTaskLiveSnapshot`
+   * 负责，页面不再自己发起一次重复请求。详情查询失败时由快照给出可读错误，
+   * 不会把失败伪装成"任务不存在"以外的其他状态。
+   */
+  const openDetail = useCallback((taskID: string) => {
+    setActionError(undefined);
+    setSelectedTaskID(taskID);
+  }, []);
 
   /**
    * 启动请求结束后重新读取服务端事实。
@@ -351,28 +327,15 @@ export function TasksPage() {
    */
   const refreshAfterLaunch = useCallback(
     async (taskID: string) => {
-      const failures: string[] = [];
-      try {
-        const { data } = await fetchTask(taskID);
-        setSelected((current) => (current?.id === taskID ? data : current));
-        if (selectedRef.current?.id === taskID) selectedRef.current = data;
-      } catch (cause) {
-        failures.push(`任务详情（${describeError(cause)}）`);
-      }
+      const failures = await refreshTask(taskID);
       reload();
-      try {
-        const { data } = await fetchTaskWorkflow(taskID);
-        setWorkflow(data);
-      } catch (cause) {
-        failures.push(`工作流进度（${describeError(cause)}）`);
-      }
       setLaunchRefreshError(
         failures.length > 0
           ? `启动请求已结束，但状态刷新失败：${failures.join("、")}。页面可能不是最新状态，请手动刷新确认。`
           : undefined,
       );
     },
-    [reload],
+    [refreshTask, reload],
   );
 
   /**
@@ -413,12 +376,12 @@ export function TasksPage() {
       setActionError(undefined);
       try {
         await cancelTaskWorkflow(taskID);
-        await loadWorkflow(taskID);
+        await refreshNow();
       } catch (cause) {
         setActionError(describeError(cause));
       }
     },
-    [loadWorkflow],
+    [refreshNow],
   );
 
   /** 恢复已停止的工作流：只从已确认的进度继续 */
@@ -427,12 +390,12 @@ export function TasksPage() {
       setActionError(undefined);
       try {
         await resumeTaskWorkflow(taskID, { run_id: runID });
-        await loadWorkflow(taskID);
+        await refreshNow();
       } catch (cause) {
         setActionError(describeError(cause));
       }
     },
-    [loadWorkflow],
+    [refreshNow],
   );
 
   const handleCancel = useCallback(
@@ -441,14 +404,14 @@ export function TasksPage() {
       try {
         await cancelTask(task.id);
         reload();
-        if (selected?.id === task.id) {
-          await openDetail(task.id);
+        if (selectedTaskID === task.id) {
+          await refreshNow();
         }
       } catch (cause) {
         setActionError(describeError(cause));
       }
     },
-    [openDetail, reload, selected?.id],
+    [refreshNow, reload, selectedTaskID],
   );
 
   const handleDelete = useCallback(
@@ -456,15 +419,16 @@ export function TasksPage() {
       setActionError(undefined);
       try {
         await deleteTask(task.id);
-        if (selected?.id === task.id) {
-          setSelected(undefined);
+        if (selectedTaskID === task.id) {
+          // 记录已删除：关闭详情并停止自动刷新。
+          setSelectedTaskID(undefined);
         }
         reload();
       } catch (cause) {
         setActionError(describeError(cause));
       }
     },
-    [reload, selected?.id],
+    [reload, selectedTaskID],
   );
 
   const columns = useMemo<ExTableColumn<Task & Record<string, unknown>>[]>(
@@ -473,7 +437,7 @@ export function TasksPage() {
         dataIndex: "name",
         render: (_dom, record) => (
           <Flex gap={4} vertical>
-            <LinkButton onClick={() => void openDetail(record.id)} text={record.name} />
+            <LinkButton onClick={() => openDetail(record.id)} text={record.name} />
             <Typography.Text type="secondary" ellipsis style={{ maxWidth: 320 }}>
               {record.description}
             </Typography.Text>
@@ -505,7 +469,7 @@ export function TasksPage() {
         dataIndex: "option",
         render: (_dom, record) => (
           <Space>
-            <LinkButton onClick={() => void openDetail(record.id)} text="详情" />
+            <LinkButton onClick={() => openDetail(record.id)} text="详情" />
             <LinkButton
               disabled={!canStartTask(record) || startingTaskID === record.id}
               loading={startingTaskID === record.id}
@@ -599,15 +563,24 @@ export function TasksPage() {
         />
       )}
 
-      {selected && (
+      {snapshot.error && !selected && (
+        <Alert
+          action={<Button onClick={() => void refreshNow()} size="small" text="重试" />}
+          description={snapshot.error}
+          showIcon
+          title="操作失败"
+          type="error"
+        />
+      )}
+
+      {/* 详情区域只在已取得任务或正在加载时出现：首次加载失败由上面的错误提示呈现，
+          不渲染一个空的详情框冒充任务存在 */}
+      {(selected || (selectedTaskID !== undefined && detailLoading)) && (
         <Flex gap="small" vertical>
           <Flex align="center" gap="small" justify="space-between">
             <Typography.Text strong>任务详情</Typography.Text>
             <Button
-              onClick={() => {
-                setSelected(undefined);
-                selectedRef.current = undefined;
-              }}
+              onClick={() => setSelectedTaskID(undefined)}
               size="small"
               text="关闭"
               type="text"
@@ -615,15 +588,28 @@ export function TasksPage() {
           </Flex>
           {detailLoading ? (
             <Typography.Text type="secondary">正在加载详情…</Typography.Text>
-          ) : (
+          ) : selected ? (
             <TaskDetail task={selected} />
+          ) : null}
+          {snapshot.refreshError && (
+            <Alert
+              action={<Button onClick={() => void refreshNow()} size="small" text="重试" />}
+              description={snapshot.refreshError}
+              showIcon
+              title="自动刷新失败"
+              type="warning"
+            />
           )}
+          {refreshHint && <Typography.Text type="secondary">{refreshHint}</Typography.Text>}
           <Flex align="center" gap="small">
             <Typography.Text strong>工作流进度</Typography.Text>
-            <Button onClick={() => void loadWorkflow(selected.id)} size="small" text="刷新" />
+            <Button onClick={() => void refreshNow()} size="small" text="刷新进度" />
+            <Typography.Text type="secondary">
+              {autoRefreshOn ? "执行期间每 5 秒自动刷新" : "自动刷新已停止"}
+            </Typography.Text>
             <Button
-              disabled={!canCancelWorkflow(workflow?.run)}
-              onClick={() => void handleCancelWorkflow(selected.id)}
+              disabled={!selected || !canCancelWorkflow(workflow?.run)}
+              onClick={() => selected && void handleCancelWorkflow(selected.id)}
               size="small"
               text="取消工作流"
             />
@@ -631,7 +617,7 @@ export function TasksPage() {
               disabled={!canResumeWorkflow(workflow?.run)}
               onClick={() => {
                 const runID = workflow?.run?.run_id;
-                if (runID) void handleResumeWorkflow(selected.id, runID);
+                if (runID && selected) void handleResumeWorkflow(selected.id, runID);
               }}
               size="small"
               text="恢复工作流"
@@ -645,9 +631,15 @@ export function TasksPage() {
           ) : (
             <Typography.Text type="secondary">尚未启动工作流</Typography.Text>
           )}
-          {selected && <TaskExecutionPanel onRefreshTask={refreshTaskDetail} task={selected} />}
-          {selected && <CodeSavePanel task={selected} />}
-          {selected && <ResumeEligibilityPanel task={selected} />}
+          {selected && (
+            <TaskExecutionPanel
+              onRefreshTask={refreshTaskDetail}
+              stepsToken={tokens.steps}
+              task={selected}
+            />
+          )}
+          {selected && <CodeSavePanel task={selected} token={tokens.codeSaves} />}
+          {selected && <ResumeEligibilityPanel task={selected} token={tokens.resume} />}
         </Flex>
       )}
 

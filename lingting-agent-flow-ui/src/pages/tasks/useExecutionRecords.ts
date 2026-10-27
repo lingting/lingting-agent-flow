@@ -56,10 +56,16 @@ export function isNotFound(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404;
 }
 
-/** 一次请求的通用加载器：忽略过期响应，支持手动刷新 */
+/**
+ * 一次请求的通用加载器：忽略过期响应，支持手动刷新与外部刷新令牌。
+ *
+ * `token` 由自动刷新提供：值变化时重新读取一次（同一任务、同一份服务端状态确实变了），
+ * 调用方不需要知道定时器的存在。
+ */
 function useLoader<T>(
   load: ((signal: AbortSignal) => Promise<T>) | undefined,
   deps: readonly unknown[],
+  token?: number,
 ): { state: LoadState<T>; reload: () => void } {
   const [state, setState] = useState<LoadState<T>>({ status: "idle" });
   const [nonce, setNonce] = useState(0);
@@ -99,15 +105,18 @@ function useLoader<T>(
         setState({ data: previous, error: message, status: "ready" });
       });
     return () => controller.abort();
-    // deps 由调用方给出，nonce 只用于触发手动刷新。
+    // deps 由调用方给出，nonce 与 token 只用于触发重新加载。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [...deps, nonce]);
+  }, [...deps, nonce, token]);
 
   return { reload, state };
 }
 
 /** 加载任务的全部步骤；任务不存在时返回错误而不是空列表 */
-export function useTaskSteps(taskID?: string): {
+export function useTaskSteps(
+  taskID?: string,
+  token?: number,
+): {
   state: LoadState<Step[]>;
   reload: () => void;
 } {
@@ -118,6 +127,7 @@ export function useTaskSteps(taskID?: string): {
           fetchTaskSteps(trimmed, { size: 100 }, { signal }).then(({ data }) => data.records)
       : undefined,
     [trimmed],
+    token,
   );
   return { reload, state };
 }
@@ -131,7 +141,10 @@ export function useTaskSteps(taskID?: string): {
  * 空数组是合法结果（该任务还没有保存过代码），与查询失败、任务不存在必须区分：
  * 后两者走 `error` 分支，页面不得显示为"暂无记录"。
  */
-export function useTaskCodeSaves(taskID?: string): {
+export function useTaskCodeSaves(
+  taskID?: string,
+  token?: number,
+): {
   state: LoadState<CodeSaveRecord[]>;
   reload: () => void;
 } {
@@ -141,6 +154,7 @@ export function useTaskCodeSaves(taskID?: string): {
       ? (signal) => fetchTaskCodeSaves(trimmed, { signal }).then(({ data }) => data.records)
       : undefined,
     [trimmed],
+    token,
   );
   return { reload, state };
 }
@@ -162,6 +176,7 @@ export type StepRecords = {
 export function useStepRecords(
   taskID?: string,
   stepID?: string,
+  token?: number,
 ): { state: LoadState<StepRecords>; reload: () => void } {
   const task = taskID?.trim() ?? "";
   const step = stepID?.trim() ?? "";
@@ -195,6 +210,7 @@ export function useStepRecords(
         }
       : undefined,
     [task, step],
+    token,
   );
   return { reload, state };
 }
