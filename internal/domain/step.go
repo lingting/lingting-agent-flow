@@ -176,6 +176,41 @@ func (s StepStatus) IsTerminal() bool {
 	return stepStatusMachine.isTerminal(string(s))
 }
 
+// BeginsExecution 判断迁移到该状态是否意味着"步骤真正开始执行"。
+//
+// 它与 IsTerminal 一起构成步骤时间语义的两端：
+//   - 迁移到返回 true 的状态时记录 started_at；
+//   - 迁移到终态时记录 finished_at。
+//
+// pending 只是计划创建后的等待状态，skipped 与 cancelled 可能在步骤从未执行时
+// 发生，因此这三者都不表示开始执行。running 与 developing 是执行占用，
+// verifying 是开发阶段结束后的验证阶段，三者都属于"已经真正开始执行"。
+func (s StepStatus) BeginsExecution() bool {
+	switch s {
+	case StepStatusRunning, StepStatusDeveloping, StepStatusVerifying:
+		return true
+	default:
+		return false
+	}
+}
+
+// EndsExecution 判断迁移到该状态是否意味着"步骤本次执行周期结束"。
+//
+// 除终态外，retry_wait 也结束当前执行周期：它表示本次尝试已经得出失败结论并
+// 等待下一次尝试，此后再次进入执行属于新的执行周期。failed 与
+// recovery_required 同样结束当前周期，但它们允许重新进入执行，因此不是终态。
+func (s StepStatus) EndsExecution() bool {
+	if s.IsTerminal() {
+		return true
+	}
+	switch s {
+	case StepStatusRetryWait, StepStatusFailed, StepStatusRecoveryRequired:
+		return true
+	default:
+		return false
+	}
+}
+
 // VerificationCommand 是验证阶段需要执行的一条命令。
 //
 // Command 与 Args 分开保存：命令以参数切片形式通过容器执行接口传递，
@@ -599,10 +634,19 @@ func (s *Step) Transition(next StepStatus, at time.Time) error {
 	now := normalizeTime(at)
 	s.Status = next
 	s.UpdatedAt = now
-	if s.StartedAt == nil && next != StepStatusPending {
-		s.StartedAt = &now
-	}
-	if next.IsTerminal() {
+	// 时间语义：started_at 只在步骤真正开始执行时写入，pending 之后被跳过或直接取消
+	// 都不会产生开始时间；finished_at 只在本轮执行周期结束时写入。
+	//
+	// 一旦步骤重新进入执行（例如 failed 之后显式重新执行），就开启新的执行周期：
+	// finished_at 被清空，started_at 保留首次真正进入执行的时间，因此这两个字段
+	// 分别表达"这个步骤第一次开始执行"与"当前执行周期何时结束"。这样既不会把不同
+	// 周期混成一条记录，也不会覆盖首次开始时间这一历史事实。
+	if next.BeginsExecution() {
+		if s.StartedAt == nil {
+			s.StartedAt = &now
+		}
+		s.FinishedAt = nil
+	} else if next.EndsExecution() {
 		s.FinishedAt = &now
 	}
 	return nil

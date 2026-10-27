@@ -91,16 +91,23 @@ type WorkflowRunResponse struct {
 }
 
 // WorkflowStepResponse 是单个步骤的工作流进度。
+//
+// 时间字段直接来自持久化的步骤记录，与 `GET /tasks/{id}/steps` 是同一事实源：
+// 从不推断、也从不用工作流级时间或 created_at / updated_at 代替。确实没有时间的
+// 步骤（像从未开始的 pending 步骤）保持缺省，不用零值冒充"已开始"或"已结束"。
 type WorkflowStepResponse struct {
-	StepID     string `json:"step_id"`
-	Sequence   int    `json:"sequence"`
-	Title      string `json:"title"`
-	StepType   string `json:"step_type"`
-	Status     string `json:"status"`
-	Result     string `json:"result,omitempty"`
-	Error      string `json:"error,omitempty"`
-	AttemptID  string `json:"attempt_id,omitempty"`
-	StartedAt  string `json:"started_at,omitempty"`
+	StepID string `json:"step_id"`
+	// Sequence 是计划内序号。
+	Sequence  int    `json:"sequence"`
+	Title     string `json:"title"`
+	StepType  string `json:"step_type"`
+	Status    string `json:"status"`
+	Result    string `json:"result,omitempty"`
+	Error     string `json:"error,omitempty"`
+	AttemptID string `json:"attempt_id,omitempty"`
+	// StartedAt 是步骤首次真正进入执行的时间（UTC，RFC3339 毫秒精度）。
+	StartedAt string `json:"started_at,omitempty"`
+	// FinishedAt 是步骤当前执行周期结束的时间；仍在执行时缺省。
 	FinishedAt string `json:"finished_at,omitempty"`
 }
 
@@ -455,14 +462,16 @@ func workflowStatusResponse(result app.WorkflowStatusResult) WorkflowStatusRespo
 	}
 	for _, step := range result.Steps {
 		response.Steps = append(response.Steps, WorkflowStepResponse{
-			StepID:    step.StepID.String(),
-			Sequence:  step.Sequence,
-			Title:     step.Title,
-			StepType:  string(step.Type),
-			Status:    string(step.Status),
-			Result:    step.Result,
-			Error:     step.FailureSummary,
-			AttemptID: workflowIDString(step.CurrentAttemptID),
+			StepID:     step.StepID.String(),
+			Sequence:   step.Sequence,
+			Title:      step.Title,
+			StepType:   string(step.Type),
+			Status:     string(step.Status),
+			Result:     step.Result,
+			Error:      step.FailureSummary,
+			AttemptID:  workflowIDString(step.CurrentAttemptID),
+			StartedAt:  workflowTimeString(step.StartedAt),
+			FinishedAt: workflowTimeString(step.FinishedAt),
 		})
 	}
 	return response
@@ -474,6 +483,18 @@ func workflowIDString(id *domain.ID) string {
 		return ""
 	}
 	return id.String()
+}
+
+// workflowTimeString 把可空步骤时间转换成与项目其他时间字段一致的 RFC3339 文本。
+//
+// 采用 UTC 毫秒精度：与 `domain.normalizeTime` 的持久化精度一致，读回后与写入值
+// 完全相等。空值返回空字符串，由 DTO 的 omitempty 省略字段——历史数据中确实没有
+// 时间的步骤不会被伪造成某个时刻。
+func workflowTimeString(at *time.Time) string {
+	if at == nil {
+		return ""
+	}
+	return at.UTC().Format(time.RFC3339Nano)
 }
 
 // matchActionPath 判断路径是否指向任务下的工作流动作。

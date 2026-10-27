@@ -92,8 +92,12 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > 失败保留上一次成功快照且不改变策略；步骤 / 代码保存 / 续跑资格三个子面板只在服务端真实
 > 字段变化时重载；未修改任何后端代码，未新增或修改任何 HTTP API，新增前端单元测试 35 个、
 > E2E 11 个，全量单元测试 361 通过、全量 E2E 129 通过 / 0 失败）。
-> **P4-M3 仍为 `in_progress`**：M3-2 已由 P4-M2-7 满足、M3-1 与 M3-7 已完成，
-> M3-6、M3-8 未开始（均需先补后端能力）。P1 证据见
+> **P4-M3 仍为 `in_progress`**：M3-2 已由 P4-M2-7 满足，M3-1、M3-3、M3-4、M3-5、
+> M3-6 与 M3-7 已完成，M3-8 未开始（需先补后端能力）。M3-6 证据见
+> `P4-M3-6-workflow-step-timestamps.md`：核实出三处缺口（领域 `Transition` 只在终态写
+> `finished_at`、`workflowStatusResponse` 不映射时间、前端用 `updated_at` 冒充），据此
+> 重写领域时间语义、补齐 DTO 映射并新增前端 `stepTimes.ts`；未新增表 / 迁移 / 接口，
+> `steps.started_at` 与 `finished_at` 列自 `0001_initial.sql` 起即存在）。P1 证据见
 > `P1-single-task-e2e.md` 的对应"完成记录"；P2-M1 证据见
 > `P2-M1-recovery-boundaries.md`；P2-M2 证据见 `P2-M2-interruption-semantics.md`；
 > P2-M3 与 P2-M4 证据见 `P2-reliability-recovery.md` 的对应里程碑详情。
@@ -503,7 +507,9 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
     闭合**（`POST /tasks/{id}/plan` 接入 Web，按 `persisted` / `failure_stage` 展示真实
     结果，有步骤时不显示覆盖入口）；**G14 单步诊断入口已于 P4-M2-7 闭合**（单步骤执行、
     顺序执行、开发—验证闭环、显式开启修复周期，全部只使用当前真实记录的标识）；G15 事件
-    时间线、G16 修复周期历史、G18 工作流步骤起止时间恒为空。
+    时间线、G16 修复周期历史；**G18 工作流步骤起止时间恒为空已于 P4-M3-6 闭合**
+    （领域状态机按"真正开始 / 周期结束"写时间，工作流状态接口补齐 `started_at` /
+    `finished_at` 映射，步骤列表展示真实起止时间与耗时，缺失显示占位符而不伪造）。
   - P3 三项：G17 调度名额可见性；**G19 进度自动刷新已于 P4-M3-7 闭合**（任务详情与执行
     进度按 5 秒周期自动刷新，活动状态判定依据 `domain.WorkflowRunStatus.IsActive()` 与
     `TaskStatus.IsActive()`，终态与等待人工处置后停止，页面隐藏暂停、恢复前台立即刷新，

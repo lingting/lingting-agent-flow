@@ -27,8 +27,8 @@
 
 - **当前阶段**：P4 —— 产品操作体验与针对性优化。
 - **当前里程碑**：`P4-M3` —— 展示阶段进度、验证结果、失败原因和恢复状态，状态
-  `in_progress`（M3-1、M3-3、M3-4、M3-5、M3-7 已完成、M3-2 已由 M2-7 满足，
-  M3-6 与 M3-8 未开始，两者都需先补后端能力）。
+  `in_progress`（M3-1、M3-3、M3-4、M3-5、M3-6、M3-7 已完成、M3-2 已由 M2-7 满足，
+  M3-8 未开始，需先补后端能力）。
   详见下方"当前里程碑"详述与
   [`P4-M3-1-attempt-session-history.md`](./P4-M3-1-attempt-session-history.md)。
 - **上一里程碑**：`P4-M2` —— 提供完整任务生命周期的必要操作入口，状态 `completed`
@@ -145,7 +145,23 @@
   单元测试 35 个（`tests/unit/task-progress-auto-refresh.test.ts`）与 E2E 11 个
   （`tests/e2e/task-progress-auto-refresh.spec.ts`），全量单元测试 361 通过，全量 E2E
   129 通过 / 0 失败（其中 2 个既有失败 `layout.spec.ts:43` 与 `:64` 已按用户决定移除正文
-  断言并记录待恢复项，见交付文档 §7.2）。至此 **M3-7 已完成**，M3-6 与 M3-8 未开始。
+  断言并记录待恢复项，见交付文档 §7.2）。至此 **M3-7 已完成**。
+  同轮实施子任务 **M3-6（工作流步骤起止时间补全）**，交付物为
+  [`P4-M3-6-workflow-step-timestamps.md`](./P4-M3-6-workflow-step-timestamps.md)：先按当前
+  代码逐层核实，确认真实缺口是**三处**而不是只有 G18 描述的一处——① 领域时间语义缺陷
+  （`Step.Transition` 只在 `IsTerminal()` 写 `finished_at`，因此 `failed` /
+  `recovery_required` / `retry_wait` 永远没有结束时间，重新执行也不清空上一轮的结束时间）；
+  ② `httpapi.workflowStatusResponse` 从不映射 `started_at` / `finished_at`；
+  ③ 前端 `StepListPanel` 用 `updated_at` 冒充时间、从不读取真实起止时间。据此在
+  `internal/domain/step.go` 新增 `StepStatus.BeginsExecution()` / `EndsExecution()` 并以它们
+  重写 `Transition` 的时间写入（`started_at` 只写首次真正执行、重新执行清空 `finished_at`、
+  六种"周期结束"状态都写 `finished_at`），在 `internal/httpapi/workflow.go` 补齐 DTO 映射
+  与 `workflowTimeString`，前端新增纯函数模块 `src/pages/tasks/stepTimes.ts` 并改写步骤行
+  展示。**未新增表、未新增迁移脚本、未新增接口、未改动工作流成功判定**（`steps.started_at` /
+  `finished_at` 自 `0001_initial.sql` 起即存在且读写完整）。新增 Go 测试 28 个（领域 7、存储 10、
+  HTTP 6、工作流集成 5）与前端单元测试 15 个、E2E 7 个；`go test ./tests/...` 2262 通过（46
+  包，退出码 0），`pnpm test:unit:safe` 376 通过，`pnpm test:e2e:safe` 136 通过，
+  `pnpm check` 与 `pnpm build` 通过。至此 **M3-6 已完成**，M3-8 未开始。
 - **上一里程碑**：`P4-M2` —— 提供完整任务生命周期的必要操作入口，状态 `completed`
   （M2-1 至 M2-7 全部完成）。详见
   [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
@@ -185,9 +201,9 @@
   [`P4-M3-4-resume-eligibility-display.md`](./P4-M3-4-resume-eligibility-display.md)）；**M3-7 已完成**
   （任务执行进度自动刷新，见
   [`P4-M3-7-progress-auto-refresh.md`](./P4-M3-7-progress-auto-refresh.md)）。
-  M3-6 与 M3-8 未开始，其中 M3-6
-  （工作流步骤起止时间）与 M3-8（事件时间线、修复周期历史）需要先补后端能力。
-  建议顺序：M3-6 / M3-8。
+  **M3-6 已完成**（工作流步骤起止时间，见
+  [`P4-M3-6-workflow-step-timestamps.md`](./P4-M3-6-workflow-step-timestamps.md)）；
+  **M3-8 未开始**（事件时间线、修复周期历史，需要先补后端能力）。
   环境构建 Web 入口与角色变更入口是否上 Web 仍按产品取舍决定。详见
   [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
 - **更早里程碑**：`P3-M5` —— 验证多任务并发、冲突和资源回收行为，状态

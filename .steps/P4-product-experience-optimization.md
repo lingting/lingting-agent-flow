@@ -105,7 +105,8 @@ P1–P3 保证"能跑"，但用户无法清楚地操作与观察时，主流程�
   合并三阶段与 `persist_status` / `recovery_status` 分别输出；查询只依赖存储，不复用强制
   要求 SSH 的 `ContainerService`。前端三阶段展示仍归 M3-5，核验操作入口归 M4-2）。
 - **P2 管理/诊断能力**：G12 项目后端能力不存在（无表、无服务）、G13 计划生成、G14 单步
-  诊断入口、G15 事件时间线、G16 修复周期历史、G18 工作流步骤起止时间恒为空。
+  诊断入口、G15 事件时间线、G16 修复周期历史（G18 工作流步骤起止时间恒为空已于 P4-M3-6
+  闭合）。
 - **P3 体验优化**：G17 调度名额、G19 进度自动刷新、G20 单步诊断动作。
 
 **历史文档需要纠正的地方**（详见 P4-M1 §3）：README 仍称"多任务并发调度未实现"
@@ -136,7 +137,7 @@ P1–P3 保证"能跑"，但用户无法清楚地操作与观察时，主流程�
 |---|---|---|---|
 | P4-M1 | 盘点当前 API 与 Web 业务操作能力的缺口 | `completed`（2026-10-26，基于 `master` HEAD `70f82b1`） | P3 退出 |
 | P4-M2 | 提供完整任务生命周期的必要操作入口 | `completed`（M2-1 至 M2-7 全部完成，2026-10-26） | P4-M1 |
-| P4-M3 | 展示阶段进度、验证结果、失败原因和恢复状态 | `in_progress`（M3-2 经核实已由 M2-7 满足；M3-1、M3-3、M3-4、M3-5 已完成；M3-6 至 M3-8 待做） | P4-M1、P4-M2（部分工作项需 M2 先补 API） |
+| P4-M3 | 展示阶段进度、验证结果、失败原因和恢复状态 | `in_progress`（M3-2 经核实已由 M2-7 满足；M3-1、M3-3、M3-4、M3-5、M3-6、M3-7 已完成；M3-8 待做） | P4-M1、P4-M2（部分工作项需 M2 先补 API） |
 | P4-M4 | 支持必要的继续执行、取消、恢复和结果查看操作 | `pending` | P4-M2、P4-M3 |
 | P4-M5 | 根据真实使用问题或可测量数据推进性能、并发、存储与架构优化 | `pending` | P4-M2、P4-M3、P4-M4 |
 
@@ -177,8 +178,10 @@ HTTP 读取，新任务可从 Web 显式启动并真实推进工作流，创建�
 （续跑资格与阻塞原因展示，覆盖 G11，交付物
 [`P4-M3-4-resume-eligibility-display.md`](./P4-M3-4-resume-eligibility-display.md)）。
 **M3-7 已完成**（任务执行进度自动刷新，覆盖 G19，交付物
-[`P4-M3-7-progress-auto-refresh.md`](./P4-M3-7-progress-auto-refresh.md)）。M3-6、M3-8
-尚未开始，两者都需要先补后端能力。建议顺序：M3-6 / M3-8。
+[`P4-M3-7-progress-auto-refresh.md`](./P4-M3-7-progress-auto-refresh.md)）。**M3-6 已完成**
+（工作流步骤起止时间补全，覆盖 G18，交付物
+[`P4-M3-6-workflow-step-timestamps.md`](./P4-M3-6-workflow-step-timestamps.md)）。M3-8
+尚未开始，需要先补后端能力。
 
 M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、M5（基于实测数据的优化）。
 
@@ -278,7 +281,7 @@ M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、
 
 - **ID**：`P4-M3`
 - **状态**：`in_progress`（2026-10-27 核实的子项状态：M3-2 已由 P4-M2-7 满足；
-  M3-1、M3-3、M3-4、M3-5、M3-7 完成；M3-6、M3-8 未开始，均需先补后端能力）
+  M3-1、M3-3、M3-4、M3-5、M3-6、M3-7 完成；M3-8 未开始，需先补后端能力）
 - **必要性**：用户看不到真实进度与失败原因，就无法判断任务为何卡住。
 - **前置依赖**：P4-M1；M2-5、M2-6（需先有对应查询 API）。
 - **工作项**：
@@ -324,7 +327,21 @@ M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、
      **本轮未修改后端代码**；新增前端单元测试 30 个（`tests/unit/task-code-saves.test.ts`）
      与 E2E 14 个（`tests/e2e/task-code-saves.spec.ts`），全量单元测试 248 通过，全量 E2E
      94 通过 / 3 既有失败（经 `git stash -u` 基线对照确认）。
-  6. **M3-6** 工作流步骤起止时间补全（服务端 `workflowStatusResponse` 未赋值）。覆盖 G18。
+  6. **M3-6** 工作流步骤起止时间补全。覆盖 G18。**已完成**（2026-10-27，交付物
+     [`P4-M3-6-workflow-step-timestamps.md`](./P4-M3-6-workflow-step-timestamps.md)）：先按
+     当前代码逐层核实，确认真实缺口是三处而不是只有 `workflowStatusResponse` 未赋值一处——
+     ① `domain.Step.Transition` 只在 `IsTerminal()` 写 `finished_at`，因此 `failed` /
+     `recovery_required` / `retry_wait` 三种"周期已结束但可重新执行"的状态永远没有结束时间，
+     重新执行也不清空上一轮的结束时间；② `workflowStatusResponse` 从不映射 `started_at` /
+     `finished_at`；③ 前端 `StepListPanel` 用 `updated_at` 冒充时间。据此新增
+     `StepStatus.BeginsExecution()` / `EndsExecution()` 并以它们重写 `Transition` 的时间写入
+     （`started_at` 只写首次真正执行、重新执行清空 `finished_at`、六种周期结束状态都写
+     `finished_at`），`httpapi` 补齐 DTO 映射与 `workflowTimeString`，前端新增纯函数模块
+     `stepTimes.ts` 并改写步骤行。**未新增表、未新增迁移脚本、未新增接口、未改动工作流成功
+     判定**（`steps.started_at` / `finished_at` 自 `0001_initial.sql` 起即存在且读写完整）。
+     新增 Go 测试 28 个与前端单元测试 15 个、E2E 7 个；`go test ./tests/...` 2262 通过，
+     `pnpm test:unit:safe` 376 通过，`pnpm test:e2e:safe` 136 通过，`pnpm check` / `pnpm build`
+     通过。
   7. **M3-7** 进度自动刷新。覆盖 G19。**已完成**（2026-10-27，交付物
      [`P4-M3-7-progress-auto-refresh.md`](./P4-M3-7-progress-auto-refresh.md)）：先按当前代码
      核实 `domain.WorkflowRunStatus.IsActive()`（只有 `running` / `cancel_requested`）、
@@ -389,6 +406,6 @@ M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、
 - **它不是**：不是 CPU 硬配额方案。最初实施的 Windows Job Object 硬配额已验证机制有效但
   维护成本过高，已全部删除；降低 worker 属于软限制，不得表述为 CPU 百分比上限。
 - **推进顺序**：本次治理与 P4-M3 剩余项**没有依赖关系**，不构成它们的前置条件，也不改变
-  「M3-1 剩余字段 → M3-7 → M3-6 / M3-8」的顺序（M3-1 已于本轮完成后，剩 M3-7 → M3-6 / M3-8）。后续若测试资源再次成为瓶颈
-  （例如 E2E 用例数显著增长），按交付文档记录的观测方法重新评估，而不是凭推测再引入
-  进程级配额机制。
+  「M3-1 剩余字段 → M3-7 → M3-6 → M3-8」的顺序（M3-1、M3-7、M3-6 均已完成后，只剩
+  M3-8）。后续若测试资源再次成为瓶颈（例如 E2E 用例数显著增长），按交付文档记录的观测
+  方法重新评估，而不是凭推测再引入进程级配额机制。

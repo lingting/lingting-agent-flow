@@ -1,8 +1,11 @@
 /**
  * 步骤列表视图。
  *
- * 只展示接口真实返回的字段：顺序、标题、类型、状态与失败摘要。计划是否持久化不靠
- * 前端推断——步骤列表来自数据库，列表为空就是"没有已持久化的计划步骤"。
+ * 只展示接口真实返回的字段：顺序、标题、类型、状态、失败摘要与起止时间。计划是否
+ * 持久化不靠前端推断——步骤列表来自数据库，列表为空就是"没有已持久化的计划步骤"。
+ *
+ * 起止时间来自 `started_at` / `finished_at`：缺失时显示中性占位符，正在执行的步骤
+ * 不显示完成时间，绝不使用 `updated_at` 或任何推算值冒充。
  *
  * 每一项都可以被选中，选中后由父组件加载该步骤的尝试、会话、验证历史与操作入口。
  */
@@ -17,15 +20,8 @@ import {
   stepTypeLabel,
   validationStateLabel,
 } from "@/pages/tasks/steps";
+import { stepTimeDisplay, stepTimeSummary } from "@/pages/tasks/stepTimes";
 import type { LoadState } from "@/pages/tasks/useExecutionRecords";
-
-/** 时间展示：使用本地时区，缺省显示占位符 */
-function formatTime(value?: string): string {
-  if (!value) return "—";
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return "—";
-  return parsed.toLocaleString();
-}
 
 /** 单个步骤行 */
 function StepRow({
@@ -40,9 +36,10 @@ function StepRow({
   onSelect: (step: Step) => void;
 }) {
   const meta = stepStatusMeta(step.status);
+  const times = stepTimeDisplay(step);
   return (
     <Flex
-      align="center"
+      align="flex-start"
       gap="small"
       justify="space-between"
       style={{
@@ -51,7 +48,7 @@ function StepRow({
         padding: "6px 8px",
       }}
     >
-      <Flex align="center" gap="small" style={{ minWidth: 0 }}>
+      <Flex align="center" gap="small" style={{ minWidth: 0 }} wrap>
         <Typography.Text type="secondary" style={{ width: 28 }}>
           {step.sequence}
         </Typography.Text>
@@ -77,14 +74,22 @@ function StepRow({
           </Typography.Text>
         )}
       </Flex>
-      <Flex align="center" gap="small">
+      <Flex align="flex-end" gap={2} style={{ flexShrink: 0 }} vertical>
         {step.error && (
           <Typography.Text style={{ maxWidth: 260 }} type="danger" ellipsis>
             {step.error}
           </Typography.Text>
         )}
-        <Typography.Text type="secondary">{formatTime(step.updated_at)}</Typography.Text>
-        <Typography.Text type="secondary">{meta.active ? "执行中" : ""}</Typography.Text>
+        {/*
+          起止时间直接来自服务端字段：缺失显示占位符，正在执行时不显示完成时间，
+          也不显示任何由 created_at / updated_at 推算出来的时刻。
+        */}
+        <Typography.Text type="secondary">
+          开始 {times.startedText} · 结束 {times.finishedText}
+        </Typography.Text>
+        <Typography.Text type="secondary">
+          {meta.active ? "执行中" : stepTimeSummary(step)}
+        </Typography.Text>
       </Flex>
     </Flex>
   );

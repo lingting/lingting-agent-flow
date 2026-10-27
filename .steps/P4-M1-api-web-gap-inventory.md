@@ -418,6 +418,13 @@ HTTP 只有 `POST .../code-saves/{recordID}/verify-code-save`，而 `recordID` �
 
 ### G18 工作流步骤起止时间恒为空（P2）
 
+> **已于 P4-M3-6 闭合**（2026-10-27）。实施时核实出三处缺口而不只是下面记录的
+> `workflowStatusResponse` 未赋值一处：领域 `Step.Transition` 只在 `IsTerminal()` 写
+> `finished_at`（导致 `failed` / `recovery_required` / `retry_wait` 永远没有结束时间）、
+> HTTP 转换未映射、前端用 `updated_at` 冒充。证据与验收结果见
+> [`P4-M3-6-workflow-step-timestamps.md`](./P4-M3-6-workflow-step-timestamps.md)。以下为该
+> 盘点时的现场记录，保留不改。
+
 **事实**：`WorkflowStepView` 定义了 `StartedAt` / `FinishedAt`
 （`internal/app/task_workflow_run.go:118-120`），`WorkflowStepResponse` 也声明了
 `started_at` / `finished_at`（`internal/httpapi/workflow.go:103-104`），但
@@ -520,7 +527,7 @@ HTTP 只有 `POST .../code-saves/{recordID}/verify-code-save`，而 `recordID` �
 | R3 | G12（项目）需要新表与迁移，属后端立项，不能在 M2 里"顺手加个页面" |
 | R4 | G9 的容器 `delete` 属破坏性操作，是否进 Web 需与"未推送代码不得丢失"的既有约束一起评审 |
 | R5 | 前端 `Task` 类型缺 `final_result` / `closeout` 属类型漂移，说明前后端字段同步缺少检查手段；是否引入类型生成需评估 |
-| R6 | `WorkflowStepResponse.started_at` / `finished_at` 长期为空，可能已有其他读取方假设它为空，补全前需确认 |
+| R6 | `WorkflowStepResponse.started_at` / `finished_at` 长期为空，可能已有其他读取方假设它为空，补全前需确认（**P4-M3-6 已补全**：P4-M3-6 交付文档 §7 记录了补全后的语义与风险） |
 | R7 | 本次未执行任何测试，G1 的"必然 409"结论来自 `CheckWorkflowStart` 的静态判定；若存在绕过路径（例如任务在创建时即带容器），需在 M2 实施时复核 |
 
 ## 11. 待调查事项（保持未决，不写成结论）
