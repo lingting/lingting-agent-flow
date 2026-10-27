@@ -27,8 +27,7 @@
 
 - **当前阶段**：P4 —— 产品操作体验与针对性优化。
 - **当前里程碑**：`P4-M4` —— 支持必要的继续执行、取消、恢复和结果查看操作，状态
-  `in_progress`（M4-1、M4-2、M4-3 已完成，M4-4 / M4-5 未开始）。子任务 **M4-1（失败任务
-  显式重试 Web 入口）已于 2026-10-27 完成**，交付物为
+  `in_progress`（M4-1、M4-2、M4-3、M4-4 已完成，M4-5 未开始）。子任务 **M4-1（失败任务
   [`P4-M4-1-task-retry-web-entry.md`](./P4-M4-1-task-retry-web-entry.md)：前端补齐
   `RetryEligibilityResponse` / `RetryTaskResponse` / `RetryTaskRequest` 类型与
   `fetchTaskRetryEligibility` / `retryTask`（`GET|POST /api/v1/tasks/{taskID}/retry[-eligibility]`），
@@ -75,6 +74,22 @@
   ./tests/integration/local/...` 2239 通过、`go test ./tests/e2e/...` 58 通过、
   `pnpm test:unit:safe` 522 通过、`pnpm test:e2e:safe` 183 通过 / 0 失败，`gofmt`、`go vet`、
   `pnpm check` 与 `pnpm build` 通过。
+- 子任务 **M4-4（基于服务端续跑资格的工作流恢复操作）已于 2026-10-27 完成**，交付物为
+  [`P4-M4-4-resume-eligibility-web-action.md`](./P4-M4-4-resume-eligibility-web-action.md)：
+  核实出恢复入口与服务端资格**完全脱钩**——进度条里的「恢复工作流」读的是本地白名单
+  `canResumeWorkflow(workflow.run)`（`blocked` / `recovery_required` / `pending`），
+  因此在资格查询中、查询失败、快照过期或 `can_resume: false` 时按钮依然可用，与同一页
+  上写着"存在阻塞"的资格面板互相矛盾。本轮把恢复入口**唯一化**到 `ResumeEligibilityPanel`
+  内：删除进度条按钮、`canResumeWorkflow` 与 `TasksPage.handleResumeWorkflow`，扩展既有
+  `useResumeEligibility` 承载恢复操作（未新增第二个 Hook、未新增第二个刷新循环）。可提交性
+  由纯函数 `resumeSubmitBlockReason` 决定，判定顺序为"在途 → 查询中 → 查询失败 → 无快照 →
+  快照不属于当前任务 → 刷新失败 → `can_resume` 为假"，全部命中即禁用，**不读取任何任务或
+  工作流状态**；恢复请求只发送资格快照里的 `run_id`，结果按 `running` / `pending` / 其他三档
+  如实展示并明确"请求受理 ≠ 工作流成功 ≠ 任务完成"，服务端拒绝、超时中断、刷新失败分别提示
+  且**不自动重发**。**本轮未修改任何 Go 生产代码**：核实到恢复接口已在应用层重新执行租约、
+  计划摘要、`CheckWorkflowStart`、容器、执行节点与代码保存副作用的完整校验，`can_resume`
+  只是查询时刻快照而非执行授权。新增前端单元测试 25 个与 E2E 14 个；`pnpm test:unit:safe`
+  547 通过、`pnpm test:e2e:safe` 197 通过 / 0 失败，`pnpm check` 与 `pnpm build` 通过。
 - **上一里程碑**：`P4-M3` —— 展示阶段进度、验证结果、失败原因和恢复状态，状态
   `completed`（M3-1、M3-3、M3-4、M3-5、M3-6、M3-7、M3-8 已完成，M3-2 已由 M2-7 满足）。
   详见下方"当前里程碑"详述与
@@ -278,7 +293,18 @@
   `domain.DecideContainerDisposal` 与 `app.TaskContainerDisposalService`，复用既有
   `ContainerService` 的所有权核验与远程会话路径），未改动容器状态机、生命周期策略与工作流编排。
   见 [`P4-M4-3-container-delete-detach-web-actions.md`](./P4-M4-3-container-delete-detach-web-actions.md)。
-  剩余子项：M4-4（`resume-eligibility` 驱动的恢复入口）、M4-5（单步诊断动作）。
+  **M4-4（基于服务端续跑资格的工作流恢复操作，2026-10-27 完成）**：核实出恢复入口与资格
+  **完全脱钩**——进度条里的按钮读本地白名单 `canResumeWorkflow(workflow.run)`，在资格查询中、
+  查询失败、快照过期或 `can_resume=false` 时仍可点击。本轮把恢复入口唯一化到
+  `ResumeEligibilityPanel` 内，删除进度条按钮、`canResumeWorkflow` 与
+  `TasksPage.handleResumeWorkflow`，扩展既有 `useResumeEligibility` 承载恢复操作；可提交性由
+  纯函数 `resumeSubmitBlockReason` 判定（在途 / 查询中 / 查询失败 / 无快照 / 快照不属于当前任务 /
+  刷新失败 / `can_resume` 为假），**不读取任何任务或工作流状态**；请求只发送资格快照里的
+  `run_id`，结果按 `running` / `pending` / 其他三档展示并明确"受理 ≠ 成功 ≠ 完成"，拒绝、
+  超时中断与刷新失败分别提示且不自动重发。**未修改任何 Go 生产代码**：恢复接口已在应用层
+  重新核验租约、计划摘要、`CheckWorkflowStart`、容器、执行节点与代码保存副作用。见
+  [`P4-M4-4-resume-eligibility-web-action.md`](./P4-M4-4-resume-eligibility-web-action.md)。
+  剩余子项：M4-5（单步诊断动作）。
   环境构建 Web 入口与角色变更入口是否上 Web 仍按产品取舍决定。详见
   [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
 - **P4-M3 收尾时的核实记录**（M4 开始前）：`P4-M3`（展示阶段进度、验证结果、失败原因和
@@ -518,6 +544,7 @@
 | [`P4-M4-1-task-retry-web-entry.md`](./P4-M4-1-task-retry-web-entry.md) | P4-M4-1：失败任务显式重试 Web 入口（真实路由与 DTO 契约、资格唯一判据 `can_retry`、10 个阻塞分类、同步请求与超时语义、操作防重与结果语义、竞态处理、测试证据、剩余风险） |
 | [`P4-M4-2-code-save-verification-web-action.md`](./P4-M4-2-code-save-verification-web-action.md) | P4-M4-2：代码保存核验 Web 操作入口（真实路由与双 DTO 差异、请求参数可信来源与"不猜测容器/工作区"依据、五组事实互不替代、`persisted` 与 `safe_to_retry` 语义、竞态与防重、测试证据、剩余风险） |
 | [`P4-M4-3-container-delete-detach-web-actions.md`](./P4-M4-3-container-delete-detach-web-actions.md) | P4-M4-3：容器 delete / detach 的 HTTP API 与 Web 操作入口（HTTP 缺口核实、三条新路由与 DTO 契约、处置校验与归属校验的区别、两层所有权核验、delete 与 detach 的边界、结果不确定语义、竞态与防重、测试证据、剩余风险） |
+| [`P4-M4-4-resume-eligibility-web-action.md`](./P4-M4-4-resume-eligibility-web-action.md) | P4-M4-4：基于服务端续跑资格的工作流恢复操作（实施前资格/入口/服务端前置条件的代码证据、恢复入口脱钩的四个真实缺口、判定顺序与"不读取任务状态"依据、受理 ≠ 成功 ≠ 完成的语义拆分、任务切换与刷新失败边界、测试证据、剩余风险） |
 | [`P4-frontend-test-resource-governance.md`](./P4-frontend-test-resource-governance.md) | P4 工程质量：前端测试并发治理（真实资源模型核实、Playwright worker 4 / Vitest worker 4 默认值、非法输入拒绝、资源受限入口、能力边界、验收命令与既有失败隔离） |
 
 ## 下一步工作的选择规则

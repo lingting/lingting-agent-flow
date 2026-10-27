@@ -19,7 +19,6 @@ import {
   cancelTaskWorkflow,
   deleteTask,
   fetchTasks,
-  resumeTaskWorkflow,
   startTask,
   type Task,
   type TaskStatus,
@@ -42,7 +41,6 @@ import {
   canCancelTask,
   canCancelWorkflow,
   canDeleteTask,
-  canResumeWorkflow,
   TASK_STATUS_META,
   WORKFLOW_RUN_STATUS_DICT,
 } from "@/pages/tasks/status";
@@ -386,20 +384,10 @@ export function TasksPage() {
     [refreshNow],
   );
 
-  /** 恢复已停止的工作流：只从已确认的进度继续 */
-  const handleResumeWorkflow = useCallback(
-    async (taskID: string, runID: string) => {
-      setActionError(undefined);
-      try {
-        await resumeTaskWorkflow(taskID, { run_id: runID });
-        await refreshNow();
-      } catch (cause) {
-        setActionError(describeError(cause));
-      }
-    },
-    [refreshNow],
-  );
-
+  /**
+   * 恢复入口已迁到 `ResumeEligibilityPanel`：可用性必须来自服务端的续跑资格，
+   * 页面级不再保留按工作流状态判定的第二个恢复入口。
+   */
   const handleCancel = useCallback(
     async (task: Task) => {
       setActionError(undefined);
@@ -615,16 +603,6 @@ export function TasksPage() {
               size="small"
               text="取消工作流"
             />
-            <Button
-              disabled={!canResumeWorkflow(workflow?.run)}
-              onClick={() => {
-                const runID = workflow?.run?.run_id;
-                if (runID && selected) void handleResumeWorkflow(selected.id, runID);
-              }}
-              size="small"
-              text="恢复工作流"
-              type="primary"
-            />
           </Flex>
           {workflowLoading && !workflow ? (
             <Typography.Text type="secondary">正在加载工作流进度…</Typography.Text>
@@ -641,7 +619,13 @@ export function TasksPage() {
             />
           )}
           {selected && <CodeSavePanel task={selected} token={tokens.codeSaves} />}
-          {selected && <ResumeEligibilityPanel task={selected} token={tokens.resume} />}
+          {selected && (
+            <ResumeEligibilityPanel
+              onRefreshTask={refreshTaskDetail}
+              task={selected}
+              token={tokens.resume}
+            />
+          )}
           {selected && <TaskContainerPanel onRefreshTask={refreshTaskDetail} task={selected} />}
           {selected && <RetryTaskPanel onRefreshTask={refreshTaskDetail} task={selected} />}
         </Flex>

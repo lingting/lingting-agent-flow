@@ -1,18 +1,20 @@
 /**
- * 任务续跑资格与阻塞原因面板（只读）。
+ * 任务续跑资格、阻塞原因与恢复工作流操作面板。
  *
  * 数据来自 `GET /api/v1/tasks/{taskID}/resume-eligibility`：服务端把任务状态、最近一次
- * 工作流执行记录、代码保存记录与容器前置条件聚合成一份统一结论。本面板只负责如实呈现：
+ * 工作流执行记录、代码保存记录与容器前置条件聚合成一份统一结论。本面板负责如实呈现：
  *
  *   1. 资格结论（`can_resume` + `summary`），并明确说明这是查询时刻的快照；
  *   2. 任务状态与工作流执行状态（`run` 缺省时说明服务端没有返回记录，不补造）；
  *   3. 阻塞原因（`blocking` 逐项展示，未知分类原样展示）；
  *   4. 代码保存续跑判定（`code_save_action` + `code_save_summary`）；
  *   5. 需要关注的代码保存记录（三个 Git 阶段与记录维度两个状态分别展示）；
- *   6. 服务端给出的下一步动作（原文展示，不解析成自动执行指令）。
+ *   6. 服务端给出的下一步动作（原文展示，不解析成自动执行指令）；
+ *   7. 恢复工作流的显式操作与它的真实结果。
  *
- * 本面板不发起恢复、不触发核验、不自动刷新：恢复按钮与工作流操作仍由任务页既有入口承担，
- * 且服务端在真正执行恢复前会重新检查前置条件。
+ * 恢复入口的唯一判据是服务端 `can_resume`：查询中、查询失败、快照不属于当前任务或已在途时
+ * 一律禁用；同时本面板不触发核验、不自动刷新、不自动重发恢复请求，也不把"请求已受理"
+ * 表述为"任务已完成"。
  */
 import { Alert, Descriptions, Flex, Space, Typography } from "antd";
 import { Button, DictTag, LinkButton } from "lingting-react-ui";
@@ -32,6 +34,13 @@ import {
   recoveryStatusMeta,
 } from "@/pages/tasks/codeSaves";
 import {
+  canSubmitResume,
+  describeResumeResult,
+  RESUME_FAILED_TITLE,
+  RESUME_UNCERTAIN_TITLE,
+  resumeSubmitBlockText,
+} from "@/pages/tasks/resumeAction";
+import {
   codeSaveResumeActionMeta,
   looksLikeCliCommand,
   resumeBlockingList,
@@ -46,9 +55,17 @@ import {
   isKnownWorkflowRunStatus,
   TASK_STATUS_META,
   WORKFLOW_RUN_STATUS_DICT,
+  WORKFLOW_RUN_STATUS_META,
 } from "@/pages/tasks/status";
-import { useResumeEligibility } from "@/pages/tasks/useResumeEligibility";
+import {
+  useResumeEligibility,
+  type ResumeOperationState,
+} from "@/pages/tasks/useResumeEligibility";
 
+/** 由 `WORKFLOW_RUN_STATUS_META` 派生的"状态取值 → 中文标签"映射，不新增第二套状态名 */
+const RUN_STATUS_LABELS: Record<string, string> = Object.fromEntries(
+  Object.entries(WORKFLOW_RUN_STATUS_META).map(([value, meta]) => [value, meta.label]),
+);
 /** 时间展示：使用本地时区，缺省显示占位符 */
 function formatTime(value?: string): string {
   if (!value) return "—";
@@ -281,18 +298,104 @@ function ResumeEligibilityBody({ data }: { data: ResumeEligibilityResponse }) {
 }
 
 /**
- * 续跑资格面板。
+ * 一次恢复请求的真实结果。
+ *
+ * 只陈述服务端响应里能直接读到的事实：请求已被受理、执行记录的当前状态、当前进度。
+ * 恢复被受理不等于工作流会成功，也不等于任务已完成，因此结论里明确写出这一点。
+ */
+function ResumeOutcomePanel({
+  onClose,
+  operation,
+}: {
+  onClose: () => void;
+  operation: ResumeOperationState;
+}) {
+  const outcome = operation.outcome
+    ? describeResumeResult(operation.outcome, { statusLabels: RUN_STATUS_LABELS })
+    : undefined;
+  return (
+    <Alert
+      closable
+      description={
+        <Flex gap={2} vertical>
+          {outcome && <Typography.Text>{outcome.description}</Typography.Text>}
+          {outcome?.details.map((detail) => (
+            <Typography.Text key={detail} type="secondary">
+              {detail}
+            </Typography.Text>
+          ))}
+        </Flex>
+      }
+      onClose={onClose}
+      showIcon
+      title={outcome?.title ?? "恢复请求已受理"}
+      type={outcome && outcome.attention ? "warning" : "success"}
+    />
+  );
+}
+
+/**
+ * 续跑资格面板（含恢复工作流操作）。
  *
  * 加载中、查询成功、查询失败（带重试）、刷新失败（保留旧快照）四种状态分别呈现：
  * 查询失败绝不显示为"允许续跑"，刷新失败也不会抹掉上一次真实结果。
+ *
+ * `onRefreshTask` 由父组件提供：恢复请求结束之后必须重新读取任务详情与工作流进度，
+ * 返回值是刷新失败的项，用于单独提示。
  */
-export function ResumeEligibilityPanel({ task, token }: { task: Task; token?: number }) {
-  const { state, reload } = useResumeEligibility(task.id, token);
+export function ResumeEligibilityPanel({
+  onRefreshTask,
+  task,
+  token,
+}: {
+  onRefreshTask: () => Promise<string[]>;
+  task: Task;
+  token?: number;
+}) {
+  const { clearOutcome, operation, reload, resume, state } = useResumeEligibility({
+    refresh: onRefreshTask,
+    taskID: task.id,
+    token,
+  });
+
+  const snapshot = state.status === "ready" ? state.data : undefined;
+  const submitInput = {
+    eligibility: snapshot,
+    eligibilityRefreshError: state.status === "ready" ? state.error : undefined,
+    eligibilityStatus: state.status,
+    eligibilityTaskID: snapshot?.task_id,
+    running: operation.running,
+    taskID: task.id,
+  };
+  const allowed = canSubmitResume(submitInput);
+  const blockText = resumeSubmitBlockText(submitInput);
+  // 服务端给出的执行记录标识是恢复请求的唯一入参来源；缺失时不猜测，直接禁用入口。
+  const runID = snapshot?.run?.run_id?.trim();
+
+  const handleResume = () => {
+    if (!runID || !allowed) return;
+    void resume({ run_id: runID });
+  };
 
   return (
     <Flex gap="small" vertical>
       <Space align="center" size={8} wrap>
         <Typography.Text strong>续跑资格与阻塞原因</Typography.Text>
+        <Button
+          disabled={!allowed || !runID}
+          loading={operation.running}
+          onClick={handleResume}
+          size="small"
+          text={operation.running ? "恢复中" : "恢复工作流"}
+          tooltip={
+            allowed
+              ? runID
+                ? "恢复是真实执行操作：服务端会重新核验租约、容器、执行节点与代码保存副作用。"
+                : "服务端未返回执行记录标识，无法构造恢复请求。"
+              : blockText
+          }
+          type="primary"
+        />
         <LinkButton onClick={reload} text="刷新续跑资格" />
       </Space>
       <Typography.Text type="secondary">
@@ -306,7 +409,7 @@ export function ResumeEligibilityPanel({ task, token }: { task: Task; token?: nu
       {state.status === "error" && (
         <Alert
           action={<Button onClick={reload} size="small" text="重试" />}
-          description={state.error}
+          description={`${state.error} 续跑资格当前无法确认，因此不提供恢复入口。`}
           showIcon
           title="查询续跑资格失败"
           type="error"
@@ -315,14 +418,45 @@ export function ResumeEligibilityPanel({ task, token }: { task: Task; token?: nu
       {state.status === "ready" && state.error && (
         <Alert
           action={<Button onClick={reload} size="small" text="重试" />}
-          description={`${state.error} 下方展示的是上一次成功查询的结果，不是最新状态。`}
+          description={`${state.error} 下方展示的是上一次成功查询的结果，不是最新状态。恢复入口仍以该快照的 can_resume 为准，执行时服务端会重新核验。`}
           showIcon
           title="续跑资格刷新失败"
           type="warning"
         />
       )}
 
-      {state.status === "ready" && <ResumeEligibilityBody data={state.data} />}
+      {snapshot && <ResumeEligibilityBody data={snapshot} />}
+
+      {operation.running && (
+        <Alert
+          description="请求已发出，服务端正在重新核验前置条件并尝试恢复工作流。该操作是同步的，请等待真实结果返回后再进行下一步。"
+          showIcon
+          title="正在发起恢复"
+          type="info"
+        />
+      )}
+      {operation.failure && (
+        <Alert
+          closable
+          description={operation.failure}
+          onClose={clearOutcome}
+          showIcon
+          title={RESUME_FAILED_TITLE}
+          type="error"
+        />
+      )}
+      {operation.uncertain && (
+        <Alert
+          description={operation.uncertain}
+          showIcon
+          title={RESUME_UNCERTAIN_TITLE}
+          type="warning"
+        />
+      )}
+      {operation.outcome && <ResumeOutcomePanel onClose={clearOutcome} operation={operation} />}
+      {operation.refreshError && (
+        <Alert description={operation.refreshError} showIcon title="状态刷新失败" type="warning" />
+      )}
     </Flex>
   );
 }

@@ -92,7 +92,7 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > 失败保留上一次成功快照且不改变策略；步骤 / 代码保存 / 续跑资格三个子面板只在服务端真实
 > 字段变化时重载；未修改任何后端代码，未新增或修改任何 HTTP API，新增前端单元测试 35 个、
 > E2E 11 个，全量单元测试 361 通过、全量 E2E 129 通过 / 0 失败）。
-> **P4-M4 状态为 `in_progress`**（M4-1、M4-2、M4-3 已完成，M4-4 / M4-5 未开始）。
+> **P4-M4 状态为 `in_progress`**（M4-1、M4-2、M4-3、M4-4 已完成，M4-5 未开始）。
 > **M4-1（失败任务显式重试 Web 入口）于 2026-10-27 完成**：核实
 > `POST /tasks/{id}/retry`（同步、成功 202）与 `GET /tasks/{id}/retry-eligibility`（只读）的
 > 真实 DTO、10 个稳定拒绝分类、同步与超时语义，然后只接入前端——新增
@@ -156,6 +156,23 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > `go test ./tests/e2e/...` 58 通过、`pnpm test:unit:safe` 522 通过、
 > `pnpm test:e2e:safe` 183 通过 / 0 失败，`gofmt`、`go vet`、`pnpm check` 与 `pnpm build`
 > 通过。证据见 `P4-M4-3-container-delete-detach-web-actions.md`。
+> **M4-4（基于服务端续跑资格的工作流恢复操作）于 2026-10-27 完成**：核实出恢复入口与服务端
+> 资格**完全脱钩**——进度条里的「恢复工作流」读本地白名单 `canResumeWorkflow(workflow.run)`
+> （`blocked` / `recovery_required` / `pending`），因此在资格查询中、查询失败、快照过期或
+> `can_resume: false` 时按钮仍然可用，与同一页上写着"存在阻塞"的资格面板互相矛盾；且恢复结果
+> 只做 `refreshNow()`，成功时不展示真实响应、失败时统一塞进页面顶部错误提示，没有区分"被拒绝 /
+> 结果无法确认 / 已受理"。本轮把恢复入口**唯一化**到 `ResumeEligibilityPanel`（删除进度条按钮、
+> `canResumeWorkflow` 与 `TasksPage.handleResumeWorkflow`），扩展既有 `useResumeEligibility`
+> 承载恢复操作，新增纯函数模块 `resumeAction.ts`：可提交性判定顺序固定为"在途 → 查询中 →
+> 查询失败 → 无快照 → 快照不属于当前任务 → 刷新失败 → `can_resume` 为假"，**不读取任何任务或
+> 工作流状态**；请求只发送资格快照里的 `run_id`，结果按 `running` / `pending` / 其他三档展示，
+> 明确"请求受理 ≠ 工作流成功 ≠ 任务完成"，服务端拒绝、超时中断、刷新失败分别提示且不自动重发，
+> 同一任务在途防重、切换任务丢弃迟到响应、恢复后刷新失败保留请求结果。**本轮未修改任何 Go 生产
+> 代码，未新增 HTTP 接口**：核实到恢复接口已在应用层重新执行租约、计划摘要、`CheckWorkflowStart`、
+> 容器、执行节点与代码保存副作用的完整校验，`can_resume` 只是查询时刻快照而非执行授权。新增前端
+> 单元测试 25 个与 E2E 14 个；`pnpm test:unit:safe` 547 通过、`pnpm test:e2e:safe` 197 通过 /
+> 0 失败，`pnpm check` 与 `pnpm build` 通过。证据见
+> `P4-M4-4-resume-eligibility-web-action.md`。
 > **P4-M3 已为 `completed`**：M3-2 已由 P4-M2-7 满足，M3-1、M3-3、M3-4、M3-5、
 > M3-6、M3-7 与 M3-8 全部完成。**M3-8（事件时间线与修复周期历史）于 2026-10-27 完成**：
 > 核实出 `ListEventsByTask` 生产代码零调用者且排序只有 `ORDER BY id`、`EventFilter`
@@ -613,6 +630,10 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
     **G11 续跑阻塞原因已于 P4-M3-4 闭合**（任务详情新增 `ResumeEligibilityPanel`，逐项展示
     `blocking` 与 `next_actions`，未知分类原样保留，见
     `P4-M3-4-resume-eligibility-display.md`）。
+    **G11 的恢复操作侧已于 P4-M4-4 闭合**（恢复入口从进度条迁入 `ResumeEligibilityPanel`，
+    可用性只来自 `can_resume`，判定顺序排除在途 / 查询中 / 查询失败 / 无快照 / 快照过期 /
+    刷新失败，删除本地状态白名单 `canResumeWorkflow`；结果区分受理 / 拒绝 / 结果不确定 /
+    刷新失败且不自动重发，见 `P4-M4-4-resume-eligibility-web-action.md`）。
     **G10 收尾结论展示已于 P4-M3-3 闭合**（`types.ts` 补齐三个字段，任务详情拆成任务状态 /
     最终业务结论 / 收尾闭环三行独立事实，见
     `P4-M3-3-task-closeout-display.md`）。

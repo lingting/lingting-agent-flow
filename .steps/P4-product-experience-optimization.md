@@ -93,7 +93,8 @@ P1–P3 保证"能跑"，但用户无法清楚地操作与观察时，主流程�
     返回真实构建状态、`image_ref`、服务端计算的可用性与版本元数据；纯读取不再要求
     SSH / Docker 依赖。剩余部分是前端接入（M2-3）与环境构建 Web 入口（未排期）。
 - **P1 业务决策阻塞**：G5 重试无入口、G9 容器处置无 HTTP（**G9 已由 M4-3 闭合**，见下）、
-  G11 续跑阻塞原因不可见。
+  G11 续跑阻塞原因不可见（**G11 展示侧已由 M3-4 闭合、操作侧已由 M4-4 闭合**：恢复入口迁入
+  `ResumeEligibilityPanel`，可用性只来自服务端 `can_resume`，见下）。
   **G7 步骤 / Attempt / Session 历史视图已由 M2-7 交付，M3-3 核实为部分满足**：步骤、
   尝试与会话（执行 / 归档 / 导出三态分列）均已展示，仍缺尝试的
   `timed_out` / `cancelled` / `error_class` / `failure_stage` 与会话归档 / 导出状态的中文
@@ -148,7 +149,7 @@ P1–P3 保证"能跑"，但用户无法清楚地操作与观察时，主流程�
 | P4-M1 | 盘点当前 API 与 Web 业务操作能力的缺口 | `completed`（2026-10-26，基于 `master` HEAD `70f82b1`） | P3 退出 |
 | P4-M2 | 提供完整任务生命周期的必要操作入口 | `completed`（M2-1 至 M2-7 全部完成，2026-10-26） | P4-M1 |
 | P4-M3 | 展示阶段进度、验证结果、失败原因和恢复状态 | `completed`（M3-2 经核实已由 M2-7 满足；M3-1、M3-3、M3-4、M3-5、M3-6、M3-7、M3-8 全部完成） | P4-M1、P4-M2（部分工作项需 M2 先补 API） |
-| P4-M4 | 支持必要的继续执行、取消、恢复和结果查看操作 | `in_progress`（M4-1、M4-2、M4-3 已完成，M4-4 / M4-5 未开始） | P4-M2、P4-M3 |
+| P4-M4 | 支持必要的继续执行、取消、恢复和结果查看操作 | `in_progress`（M4-1、M4-2、M4-3、M4-4 已完成，M4-5 未开始） | P4-M2、P4-M3 |
 | P4-M5 | 根据真实使用问题或可测量数据推进性能、并发、存储与架构优化 | `pending` | P4-M2、P4-M3、P4-M4 |
 
 ## 阶段退出条件
@@ -194,6 +195,16 @@ HTTP 读取，新任务可从 Web 显式启动并真实推进工作流，创建�
 （事件时间线与修复周期历史，覆盖 G15、G16，交付物
 [`P4-M3-8-event-timeline-repair-cycle-history.md`](./P4-M3-8-event-timeline-repair-cycle-history.md)）。
 至此 **P4-M3 全部子项完成**。
+
+**P4-M4 已进入实施**（2026-10-27 按当前代码核实）：M4-1 已完成（失败任务显式重试 Web 入口，
+覆盖 G5）、M4-2 已完成（代码保存核验 Web 操作入口，覆盖 G8 的操作侧）、M4-3 已完成（容器
+`delete` / `detach` 的 HTTP API 与 Web 操作入口，覆盖 G9）、M4-4 已完成（基于服务端续跑资格的
+工作流恢复操作，覆盖 G11 的操作侧，交付物
+[`P4-M4-4-resume-eligibility-web-action.md`](./P4-M4-4-resume-eligibility-web-action.md)）。
+剩余子项：M4-5（单步诊断动作，覆盖 G20）。M4-4 的关键结论是"恢复入口的可用性只能来自
+`resume-eligibility` 的 `can_resume`"——原有的 `canResumeWorkflow(workflow.run)` 是前端自己
+复制服务端续跑规则的实例，本轮已删除，恢复结果也按受理 / 拒绝 / 结果不确定 / 刷新失败四类
+分别呈现。
 
 M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、M5（基于实测数据的优化）。
 
@@ -387,7 +398,7 @@ M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、
 ### P4-M4 支持必要的继续执行、取消、恢复和结果查看操作
 
 - **ID**：`P4-M4`
-- **状态**：`in_progress`（**M4-1、M4-2、M4-3 已于 2026-10-27 完成**，M4-4 / M4-5 未开始）
+- **状态**：`in_progress`（**M4-1、M4-2、M4-3、M4-4 已于 2026-10-27 完成**，M4-5 未开始）
 - **必要性**：这些是任务管理闭环的必要操作。
 - **前置依赖**：P4-M2、P4-M3。
 - **工作项**：
@@ -443,7 +454,22 @@ M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、
      `go test ./tests/e2e/...` 58 通过、`pnpm test:unit:safe` 522 通过、`pnpm test:e2e:safe`
      183 通过 / 0 失败，`gofmt`、`go vet`、`pnpm check` 与 `pnpm build` 通过。交付物
      [`P4-M4-3-container-delete-detach-web-actions.md`](./P4-M4-3-container-delete-detach-web-actions.md)。
-  4. **M4-4** 继续执行 / 恢复工作流的可用性来自 `resume-eligibility`。覆盖 G11。
+  4. **M4-4** 继续执行 / 恢复工作流的可用性来自 `resume-eligibility`。覆盖 G11。**已完成**
+     （2026-10-27）：核实出恢复入口与服务端资格**完全脱钩**——进度条里的「恢复工作流」按本地
+     白名单 `canResumeWorkflow(workflow.run)`（`blocked` / `recovery_required` / `pending`）启用，
+     因此在资格查询中、查询失败、快照过期或 `can_resume: false` 时按钮依然可用，与同一页上写着
+     "存在阻塞"的资格面板互相矛盾。本轮把恢复入口**唯一化**到 `ResumeEligibilityPanel`：删除
+     进度条按钮、`canResumeWorkflow` 与 `TasksPage.handleResumeWorkflow`，扩展既有
+     `useResumeEligibility` 承载恢复操作，新增纯函数模块 `resumeAction.ts`——可提交性判定顺序固定
+     为"在途 → 查询中 → 查询失败 → 无快照 → 快照不属于当前任务 → 刷新失败 → `can_resume` 为假"，
+     **不读取任何任务或工作流状态**；请求只发送资格快照里的 `run_id`，结果按 `running` /
+     `pending` / 其他三档展示并明确"请求受理 ≠ 工作流成功 ≠ 任务完成"，服务端拒绝、超时中断、
+     刷新失败分别提示且不自动重发，同一任务在途防重、切换任务丢弃迟到响应、恢复后刷新失败保留
+     请求结果。**未修改任何 Go 生产代码，未新增 HTTP 接口**：核实到恢复接口已在应用层重新执行
+     租约、计划摘要、`CheckWorkflowStart`、容器、执行节点与代码保存副作用的完整校验。新增前端
+     单元测试 25 个与 E2E 14 个，`pnpm test:unit:safe` 547 通过、`pnpm test:e2e:safe` 197 通过 /
+     0 失败，`pnpm check` 与 `pnpm build` 通过。交付物
+     [`P4-M4-4-resume-eligibility-web-action.md`](./P4-M4-4-resume-eligibility-web-action.md)。
   5. **M4-5** 单步诊断动作（初始化代码、确定性验证）。覆盖 G20。
 - **完成定义**：`failed` / `blocked` / `recovery_required` 三类现场都能在 Web 上被理解
   并处置；所有有副作用的操作都需要用户显式触发，不自动重放提交、推送、合并或其他

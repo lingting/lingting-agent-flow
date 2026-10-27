@@ -165,15 +165,5 @@ export function canCancelWorkflow(run?: WorkflowRun): boolean {
   if (run.status_terminal || run.cancel_requested) return false;
   return run.status === "running" || run.status === "pending";
 }
-
-/**
- * 是否允许恢复工作流。
- *
- * 只有 `blocked`、`recovery_required` 与 `pending` 允许恢复：终态记录不会被恢复流程
- * 重新打开，`cancel_requested` 必须先完成取消。
- */
-export function canResumeWorkflow(run?: WorkflowRun): boolean {
-  if (!run) return false;
-  if (run.cancel_requested) return false;
-  return run.status === "blocked" || run.status === "recovery_required" || run.status === "pending";
-}
+// 恢复工作流的可用性判定不在这里：它只能来自服务端 `resume-eligibility` 的 can_resume，
+// 页面与面板都不得依据工作流执行状态自行推断（见 `resumeAction.ts`）。
