@@ -68,6 +68,26 @@ function sampleAttempt(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/** 一份会话响应样本，字段与 Go 端 `httpapi.SessionResponse` 一致 */
+function sampleSession(overrides: Record<string, unknown> = {}) {
+  return {
+    agent_role: "developer",
+    archive_path: "/data/sessions/session-1.jsonl",
+    archive_status: "succeeded",
+    created_at: "2026-10-26T08:00:00Z",
+    export_status: "succeeded",
+    id: "session-1",
+    model: "group/free",
+    provider: "openai",
+    role_id: "role-1",
+    started_at: "2026-10-26T08:00:00Z",
+    status: "completed",
+    status_terminal: true,
+    task_id: "task-1",
+    ...overrides,
+  };
+}
+
 /** 一份验证记录样本 */
 function sampleValidation(overrides: Record<string, unknown> = {}) {
   return {
@@ -206,12 +226,17 @@ async function stubValidations(page: Page, records = [sampleValidation()]) {
 }
 
 /** 拦截尝试下的会话列表 */
-async function stubSessions(page: Page) {
+async function stubSessions(page: Page, sessions: unknown[] = []) {
   await page.route(
     "**/api/v1/tasks/task-1/steps/step-1/attempts/attempt-1/sessions?*",
     (route: Route) =>
       route.fulfill({
-        body: JSON.stringify({ current: 1, records: [], size: 100, total: 0 }),
+        body: JSON.stringify({
+          current: 1,
+          records: sessions,
+          size: 100,
+          total: sessions.length,
+        }),
         contentType: "application/json",
         status: 200,
       }),
@@ -702,6 +727,162 @@ test.describe("验证与诊断操作", () => {
 
     await expect(page.getByText(/代码已初始化/)).toBeVisible();
     await expect(page.getByText(/任务分支：agent\/task-1/)).toBeVisible();
+  });
+});
+
+test.describe("尝试与会话历史展示", () => {
+  test("超时、取消、错误分类与失败阶段按真实字段展示", async ({ page }) => {
+    await stubTaskList(page);
+    await stubTaskDetail(page);
+    await stubWorkflow(page);
+    await stubSteps(page, [sampleStep({ status: "failed" })]);
+    await stubAttempts(page, [
+      // 超时尝试：布尔事实为 true，错误分类与失败阶段都已写入。
+      sampleAttempt({
+        cancelled: false,
+        error_class: "timeout",
+        failure_stage: "execute",
+        status: "timed_out",
+        timed_out: true,
+      }),
+      // 取消尝试：只有取消布尔为 true，没有错误分类与失败阶段。
+      sampleAttempt({
+        attempt_number: 2,
+        cancelled: true,
+        id: "attempt-2",
+        status: "cancelled",
+        timed_out: false,
+      }),
+    ]);
+    await stubValidations(page, []);
+    await stubSessions(page);
+
+    await openDetail(page);
+    await selectStep(page);
+
+    // 超时是独立事实：状态标签使用 DictTag，独立标记是另一个文本节点，
+    // 因此"已超时"在页面上应出现两次（状态标签 + 独立标记）。
+    await expect(page.getByText("已超时", { exact: true })).toHaveCount(2);
+    // 错误分类与失败阶段按真实取值展示为中文说明。
+    await expect(page.getByText(/错误分类 执行超时/)).toBeVisible();
+    await expect(page.getByText(/失败阶段 执行阶段/)).toBeVisible();
+    // 取消尝试展示独立标记：状态标签"已取消" + 独立标记"已取消"。
+    await expect(page.getByText("已取消", { exact: true })).toHaveCount(2);
+    // 取消尝试没有 error_class / failure_stage，因此不出现虚构分类。
+    await expect(page.getByText(/错误分类/)).toHaveCount(1);
+    await expect(page.getByText(/失败阶段/)).toHaveCount(1);
+  });
+
+  test("布尔事实为 false 时不产生超时与取消警告", async ({ page }) => {
+    await stubTaskList(page);
+    await stubTaskDetail(page);
+    await stubWorkflow(page);
+    await stubSteps(page, [sampleStep({ status: "completed" })]);
+    await stubAttempts(page, [
+      sampleAttempt({ cancelled: false, status: "completed", timed_out: false }),
+    ]);
+    await stubValidations(page, []);
+    await stubSessions(page);
+
+    await openDetail(page);
+    await selectStep(page);
+
+    await expect(page.getByText(/第 1 次尝试/)).toBeVisible();
+    await expect(page.getByText("已超时", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("已取消", { exact: true })).toHaveCount(0);
+    await expect(page.getByText(/错误分类/)).toHaveCount(0);
+    await expect(page.getByText(/失败阶段/)).toHaveCount(0);
+  });
+
+  test("会话归档与导出状态展示中文标签，并保留真实标识", async ({ page }) => {
+    await stubTaskList(page);
+    await stubTaskDetail(page);
+    await stubWorkflow(page);
+    await stubSteps(page);
+    await stubAttempts(page);
+    await stubValidations(page, []);
+    await stubSessions(page, [sampleSession()]);
+
+    await openDetail(page);
+    await selectStep(page);
+
+    await expect(page.getByText(/归档 已归档 \/ 导出 已导出/)).toBeVisible();
+    // 会话标识、角色、模型与执行状态仍完整保留。
+    // 执行状态"正常结束"与尝试状态标签同名，这里限定到会话行的作用域内断言。
+    const sessionLine = page.getByText(/developer \/ group\/free/);
+    await expect(sessionLine).toBeVisible();
+    await expect(page.getByText("session-1", { exact: true })).toBeVisible();
+    await expect(page.getByText("正常结束", { exact: true })).toHaveCount(2);
+  });
+
+  test("未知归档与导出状态原样展示，不误报成功", async ({ page }) => {
+    await stubTaskList(page);
+    await stubTaskDetail(page);
+    await stubWorkflow(page);
+    await stubSteps(page);
+    await stubAttempts(page);
+    await stubValidations(page, []);
+    await stubSessions(page, [
+      sampleSession({
+        archive_status: "archived_to_object_storage",
+        export_status: "pending_upload",
+      }),
+    ]);
+
+    await openDetail(page);
+    await selectStep(page);
+
+    await expect(page.getByText(/归档 archived_to_object_storage/)).toBeVisible();
+    await expect(page.getByText(/导出 pending_upload/)).toBeVisible();
+    await expect(page.getByText(/归档 已归档/)).toHaveCount(0);
+    await expect(page.getByText(/导出 已导出/)).toHaveCount(0);
+  });
+
+  test("归档成功但导出失败时两个事实分别展示", async ({ page }) => {
+    await stubTaskList(page);
+    await stubTaskDetail(page);
+    await stubWorkflow(page);
+    await stubSteps(page);
+    await stubAttempts(page);
+    await stubValidations(page, []);
+    await stubSessions(page, [
+      sampleSession({ archive_status: "succeeded", export_status: "failed" }),
+    ]);
+
+    await openDetail(page);
+    await selectStep(page);
+
+    await expect(page.getByText(/归档 已归档/)).toBeVisible();
+    await expect(page.getByText(/导出 导出失败/)).toBeVisible();
+    // 执行状态与归档 / 导出状态没有被合并成一个"成功"结论：
+    // 归档成功与导出失败同时存在，页面不会把导出失败读作已导出。
+    await expect(page.getByText(/导出 已导出/)).toHaveCount(0);
+  });
+
+  test("既有执行记录、验证历史与操作入口没有回归", async ({ page }) => {
+    await stubTaskList(page);
+    await stubTaskDetail(page);
+    await stubWorkflow(page);
+    await stubSteps(page);
+    await stubAttempts(page, [
+      sampleAttempt({ error_class: "agent_failure", failure_stage: "execute", status: "failed" }),
+    ]);
+    await stubValidations(page);
+    await stubSessions(page, [sampleSession()]);
+
+    await openDetail(page);
+    await selectStep(page);
+
+    // 执行记录
+    await expect(page.getByText(/第 1 次尝试/)).toBeVisible();
+    await expect(page.getByText("执行尝试", { exact: true })).toBeVisible();
+    // 验证历史
+    await expect(page.getByText("验证历史", { exact: true })).toBeVisible();
+    await expect(page.getByText("最新验证")).toBeVisible();
+    await expect(page.getByText(/流程 已完成/)).toBeVisible();
+    // 操作入口仍可见
+    await expect(page.getByRole("button", { name: "确定性验证" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "初始化代码" })).toBeVisible();
   });
 });
 

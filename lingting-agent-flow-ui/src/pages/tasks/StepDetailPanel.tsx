@@ -12,9 +12,10 @@ import { Alert, Descriptions, Flex, Space, Typography } from "antd";
 import { Button, DictTag, type DictItem, LinkButton } from "lingting-react-ui";
 import { useState } from "react";
 
-import type { Attempt, Step, Task, ValidationHistoryResponse } from "@/lib/api";
+import type { Attempt, Session, Step, Task, ValidationHistoryResponse } from "@/lib/api";
 import {
   ATTEMPT_STATUS_META,
+  attemptFailureFacts,
   attemptStatusMeta,
   canExecuteAndValidate,
   canExecuteStep,
@@ -24,6 +25,10 @@ import {
   CHECK_STATUS_LABEL,
   checkStatusLabel,
   isKnownStepStatus,
+  sessionArchiveStatusLabel,
+  sessionExportStatusLabel,
+  sessionRunStatusLabel,
+  sessionStatusLabel,
   STEP_STATUS_DICT,
   stepStatusMeta,
   stepTypeLabel,
@@ -182,6 +187,33 @@ function ValidationRunBlock({
   );
 }
 
+/**
+ * 单条会话的只读展示。
+ *
+ * 执行状态、归档状态与导出状态分别展示三个独立的领域事实，任何两个都不能互相推导：
+ * 调用正常结束不代表归档或导出成功，归档成功也不代表 HTML 已导出。
+ */
+function SessionLine({ session }: { session: Session }) {
+  const runStatus = sessionRunStatusLabel(session.run_status);
+  return (
+    <Space align="center" size={8} wrap>
+      <Typography.Text type="secondary">会话</Typography.Text>
+      <Typography.Text code>{session.id}</Typography.Text>
+      <Typography.Text type="secondary">
+        {session.agent_role} / {session.model}
+      </Typography.Text>
+      <Typography.Text type="secondary">
+        {sessionStatusLabel(session.status)}
+        {runStatus ? `（${runStatus}）` : ""}
+      </Typography.Text>
+      <Typography.Text type="secondary">
+        归档 {sessionArchiveStatusLabel(session.archive_status)} / 导出{" "}
+        {sessionExportStatusLabel(session.export_status)}
+      </Typography.Text>
+    </Space>
+  );
+}
+
 /** 单个尝试：状态、结论与"验证 / 初始化代码"两个动作 */
 function AttemptBlock({
   attempt,
@@ -198,6 +230,7 @@ function AttemptBlock({
 }) {
   const busy = operations.state.running !== undefined;
   const meta = attemptStatusMeta(attempt.status);
+  const facts = attemptFailureFacts(attempt);
   return (
     <Flex gap={4} vertical>
       <Space align="center" size={8} wrap>
@@ -206,6 +239,8 @@ function AttemptBlock({
         <Typography.Text code>{attempt.id}</Typography.Text>
         <Typography.Text type="secondary">退出码 {attempt.exit_code}</Typography.Text>
         <Typography.Text type="secondary">{formatTime(attempt.started_at)}</Typography.Text>
+        {facts.timedOut && <Typography.Text type="warning">{facts.timedOut}</Typography.Text>}
+        {facts.cancelled && <Typography.Text type="warning">{facts.cancelled}</Typography.Text>}
         {attempt.verification_verdict && (
           <Typography.Text type="secondary">
             验证判定 {verdictMeta(attempt.verification_verdict).label}
@@ -220,23 +255,26 @@ function AttemptBlock({
       {attempt.result_summary && (
         <Typography.Text type="secondary">{attempt.result_summary}</Typography.Text>
       )}
+      {(facts.errorClass || facts.failureStage) && (
+        <Space align="center" size={8} wrap>
+          {facts.errorClass && (
+            <Typography.Text type="secondary">
+              错误分类 {facts.errorClass}
+              {facts.errorClassKnown ? "" : "（未在当前版本中定义）"}
+            </Typography.Text>
+          )}
+          {facts.failureStage && (
+            <Typography.Text type="secondary">
+              失败阶段 {facts.failureStage}
+              {facts.failureStageKnown ? "" : "（未在当前版本中定义）"}
+            </Typography.Text>
+          )}
+        </Space>
+      )}
       {sessions.length > 0 && (
         <Flex gap={2} vertical>
           {sessions.map((session) => (
-            <Space align="center" key={session.id} size={8} wrap>
-              <Typography.Text type="secondary">会话</Typography.Text>
-              <Typography.Text code>{session.id}</Typography.Text>
-              <Typography.Text type="secondary">
-                {session.agent_role} / {session.model}
-              </Typography.Text>
-              <Typography.Text type="secondary">
-                {session.status}
-                {session.run_status ? `（${session.run_status}）` : ""}
-              </Typography.Text>
-              <Typography.Text type="secondary">
-                归档 {session.archive_status} / 导出 {session.export_status}
-              </Typography.Text>
-            </Space>
+            <SessionLine key={session.id} session={session} />
           ))}
         </Flex>
       )}

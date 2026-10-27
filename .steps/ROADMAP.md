@@ -77,10 +77,14 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > `code_save_records` 与 `next_actions` 依据服务端响应如实展示；未知阻塞分类与未知动作原样
 > 保留，查询失败不显示为允许续跑，刷新失败保留上一次真实快照，切换任务丢弃迟到响应，
 > 恢复按钮仍由既有 `canResumeWorkflow` 判定；未修改任何后端代码，新增前端单元测试 34 个、
-> E2E 16 个，全量单元测试 282 通过、全量 E2E 110 通过 / 3 既有失败）。**P4-M3 仍为
-> `in_progress`**：同轮核验 M3-2
-> 已由 P4-M2-7 满足、M3-1 部分满足（缺尝试的 `timed_out` / `cancelled` / `error_class` /
-> `failure_stage` 与会话归档 / 导出状态的中文标签），M3-6、M3-7、M3-8 未开始。P1 证据见
+> E2E 16 个，全量单元测试 282 通过、全量 E2E 110 通过 / 3 既有失败）；**P4-M3-1 于同日
+> 完成**（Attempt / Session 历史展示补齐：`AttemptBlock` 补齐 `timed_out` / `cancelled` /
+> `error_class` / `failure_stage`，超时与取消只读独立布尔而非从 `status` 反推，错误分类与
+> 失败阶段缺省时不渲染、未知取值原样保留；抽出 `SessionLine` 用三张互不复用的映射表把
+> 归档 / 导出 / 执行状态中文化，未知值原样、缺省用中性占位符；未修改任何后端代码，也未
+> 新增或修改任何 HTTP API，新增前端单元测试 30 个、E2E 6 个，全量单元测试 326 通过、
+> 全量 E2E 116 通过 / 3 既有失败）。**P4-M3 仍为 `in_progress`**：M3-2 已由 P4-M2-7 满足、
+> M3-1 已完成，M3-6、M3-7、M3-8 未开始。P1 证据见
 > `P1-single-task-e2e.md` 的对应"完成记录"；P2-M1 证据见
 > `P2-M1-recovery-boundaries.md`；P2-M2 证据见 `P2-M2-interruption-semantics.md`；
 > P2-M3 与 P2-M4 证据见 `P2-reliability-recovery.md` 的对应里程碑详情。

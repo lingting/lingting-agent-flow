@@ -123,6 +123,164 @@ export function attemptStatusMeta(status: string): AttemptStatusMeta {
   return ATTEMPT_STATUS_META[status as AttemptStatus] ?? { color: "default", label: status };
 }
 
+/**
+ * 尝试级别的独立事实标记：超时、取消、错误分类与失败阶段。
+ *
+ * 这四个字段各自表达一件真实的事，前端只负责如实展示：
+ *   - `timed_out` / `cancelled` 是尝试记录上的独立布尔事实，不由 `status` 推断；
+ *   - `error_class` / `failure_stage` 的取值来自服务端，未知取值原样保留。
+ *
+ * 缺省一律返回 `undefined`，调用方据此不渲染该行，绝不补出"未发生"或"成功"。
+ */
+export type AttemptFailureFacts = {
+  /** 已超时标记；仅在服务端 `timed_out=true` 时存在 */
+  timedOut?: string;
+  /** 已取消标记；仅在服务端 `cancelled=true` 时存在 */
+  cancelled?: string;
+  /** 错误分类；缺省时不出现 */
+  errorClass?: string;
+  /** 失败阶段标签；缺省时不出现 */
+  failureStage?: string;
+  /** `error_class` 为前端已知取值，可附加中文说明 */
+  errorClassKnown: boolean;
+  /** `failure_stage` 为前端已知取值，可附加中文说明 */
+  failureStageKnown: boolean;
+};
+
+/**
+ * 错误分类的中文说明，取值来自 Go 端 `domain.RetryErrorClass` 与恢复流程实际写入的分类。
+ *
+ * 只收录已在服务端代码中确认会写入 `Attempt.ErrorClass` 或同一分类枚举的取值；
+ * 未收录的取值按原始文本展示，不根据错误文本猜测分类。
+ */
+export const ATTEMPT_ERROR_CLASS_LABEL: Record<string, string> = {
+  agent_failure: "Agent 调用失败",
+  timeout: "执行超时",
+  verification_failure: "验证未通过",
+  network: "网络类失败",
+};
+
+/** 失败阶段的中文说明，取值来自服务端实际写入 `Attempt.FailureStage` 的阶段名 */
+export const ATTEMPT_FAILURE_STAGE_LABEL: Record<string, string> = {
+  execute: "执行阶段",
+  verify: "验证阶段",
+  recover: "服务恢复阶段",
+};
+
+/** 超时与取消的固定标记文案；两者不互相替代 */
+export const ATTEMPT_TIMED_OUT_LABEL = "已超时";
+export const ATTEMPT_CANCELLED_LABEL = "已取消";
+
+/** 读取错误分类说明；未知取值没有说明，返回 undefined 而不是猜测 */
+export function attemptErrorClassLabel(errorClass?: string): string | undefined {
+  if (!errorClass) return undefined;
+  return ATTEMPT_ERROR_CLASS_LABEL[errorClass];
+}
+
+/** 读取失败阶段标签；未知取值原样返回，缺省时返回 undefined */
+export function attemptFailureStageLabel(stage?: string): string | undefined {
+  if (!stage) return undefined;
+  return ATTEMPT_FAILURE_STAGE_LABEL[stage] ?? stage;
+}
+
+/**
+ * 汇总一次尝试的失败事实。
+ *
+ * 只读取接口返回的真实字段：布尔值为 `true` 时才产生标记，`false` 不产生任何警告；
+ * `error_class` / `failure_stage` 缺省时不出现在结果里，也就不会被页面渲染。
+ */
+export function attemptFailureFacts(attempt: Attempt): AttemptFailureFacts {
+  const errorClass = attempt.error_class?.trim();
+  const failureStage = attempt.failure_stage?.trim();
+  const facts: AttemptFailureFacts = {
+    errorClassKnown: false,
+    failureStageKnown: false,
+  };
+  if (attempt.timed_out) facts.timedOut = ATTEMPT_TIMED_OUT_LABEL;
+  if (attempt.cancelled) facts.cancelled = ATTEMPT_CANCELLED_LABEL;
+  if (errorClass) {
+    facts.errorClass = ATTEMPT_ERROR_CLASS_LABEL[errorClass] ?? errorClass;
+    facts.errorClassKnown = Object.hasOwn(ATTEMPT_ERROR_CLASS_LABEL, errorClass);
+  }
+  if (failureStage) {
+    facts.failureStage = ATTEMPT_FAILURE_STAGE_LABEL[failureStage] ?? failureStage;
+    facts.failureStageKnown = Object.hasOwn(ATTEMPT_FAILURE_STAGE_LABEL, failureStage);
+  }
+  return facts;
+}
+
+/**
+ * 会话归档状态标签，取值来自 Go 端 `domain.SessionArchiveStatus`。
+ *
+ * 归档指把容器内的原始会话文件复制到 AgentFlow 本机持久目录，它与会话执行状态、
+ * HTML 导出状态是三个独立事实，因此三张映射表互不复用。
+ */
+export const SESSION_ARCHIVE_STATUS_LABEL: Record<string, string> = {
+  not_attempted: "未归档",
+  succeeded: "已归档",
+  failed: "归档失败",
+};
+
+/** 会话 HTML 导出状态标签，取值来自 Go 端 `domain.SessionExportStatus` */
+export const SESSION_EXPORT_STATUS_LABEL: Record<string, string> = {
+  not_attempted: "未导出",
+  succeeded: "已导出",
+  failed: "导出失败",
+};
+
+/** 状态缺省时的中性占位符：既不表示成功，也不表示失败 */
+export const SESSION_STATUS_MISSING_LABEL = "未提供";
+
+/**
+ * 会话执行状态标签，取值来自 Go 端 `domain.SessionStatus`。
+ *
+ * 它只表达"这次 Agent 调用如何结束"，不代表步骤验收通过，也不代表归档或导出成功。
+ */
+export const SESSION_STATUS_LABEL: Record<string, string> = {
+  starting: "启动中",
+  running: "执行中",
+  completed: "正常结束",
+  failed: "失败",
+  cancelled: "已取消",
+  interrupted: "已中断",
+};
+
+/** 会话运行结果标签，取值来自 Go 端 `domain.SessionRunStatus` */
+export const SESSION_RUN_STATUS_LABEL: Record<string, string> = {
+  completed: "运行正常结束",
+  failed: "运行失败",
+  cancelled: "运行已取消",
+  timed_out: "运行已超时",
+};
+
+/**
+ * 三个读取函数共用同一条边界规则，因此逐个显式写出，不做额外抽象：
+ * 缺省 → 中性占位符；已知 → 中文标签；未知 → 服务端原始值。
+ */
+/** 读取归档状态标签；未知取值原样展示，不因字典缺项隐藏真实取值 */
+export function sessionArchiveStatusLabel(status?: string): string {
+  if (!status) return SESSION_STATUS_MISSING_LABEL;
+  return SESSION_ARCHIVE_STATUS_LABEL[status] ?? status;
+}
+
+/** 读取导出状态标签；与归档状态各自独立，不由归档结果推导 */
+export function sessionExportStatusLabel(status?: string): string {
+  if (!status) return SESSION_STATUS_MISSING_LABEL;
+  return SESSION_EXPORT_STATUS_LABEL[status] ?? status;
+}
+
+/** 读取会话执行状态标签；未知取值原样展示 */
+export function sessionStatusLabel(status?: string): string {
+  if (!status) return SESSION_STATUS_MISSING_LABEL;
+  return SESSION_STATUS_LABEL[status] ?? status;
+}
+
+/** 读取会话运行结果标签；缺省返回 undefined，由调用方决定不渲染 */
+export function sessionRunStatusLabel(runStatus?: string): string | undefined {
+  if (!runStatus) return undefined;
+  return SESSION_RUN_STATUS_LABEL[runStatus] ?? runStatus;
+}
+
 /** 单步骤执行结论的中文标签，取值来自 Go 端 `domain.StepExecutionOutcome` */
 export const EXECUTION_OUTCOME_LABEL: Record<StepExecutionOutcome, string> = {
   completed: "正常结束",
