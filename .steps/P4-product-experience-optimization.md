@@ -138,7 +138,7 @@ P1–P3 保证"能跑"，但用户无法清楚地操作与观察时，主流程�
 | P4-M1 | 盘点当前 API 与 Web 业务操作能力的缺口 | `completed`（2026-10-26，基于 `master` HEAD `70f82b1`） | P3 退出 |
 | P4-M2 | 提供完整任务生命周期的必要操作入口 | `completed`（M2-1 至 M2-7 全部完成，2026-10-26） | P4-M1 |
 | P4-M3 | 展示阶段进度、验证结果、失败原因和恢复状态 | `completed`（M3-2 经核实已由 M2-7 满足；M3-1、M3-3、M3-4、M3-5、M3-6、M3-7、M3-8 全部完成） | P4-M1、P4-M2（部分工作项需 M2 先补 API） |
-| P4-M4 | 支持必要的继续执行、取消、恢复和结果查看操作 | `pending` | P4-M2、P4-M3 |
+| P4-M4 | 支持必要的继续执行、取消、恢复和结果查看操作 | `in_progress`（M4-1 已完成，M4-2 至 M4-5 未开始） | P4-M2、P4-M3 |
 | P4-M5 | 根据真实使用问题或可测量数据推进性能、并发、存储与架构优化 | `pending` | P4-M2、P4-M3、P4-M4 |
 
 ## 阶段退出条件
@@ -377,12 +377,21 @@ M2 之后依次为 M3（可观测性）、M4（继续/取消/恢复/核验）、
 ### P4-M4 支持必要的继续执行、取消、恢复和结果查看操作
 
 - **ID**：`P4-M4`
-- **状态**：`pending`
+- **状态**：`in_progress`（**M4-1 已于 2026-10-27 完成**，M4-2 / M4-3 / M4-4 / M4-5 未开始）
 - **必要性**：这些是任务管理闭环的必要操作。
 - **前置依赖**：P4-M2、P4-M3。
 - **工作项**：
   1. **M4-1** 重试入口，可用性来自 `GET /tasks/{id}/retry-eligibility`（禁止前端推断，
-     禁止硬编码状态白名单）。覆盖 G5。
+     禁止硬编码状态白名单）。覆盖 G5。**已完成**（2026-10-27）：前端新增
+     `RetryTaskRequest` / `RetryTaskResponse` / `RetryEligibilityResponse` 类型、
+     `fetchTaskRetryEligibility` / `retryTask`、纯函数模块 `retry.ts`、状态 Hook
+     `useTaskRetry.ts` 与详情页独立面板 `RetryTaskPanel`；重试入口只由 `can_retry` 决定，
+     `blocking` 逐项展示（10 个分类，未知取值原样保留），查询失败不启用操作、刷新失败保留
+     上一次真实快照、切换任务丢弃迟到响应，结果按 `workflow_started` 区分"已启动工作流"与
+     "任务已重开但工作流没有启动"，请求失败与结果不确定分别提示且不自动重发。**未修改任何
+     Go 代码与重试领域规则**；新增前端单元测试 34 个与 E2E 10 个，`pnpm test:unit:safe` 443
+     通过、`pnpm test:e2e:safe` 155 通过 / 0 失败、`pnpm check` 与 `pnpm build` 通过。交付物
+     [`P4-M4-1-task-retry-web-entry.md`](./P4-M4-1-task-retry-web-entry.md)。
   2. **M4-2** 代码保存核验操作入口。覆盖 G8。
   3. **M4-3** 容器记录查看与显式 `delete` / `detach`（需先补 HTTP 接口）。覆盖 G9。
   4. **M4-4** 继续执行 / 恢复工作流的可用性来自 `resume-eligibility`。覆盖 G11。

@@ -34,6 +34,7 @@ import {
 } from "@/pages/tasks/closeout";
 import { CodeSavePanel } from "@/pages/tasks/CodeSavePanel";
 import { ResumeEligibilityPanel } from "@/pages/tasks/ResumeEligibilityPanel";
+import { RetryTaskPanel } from "@/pages/tasks/RetryTaskPanel";
 import { TaskExecutionPanel } from "@/pages/tasks/TaskExecutionPanel";
 import { canStartTask, describeLaunchResult } from "@/pages/tasks/launch";
 import {
@@ -640,6 +641,7 @@ export function TasksPage() {
           )}
           {selected && <CodeSavePanel task={selected} token={tokens.codeSaves} />}
           {selected && <ResumeEligibilityPanel task={selected} token={tokens.resume} />}
+          {selected && <RetryTaskPanel onRefreshTask={refreshTaskDetail} task={selected} />}
         </Flex>
       )}
 

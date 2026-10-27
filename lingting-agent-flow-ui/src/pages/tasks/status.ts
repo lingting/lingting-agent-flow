@@ -42,6 +42,16 @@ export const TASK_STATUS_OPTIONS = Object.entries(TASK_STATUS_META).map(([value,
   value: value as TaskStatus,
 }));
 
+/**
+ * "状态取值 → 中文标签"的投影。
+ *
+ * 它只是 `TASK_STATUS_META` 的另一种形状，用于需要按字符串查标签的场景（例如服务端返回的
+ * 状态值可能不在联合类型内）。不新增状态名，也不改变语义。
+ */
+export const TASK_STATUS_LABEL: Record<TaskStatus, string> = Object.fromEntries(
+  Object.entries(TASK_STATUS_META).map(([value, meta]) => [value, meta.label]),
+) as Record<TaskStatus, string>;
+
 /** 读取状态元数据；未知状态原样展示，不猜测语义 */
 export function taskStatusMeta(status: TaskStatus): TaskStatusMeta {
   return TASK_STATUS_META[status] ?? { active: false, color: "default", label: String(status) };

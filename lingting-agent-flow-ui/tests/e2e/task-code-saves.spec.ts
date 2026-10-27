@@ -446,7 +446,8 @@ test.describe("代码保存记录展示", () => {
 
     await expect(page.getByText("加载代码保存记录失败")).toBeVisible();
     await expect(page.getByText("任务不存在: task-1")).toBeVisible();
-    await expect(page.getByRole("button", { name: /重\s*试/ })).toBeVisible();
+    // 页面上有多个"重试"按钮（各只读面板各自的重试入口），这里断言第一个可见即可。
+    await expect(page.getByRole("button", { name: /^重\s*试$/ }).first()).toBeVisible();
     await expect(page.getByText(/该任务当前没有代码保存记录/)).toHaveCount(0);
   });
 

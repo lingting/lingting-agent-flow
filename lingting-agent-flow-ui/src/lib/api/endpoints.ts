@@ -15,6 +15,9 @@ import type {
   EnvironmentType,
   EnvironmentVersion,
   ResumeEligibilityResponse,
+  RetryEligibilityResponse,
+  RetryTaskRequest,
+  RetryTaskResponse,
   ResumeWorkflowRequest,
   RoleListResponse,
   StartTaskRequest,
@@ -205,6 +208,60 @@ export function createTask(body: CreateTaskRequest, options: ApiRequestOptions =
 /** 请求取消任务；返回取消后的任务状态 */
 export function cancelTask(taskID: string, options: ApiRequestOptions = {}) {
   return apiRequest<Task>(taskCancelPath(taskID), { ...options, method: "POST" });
+}
+/**
+ * 任务显式重试的路径。
+ *
+ * 形状与 Go 端 `httpapi.actionTaskID` 一致：`{taskID}/retry` 两段才是重试动作；
+ * `{taskID}/retry-eligibility` 是只读资格查询，两者是不同接口。
+ */
+export function taskRetryPath(taskID: string): string {
+  return `${taskPath(taskID)}/retry`;
+}
+
+/** 只读重试资格查询路径 */
+export function taskRetryEligibilityPath(taskID: string): string {
+  return `${taskPath(taskID)}/retry-eligibility`;
+}
+
+/**
+ * 查询任务当前的重试资格与阻塞原因。
+ *
+ * 服务端 `app.TaskRetryService.Eligibility` 读取任务、未结束执行记录、计划步骤与代码保存
+ * 记录后由 `domain.DecideTaskRetryEligibility` 判定。三种结果必须区分：
+ *   - `200`：拿到了服务端结论，`can_retry` 才是唯一判据；
+ *   - `404`：任务不存在或已逻辑删除，不能当作"可以重试"；
+ *   - 其他失败：查询失败，不能伪造"允许重试"或"没有阻塞"。
+ *
+ * 该请求只读，不领取租约、不写状态、不产生远程副作用。
+ */
+export function fetchTaskRetryEligibility(taskID: string, options: ApiRequestOptions = {}) {
+  return apiRequest<RetryEligibilityResponse>(taskRetryEligibilityPath(taskID), options);
+}
+
+/**
+ * 显式重试一个失败任务。
+ *
+ * 服务端只在任务被重开、启动流程得出真实结论后才返回响应，成功时是 202（表示"已受理并
+ * 得出结论"，不表示任务已完成）。响应中的 `workflow_started` 才是"工作流真的启动了"的
+ * 唯一依据；失败时返回非 2xx 与统一错误结构，因此调用方不会拿到伪造的成功。
+ *
+ * 该操作有真实副作用（可能创建容器、初始化远程工作区、调用 Planner 并启动编排），因此
+ * 调用方不得自动重试；重试流程本身包含远程准备与 Planner 调用，耗时远超普通请求，这里
+ * 不设客户端超时，避免客户端提前断开后留下"未知状态"的现场。
+ */
+export function retryTask(
+  taskID: string,
+  body: RetryTaskRequest = {},
+  options: ApiRequestOptions = {},
+) {
+  return apiRequest<RetryTaskResponse>(taskRetryPath(taskID), {
+    ...options,
+    body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json", ...options.headers },
+    method: "POST",
+    timeoutMs: options.timeoutMs ?? 0,
+  });
 }
 
 /**

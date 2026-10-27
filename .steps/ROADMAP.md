@@ -92,6 +92,20 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > 失败保留上一次成功快照且不改变策略；步骤 / 代码保存 / 续跑资格三个子面板只在服务端真实
 > 字段变化时重载；未修改任何后端代码，未新增或修改任何 HTTP API，新增前端单元测试 35 个、
 > E2E 11 个，全量单元测试 361 通过、全量 E2E 129 通过 / 0 失败）。
+> **P4-M4 状态为 `in_progress`**（M4-1 已完成，M4-2 / M4-3 / M4-4 / M4-5 未开始）。
+> **M4-1（失败任务显式重试 Web 入口）于 2026-10-27 完成**：核实
+> `POST /tasks/{id}/retry`（同步、成功 202）与 `GET /tasks/{id}/retry-eligibility`（只读）的
+> 真实 DTO、10 个稳定拒绝分类、同步与超时语义，然后只接入前端——新增
+> `RetryTaskRequest` / `RetryTaskResponse` / `RetryEligibilityResponse` 类型、
+> `fetchTaskRetryEligibility` / `retryTask`（不设客户端超时，避免同步操作提前失联）、纯函数
+> 模块 `retry.ts`、唯一状态 Hook `useTaskRetry.ts` 与详情页独立面板 `RetryTaskPanel`。
+> 可用性只来自服务端 `can_retry`（前端无状态白名单），阻塞分类逐项展示且未知取值原样保留，
+> 查询失败不启用操作、刷新失败保留上一次真实快照、切换任务丢弃迟到响应；结果按
+> `workflow_started` 区分"已启动工作流"与"任务已重开但工作流没有启动"，请求失败如实展示
+> 服务端错误，超时 / 网络中断提示"无法确认"且不自动重发。资格查询不进入 5 秒自动刷新。
+> **未修改任何 Go 代码、重试领域规则与工作流编排**；新增前端单元测试 34 个、E2E 10 个，
+> `pnpm test:unit:safe` 443 通过、`pnpm test:e2e:safe` 155 通过 / 0 失败、`pnpm check` 与
+> `pnpm build` 通过。证据见 `P4-M4-1-task-retry-web-entry.md`。
 > **P4-M3 已为 `completed`**：M3-2 已由 P4-M2-7 满足，M3-1、M3-3、M3-4、M3-5、
 > M3-6、M3-7 与 M3-8 全部完成。**M3-8（事件时间线与修复周期历史）于 2026-10-27 完成**：
 > 核实出 `ListEventsByTask` 生产代码零调用者且排序只有 `ORDER BY id`、`EventFilter`
@@ -356,6 +370,16 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
   `next_actions` 只展示原文并标注 CLI 建议需人工执行；加载状态由
   `useResumeEligibility.ts` 独立维护，查询失败不显示为允许续跑、刷新失败保留上一次快照、
   切换任务丢弃迟到响应，恢复按钮仍由既有 `canResumeWorkflow` 判定。本轮不发起恢复或核验。
+- **Web 失败任务显式重试入口**（P4-M4-1）：任务详情下的面板
+  `lingting-agent-flow-ui/src/pages/tasks/RetryTaskPanel.tsx`，展示元数据与竞态判定在
+  `retry.ts`，唯一状态实现在 `useTaskRetry.ts`，数据来自
+  `fetchTaskRetryEligibility`（`GET /api/v1/tasks/{taskID}/retry-eligibility`）与
+  `retryTask`（`POST /api/v1/tasks/{taskID}/retry`）。重试入口可用性**只**来自服务端
+  `can_retry`（前端不含状态白名单），`blocking` 逐项展示（10 个已核实分类各有中文标签与
+  解释，未知分类原样保留），查询失败不启用操作、刷新失败保留上一次真实快照、切换任务丢弃
+  迟到响应；结果按 `workflow_started` 区分"已启动工作流"与"任务已重开但工作流没有启动"，
+  请求失败如实展示服务端错误，超时 / 网络中断提示"无法确认"且**不自动重发**。资格查询不进入
+  5 秒自动刷新循环，本轮未修改任何 Go 代码与领域规则。
 - **验证失败修复与重新验证闭环**（P1-M3）：`app.StepWorkflowService.ExecuteAndValidate`
   驱动 `runRepairLoop`（`internal/app/step_workflow_repair.go`），每轮复用
   `StepExecutor.Execute(DeferCompletion)` + `ValidationService.Validate`，每轮新建
@@ -500,9 +524,12 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
     **前端三阶段展示已于 P4-M3-5 闭合**（任务详情只读面板按提交 / 推送 / 合并 / 记录可信度 /
     核验结论五组事实分别展示，见 `P4-M3-5-code-save-status-display.md`），核验操作入口仍归
     P4-M4（M4-2）。
-  - 其余 P1 业务决策阻塞：G5 重试、G9 容器处置，以及 G7 执行记录
-    历史的字段级剩余（P4-M3-3 核实：步骤 / 尝试 / 会话已展示，仍缺尝试的 `timed_out` /
-    `cancelled` / `error_class` / `failure_stage` 与会话归档 / 导出状态的中文标签）。
+  - 其余 P1 业务决策阻塞：G9 容器处置，以及 G7 执行记录历史的字段级剩余
+    （**已闭合**：P4-M3-1 补齐尝试的 `timed_out` / `cancelled` / `error_class` /
+    `failure_stage` 与会话归档 / 导出状态的中文标签）。
+    **G5 失败任务重试入口已于 P4-M4-1 闭合**（任务详情新增 `RetryTaskPanel`，可用性只来自
+    `GET /retry-eligibility` 的 `can_retry`，阻塞分类逐项展示且未知取值原样保留，结果按
+    `workflow_started` 区分，不自动重发，见 `P4-M4-1-task-retry-web-entry.md`）。
     **G11 续跑阻塞原因已于 P4-M3-4 闭合**（任务详情新增 `ResumeEligibilityPanel`，逐项展示
     `blocking` 与 `next_actions`，未知分类原样保留，见
     `P4-M3-4-resume-eligibility-display.md`）。

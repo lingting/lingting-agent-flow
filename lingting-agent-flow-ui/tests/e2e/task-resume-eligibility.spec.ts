@@ -537,7 +537,8 @@ test.describe("失败、刷新与竞态", () => {
 
     await expect(page.getByText("查询续跑资格失败")).toBeVisible();
     await expect(page.getByText("任务不存在: task-1")).toBeVisible();
-    await expect(page.getByRole("button", { name: /重\s*试/ })).toBeVisible();
+    // 页面上有多个"重试"按钮（续跑资格与重试资格各自的重试入口），这里断言第一个可见即可。
+    await expect(page.getByRole("button", { name: /^重\s*试$/ }).first()).toBeVisible();
     await expect(page.getByText("当前查询结果允许继续推进")).toHaveCount(0);
     await expect(page.getByText("当前存在阻塞，不能按当前条件直接续跑")).toHaveCount(0);
   });

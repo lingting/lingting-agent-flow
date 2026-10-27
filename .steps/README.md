@@ -26,7 +26,20 @@
 ## 当前阶段与当前里程碑
 
 - **当前阶段**：P4 —— 产品操作体验与针对性优化。
-- **当前里程碑**：`P4-M3` —— 展示阶段进度、验证结果、失败原因和恢复状态，状态
+- **当前里程碑**：`P4-M4` —— 支持必要的继续执行、取消、恢复和结果查看操作，状态
+  `in_progress`（M4-1 已完成，M4-2 / M4-3 / M4-4 / M4-5 未开始）。子任务 **M4-1（失败任务
+  显式重试 Web 入口）已于 2026-10-27 完成**，交付物为
+  [`P4-M4-1-task-retry-web-entry.md`](./P4-M4-1-task-retry-web-entry.md)：前端补齐
+  `RetryEligibilityResponse` / `RetryTaskResponse` / `RetryTaskRequest` 类型与
+  `fetchTaskRetryEligibility` / `retryTask`（`GET|POST /api/v1/tasks/{taskID}/retry[-eligibility]`），
+  任务详情新增独立面板 `RetryTaskPanel`；可用性只来自服务端 `can_retry`（不出现任何状态
+  白名单），阻塞分类逐项展示且未知取值原样保留，查询失败不启用操作、刷新失败保留上一次真实
+  快照、切换任务丢弃迟到响应；结果按 `workflow_started` 区分"已启动工作流"与"任务已重开但
+  工作流没有启动"，请求失败如实展示服务端错误，超时 / 网络中断提示结果无法确认且**不自动
+  重新提交**。**本轮未修改任何 Go 代码，未改动重试领域规则，也未新增第二套工作流**；新增前端
+  单元测试 34 个与 E2E 10 个，`pnpm test:unit:safe` 443 通过，`pnpm test:e2e:safe` 155 通过 /
+  0 失败，`pnpm check` 与 `pnpm build` 通过。
+- **上一里程碑**：`P4-M3` —— 展示阶段进度、验证结果、失败原因和恢复状态，状态
   `completed`（M3-1、M3-3、M3-4、M3-5、M3-6、M3-7、M3-8 已完成，M3-2 已由 M2-7 满足）。
   详见下方"当前里程碑"详述与
   [`P4-M3-1-attempt-session-history.md`](./P4-M3-1-attempt-session-history.md)。
@@ -205,8 +218,18 @@
   里程碑归属。本次未运行任何测试，全部结论为静态代码核实，已在文档 §9 如实记录。
   另外记录了 7 处历史文档与代码不符之处（README 仍称并发调度未实现、任务调度器未接入、
   项目/环境/容器/代码保存均无 HTTP 接口、任务页尚未接入步骤执行入口等）。
-- **下一步**：`P4-M3`（展示阶段进度、验证结果、失败原因和恢复状态）已全部完成，下一步进入
-  `P4-M4`（继续执行、取消、恢复和结果查看操作）。2026-10-26 的核实结论：**M3-3 已完成**（任务最终结论与收尾闭环展示，见
+- **下一步**：`P4-M4`（支持必要的继续执行、取消、恢复和结果查看操作）状态 `in_progress`。
+  **M4-1（失败任务显式重试 Web 入口，2026-10-27 完成）**：前端接入
+  `GET|POST /api/v1/tasks/{taskID}/retry[-eligibility]`，可用性只来自服务端 `can_retry`，
+  阻塞分类逐项展示、未知取值原样保留，`workflow_started=false` 不被显示为已启动，请求失败
+  与结果不确定分别提示且不自动重发；**未修改任何 Go 代码、重试领域规则与工作流编排**。见
+  [`P4-M4-1-task-retry-web-entry.md`](./P4-M4-1-task-retry-web-entry.md)。剩余子项：
+  M4-2（代码保存核验入口）、M4-3（容器 `delete` / `detach`，需先补 HTTP 接口）、
+  M4-4（`resume-eligibility` 驱动的恢复入口）、M4-5（单步诊断动作）。
+  环境构建 Web 入口与角色变更入口是否上 Web 仍按产品取舍决定。详见
+  [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
+- **P4-M3 收尾时的核实记录**（M4 开始前）：`P4-M3`（展示阶段进度、验证结果、失败原因和
+  恢复状态）已全部完成；2026-10-26 的核实结论：**M3-3 已完成**（任务最终结论与收尾闭环展示，见
   [`P4-M3-3-task-closeout-display.md`](./P4-M3-3-task-closeout-display.md)）；**M3-5 已完成**
   （代码保存三阶段状态展示，见
   [`P4-M3-5-code-save-status-display.md`](./P4-M3-5-code-save-status-display.md)）；**M3-2 已由
@@ -223,8 +246,6 @@
   **M3-8 已完成**（事件时间线与修复周期历史，见
   [`P4-M3-8-event-timeline-repair-cycle-history.md`](./P4-M3-8-event-timeline-repair-cycle-history.md)）。
   至此 **P4-M3 全部子项完成**。
-  环境构建 Web 入口与角色变更入口是否上 Web 仍按产品取舍决定。详见
-  [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
 - **更早里程碑**：`P3-M5` —— 验证多任务并发、冲突和资源回收行为，状态
   `completed`（2026-10-25，基于 `master` HEAD `abfdfd3` 之后的工作区核实与实施）。
   交付物为 [`P3-M5-multi-task-acceptance.md`](./P3-M5-multi-task-acceptance.md)。
@@ -441,6 +462,7 @@
 | [`P4-M3-6-workflow-step-timestamps.md`](./P4-M3-6-workflow-step-timestamps.md) | P4-M3-6：工作流步骤起止时间补全（领域时间语义、DTO 映射、步骤列表时间展示，未新增表/迁移/接口） |
 | [`P4-M3-7-progress-auto-refresh.md`](./P4-M3-7-progress-auto-refresh.md) | P4-M3-7：任务执行进度自动刷新（活动状态判定的领域证据、5 秒周期与串行调度、启动窗口、后台暂停与恢复、请求票据与迟到响应、子面板按字段变化重载的成本取舍、测试证据、基线失败对照、剩余风险） |
 | [`P4-M3-8-event-timeline-repair-cycle-history.md`](./P4-M3-8-event-timeline-repair-cycle-history.md) | P4-M3-8：事件时间线与修复周期历史（事件模型与 payload 安全核查、排序与分页契约、归属校验、白名单摘要、前端两面板的刷新与竞态策略、测试证据、剩余风险） |
+| [`P4-M4-1-task-retry-web-entry.md`](./P4-M4-1-task-retry-web-entry.md) | P4-M4-1：失败任务显式重试 Web 入口（真实路由与 DTO 契约、资格唯一判据 `can_retry`、10 个阻塞分类、同步请求与超时语义、操作防重与结果语义、竞态处理、测试证据、剩余风险） |
 | [`P4-frontend-test-resource-governance.md`](./P4-frontend-test-resource-governance.md) | P4 工程质量：前端测试并发治理（真实资源模型核实、Playwright worker 4 / Vitest worker 4 默认值、非法输入拒绝、资源受限入口、能力边界、验收命令与既有失败隔离） |
 
 ## 下一步工作的选择规则

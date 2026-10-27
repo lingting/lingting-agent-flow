@@ -1408,3 +1408,74 @@ export type ResumeEligibilityResponse = {
   /** 整体结论摘要 */
   summary: string;
 };
+
+/**
+ * 显式重试的请求体，与 Go 端 `httpapi.RetryTaskRequest` 一致。
+ *
+ * 只接受执行参数：任务标识来自路径，重开哪个执行周期、用哪些步骤完全由服务端依据持久化
+ * 事实决定。调用方不能传步骤列表、Session 路径、工作目录、执行代次或角色覆盖。
+ * 全部字段缺省时使用任务配置或服务端默认值。
+ */
+export type RetryTaskRequest = {
+  /** 可选补充说明，会追加在计划与每一步骤的提示词之后 */
+  prompt?: string;
+  /** 单个步骤开发阶段的超时秒数，0 或省略表示使用任务配置或服务端默认值 */
+  timeout_seconds?: number;
+  /** 单个步骤验证阶段的超时秒数，0 或省略表示使用服务端默认值 */
+  validation_timeout_seconds?: number;
+  /** 本次规划调用的超时秒数，0 或省略表示使用任务配置或服务端默认值 */
+  plan_timeout_seconds?: number;
+};
+
+/**
+ * 一次显式重试的结果，与 Go 端 `httpapi.RetryTaskResponse` 一致（成功时为 202）。
+ *
+ * 结构显式区分四件事：重试前的状态、当前真实状态、新执行代次，以及编排是否真的启动。
+ * `workflow_started=false` 表示任务已进入新周期但没有启动编排，不得展示为"重试已开始"。
+ * 请求成功也不代表任务业务成功：最终结论与收尾闭环仍是独立事实。
+ */
+export type RetryTaskResponse = {
+  task_id: string;
+  /** 重试前的任务状态（通常是 failed） */
+  previous_status: TaskStatus | (string & {});
+  /** 重试结束后读取到的任务真实状态 */
+  task_status: TaskStatus | (string & {});
+  /** 本次重试取得的任务领取代次，用于区分执行周期 */
+  lease_epoch: number;
+  /** 本次重试的领取者标识 */
+  lease_owner: string;
+  /** 本次重试是否真的启动了工作流推进 */
+  workflow_started: boolean;
+  /** 启动后的执行记录；未启动时缺省，不得由前端补造 */
+  run?: WorkflowRun;
+  /** 启动流程失败时的阶段；成功时缺省 */
+  failure_stage?: string;
+  /** 启动流程失败时的原因摘要；成功时缺省 */
+  failure?: string;
+  /** 本次启动开始时间；Go 端零值时序列化为 `0001-01-01T00:00:00Z` */
+  started_at?: string;
+  /** 本次启动结束时间；未完成或零值时同样是零值时间 */
+  finished_at?: string;
+};
+
+/**
+ * 只读的重试资格结论，与 Go 端 `httpapi.RetryEligibilityResponse` 一致。
+ *
+ * `can_retry` 是服务端资格判定的唯一依据：前端不得根据 `task.status === "failed"`、
+ * `status_terminal`、`status_finished` 或任务状态名称自行推断可重试。
+ *
+ * `blocking` 是服务端给出的稳定阻塞分类（`internal/domain/task_retry.go` 的
+ * `TaskRetryRejection`），类型保留 `string` 分支：未知分类原样展示，不省略、不归并。
+ * Go 端 `append` 到空切片时可能序列化为 `null`，因此类型保留 `null` 分支。
+ */
+export type RetryEligibilityResponse = {
+  task_id: string;
+  /** 任务当前状态；未知取值原样保留 */
+  task_status: TaskStatus | (string & {});
+  /** 服务端当前是否允许开启一次新的执行周期 */
+  can_retry: boolean;
+  /** 阻塞项分类列表，空列表或 `null` 表示服务端没有给出阻塞项 */
+  blocking: string[] | null;
+  /** 服务端给出的可读说明；缺省时界面使用中性提示，不编造结论 */
+  summary: string;
+};
