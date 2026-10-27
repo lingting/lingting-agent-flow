@@ -12,18 +12,24 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { mergeEventPages } from "@/pages/tasks/history";
+
 import {
   ApiError,
   fetchAttemptSessions,
   fetchStepAttempts,
+  fetchStepRepairCycles,
   fetchStepValidations,
   fetchTaskCodeSaves,
+  fetchTaskEvents,
   fetchTaskSteps,
   fetchValidationFeedback,
   type Attempt,
   type CodeSaveRecord,
+  type RepairCycle,
   type Session,
   type Step,
+  type TaskEvent,
   type ValidationFailureFeedback,
   type ValidationHistoryResponse,
 } from "@/lib/api";
@@ -263,4 +269,229 @@ export function useValidationFeedback(
   }, [task, step, run]);
 
   return state;
+}
+
+/**
+ * 事件时间线的分页大小。
+ *
+ * 与服务端默认值一致：历史记录一次不需要太多，用户按需"加载更多"即可。这个值
+ * 只在用户显式打开或点击"加载更多"时才会被请求用到，不参与自动刷新周期。
+ */
+export const EVENT_PAGE_SIZE = 20;
+
+/** 事件时间线的加载状态 */
+export type EventTimelineState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | {
+      status: "ready";
+      events: TaskEvent[];
+      /** 服务端给出的真实总数 */
+      total: number;
+      /** 是否还有后续记录 */
+      hasMore: boolean;
+      /** 加载更多进行中 */
+      loadingMore: boolean;
+      /** 刷新或加载更多失败；展示的仍是上一次成功取得的事件 */
+      error?: string;
+    }
+  | { status: "error"; error: string };
+
+/**
+ * 加载任务事件时间线。
+ *
+ * 与步骤 / 尝试 / 验证的加载器刻意分开，原因有三：
+ *   1. 事件历史是任务维度的，不随选中步骤变化；
+ *   2. 它不参与 5 秒自动刷新：事件只在用户显式刷新、打开任务或"加载更多"时读取，
+ *      避免把整个历史列表无条件放进刷新循环；
+ *   3. 它需要分页累积，而不是每次覆盖。
+ *
+ * `token` 由父组件在服务端执行相关事实变化时递增，用来在"确实发生了新事件"时
+ * 重新读取第一页；`taskID` 变化会重置累积结果，旧任务的迟到响应一律丢弃。
+ */
+export function useTaskEvents(
+  taskID?: string,
+  token?: number,
+): {
+  state: EventTimelineState;
+  /** 重新读取第一页（手动刷新与失败重试共用） */
+  reload: () => void;
+  /** 追加下一页；没有后续记录或正在加载时不发起请求 */
+  loadMore: () => void;
+} {
+  const trimmed = taskID?.trim() ?? "";
+  const [state, setState] = useState<EventTimelineState>({ status: "idle" });
+  const [nonce, setNonce] = useState(0);
+  const [moreNonce, setMoreNonce] = useState(0);
+  // 累积结果与归属任务：读取回调需要它们的最新值，不能依赖闭包快照。
+  const eventsRef = useRef<TaskEvent[]>([]);
+  const totalRef = useRef(0);
+  const taskRef = useRef("");
+  const loadingMoreRef = useRef(false);
+
+  const reload = useCallback(() => setNonce((value) => value + 1), []);
+  const loadMore = useCallback(() => {
+    if (loadingMoreRef.current) return;
+    if (eventsRef.current.length >= totalRef.current) return;
+    loadingMoreRef.current = true;
+    setState((current) =>
+      current.status === "ready" ? { ...current, loadingMore: true } : current,
+    );
+    setMoreNonce((value) => value + 1);
+  }, []);
+
+  useEffect(() => {
+    // 切换任务或卸载时清空累积结果，防止把上一个任务的事件拼进新任务列表。
+    if (taskRef.current !== trimmed) {
+      taskRef.current = trimmed;
+      eventsRef.current = [];
+      totalRef.current = 0;
+      loadingMoreRef.current = false;
+    }
+    if (!trimmed) {
+      eventsRef.current = [];
+      totalRef.current = 0;
+      setState({ status: "idle" });
+      return;
+    }
+    const controller = new AbortController();
+    if (eventsRef.current.length === 0) {
+      setState({ status: "loading" });
+    }
+    fetchTaskEvents(trimmed, { offset: 0, size: EVENT_PAGE_SIZE }, { signal: controller.signal })
+      .then(({ data }) => {
+        if (controller.signal.aborted) return;
+        eventsRef.current = data.records;
+        totalRef.current = data.total;
+        loadingMoreRef.current = false;
+        setState({
+          events: data.records,
+          hasMore: data.records.length < data.total,
+          loadingMore: false,
+          status: "ready",
+          total: data.total,
+        });
+      })
+      .catch((cause: unknown) => {
+        if (controller.signal.aborted) return;
+        loadingMoreRef.current = false;
+        const message = describeApiError(cause);
+        const previous = eventsRef.current;
+        if (previous.length === 0) {
+          setState({ error: message, status: "error" });
+          return;
+        }
+        // 刷新失败：保留上一次成功取得的事件，并单独提示失败，不伪装成空历史。
+        setState({
+          error: message,
+          events: previous,
+          hasMore: previous.length < totalRef.current,
+          loadingMore: false,
+          status: "ready",
+          total: totalRef.current,
+        });
+      });
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trimmed, nonce, token]);
+
+  useEffect(() => {
+    if (moreNonce === 0) return;
+    if (!trimmed) return;
+    const controller = new AbortController();
+    fetchTaskEvents(
+      trimmed,
+      { offset: eventsRef.current.length, size: EVENT_PAGE_SIZE },
+      { signal: controller.signal },
+    )
+      .then(({ data }) => {
+        if (controller.signal.aborted) return;
+        const merged = mergeEventPages(eventsRef.current, data.records);
+        eventsRef.current = merged;
+        totalRef.current = data.total;
+        loadingMoreRef.current = false;
+        setState({
+          events: merged,
+          hasMore: merged.length < data.total,
+          loadingMore: false,
+          status: "ready",
+          total: data.total,
+        });
+      })
+      .catch((cause: unknown) => {
+        if (controller.signal.aborted) return;
+        loadingMoreRef.current = false;
+        setState((current) =>
+          current.status === "ready"
+            ? { ...current, error: describeApiError(cause), loadingMore: false }
+            : current,
+        );
+      });
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [moreNonce, trimmed]);
+
+  return { loadMore, reload, state };
+}
+
+/**
+ * 加载某步骤的修复周期历史。
+ *
+ * 只读：不开启新周期、不关闭活动周期、不创建执行尝试。
+ *
+ * 与通用加载器的两点差异都是刻意的：
+ *   - 步骤或任务变化时清空累积结果，避免把上一个步骤的周期显示在新步骤下；
+ *   - 刷新失败保留上一次成功取得的记录并单独提示，不把失败显示成"暂无周期"。
+ *
+ * 旧步骤的迟到响应由 `AbortController` 丢弃，因此快速切换步骤不会被覆盖。
+ */
+export function useStepRepairCycles(
+  taskID?: string,
+  stepID?: string,
+  token?: number,
+): { state: LoadState<RepairCycle[]>; reload: () => void } {
+  const task = taskID?.trim() ?? "";
+  const step = stepID?.trim() ?? "";
+  const [state, setState] = useState<LoadState<RepairCycle[]>>({ status: "idle" });
+  const [nonce, setNonce] = useState(0);
+  const dataRef = useRef<RepairCycle[] | undefined>(undefined);
+  const ownerRef = useRef("");
+
+  const reload = useCallback(() => setNonce((value) => value + 1), []);
+
+  useEffect(() => {
+    const owner = `${task}/${step}`;
+    if (ownerRef.current !== owner) {
+      ownerRef.current = owner;
+      dataRef.current = undefined;
+    }
+    if (!task || !step) {
+      dataRef.current = undefined;
+      setState({ status: "idle" });
+      return;
+    }
+    const controller = new AbortController();
+    if (dataRef.current === undefined) {
+      setState({ status: "loading" });
+    }
+    fetchStepRepairCycles(task, step, { signal: controller.signal })
+      .then(({ data }) => {
+        if (controller.signal.aborted) return;
+        dataRef.current = data.records;
+        setState({ data: data.records, status: "ready" });
+      })
+      .catch((cause: unknown) => {
+        if (controller.signal.aborted) return;
+        const message = describeApiError(cause);
+        const previous = dataRef.current;
+        if (previous === undefined) {
+          setState({ error: message, status: "error" });
+          return;
+        }
+        setState({ data: previous, error: message, status: "ready" });
+      });
+    return () => controller.abort();
+  }, [nonce, step, task, token]);
+
+  return { reload, state };
 }

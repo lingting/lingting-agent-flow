@@ -17,6 +17,9 @@
  *   - 会话：`{taskID}/steps/{stepID}/attempts/{attemptID}/sessions`
  *   - 验证：`{taskID}/steps/{stepID}/validations`、
  *     `{taskID}/steps/{stepID}/validations/{runID}/feedback`
+ *   - 历史：`{taskID}/events`、`{taskID}/steps/{stepID}/repair-cycles`
+ *
+ * 历史查询都是纯只读：不触发执行、重试、验证、恢复、代码保存或任何 Git 操作。
  */
 import { apiRequest, type ApiRequestOptions } from "./client";
 import { taskPath } from "./endpoints";
@@ -28,10 +31,12 @@ import type {
   ExecuteStepResponse,
   ExecuteStepsRequest,
   ExecuteStepsResponse,
+  EventTimelineResponse,
   InitializeCodeRequest,
   InitializeCodeResponse,
   OpenRepairCycleResponse,
   PlanRequest,
+  RepairCycleHistoryResponse,
   PlanResponse,
   SessionListResponse,
   StepListResponse,
@@ -213,6 +218,63 @@ export function fetchValidationFeedback(
     validationFeedbackPath(taskID, stepID, runID),
     options,
   );
+}
+
+/** 任务事件时间线路径 */
+export function taskEventsPath(taskID: string): string {
+  return `${taskPath(taskID)}/events`;
+}
+
+/** 步骤修复周期历史路径 */
+export function stepRepairCyclesPath(taskID: string, stepID: string): string {
+  return `${stepPath(taskID, stepID)}/repair-cycles`;
+}
+
+/** 事件时间线的分页与筛选参数；`type` 为空表示不限制 */
+export type EventTimelineQuery = {
+  size?: number;
+  offset?: number;
+  type?: string[];
+};
+
+/** 把事件时间线的分页与类型筛选拼到路径上；空值不参与拼接 */
+function withEventQuery(path: string, query: EventTimelineQuery): string {
+  const params = new URLSearchParams();
+  if (query.size !== undefined) params.set("size", String(query.size));
+  if (query.offset !== undefined) params.set("offset", String(query.offset));
+  for (const type of query.type ?? []) {
+    params.append("type", type);
+  }
+  const encoded = params.toString();
+  return encoded ? `${path}?${encoded}` : path;
+}
+
+/**
+ * 查询任务事件时间线分页。
+ *
+ * 返回顺序完全采用服务端顺序（`created_at, id` 升序），页面不重新排序：重排会
+ * 破坏"同一时间戳事件的确定先后"这一契约。`total` 是满足筛选条件的真实总数。
+ */
+export function fetchTaskEvents(
+  taskID: string,
+  query: EventTimelineQuery = {},
+  options: ApiRequestOptions = {},
+) {
+  return apiRequest<EventTimelineResponse>(withEventQuery(taskEventsPath(taskID), query), options);
+}
+
+/**
+ * 查询某步骤的修复周期历史。
+ *
+ * 只读：不开启新周期、不关闭活动周期、不创建执行尝试。返回按周期序号升序排列，
+ * 页面不得按 `closed_at` 重排或据此推断周期是否成功。
+ */
+export function fetchStepRepairCycles(
+  taskID: string,
+  stepID: string,
+  options: ApiRequestOptions = {},
+) {
+  return apiRequest<RepairCycleHistoryResponse>(stepRepairCyclesPath(taskID, stepID), options);
 }
 
 /** POST 请求的公共选项：JSON 请求体 + 不设客户端超时 */

@@ -27,8 +27,7 @@
 
 - **当前阶段**：P4 —— 产品操作体验与针对性优化。
 - **当前里程碑**：`P4-M3` —— 展示阶段进度、验证结果、失败原因和恢复状态，状态
-  `in_progress`（M3-1、M3-3、M3-4、M3-5、M3-6、M3-7 已完成、M3-2 已由 M2-7 满足，
-  M3-8 未开始，需先补后端能力）。
+  `completed`（M3-1、M3-3、M3-4、M3-5、M3-6、M3-7、M3-8 已完成，M3-2 已由 M2-7 满足）。
   详见下方"当前里程碑"详述与
   [`P4-M3-1-attempt-session-history.md`](./P4-M3-1-attempt-session-history.md)。
 - **上一里程碑**：`P4-M2` —— 提供完整任务生命周期的必要操作入口，状态 `completed`
@@ -86,8 +85,8 @@
   `git stash -u` 基线对照确认为既有问题）。P4-M2 的 7 个子任务至此全部完成。详见
   [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
 - **当前里程碑**：`P4-M3` —— 展示阶段进度、验证结果、失败原因和恢复状态，状态
-  `in_progress`。2026-10-26 按当前代码核实并实施子任务 **M3-3（任务最终结论与收尾闭环
-  展示）**，交付物为
+  `completed`（全部子项已完成）。2026-10-26 按当前代码核实并实施子任务 **M3-3（任务最终
+  结论与收尾闭环展示）**，交付物为
   [`P4-M3-3-task-closeout-display.md`](./P4-M3-3-task-closeout-display.md)：先核实
   `TaskResponse` 已输出 `final_result` / `closeout` / `closeout_summary`（`omitempty` 与
   派生规则见 `domain.DecideTaskCloseoutView`），再补齐前端 `Task` 类型（新增 `TaskResult` /
@@ -161,7 +160,25 @@
   `finished_at` 自 `0001_initial.sql` 起即存在且读写完整）。新增 Go 测试 28 个（领域 7、存储 10、
   HTTP 6、工作流集成 5）与前端单元测试 15 个、E2E 7 个；`go test ./tests/...` 2262 通过（46
   包，退出码 0），`pnpm test:unit:safe` 376 通过，`pnpm test:e2e:safe` 136 通过，
-  `pnpm check` 与 `pnpm build` 通过。至此 **M3-6 已完成**，M3-8 未开始。
+  `pnpm check` 与 `pnpm build` 通过。至此 **M3-6 已完成**。
+- **M3-8（事件时间线与修复周期历史，2026-10-27 完成）**：先核实出两处真实缺口——①
+  `storage.EventStore.ListEventsByTask` 生产代码**零调用者**（只有测试调用），且排序只有
+  `ORDER BY id`（不是 `(created_at, id)`，补写的更早事件会排在时间线末尾），`EventFilter`
+  缺偏移、类型筛选与总数统计；②`RepairCycleStore.ListRepairCyclesByStep` 有存储能力但
+  **没有任何 HTTP 只读入口**，前端只有写入口 `openRepairCycle`。据此新增
+  `GET /api/v1/tasks/{taskID}/events`（`type` / `size` / `offset`，排序固定
+  `(created_at, id)`，`total` 来自独立 `CountEventsByTask`）与
+  `GET /api/v1/tasks/{taskID}/steps/{stepID}/repair-cycles`，应用层由
+  `app.HistoryQueryService` 承担归属校验（先任务、后步骤、再比对 `step.TaskID`）。
+  **事件 payload 不直接输出**：逐写入点核实 21 处 payload 后发现含 `work_dir`、
+  `repository`、`container_id`、`error_summary` 等不可对外字段，因此改为 8 字段白名单摘要
+  并经 `domain.ClipFeedbackText` 脱敏截断；未知类型保留原始 `event_type` 与
+  `type_known=false`。前端新增 `EventTimelinePanel`（任务维度，独立于步骤选择，不进入
+  5 秒刷新循环）与 `RepairCyclePanel`（步骤维度），`closed_at` 缺失一律显示"尚未记录结束
+  时间"。**未新增表、未新增迁移、未改动工作流执行与成功判定**。新增 Go 测试 30 个、前端
+  单元测试 33 个、E2E 9 个；`go test ./tests/unit/...` 1751 通过，`go test
+  ./tests/integration/local/...` 463 通过，`pnpm test:unit:safe` 409 通过，
+  `pnpm test:e2e:safe` 145 通过 / 0 失败，`pnpm check` 与 `pnpm build` 通过。
 - **上一里程碑**：`P4-M2` —— 提供完整任务生命周期的必要操作入口，状态 `completed`
   （M2-1 至 M2-7 全部完成）。详见
   [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
@@ -188,8 +205,8 @@
   里程碑归属。本次未运行任何测试，全部结论为静态代码核实，已在文档 §9 如实记录。
   另外记录了 7 处历史文档与代码不符之处（README 仍称并发调度未实现、任务调度器未接入、
   项目/环境/容器/代码保存均无 HTTP 接口、任务页尚未接入步骤执行入口等）。
-- **下一步**：继续 `P4-M3`（展示阶段进度、验证结果、失败原因和恢复状态）的剩余子项。
-  2026-10-26 的核实结论：**M3-3 已完成**（任务最终结论与收尾闭环展示，见
+- **下一步**：`P4-M3`（展示阶段进度、验证结果、失败原因和恢复状态）已全部完成，下一步进入
+  `P4-M4`（继续执行、取消、恢复和结果查看操作）。2026-10-26 的核实结论：**M3-3 已完成**（任务最终结论与收尾闭环展示，见
   [`P4-M3-3-task-closeout-display.md`](./P4-M3-3-task-closeout-display.md)）；**M3-5 已完成**
   （代码保存三阶段状态展示，见
   [`P4-M3-5-code-save-status-display.md`](./P4-M3-5-code-save-status-display.md)）；**M3-2 已由
@@ -203,7 +220,9 @@
   [`P4-M3-7-progress-auto-refresh.md`](./P4-M3-7-progress-auto-refresh.md)）。
   **M3-6 已完成**（工作流步骤起止时间，见
   [`P4-M3-6-workflow-step-timestamps.md`](./P4-M3-6-workflow-step-timestamps.md)）；
-  **M3-8 未开始**（事件时间线、修复周期历史，需要先补后端能力）。
+  **M3-8 已完成**（事件时间线与修复周期历史，见
+  [`P4-M3-8-event-timeline-repair-cycle-history.md`](./P4-M3-8-event-timeline-repair-cycle-history.md)）。
+  至此 **P4-M3 全部子项完成**。
   环境构建 Web 入口与角色变更入口是否上 Web 仍按产品取舍决定。详见
   [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)。
 - **更早里程碑**：`P3-M5` —— 验证多任务并发、冲突和资源回收行为，状态
@@ -419,7 +438,9 @@
 | [`P4-M3-3-task-closeout-display.md`](./P4-M3-3-task-closeout-display.md) | P4-M3-3：任务最终结论与收尾闭环展示（真实 DTO 契约、M3-1 / M3-2 核验结论、三行独立事实与警示、测试证据、未执行项与剩余风险） |
 | [`P4-M3-5-code-save-status-display.md`](./P4-M3-5-code-save-status-display.md) | P4-M3-5：代码保存三阶段状态展示（后端 DTO 字段契约、前端类型与查询封装、五组独立事实与警示、测试证据、未执行项与剩余风险） |
 | [`P4-M3-4-resume-eligibility-display.md`](./P4-M3-4-resume-eligibility-display.md) | P4-M3-4：续跑资格与阻塞原因展示（后端查询契约与阻塞分类来源、前端类型与查询封装、资格结论与阻塞项展示规则、加载失败与竞态处理、测试证据、退出条件检查、剩余风险） |
+| [`P4-M3-6-workflow-step-timestamps.md`](./P4-M3-6-workflow-step-timestamps.md) | P4-M3-6：工作流步骤起止时间补全（领域时间语义、DTO 映射、步骤列表时间展示，未新增表/迁移/接口） |
 | [`P4-M3-7-progress-auto-refresh.md`](./P4-M3-7-progress-auto-refresh.md) | P4-M3-7：任务执行进度自动刷新（活动状态判定的领域证据、5 秒周期与串行调度、启动窗口、后台暂停与恢复、请求票据与迟到响应、子面板按字段变化重载的成本取舍、测试证据、基线失败对照、剩余风险） |
+| [`P4-M3-8-event-timeline-repair-cycle-history.md`](./P4-M3-8-event-timeline-repair-cycle-history.md) | P4-M3-8：事件时间线与修复周期历史（事件模型与 payload 安全核查、排序与分页契约、归属校验、白名单摘要、前端两面板的刷新与竞态策略、测试证据、剩余风险） |
 | [`P4-frontend-test-resource-governance.md`](./P4-frontend-test-resource-governance.md) | P4 工程质量：前端测试并发治理（真实资源模型核实、Playwright worker 4 / Vitest worker 4 默认值、非法输入拒绝、资源受限入口、能力边界、验收命令与既有失败隔离） |
 
 ## 下一步工作的选择规则

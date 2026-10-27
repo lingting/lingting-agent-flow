@@ -630,18 +630,32 @@ type ValidationFeedbackStore interface {
 }
 
 // EventFilter 约束事件查询条件，零值表示不限制。
+//
+// 排序固定为 (created_at, id) 升序：`id` 是自增主键，作为同一毫秒内多条事件
+// 的稳定次序。由于 id 单调递增，`(created_at, id)` 的顺序在分页查询中也是稳定
+// 的（键唯一），不会漏行也不会重复行。
 type EventFilter struct {
 	// StepID 限制事件所属步骤。
 	StepID *domain.ID
+	// Types 限制事件类型，为空表示不限制。
+	//
+	// 类型取值不做白名单校验：历史数据中可能存在当前版本不再定义的类型，
+	// 这样的记录必须仍可被按类型查询出来，而不是被静默丢弃。
+	Types []domain.EventType
 	// Limit 限制返回条数，小于等于 0 表示不限制。
 	Limit int
+	// Offset 是跳过的记录条数，小于等于 0 表示不跳过。
+	Offset int
 }
 
 // EventStore 保存任务工作流的关键事件，只提供追加与查询。
 type EventStore interface {
 	// AppendEvent 追加事件并返回带自增标识的记录。
 	AppendEvent(ctx context.Context, event domain.Event) (domain.Event, error)
+	// ListEventsByTask 按 (created_at, id) 升序返回任务的事件时间线。
 	ListEventsByTask(ctx context.Context, taskID domain.ID, filter EventFilter) ([]domain.Event, error)
+	// CountEventsByTask 返回满足筛选条件的事件总数，供分页响应使用。
+	CountEventsByTask(ctx context.Context, taskID domain.ID, filter EventFilter) (int, error)
 }
 
 // RoleSeeder 提供角色初始化所需的最低能力。

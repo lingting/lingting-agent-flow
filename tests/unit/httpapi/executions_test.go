@@ -90,6 +90,33 @@ func newExecutionAPIFixture(t *testing.T) *executionAPIFixture {
 	return fixture
 }
 
+// handlerWithHistory 用同一个数据库构造额外装配历史查询服务的处理器。
+func handlerWithHistory(
+	t *testing.T,
+	fixture *executionAPIFixture,
+) http.Handler {
+	t.Helper()
+	history, err := app.NewHistoryQueryService(fixture.db)
+	if err != nil {
+		t.Fatalf("构造历史查询服务失败: %v", err)
+	}
+	tasks, err := app.NewTaskService(app.TaskServiceOptions{Store: fixture.db})
+	if err != nil {
+		t.Fatalf("构造任务服务失败: %v", err)
+	}
+	records, err := app.NewExecutionRecordService(fixture.db)
+	if err != nil {
+		t.Fatalf("构造执行记录服务失败: %v", err)
+	}
+	return httpapi.NewHandler(httpapi.Deps{
+		Health:           app.NewHealthService(fixture.db),
+		SystemInfo:       func() app.SystemInfo { return app.SystemInfo{Version: "test"} },
+		Tasks:            tasks,
+		ExecutionRecords: records,
+		History:          history,
+	})
+}
+
 // apiTaskWithStep 写入需求、任务与一个步骤，并把步骤回填到 out。
 func apiTaskWithStep(
 	t *testing.T,

@@ -72,6 +72,8 @@ type Options struct {
 	CodeSaveQueries *app.CodeSaveQueryService
 	// ResumeEligibility 计算任务的续跑资格，为空时该接口报告服务不可用。
 	ResumeEligibility *app.ResumeEligibilityService
+	// History 提供事件时间线与修复周期历史的只读查询，为空时两个接口报告服务不可用。
+	History *app.HistoryQueryService
 	// TaskRetry 是任务显式重试服务，为空时重试接口报告服务不可用。
 	TaskRetry *app.TaskRetryService
 	// Files 是前端静态资源文件系统，为空时使用嵌入资源。
@@ -129,6 +131,7 @@ func New(options Options) (*Server, error) {
 		Containers:        options.Containers,
 		CodeSaveQueries:   options.CodeSaveQueries,
 		ResumeEligibility: options.ResumeEligibility,
+		History:           options.History,
 		TaskRetry:         options.TaskRetry,
 		Logger:            logger,
 	})

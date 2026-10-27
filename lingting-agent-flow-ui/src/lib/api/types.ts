@@ -816,6 +816,74 @@ export type ValidationRun = {
 };
 
 /**
+ * 一条任务事件，与 Go 端 `httpapi.EventResponse` 一一对应。
+ *
+ * 服务端不返回原始 `payload_json`：只有经审查的摘要文本会出现在 `summary`。
+ * 没有可公开摘要时该字段缺省，前端必须显示中性占位符，不能把缺失当成空事件。
+ */
+export type TaskEvent = {
+  /** 数据库自增标识，同一任务内单调递增，可作为列表稳定 key */
+  id: number;
+  task_id: string;
+  step_id?: string;
+  attempt_id?: string;
+  session_id?: string;
+  /** 事件类型原始取值，与 Go 端 `domain.EventType` 一致 */
+  event_type: string;
+  /** 事件类型中文说明；未知类型缺省，前端原样显示 `event_type` */
+  event_label?: string;
+  /** 事件类型是否属于当前版本定义的类型 */
+  type_known: boolean;
+  /** 经审查并脱敏的事件摘要；无可公开内容时缺省 */
+  summary?: string;
+  created_at: string;
+};
+
+/**
+ * 任务事件时间线的分页响应，与 Go 端 `httpapi.EventTimelineResponse` 一一对应。
+ *
+ * `records` 按服务端规定的 `(created_at, id)` 升序排列，前端不重新排序。
+ * 分页使用 `size` / `offset`；`total` 是满足筛选条件的真实总数。
+ */
+export type EventTimelineResponse = {
+  task_id: string;
+  records: TaskEvent[];
+  total: number;
+  size: number;
+  offset: number;
+};
+
+/**
+ * 一个修复周期，与 Go 端 `httpapi.RepairCycleResponse` 一一对应。
+ *
+ * `closed_at` 缺省只表示"该周期还没有记录结束时间"，不表示周期成功、失败或仍在
+ * 执行；前端必须显示中性占位符。
+ */
+export type RepairCycle = {
+  id: string;
+  task_id: string;
+  step_id: string;
+  /** 步骤内的周期序号，从 1 开始 */
+  sequence: number;
+  /** 周期开启时生效的尝试次数上限（含首轮），是快照而非当前配置 */
+  max_attempts: number;
+  /** 开启来源的稳定标签，例如 `user_reopen` */
+  opened_by: string;
+  opened_at: string;
+  /** 结束时间；缺省表示尚未记录 */
+  closed_at?: string;
+};
+
+/** 某个步骤的修复周期历史，与 Go 端 `httpapi.RepairCycleHistoryResponse` 一一对应 */
+export type RepairCycleHistoryResponse = {
+  task_id: string;
+  step_id: string;
+  /** 按周期序号升序排列 */
+  records: RepairCycle[];
+  total: number;
+};
+
+/**
  * 某个步骤的验证历史，与 Go 端 `httpapi.ValidationHistoryResponse` 一一对应。
  *
  * `state` 是服务端从最新记录派生的验证状态，前端不自行从原始记录推断。

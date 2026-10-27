@@ -226,6 +226,8 @@ type Server struct {
 	containerService *app.ContainerService
 	// resumeEligibility 计算任务续跑资格，为空时该接口返回 503。
 	resumeEligibility *app.ResumeEligibilityService
+	// historyQueries 提供事件时间线与修复周期历史的只读查询。
+	historyQueries *app.HistoryQueryService
 	// taskRetry 是任务显式重试服务，为空时不提供重试接口。
 	taskRetry *app.TaskRetryService
 	// taskLeaseRecovery 在启动时核验残留的任务租约现场。
@@ -572,6 +574,13 @@ func (s *Server) startServices(ctx context.Context) error {
 		return err
 	}
 	s.executionRecords = records
+	// 事件时间线与修复周期历史同样只依赖已打开的数据库：它们只读已经持久化的
+	// 事实，不建立 SSH / Docker 会话，也不推进任何状态。
+	history, err := historyQueryService(s.store)
+	if err != nil {
+		return err
+	}
+	s.historyQueries = history
 	// 代码保存记录列表只读持久化记录：它不核验容器、不执行 Git，也不建立 SSH 会话，
 	// 因此不能复用 ContainerService（它强制要求 SSH 依赖）。
 	codeSaves, codeSavesErr := codeSaveQueryService(s.store)
@@ -697,6 +706,20 @@ func (s *Server) executionRecordService() (*app.ExecutionRecordService, error) {
 		return nil, fmt.Errorf("初始化执行记录服务失败: %w", err)
 	}
 	return records, nil
+}
+
+// historyQueryService 构造事件时间线与修复周期历史查询服务。
+//
+// 未打开数据库时返回 nil：两个历史接口随后返回 503，而不是伪造空结果。
+func historyQueryService(store storage.Store) (*app.HistoryQueryService, error) {
+	if store == nil {
+		return nil, nil
+	}
+	history, err := app.NewHistoryQueryService(store)
+	if err != nil {
+		return nil, fmt.Errorf("初始化历史查询服务失败: %w", err)
+	}
+	return history, nil
 }
 
 // codeSaveQueryService 构造代码保存记录只读查询服务。
@@ -841,6 +864,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		Containers:        s.containerService,
 		CodeSaveQueries:   s.codeSaveQueries,
 		ResumeEligibility: s.resumeEligibility,
+		History:           s.historyQueries,
 		TaskRetry:         s.taskRetry,
 		CodeInitialize:    s.codeInitialize,
 		RequireWebUI:      s.requireWeb,

@@ -57,7 +57,11 @@ func (s eventStore) AppendEvent(ctx context.Context, event domain.Event) (domain
 	return stored, nil
 }
 
-// ListEventsByTask 按写入顺序返回任务的事件时间线。
+// ListEventsByTask 按 (created_at, id) 升序返回任务的事件时间线。
+//
+// 排序不是单纯的 id 顺序：事件时间取自业务时钟，`id` 只保证写入先后。两者组合
+// 既让时间线与真实发生时间一致，又保证同一毫秒内的多条事件有确定的先后，从而
+// 使分页查询不漏行、不重复行。
 func (s eventStore) ListEventsByTask(
 	ctx context.Context,
 	taskID domain.ID,
@@ -66,8 +70,13 @@ func (s eventStore) ListEventsByTask(
 	if err := taskID.Validate(); err != nil {
 		return nil, err
 	}
-	statement, args := buildEventQuery(taskID, filter)
-	rows, err := s.q.QueryContext(ctx, statement, args...)
+	statement, args := buildEventQuery("SELECT "+eventColumns+" FROM events", taskID, filter)
+	var builder strings.Builder
+	builder.WriteString(statement)
+	builder.WriteString(` ORDER BY created_at, id`)
+	queryArgs := append([]any{}, args...)
+	queryArgs = appendPaging(&builder, queryArgs, filter.Limit, filter.Offset)
+	rows, err := s.q.QueryContext(ctx, builder.String(), queryArgs...)
 	if err != nil {
 		return nil, wrapError("查询事件", err)
 	}
@@ -88,21 +97,53 @@ func (s eventStore) ListEventsByTask(
 	return events, nil
 }
 
-// buildEventQuery 构造事件查询语句与参数。
-func buildEventQuery(taskID domain.ID, filter storage.EventFilter) (string, []any) {
+// CountEventsByTask 返回满足筛选条件的事件总数。
+//
+// 分页响应必须能给出真实总数：前端据它判断"是否还有下一页"，用当前页条数推算
+// 会让最后一页的展示与真实总量不一致。
+func (s eventStore) CountEventsByTask(
+	ctx context.Context,
+	taskID domain.ID,
+	filter storage.EventFilter,
+) (int, error) {
+	if err := taskID.Validate(); err != nil {
+		return 0, err
+	}
+	statement, args := buildEventQuery("SELECT COUNT(*) FROM events", taskID, filter)
+	var total int
+	if err := s.q.QueryRowContext(ctx, statement, args...).Scan(&total); err != nil {
+		return 0, wrapError("统计事件数量", err)
+	}
+	return total, nil
+}
+
+// buildEventQuery 构造事件查询的 FROM / WHERE 部分与参数。
+//
+// 分页与排序由调用方追加：只有列表查询需要它们，统计查询不需要。
+func buildEventQuery(prefix string, taskID domain.ID, filter storage.EventFilter) (string, []any) {
 	var builder strings.Builder
-	builder.WriteString(`SELECT `)
-	builder.WriteString(eventColumns)
-	builder.WriteString(` FROM events WHERE task_id = ?`)
+	builder.WriteString(prefix)
+	builder.WriteString(` WHERE task_id = ?`)
 	args := []any{toIDParam(taskID)}
 	if filter.StepID != nil && !filter.StepID.IsEmpty() {
 		builder.WriteString(` AND step_id = ?`)
 		args = append(args, toIDParam(*filter.StepID))
 	}
-	builder.WriteString(` ORDER BY id`)
-	if filter.Limit > 0 {
-		builder.WriteString(` LIMIT ?`)
-		args = append(args, filter.Limit)
+	if len(filter.Types) > 0 {
+		placeholdersForType := make([]string, 0, len(filter.Types))
+		for _, eventType := range filter.Types {
+			// 空类型不构成筛选条件：它既不是合法事件类型，也无法命中任何记录。
+			if strings.TrimSpace(string(eventType)) == "" {
+				continue
+			}
+			placeholdersForType = append(placeholdersForType, "?")
+			args = append(args, string(eventType))
+		}
+		if len(placeholdersForType) > 0 {
+			builder.WriteString(` AND event_type IN (`)
+			builder.WriteString(strings.Join(placeholdersForType, ", "))
+			builder.WriteString(`)`)
+		}
 	}
 	return builder.String(), args
 }

@@ -10,7 +10,9 @@ import {
   executeStep,
   executeSteps,
   fetchStepAttempts,
+  fetchStepRepairCycles,
   fetchStepValidations,
+  fetchTaskEvents,
   fetchTaskSteps,
   fetchValidationFeedback,
   generatePlan,
@@ -575,5 +577,117 @@ describe("执行类写操作", () => {
     expect(error.status).toBe(412);
     expect(error.code).toBe("precondition_failed");
     expect(error.message).toBe("执行节点未通过环境预检");
+  });
+});
+
+describe("事件时间线与修复周期历史查询", () => {
+  it("事件路径带 size 与 offset，并解析分页元数据", async () => {
+    const spy = vi.fn(async () =>
+      jsonResponse({
+        offset: 20,
+        records: [
+          {
+            created_at: "2026-10-26T08:00:00Z",
+            event_label: "任务创建",
+            event_type: "task.created",
+            id: 21,
+            task_id: "task-1",
+            type_known: true,
+          },
+        ],
+        size: 20,
+        task_id: "task-1",
+        total: 41,
+      }),
+    );
+    vi.stubGlobal("fetch", spy);
+
+    const { data } = await fetchTaskEvents("task-1", { offset: 20, size: 20 });
+
+    const [target] = spy.mock.calls[0] as unknown as [string];
+    expect(target).toBe(`${TASKS_PATH}/task-1/events?size=20&offset=20`);
+    expect(data.total).toBe(41);
+    expect(data.offset).toBe(20);
+    expect(data.records[0]?.event_label).toBe("任务创建");
+  });
+
+  it("事件类型筛选支持多个取值", async () => {
+    const spy = vi.fn(async () =>
+      jsonResponse({ offset: 0, records: [], size: 20, task_id: "task-1", total: 0 }),
+    );
+    vi.stubGlobal("fetch", spy);
+
+    await fetchTaskEvents("task-1", { type: ["task.failed", "verification.failed"] });
+
+    const [target] = spy.mock.calls[0] as unknown as [string];
+    expect(target).toBe(`${TASKS_PATH}/task-1/events?type=task.failed&type=verification.failed`);
+  });
+
+  it("空事件列表是合法结果，不是错误", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({ offset: 0, records: [], size: 20, task_id: "task-1", total: 0 }),
+      ),
+    );
+    const { data } = await fetchTaskEvents("task-1");
+    expect(data.records).toEqual([]);
+    expect(data.total).toBe(0);
+  });
+
+  it("事件查询失败按 HTTP 错误类别抛出，不伪装成空列表", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({ error: { code: "not_found", message: "历史记录不存在" } }, { status: 404 }),
+      ),
+    );
+    await expect(fetchTaskEvents("task-missing")).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it("修复周期路径挂在步骤下并解析 closed_at 缺省", async () => {
+    const spy = vi.fn(async () =>
+      jsonResponse({
+        records: [
+          {
+            id: "cycle-1",
+            max_attempts: 3,
+            opened_at: "2026-10-26T08:00:00Z",
+            opened_by: "user_reopen",
+            sequence: 1,
+            step_id: "step-1",
+            task_id: "task-1",
+          },
+        ],
+        step_id: "step-1",
+        task_id: "task-1",
+        total: 1,
+      }),
+    );
+    vi.stubGlobal("fetch", spy);
+
+    const { data } = await fetchStepRepairCycles("task-1", "step-1");
+
+    const [target] = spy.mock.calls[0] as unknown as [string];
+    expect(target).toBe(`${TASKS_PATH}/task-1/steps/step-1/repair-cycles`);
+    expect(data.records).toHaveLength(1);
+    expect(data.records[0]?.closed_at).toBeUndefined();
+    expect(data.records[0]?.sequence).toBe(1);
+  });
+
+  it("修复周期为空是合法结果，不是错误", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({ records: [], step_id: "step-1", task_id: "task-1", total: 0 }),
+      ),
+    );
+    const { data } = await fetchStepRepairCycles("task-1", "step-1");
+    expect(data.records).toEqual([]);
+    expect(data.total).toBe(0);
+  });
+
+  it("步骤标识为空时直接拒绝，不拼出无效路径", () => {
+    expect(() => fetchStepRepairCycles("task-1", "  ")).toThrowError("步骤标识不能为空");
   });
 });

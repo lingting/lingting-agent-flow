@@ -37,10 +37,11 @@ import {
   verdictMeta,
   VERDICT_META,
 } from "@/pages/tasks/steps";
+import { RepairCyclePanel } from "@/pages/tasks/RepairCyclePanel";
 import type { ExecutionOperations } from "@/pages/tasks/useExecutionOperations";
 import { OPERATION_LABEL } from "@/pages/tasks/useExecutionOperations";
 import type { LoadState, StepRecords } from "@/pages/tasks/useExecutionRecords";
-import { useValidationFeedback } from "@/pages/tasks/useExecutionRecords";
+import { useStepRepairCycles, useValidationFeedback } from "@/pages/tasks/useExecutionRecords";
 /** 尝试状态字典 */
 const ATTEMPT_STATUS_DICT: DictItem<string>[] = Object.entries(ATTEMPT_STATUS_META).map(
   ([value, meta]) => ({ label: meta.label, tagColor: meta.color, value }),
@@ -319,15 +320,23 @@ export function StepDetailPanel({
   step,
   task,
   onReload,
+  recordsToken,
 }: {
   operations: ExecutionOperations;
   records: LoadState<StepRecords>;
   step: Step;
   task: Task;
   onReload: () => void;
+  /** 步骤相关事实变化令牌：变化时重新读取该步骤的修复周期历史 */
+  recordsToken?: number;
 }) {
   const [showAllValidations, setShowAllValidations] = useState(false);
   const busy = operations.state.running !== undefined;
+  /**
+   * 修复周期历史独立加载：它换步骤才重新读取，且只在步骤相关事实真的变化时
+   * （`recordsToken`）重新读取，不参与 5 秒任务快照的刷新循环。
+   */
+  const repairCycles = useStepRepairCycles(task.id, step.id, recordsToken);
   const history = records.status === "ready" ? records.data.validations : undefined;
   const attempts = records.status === "ready" ? records.data.attempts : [];
   const sessions = records.status === "ready" ? records.data.sessions : {};
@@ -458,6 +467,8 @@ export function StepDetailPanel({
               ))}
             </Flex>
           )}
+
+          <RepairCyclePanel onReload={repairCycles.reload} state={repairCycles.state} />
 
           <Space align="center" size={8}>
             <Typography.Text strong>验证历史</Typography.Text>

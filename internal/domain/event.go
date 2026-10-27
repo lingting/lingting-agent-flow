@@ -138,6 +138,14 @@ func (t EventType) Validate() error {
 	return invalidField("Event", "event_type", "未知事件类型 "+name)
 }
 
+// Known 判断事件类型是否为当前版本定义的类型。
+//
+// 它只用于展示与兼容性判断：历史事件中可能出现当前版本不再定义的类型，这类记录
+// 必须保留原始类型名并可被读回，不能被拒绝，也不能被改写为默认类型。
+func (t EventType) Known() bool {
+	return t.Validate() == nil
+}
+
 // Event 是任务工作流中的一个关键事件。
 //
 // ID 由数据库自增分配，插入前为零值。

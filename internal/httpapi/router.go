@@ -68,6 +68,11 @@ type Deps struct {
 	CodeSaveQueries *app.CodeSaveQueryService
 	// ResumeEligibility 计算任务的续跑资格，为空时该接口返回服务不可用。
 	ResumeEligibility *app.ResumeEligibilityService
+	// History 提供事件时间线与修复周期历史的只读查询。
+	//
+	// 为空时两个历史接口返回服务不可用，而不是伪造空列表：空历史与"查询服务
+	// 未装配"是两件完全不同的事实。
+	History *app.HistoryQueryService
 	// TaskRetry 是任务显式重试服务，为空时重试接口返回服务不可用。
 	//
 	// 重试入口只在领域规则判定通过后才把 failed 任务重开为新的执行周期；它复用
@@ -108,6 +113,7 @@ func NewHandler(deps Deps) http.Handler {
 		containers:        deps.Containers,
 		codeSaves:         deps.CodeSaveQueries,
 		resumeEligibility: deps.ResumeEligibility,
+		history:           newHistoryHandler(deps.History, logger),
 		taskRetry:         deps.TaskRetry,
 		logger:            logger,
 	}
@@ -155,7 +161,9 @@ type router struct {
 	resumeEligibility *app.ResumeEligibilityService
 	// taskRetry 是任务显式重试服务，为空时重试接口返回服务不可用。
 	taskRetry *app.TaskRetryService
-	logger    *slog.Logger
+	// history 处理事件时间线与修复周期历史的只读查询。
+	history *historyHandler
+	logger  *slog.Logger
 }
 
 // tasksHandler 分发任务集合路径与单任务路径的请求。
@@ -182,6 +190,20 @@ func (rt *router) tasksHandler(w http.ResponseWriter, r *http.Request) {
 	// verify-code-save 是 4 段，仍由后面的 isCodeRecoveryPath 接走。
 	if isCodeSaveListPath(r.URL.Path) {
 		rt.serveCodeSaveList(w, r)
+		return
+	}
+	// 事件时间线与修复周期历史是纯粹的历史读取：它们只依赖历史查询服务，不建立
+	// SSH / Docker 会话，也不读写任何执行状态。因此与其他子资源一样先于任务服务
+	// 可用性判定，依赖缺失时返回"历史查询服务未初始化"。
+	//
+	// 两者都是只读形状（{taskID}/events 与 {taskID}/steps/{stepID}/repair-cycles），
+	// 与下面的写操作路径段不重叠。
+	if taskID, ok := parseTaskEventsPath(r.URL.Path); ok {
+		rt.serveTaskEvents(w, r, taskID)
+		return
+	}
+	if taskID, stepID, ok := parseRepairCyclesPath(r.URL.Path); ok {
+		rt.serveStepRepairCycles(w, r, taskID, stepID)
 		return
 	}
 	if rt.tasks == nil || rt.tasks.tasks == nil {

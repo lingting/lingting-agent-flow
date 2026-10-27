@@ -442,3 +442,126 @@ func TestFullHistoryChain(t *testing.T) {
 		t.Fatalf("验证历史不符: %+v", results)
 	}
 }
+
+// TestListEventsOrdersByCreatedAtThenID 校验排序为 (created_at, id)。
+//
+// 事件时间取自业务时钟，`id` 只保证写入先后：只按 id 排序会让"补写的更早事件"
+// 出现在时间线末尾，只按时间排序则让同一毫秒内的多条事件顺序不确定。
+func TestListEventsOrdersByCreatedAtThenID(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ctx := testContext(t)
+	built := newFixture(t, db)
+	base := time.Now().UTC()
+
+	// 先写较晚的事件，再写同一较早时刻的两条：期望顺序完全由 (created_at, id) 决定。
+	later := appendEvent(
+		t, db, built.task.ID, domain.EventTypeStepCompleted, `{}`, base.Add(time.Minute),
+	)
+	first := appendEvent(
+		t, db, built.task.ID, domain.EventTypeStepStarted, `{}`, base,
+	)
+	second := appendEvent(
+		t, db, built.task.ID, domain.EventTypeAttemptStarted, `{}`, base,
+	)
+
+	events, err := db.ListEventsByTask(ctx, built.task.ID, storage.EventFilter{})
+	if err != nil {
+		t.Fatalf("查询事件失败: %v", err)
+	}
+	want := []int64{first.ID, second.ID, later.ID}
+	if len(events) != len(want) {
+		t.Fatalf("事件数量不符: %d", len(events))
+	}
+	for index, id := range want {
+		if events[index].ID != id {
+			t.Fatalf("第 %d 条顺序不符: 期望 %d 实际 %d", index, id, events[index].ID)
+		}
+	}
+}
+
+// TestListEventsByTypeAndOffset 校验类型筛选与偏移分页。
+func TestListEventsByTypeAndOffset(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ctx := testContext(t)
+	built := newFixture(t, db)
+	base := time.Now().UTC()
+	for index := 0; index < 3; index++ {
+		appendEvent(
+			t, db, built.task.ID, domain.EventTypeTaskCreated, `{}`,
+			base.Add(time.Duration(index)*time.Second),
+		)
+	}
+	appendEvent(t, db, built.task.ID, domain.EventTypeTaskFailed, `{}`, base.Add(time.Minute))
+
+	filtered, err := db.ListEventsByTask(ctx, built.task.ID, storage.EventFilter{
+		Types: []domain.EventType{domain.EventTypeTaskFailed},
+	})
+	if err != nil {
+		t.Fatalf("按类型查询失败: %v", err)
+	}
+	if len(filtered) != 1 || filtered[0].Type != domain.EventTypeTaskFailed {
+		t.Fatalf("类型筛选结果不符: %+v", filtered)
+	}
+	total, err := db.CountEventsByTask(ctx, built.task.ID, storage.EventFilter{
+		Types: []domain.EventType{domain.EventTypeTaskFailed},
+	})
+	if err != nil {
+		t.Fatalf("统计事件失败: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("筛选后总数不符: %d", total)
+	}
+
+	page, err := db.ListEventsByTask(ctx, built.task.ID, storage.EventFilter{Limit: 2, Offset: 1})
+	if err != nil {
+		t.Fatalf("分页查询失败: %v", err)
+	}
+	if len(page) != 2 {
+		t.Fatalf("分页数量不符: %d", len(page))
+	}
+	// 偏移 1 应跳过第一条 task.created 事件。
+	if page[0].Type != domain.EventTypeTaskCreated || page[1].Type != domain.EventTypeTaskCreated {
+		t.Fatalf("偏移分页结果不符: %+v", page)
+	}
+	all, err := db.CountEventsByTask(ctx, built.task.ID, storage.EventFilter{})
+	if err != nil {
+		t.Fatalf("统计事件失败: %v", err)
+	}
+	if all != 4 {
+		t.Fatalf("总数不符: %d", all)
+	}
+}
+
+// TestListEventsKeepsUnknownEventType 校验未知事件类型原样读回。
+func TestListEventsKeepsUnknownEventType(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ctx := testContext(t)
+	built := newFixture(t, db)
+	// 领域构造器拒绝未知类型，因此直接写入数据库，模拟真实的历史数据。
+	raw := testkit.OpenSQLite(t, db.Path())
+	testkit.MustExec(
+		t,
+		raw,
+		`INSERT INTO events (task_id, step_id, event_type, payload_json, created_at)
+		 VALUES (?, NULL, 'legacy.removed', '{}', ?)`,
+		built.task.ID.String(),
+		time.Now().UTC().UnixMilli(),
+	)
+
+	events, err := db.ListEventsByTask(ctx, built.task.ID, storage.EventFilter{})
+	if err != nil {
+		t.Fatalf("查询事件失败: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("事件数量不符: %d", len(events))
+	}
+	if string(events[0].Type) != "legacy.removed" {
+		t.Fatalf("未知类型必须原样保留，实际 %q", events[0].Type)
+	}
+	if events[0].Type.Known() {
+		t.Fatal("未知类型不应被判定为当前版本定义的类型")
+	}
+}

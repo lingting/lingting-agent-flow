@@ -19,8 +19,14 @@ import { OperationOutcomePanel } from "@/pages/tasks/OperationOutcomePanel";
 import { StepDetailPanel } from "@/pages/tasks/StepDetailPanel";
 import { StepListPanel } from "@/pages/tasks/StepListPanel";
 import { canGeneratePlan, canRunSteps } from "@/pages/tasks/steps";
+import { EventTimelinePanel } from "@/pages/tasks/EventTimelinePanel";
 import { useExecutionOperations, OPERATION_LABEL } from "@/pages/tasks/useExecutionOperations";
-import { describeApiError, useStepRecords, useTaskSteps } from "@/pages/tasks/useExecutionRecords";
+import {
+  describeApiError,
+  useStepRecords,
+  useTaskEvents,
+  useTaskSteps,
+} from "@/pages/tasks/useExecutionRecords";
 
 /**
  * 任务执行面板。
@@ -43,6 +49,13 @@ export function TaskExecutionPanel({
   const [selectedStepID, setSelectedStepID] = useState<string>();
   const stepsState = useTaskSteps(task.id, stepsToken);
   const records = useStepRecords(task.id, selectedStepID, stepsToken);
+  /**
+   * 事件时间线独立于步骤选择：事件属于任务维度，切换步骤不应该重新读取历史。
+   *
+   * 它只在打开任务、手动刷新、"加载更多"与父组件给出的 `stepsToken` 变化时读取，
+   * 不参与 5 秒自动刷新——把整份历史放进刷新循环会制造无谓的查询负载。
+   */
+  const events = useTaskEvents(task.id, stepsToken);
 
   const steps = stepsState.state.status === "ready" ? stepsState.state.data : [];
   const selectedStep = useMemo(
@@ -113,12 +126,19 @@ export function TaskExecutionPanel({
         state={stepsState.state}
       />
 
+      <EventTimelinePanel
+        onLoadMore={events.loadMore}
+        onReload={events.reload}
+        state={events.state}
+      />
+
       {selectedStep ? (
         <StepDetailPanel
           key={selectedStep.id}
           onReload={records.reload}
           operations={operations}
           records={records.state}
+          recordsToken={stepsToken}
           step={selectedStep}
           task={task}
         />
