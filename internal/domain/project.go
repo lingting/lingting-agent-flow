@@ -193,10 +193,6 @@ type ProjectConfig struct {
 	WorkDir string `json:"work_dir"`
 	// Caches 是允许挂载的缓存类型。
 	Caches []string `json:"caches"`
-	// SourceProvider 是后续代码获取方式的名字，不包含凭据。
-	SourceProvider string `json:"source_provider,omitempty"`
-	// CodeSaver 是后续代码保存方式的名字，不包含凭据。
-	CodeSaver string `json:"code_saver,omitempty"`
 	// CreatedAt 是配置创建时间。
 	CreatedAt time.Time `json:"created_at"`
 	// UpdatedAt 是配置最后更新时间。
@@ -228,10 +224,13 @@ func NewProjectConfig(
 	return config, nil
 }
 
-// ValidateProjectID 校验可选的项目标识。
+// ValidateProjectID 校验项目标识的书写形式。
 //
-// 空值表示"未关联项目"，是合法输入；非空时与 ProjectConfig.ID 使用同一套书写
-// 规则，因为该标识同样会进入缓存卷名与远程目录名。
+// 它只校验书写形式，空值视为合法：是否需要关联项目由调用方按业务规则决定，任务
+// 创建使用 RequireProjectID 要求必须给出项目标识。
+//
+// 非空时与 ProjectConfig.ID 使用同一套书写规则，因为该标识同样会进入缓存卷名与
+// 远程目录名。
 func ValidateProjectID(id string) error {
 	trimmed := strings.TrimSpace(id)
 	if trimmed == "" {
@@ -257,8 +256,12 @@ func (c ProjectConfig) Validate() error {
 	if c.Environment.IsBase() {
 		return invalidField("Project", "environment", "项目必须使用语言环境")
 	}
-	if _, err := ParseVersionLabel(c.EnvironmentVersion); err != nil {
-		return err
+	// 环境版本可空：空值表示使用当前可用版本，与任务配置的语义一致。项目需要锁定
+	// 具体版本时显式给出标签即可。
+	if version := strings.TrimSpace(c.EnvironmentVersion); version != "" {
+		if _, err := ParseVersionLabel(version); err != nil {
+			return err
+		}
 	}
 	if err := ValidateContainerWorkDir(c.WorkDir); err != nil {
 		return err
@@ -322,4 +325,146 @@ func SelectCaches(available []CacheMount, allowed []string) ([]CacheMount, error
 		selected = append(selected, mount)
 	}
 	return selected, nil
+}
+
+// Project 是一个持久化的项目实体。
+//
+// 项目是本产品里"同一份代码、同一套执行环境"的登记处：仓库地址、基础分支与环境
+// 配置在这里只写一次，任务创建时按标识继承，避免同一项目在多次建任务时出现不同
+// 的仓库写法、分支、缓存范围或容器内工作目录。
+//
+// 项目标识（ID）同时是缓存卷的共享范围键与远程管理工作目录名，因此它必须指向一条
+// 真实存在且未被删除的记录：写错标识会让同一项目的任务落在不同的缓存卷与目录里，
+// 而系统无法自行发现这种分裂。
+//
+// 项目只保存非机密元数据，与 ProjectConfig 一致：凭据一律不进入本实体。
+type Project struct {
+	// ProjectConfig 是项目的环境配置部分（标识、名称、环境、版本、缓存、目录）。
+	ProjectConfig
+	// RepositoryURL 是已脱敏的仓库地址，内嵌凭据的地址在校验阶段被拒绝。
+	RepositoryURL string `json:"repository_url"`
+	// BaseBranch 是规范化后的基础分支名。
+	BaseBranch string `json:"base_branch"`
+	// DeletedAt 是逻辑删除时间，nil 表示未删除。
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
+}
+
+// ProjectInput 是创建一个项目的输入。
+//
+// 它与 Project 的区别是只包含调用方可以决定的事实：标识、名称、仓库、分支与环境
+// 配置；时间戳与逻辑删除标记由领域层与服务层填。
+type ProjectInput struct {
+	// ID 是项目标识。
+	ID string
+	// Name 是项目名称。
+	Name string
+	// RepositoryURL 是仓库地址。
+	RepositoryURL string
+	// BaseBranch 是基础分支。
+	BaseBranch string
+	// Environment 是项目使用的语言环境。
+	Environment EnvironmentRef
+	// EnvironmentVersion 是锁定的环境版本标签，空值表示使用当前可用版本。
+	EnvironmentVersion string
+	// Caches 是允许挂载的缓存类型。
+	Caches []string
+	// WorkDir 是容器内项目工作目录，空值使用默认目录。
+	WorkDir string
+}
+
+// NewProject 创建并校验项目。
+func NewProject(input ProjectInput, at time.Time) (Project, error) {
+	config, err := NewProjectConfig(
+		input.ID,
+		input.Name,
+		input.Environment,
+		input.EnvironmentVersion,
+		input.Caches,
+		at,
+	)
+	if err != nil {
+		return Project{}, err
+	}
+	// NewProjectConfig 只负责环境与目录的默认值，这里补上调用方显式给出的
+	// 工作目录与规范化后的基础分支，使写入数据库的都是规范化取值。
+	if workDir := strings.TrimSpace(input.WorkDir); workDir != "" {
+		config.WorkDir = workDir
+	}
+	baseBranch, err := NormalizeGitBranch(input.BaseBranch)
+	if err != nil {
+		return Project{}, err
+	}
+	project := Project{
+		ProjectConfig: config,
+		RepositoryURL: strings.TrimSpace(input.RepositoryURL),
+		BaseBranch:    baseBranch,
+	}
+	if err := project.Validate(); err != nil {
+		return Project{}, err
+	}
+	return project, nil
+}
+
+// Validate 校验项目。
+//
+// 仓库地址与基础分支在这里一并校验：它们是项目的核心事实，不能等到任务创建或
+// 容器内 Git 操作时才失败。
+func (p Project) Validate() error {
+	if err := p.ProjectConfig.Validate(); err != nil {
+		return err
+	}
+	if _, err := ParseGitRepositoryURL(p.RepositoryURL); err != nil {
+		return err
+	}
+	if _, err := NormalizeGitBranch(p.BaseBranch); err != nil {
+		return err
+	}
+	return nil
+}
+
+// NormalizedBaseBranch 返回规范化后的基础分支名。
+func (p Project) NormalizedBaseBranch() string {
+	normalized, err := NormalizeGitBranch(p.BaseBranch)
+	if err != nil {
+		return strings.TrimSpace(p.BaseBranch)
+	}
+	return normalized
+}
+
+// EffectiveWorkDir 返回生效的容器内项目工作目录。
+func (p Project) EffectiveWorkDir() string {
+	if trimmed := strings.TrimSpace(p.WorkDir); trimmed != "" {
+		return trimmed
+	}
+	return DefaultContainerWorkDir
+}
+
+// MarkDeleted 标记项目为逻辑删除。
+//
+// 删除只置 deleted_at：项目被历史任务与代码保存记录引用，物理删除会让这些记录
+// 指向不存在的标识。重复删除返回错误，避免改写首次删除时间。
+func (p *Project) MarkDeleted(at time.Time) error {
+	if p.Deleted() {
+		return invalidField("Project", "deleted_at", "项目已删除")
+	}
+	moment := normalizeTime(at)
+	p.DeletedAt = &moment
+	p.UpdatedAt = moment
+	return nil
+}
+
+// Deleted 判断项目是否已被逻辑删除。
+func (p Project) Deleted() bool {
+	return p.DeletedAt != nil
+}
+
+// RequireProjectID 校验任务必须关联一个项目标识。
+//
+// 任务只能落在真实存在的项目上：项目标识决定缓存共享范围与远程管理工作目录名，
+// 空值或手写错字都会让同一项目的任务落在不同位置，且无法事后自动合并。
+func RequireProjectID(id string) error {
+	if strings.TrimSpace(id) == "" {
+		return invalidField("Task", "project_id", "任务必须关联项目")
+	}
+	return ValidateProjectID(id)
 }

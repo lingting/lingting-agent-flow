@@ -52,6 +52,7 @@ function sampleCreateRequest(): CreateTaskRequest {
     host_id: "host-1",
     name: "实现登录",
     planner_role_id: "planner",
+    project_id: "demo-service",
     repository_url: "ssh://git.example.com/team/repo",
   };
 }

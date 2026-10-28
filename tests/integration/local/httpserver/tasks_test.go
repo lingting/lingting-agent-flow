@@ -26,6 +26,8 @@ type taskServer struct {
 	host      domain.ExecutionHost
 	planner   domain.Role
 	developer domain.Role
+	// project 是任务必须关联的项目记录。
+	project domain.Project
 }
 
 // startTaskServer 在随机端口上启动带任务服务的真实 HTTP 服务。
@@ -77,6 +79,7 @@ func startTaskServer(t *testing.T) *taskServer {
 	fixture.planner = seedServerRole(t, store, ctx, domain.RoleTypePlanner, "规划师", now)
 	fixture.developer = seedServerRole(t, store, ctx, domain.RoleTypeDeveloper, "开发工程师", now)
 	fixture.host = seedServerHost(t, store, ctx, now)
+	fixture.project = testkit.CreateProject(t, store, testkit.DefaultTestProjectID, now)
 	return fixture
 }
 
@@ -188,6 +191,7 @@ func (s *taskServer) createBody(name string) map[string]any {
 		"name":              name,
 		"description":       "接入真实接口",
 		"host_id":           s.host.ID.String(),
+		"project_id":        s.project.ID,
 		"repository_url":    "ssh://git.example.com/team/repo",
 		"base_branch":       "main",
 		"environment":       "go",

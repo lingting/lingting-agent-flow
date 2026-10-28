@@ -206,6 +206,18 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > 任务，实测 50 000 库上 3 000 个历史 `failed` → 13.1% 单核空闲占用、402 个排队 → 8.4%），
 > 但真实库的 `tasks.status` 分布未知，且同等负载下任务列表延迟未劣化。解除待定所需数据与
 > 下一步动作记录在交付物 §8。
+> **G12（项目后端能力缺失）已于 2026-10-28 `completed`**（基线 `origin/master` `2cb21ca`）：这是
+> P4-M1 盘点中最后一项未闭合的业务缺口。核实结论是"项目此前只是一段受书写规则校验的自由文本"——
+> `domain.ProjectConfig` / `ValidateProjectID` 零生产调用者，没有 `projects` 表、store、服务、
+> CLI 与 HTTP，而 `task.Config.ProjectID` 同时是**项目级缓存卷的共享范围键**与**远程管理工作目录
+> 名**，因此拼错标识会让同一项目的任务分裂到不同缓存卷与目录里且无法自动发现。本轮把项目升级为
+> 真实登记记录并让任务**必须**关联它：迁移 `0025_projects.sql`、`domain.Project`、
+> `storage.ProjectStore`、`app.ProjectService`、`GET|POST /api/v1/projects` 与
+> `GET|PUT|DELETE /api/v1/projects/{projectID}`、CLI `agentflow project`、前端项目页与创建任务
+> 的项目选择器；未给出的执行配置（仓库 / 分支 / 环境 / 版本 / 缓存 / 工作目录）从项目继承，显式
+> 给出的值优先。证据见 [`P4-G12-project-management.md`](./P4-G12-project-management.md)。
+> **P4-M5 不受影响，仍为 `pending`**：本轮没有把数据依赖型优化标记为完成，也没有重复进行缺少
+> 真实数据的评估。
 > **P4-M3 已为 `completed`**：M3-2 已由 P4-M2-7 满足，M3-1、M3-3、M3-4、M3-5、
 > M3-6、M3-7 与 M3-8 全部完成。**M3-8（事件时间线与修复周期历史）于 2026-10-27 完成**：
 > 核实出 `ListEventsByTask` 生产代码零调用者且排序只有 `ORDER BY id`、`EventFilter`
@@ -406,6 +418,13 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 
 **已实现且有代码证据（可直接复用）**：
 
+- 项目管理：真实登记记录 + 任务必填关联（P4-G12，迁移 `0025_projects.sql`、
+  `internal/domain/project.go` 的 `Project`、`internal/storage/sqlite/projects.go`、
+  `internal/app/projects.go` 的 `ProjectService`、`internal/httpapi/projects.go`、
+  `internal/cli/project.go`、`lingting-agent-flow-ui/src/pages/projects/`）。项目承载仓库地址、
+  基础分支、语言环境与版本、缓存类型与容器内工作目录；任务创建时未给出的执行配置从项目继承，
+  显式给出的值优先。项目标识同时是项目级缓存卷的共享范围键与远程管理工作目录名，因此服务端
+  拒绝不存在或已逻辑删除的标识，前端也不提供手填入口。
 - 任务管理、逻辑删除、取消/删除语义与分页列表（`internal/app/task_management.go`、
   `internal/httpapi/tasks.go`、`internal/domain/task.go`）。
 - 执行节点管理、SSH 私钥认证、主机密钥校验、环境预检（`internal/app/hosts*.go`、
@@ -685,8 +704,13 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
     **G10 收尾结论展示已于 P4-M3-3 闭合**（`types.ts` 补齐三个字段，任务详情拆成任务状态 /
     最终业务结论 / 收尾闭环三行独立事实，见
     `P4-M3-3-task-closeout-display.md`）。
-  - P2 六项：G12 项目后端能力缺失（无表、无服务）；**G13 计划生成入口已于 P4-M2-7
-    闭合**（`POST /tasks/{id}/plan` 接入 Web，按 `persisted` / `failure_stage` 展示真实
+  - P2 六项：**G12 项目后端能力已于 2026-10-28 闭合**（迁移 `0025_projects.sql`、
+    `domain.Project`、`storage.ProjectStore`、`app.ProjectService`、`GET|POST
+    /api/v1/projects` 与 `GET|PUT|DELETE /api/v1/projects/{projectID}`、CLI
+    `agentflow project`、前端项目页与创建任务的项目选择器；任务创建改为必须关联真实项目，
+    未给出的执行配置从项目继承。见
+    [`P4-G12-project-management.md`](./P4-G12-project-management.md)）；**G13 计划生成入口已于
+    P4-M2-7 闭合**（`POST /tasks/{id}/plan` 接入 Web，按 `persisted` / `failure_stage` 展示真实
     结果，有步骤时不显示覆盖入口）；**G14 单步诊断入口已于 P4-M2-7 闭合**（单步骤执行、
     顺序执行、开发—验证闭环、显式开启修复周期，全部只使用当前真实记录的标识）；
     **G15 事件时间线与 G16 修复周期历史已于 P4-M3-8 闭合**（两个只读接口 + 两个前端面板，
@@ -825,3 +849,4 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - [P4-M3-4-resume-eligibility-display.md](./P4-M3-4-resume-eligibility-display.md)
 - [P4-frontend-test-resource-governance.md](./P4-frontend-test-resource-governance.md)
 - [P4-M5-measurement-and-optimization-assessment.md](./P4-M5-measurement-and-optimization-assessment.md)
+- [P4-G12-project-management.md](./P4-G12-project-management.md)

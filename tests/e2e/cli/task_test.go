@@ -110,6 +110,8 @@ func seedTaskPrerequisites(
 			t.Fatalf("写入角色失败: %v", err)
 		}
 	}
+	// 任务必须关联项目：预先写入一条可被建任务请求引用的项目记录。
+	testkit.CreateProject(t, db, testkit.DefaultTestProjectID, now)
 	_ = configPath
 	return host
 }
@@ -127,6 +129,7 @@ func TestTaskCreateValidatesBeforeExecution(t *testing.T) {
 		"--title", "实现功能",
 		"--description", "为项目补充功能",
 		"--host", host.ID.String(),
+		"--project", testkit.DefaultTestProjectID,
 		"--repo", "ssh://git.example.com/team/repo",
 		"--base", "main",
 		"--environment", "go",
@@ -159,16 +162,20 @@ func TestTaskCreateRejectsMissingConfiguration(t *testing.T) {
 	ws := testkit.New(t)
 	configPath := taskConfig(t, ws)
 	host := seedTaskPrerequisites(t, ws, configPath)
-	// 缺少环境名称：应在创建任务前失败，不创建任何容器与任务记录。
+	// 显式给出非法的环境名称：应在创建任务前失败，不创建任何容器与任务记录。
+	//
+	// 注意：省略 --environment 不再算错误——未给出的字段从项目继承，只有显式给出
+	// 非法取值才必须被拒绝。
 	code, _, stderr := run(
 		t,
 		"task", "create",
 		"--config", configPath,
 		"--title", "实现功能",
 		"--host", host.ID.String(),
+		"--project", testkit.DefaultTestProjectID,
 		"--repo", "ssh://git.example.com/team/repo",
 		"--base", "main",
-		"--environment", "",
+		"--environment", "INVALID ENV",
 		"--planner-role", "planner",
 		"--developer-role", "developer",
 		"--command", "build=go build ./...",
@@ -211,6 +218,7 @@ func TestTaskCreateIsIdempotent(t *testing.T) {
 		"--config", configPath,
 		"--title", "实现功能",
 		"--host", host.ID.String(),
+		"--project", testkit.DefaultTestProjectID,
 		"--repo", "ssh://git.example.com/team/repo",
 		"--base", "main",
 		"--environment", "go",
@@ -243,6 +251,7 @@ func TestTaskListAndGet(t *testing.T) {
 		"--config", configPath,
 		"--title", "实现功能",
 		"--host", host.ID.String(),
+		"--project", testkit.DefaultTestProjectID,
 		"--repo", "ssh://git.example.com/team/repo",
 		"--base", "main",
 		"--environment", "go",
@@ -285,6 +294,7 @@ func TestTaskCancelMarksRequest(t *testing.T) {
 		"--config", configPath,
 		"--title", "实现功能",
 		"--host", host.ID.String(),
+		"--project", testkit.DefaultTestProjectID,
 		"--repo", "ssh://git.example.com/team/repo",
 		"--base", "main",
 		"--environment", "go",
@@ -322,6 +332,7 @@ func TestTaskRunRequiresServer(t *testing.T) {
 		"--config", configPath,
 		"--title", "实现功能",
 		"--host", host.ID.String(),
+		"--project", testkit.DefaultTestProjectID,
 		"--repo", "ssh://git.example.com/team/repo",
 		"--base", "main",
 		"--environment", "go",

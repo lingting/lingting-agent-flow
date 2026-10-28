@@ -26,6 +26,8 @@ type taskAPIFixture struct {
 	host      domain.ExecutionHost
 	planner   domain.Role
 	developer domain.Role
+	// project 是任务必须关联的项目记录。
+	project domain.Project
 }
 
 // newTaskAPIFixture 在测试工作空间中准备任务接口所需的数据与处理器。
@@ -52,6 +54,7 @@ func newTaskAPIFixture(t *testing.T) *taskAPIFixture {
 	fixture.planner = apiRole(t, db, ctx, domain.RoleTypePlanner, "规划师", now)
 	fixture.developer = apiRole(t, db, ctx, domain.RoleTypeDeveloper, "开发工程师", now)
 	fixture.host = apiHost(t, db, ctx, now)
+	fixture.project = testkit.CreateProject(t, db, testkit.DefaultTestProjectID, now)
 	fixture.handler = httpapi.NewHandler(httpapi.Deps{
 		Health:     app.NewHealthService(db),
 		SystemInfo: func() app.SystemInfo { return app.SystemInfo{Version: "test"} },
@@ -121,6 +124,7 @@ func (f *taskAPIFixture) createBody(name, description string) map[string]any {
 		"name":              name,
 		"description":       description,
 		"host_id":           f.host.ID.String(),
+		"project_id":        f.project.ID,
 		"repository_url":    "ssh://git.example.com/team/repo",
 		"base_branch":       "main",
 		"environment":       "go",

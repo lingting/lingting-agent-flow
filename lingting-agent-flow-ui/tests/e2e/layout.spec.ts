@@ -8,7 +8,7 @@ const ROUTES = [
     text: "AgentFlow 的总览入口，用于汇总需求、任务与执行状态。",
   },
   { path: "/tasks", label: "任务", text: "创建任务" },
-  { path: "/projects", label: "项目", text: "项目管理将在后续步骤实现。" },
+  { path: "/projects", label: "项目", text: "项目的作用" },
   { path: "/machines", label: "机器", text: "执行机器管理将在后续步骤实现。" },
   { path: "/environments", label: "环境", text: "运行环境管理将在后续步骤实现。" },
   { path: "/settings", label: "设置", text: "设置项将在后续步骤实现。" },
@@ -85,7 +85,8 @@ test.describe("基础布局", () => {
 
     await expect(page).toHaveURL(/\/projects$/);
     await expect(page.locator(".ant-menu-item-selected")).toHaveText("项目");
-    await expect(page.locator("main")).toContainText("项目管理将在后续步骤实现。");
+    // 项目页已由占位页升级为真实管理页：正文断言使用与接口状态无关的固定说明。
+    await expect(page.locator("main")).toContainText("项目的作用");
   });
 
   test("未知路径显示 404 页面", async ({ page }) => {

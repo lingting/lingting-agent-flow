@@ -22,6 +22,11 @@ type Deps struct {
 	//
 	// 角色只在首次初始化时从配置导入，接口本身只读。
 	Roles *app.RoleService
+	// Projects 是项目管理服务，为空时项目接口返回服务不可用。
+	//
+	// 项目是任务必填的关联对象，因此它不是可选能力：服务未装配时接口返回 503，
+	// 而不是伪造空列表。
+	Projects *app.ProjectService
 	// Health 提供健康检查结果，为空时健康检查返回服务不可用。
 	Health *app.HealthService
 	// SystemInfo 返回系统信息，为空时接口返回服务不可用。
@@ -98,6 +103,7 @@ func NewHandler(deps Deps) http.Handler {
 	}
 	router := &router{
 		roles:        newRoleHandler(deps.Roles, logger),
+		projects:     newProjectHandler(deps.Projects, logger),
 		environments: newEnvironmentHandler(deps.Environments, logger),
 		health:       deps.Health,
 		systemInfo:   deps.SystemInfo,
@@ -126,6 +132,10 @@ func NewHandler(deps Deps) http.Handler {
 	mux := http.NewServeMux()
 	// 角色接口只有集合路径：本阶段不提供角色 CRUD，/roles 之下的其他路径统一 404。
 	mux.HandleFunc(PathRoles, router.rolesHandler)
+	// 项目接口同时注册集合路径与单项目路径：集合支持列表与创建，单项目支持详情、
+	// 整体更新与逻辑删除。
+	mux.HandleFunc(PathProjects, router.projectsHandler)
+	mux.HandleFunc(projectPathPrefix, router.projectsHandler)
 	// 环境查询只有集合路径与 "{type}/{name}/versions/{number}" 子路径：
 	// 本阶段不提供环境 CRUD、构建与 Dockerfile 接口。
 	mux.HandleFunc(PathEnvironments, router.environmentsHandler)
@@ -145,7 +155,9 @@ func NewHandler(deps Deps) http.Handler {
 // router 持有 API 处理器依赖。
 type router struct {
 	// roles 处理角色只读查询；服务未初始化时接口返回 503。
-	roles      *roleHandler
+	roles *roleHandler
+	// projects 处理项目管理接口；服务未初始化时接口返回 503。
+	projects   *projectHandler
 	health     *app.HealthService
 	systemInfo func() app.SystemInfo
 	tasks      *taskHandler
@@ -403,6 +415,13 @@ func (rt *router) healthHandler(w http.ResponseWriter, r *http.Request) {
 // 角色服务未初始化时返回 503，而不是伪造空列表。
 func (rt *router) rolesHandler(w http.ResponseWriter, r *http.Request) {
 	rt.roles.serve(w, r)
+}
+
+// projectsHandler 处理项目集合路径与单项目路径的请求。
+//
+// 项目服务未初始化时返回 503，而不是伪造空列表。
+func (rt *router) projectsHandler(w http.ResponseWriter, r *http.Request) {
+	rt.projects.serve(w, r)
 }
 
 // systemInfoHandler 处理系统信息请求。

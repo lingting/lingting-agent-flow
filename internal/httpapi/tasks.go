@@ -61,7 +61,7 @@ type TaskResponse struct {
 	Closeout string `json:"closeout"`
 	// CloseoutSummary 是收尾闭环结论的可读说明。
 	CloseoutSummary string `json:"closeout_summary,omitempty"`
-	// ProjectID 是关联项目标识，未关联时为空字符串。
+	// ProjectID 是关联项目标识；历史任务可能为空字符串。
 	ProjectID         string     `json:"project_id"`
 	CancelRequested   bool       `json:"cancel_requested"`
 	CancelRequestedAt *time.Time `json:"cancel_requested_at,omitempty"`
@@ -92,9 +92,10 @@ type TaskListResponse struct {
 type CreateTaskRequest struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
-	ProjectID   string `json:"project_id"`
-	Priority    string `json:"priority"`
-	HostID      string `json:"host_id"`
+	// ProjectID 是关联项目标识，必填；标识必须指向真实存在且未删除的项目。
+	ProjectID string `json:"project_id"`
+	Priority  string `json:"priority"`
+	HostID    string `json:"host_id"`
 	// RepositoryURL 是仓库地址。
 	RepositoryURL string `json:"repository_url"`
 	// BaseBranch 是基础分支。

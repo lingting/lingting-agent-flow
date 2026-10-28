@@ -142,9 +142,17 @@ describe("创建任务请求转换", () => {
 
   it("省略空的可选字段而不是发送空字符串", () => {
     const request = toCreateTaskRequest(formValues());
-    expect(request).not.toHaveProperty("project_id");
     expect(request).not.toHaveProperty("validator_role_id");
     expect(request).not.toHaveProperty("environment_version");
+  });
+
+  it("项目标识是必填字段：原样透传并交由服务端判定", () => {
+    // 项目标识不再是可省略字段：前端不静默丢弃空值，也不猜测一个默认项目，
+    // 空值提交后由服务端返回参数错误。
+    const request = toCreateTaskRequest(formValues());
+    expect(request.project_id).toBe("");
+    const withProject = toCreateTaskRequest({ ...formValues(), project_id: " demo-service " });
+    expect(withProject.project_id).toBe("demo-service");
   });
 
   it("不生成状态、开始时间或完成时间字段", () => {

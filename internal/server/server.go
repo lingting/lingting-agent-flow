@@ -61,6 +61,11 @@ type Options struct {
 	// 执行节点接口与后台环境预检都依赖它；构造后由 Server 接入统一生命周期，
 	// 因此后台校验服务不需要单独启动。
 	Hosts *app.ExecutionHostService
+	// Projects 是项目管理服务，为空时由已打开的数据库自动构造。
+	//
+	// 项目是任务必填的关联对象：没有项目服务时项目接口返回 503，任务创建也会
+	// 因为找不到项目而失败，因此它不像可选能力那样允许缺席。
+	Projects *app.ProjectService
 	// SSH 是 SSH 服务，用于构造执行节点环境预检能力；为空时跳过自动构造。
 	SSH *app.SSHService
 	// SSHFactory 在数据库打开后构造 SSH 服务。
@@ -170,6 +175,8 @@ type Server struct {
 	tasks      *app.TaskService
 	services   []Service
 	hosts      *app.ExecutionHostService
+	// projects 是项目管理服务，由已打开的数据库构造。
+	projects   *app.ProjectService
 	ssh        *app.SSHService
 	validation *app.HostValidationService
 	// sessions 是所有 Agent 调用共享的会话服务。
@@ -298,6 +305,7 @@ func New(options Options) (*Server, error) {
 		tasks:                 options.Tasks,
 		services:              options.Services,
 		hosts:                 options.Hosts,
+		projects:              options.Projects,
 		ssh:                   options.SSH,
 		requireWeb:            options.RequireWebUI,
 		logger:                options.Logger,
@@ -791,6 +799,28 @@ func (s *Server) hostService() (*app.ExecutionHostService, error) {
 	return hosts, nil
 }
 
+// projectService 返回项目管理服务。
+//
+// 未显式注入时用已打开的数据库构造：项目只依赖存储，不建立 SSH / Docker 会话，
+// 也不会触发任何远程操作。
+func (s *Server) projectService() (*app.ProjectService, error) {
+	if s.projects != nil {
+		return s.projects, nil
+	}
+	if s.store == nil {
+		return nil, nil
+	}
+	projects, err := app.NewProjectService(app.ProjectServiceOptions{
+		Store:  s.store,
+		Logger: s.logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("初始化项目服务失败: %w", err)
+	}
+	s.projects = projects
+	return projects, nil
+}
+
 // containerObservation 返回容器残留收敛使用的只读观测能力。
 //
 // 缺少 SSH 能力或数据库时返回 nil：收敛服务仍会报告残留，但不改变任何记录，
@@ -864,9 +894,15 @@ func (s *Server) startHTTP(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// 项目服务在启动阶段构造：构造失败说明数据库不可用，此时不进入运行阶段，
+	// 也不允许以"没有项目服务"的形态对外提供任务创建能力。
+	if _, projectErr := s.projectService(); projectErr != nil {
+		return projectErr
+	}
 	web, err := httpserver.New(httpserver.Options{
 		Address:           s.address,
 		Roles:             s.roleQuery,
+		Projects:          s.projects,
 		Health:            app.NewHealthService(s.store),
 		SystemInfo:        s.systemInfo,
 		Tasks:             tasks,

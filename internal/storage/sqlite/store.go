@@ -15,6 +15,8 @@ type dbStore struct {
 	roleStore
 	executionHostStore
 	requirementStore
+	// projectStore 提供项目登记信息的读写；项目是任务必填的关联对象。
+	projectStore
 	taskStore
 	stepStore
 	attemptStore
@@ -42,6 +44,8 @@ type txStore struct {
 	roleStore
 	executionHostStore
 	requirementStore
+	// projectStore 提供项目登记信息的读写；项目是任务必填的关联对象。
+	projectStore
 	taskStore
 	stepStore
 	attemptStore
@@ -71,6 +75,7 @@ func newDBStore(db *sql.DB) *dbStore {
 		roleStore:               roleStore{q: pool},
 		executionHostStore:      executionHostStore{q: pool},
 		requirementStore:        requirementStore{q: pool},
+		projectStore:            projectStore{q: pool},
 		taskStore:               taskStore{q: pool},
 		stepStore:               stepStore{q: pool},
 		attemptStore:            attemptStore{q: pool},
@@ -96,6 +101,7 @@ func newTxStore(tx *sql.Tx) *txStore {
 		roleStore:               roleStore{q: tx},
 		executionHostStore:      executionHostStore{q: tx},
 		requirementStore:        requirementStore{q: tx},
+		projectStore:            projectStore{q: tx},
 		taskStore:               taskStore{q: tx},
 		stepStore:               stepStore{q: tx},
 		attemptStore:            attemptStore{q: tx},

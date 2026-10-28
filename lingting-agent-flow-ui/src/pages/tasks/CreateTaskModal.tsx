@@ -1,9 +1,17 @@
 import { Alert, Form, Input, Modal, Select, Space, Switch, Typography } from "antd";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { ApiError, createTask, type CreateTaskRequest, type Environment } from "@/lib/api";
+import {
+  describeProjectEnvironment,
+  findProject,
+  projectSelectOptions,
+  resolveProjectSelection,
+} from "@/pages/projects/projects";
+import { useProjects } from "@/pages/projects/useProjects";
 import { EnvironmentSelector } from "@/pages/tasks/EnvironmentSelector";
 import { resolveEnvironmentSelection } from "@/pages/tasks/environments";
+import { projectTaskPrefill } from "@/pages/tasks/projectPrefill";
 import {
   hostSelectOptions,
   resolveHostSelection,
@@ -19,7 +27,7 @@ import { useRoles } from "@/pages/tasks/useRoles";
 type CreateTaskFormValues = {
   name: string;
   description: string;
-  project_id?: string;
+  project_id: string;
   priority: "low" | "normal" | "high";
   host_id: string;
   repository_url: string;
@@ -60,7 +68,7 @@ export function toCreateTaskRequest(values: CreateTaskFormValues): CreateTaskReq
     name: values.name.trim(),
     planner_role_id: values.planner_role_id.trim(),
     priority: values.priority,
-    project_id: values.project_id?.trim() || undefined,
+    project_id: values.project_id.trim(),
     repository_url: values.repository_url.trim(),
     validator_role_id: values.validator_role_id?.trim() || undefined,
     work_dir: values.work_dir?.trim() || undefined,
@@ -96,7 +104,8 @@ export type CreateTaskModalProps = {
  * 任务创建只落库，不会触发执行：表单不提供状态、开始时间等执行期字段，创建成功后
  * 由用户在任务列表显式发起统一启动（`POST /tasks/{id}/start`）。
  *
- * 三类外部标识全部来自真实接口，不再手工填写：
+ * 四类外部标识全部来自真实接口，不再手工填写：
+ *   - 项目：`GET /api/v1/projects`，任务必须关联项目，未填写的执行配置从项目继承；
  *   - 执行节点：`GET /api/v1/hosts`，只有已启用且 `usable_for_remote_task` 的节点可选；
  *   - 角色：`GET /api/v1/roles`，按 `type` 分类并排除 `enabled=false` 的记录；
  *   - 语言环境与版本：`GET /api/v1/environments?host_id=…`，节点变化时重新加载。
@@ -110,11 +119,21 @@ export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalPr
   // 表单是唯一取值来源：选择器只写表单，展示值由 useWatch 派生。
   // 执行节点直接决定环境查询，节点变化时 useEnvironments 会自动重新加载。
   const watchedHostID = Form.useWatch("host_id", form);
+  const watchedProjectID = Form.useWatch("project_id", form);
   const selectedEnvironment = Form.useWatch("environment", form);
   const selectedVersion = Form.useWatch("environment_version", form);
   const hosts = useHosts();
   const roles = useRoles();
+  const projects = useProjects();
   const environments = useEnvironments(watchedHostID);
+  const projectOptions = useMemo(
+    () => projectSelectOptions(projects.projects),
+    [projects.projects],
+  );
+  const selectedProject = useMemo(
+    () => findProject(projects.projects, watchedProjectID),
+    [projects.projects, watchedProjectID],
+  );
 
   const hostOptions = useMemo(() => hostSelectOptions(hosts.hosts), [hosts.hosts]);
   const plannerOptions = useMemo(() => roleSelectOptions(roles.roles, "planner"), [roles.roles]);
@@ -135,15 +154,54 @@ export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalPr
   );
 
   /**
-   * 执行节点变化时清除与旧节点关联的环境与版本选择。
+   * 计算当前项目可以预填到表单的字段。
    *
-   * 只在节点字段本身变化时触发：环境选择器写入的字段不会连带清空自己。
+   * 环境与版本只在当前执行节点的环境列表已加载时才预填：跨节点的旧选择会被提交校验
+   * 拒绝，提前塞进一个该节点并不存在的环境只会制造必然失败的配置。
+   */
+  const projectPrefillFor = (projectID?: string) =>
+    projectTaskPrefill({
+      environments: environments.environments,
+      environmentsLoaded: environments.status === "ready",
+      project: findProject(projects.projects, projectID),
+    });
+
+  /**
+   * 表单字段联动。
+   *
+   *   - 选择项目：预填仓库地址、基础分支、工作目录，环境与版本按当前节点的真实环境
+   *     列表决定是否预填；用户之后仍可手工覆盖，服务端以请求体为准。
+   *   - 执行节点变化：清除与旧节点关联的环境与版本，避免提交跨节点的旧选择。
    */
   const handleValuesChange = (changed: Partial<CreateTaskFormValues>) => {
     if ("host_id" in changed) {
       form.setFieldsValue({ environment: undefined, environment_version: undefined });
     }
+    if ("project_id" in changed) {
+      form.setFieldsValue(projectPrefillFor(changed.project_id));
+    }
   };
+
+  /**
+   * 环境列表就绪后补齐项目预填。
+   *
+   * 覆盖"先选项目、后选节点"的顺序：节点变化会清空环境与版本，等新节点的环境列表
+   * 加载完成后才谈得上按项目预填。已经选过环境时不覆盖用户的选择。
+   */
+  useEffect(() => {
+    if (environments.status !== "ready") return;
+    if (!watchedProjectID) return;
+    if (form.getFieldValue("environment")) return;
+    const prefill = projectPrefillFor(watchedProjectID);
+    if (!prefill.environment) return;
+    form.setFieldsValue({
+      environment: prefill.environment,
+      environment_version: prefill.environment_version,
+    });
+    // projectPrefillFor 依赖 environments 与 projects，两者已在依赖列表中体现。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [environments.status, environments.environments, projects.projects, watchedProjectID, form]);
+
   /** 环境变化：版本必须重新选择，旧环境的版本不适用于新环境 */
   const handleEnvironmentChange = (environment?: Environment) => {
     form.setFieldsValue({ environment: environment?.name, environment_version: undefined });
@@ -162,6 +220,15 @@ export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalPr
       values = await form.validateFields();
     } catch {
       // 校验失败时 Form 已经在字段下方给出提示，这里不再重复提示。
+      return;
+    }
+    const projectSelection = resolveProjectSelection({
+      loaded: projects.status === "ready",
+      projectID: values.project_id,
+      projects: projects.projects,
+    });
+    if (!projectSelection.ok) {
+      setError(projectSelection.error);
       return;
     }
     const hostSelection = resolveHostSelection({
@@ -203,6 +270,7 @@ export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalPr
           environment: selection.environment,
           environment_version: selection.environment_version,
           host_id: hostSelection.host_id,
+          project_id: projectSelection.project.id,
           planner_role_id: roleSelection.planner_role_id,
           validator_role_id: roleSelection.validator_role_id,
         }),
@@ -258,8 +326,48 @@ export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalPr
             maxLength={4000}
           />
         </Form.Item>
-        <Form.Item label="关联项目标识（可选）" name="project_id">
-          <Input placeholder="例如 demo-service，仅允许小写字母、数字与连字符" />
+        <Form.Item label="关联项目" required>
+          <Space direction="vertical" size={4} style={{ display: "flex" }}>
+            {projects.status === "loading" && <Alert showIcon title="正在加载项目…" type="info" />}
+            {projects.status === "error" && (
+              <Alert
+                action={<Typography.Link onClick={projects.reload}>重试</Typography.Link>}
+                description={projects.error}
+                showIcon
+                title="项目查询失败"
+                type="error"
+              />
+            )}
+            {projects.status === "ready" && projects.projects.length === 0 && (
+              <Alert
+                description="服务端还没有登记任何项目。任务必须关联项目，请先在项目页新增一个项目。"
+                showIcon
+                title="没有可用的项目"
+                type="warning"
+              />
+            )}
+            {projects.status === "ready" && projects.projects.length > 0 && (
+              <Form.Item
+                noStyle
+                name="project_id"
+                rules={[{ message: "请选择项目", required: true }]}
+              >
+                <Select
+                  aria-label="关联项目"
+                  optionFilterProp="label"
+                  options={projectOptions}
+                  placeholder="选择项目"
+                  showSearch
+                />
+              </Form.Item>
+            )}
+          </Space>
+          {selectedProject && (
+            <Typography.Text type="secondary">
+              仓库 {selectedProject.repository_url} · 分支 {selectedProject.base_branch} · 环境{" "}
+              {describeProjectEnvironment(selectedProject)}
+            </Typography.Text>
+          )}
         </Form.Item>
         <Form.Item label="优先级" name="priority">
           <Select

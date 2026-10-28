@@ -130,8 +130,37 @@ async function stubRoles(page: Page) {
   );
 }
 
+/** 拦截项目列表接口，返回一条真实项目记录（任务必须关联项目） */
+async function stubProjects(page: Page) {
+  await page.route("**/api/v1/projects", (route: Route) =>
+    route.fulfill({
+      body: JSON.stringify({
+        records: [
+          {
+            base_branch: "main",
+            caches: ["go-mod"],
+            created_at: "2026-10-28T02:00:00Z",
+            environment: "go",
+            environment_version: "v0001",
+            id: "demo-service",
+            name: "示例服务",
+            repository_url: "ssh://git.example.com/team/repo",
+            updated_at: "2026-10-28T02:00:00Z",
+            work_dir: "/workspace/project",
+          },
+        ],
+        total: 1,
+      }),
+      contentType: "application/json",
+      status: 200,
+    }),
+  );
+}
+
 test.beforeEach(async ({ page }) => {
   await stubHealth(page);
+  // 任务必须关联项目：创建任务弹窗需要真实项目可选项。
+  await stubProjects(page);
 });
 
 test.describe("任务列表", () => {
@@ -285,6 +314,12 @@ test.describe("任务操作", () => {
     await page.goto("/tasks");
     await page.getByRole("button", { name: "创建任务" }).click();
 
+    // 任务必须关联项目：从真实项目列表选择，而不是手填标识。
+    await page.getByLabel("关联项目").click();
+    await page
+      .locator(".ant-select-dropdown:visible")
+      .getByTitle(/示例服务/)
+      .click();
     await page.getByLabel("任务名称").fill("新建任务");
     await page.getByLabel("任务描述").fill("描述内容");
     await page.getByLabel("执行节点").click();

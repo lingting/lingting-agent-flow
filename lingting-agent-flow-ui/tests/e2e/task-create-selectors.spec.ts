@@ -71,6 +71,22 @@ function sampleEnvironment(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+/** 一份项目样本，字段与 Go 端 `httpapi.ProjectResponse` 一致 */
+function sampleProject(overrides: Record<string, unknown> = {}) {
+  return {
+    base_branch: "main",
+    caches: ["go-mod"],
+    created_at: "2026-10-28T02:00:00Z",
+    environment: "go",
+    environment_version: "v0001",
+    id: "demo-service",
+    name: "示例服务",
+    repository_url: "ssh://git.example.com/team/repo",
+    updated_at: "2026-10-28T02:00:00Z",
+    work_dir: "/workspace/project",
+    ...overrides,
+  };
+}
 
 /** 一份任务响应样本 */
 function sampleTask(overrides: Record<string, unknown> = {}) {
@@ -151,6 +167,21 @@ async function stubRoles(page: Page, handler: () => { body: unknown; status?: nu
   return calls;
 }
 
+/** 拦截项目列表接口；任务必须关联项目，因此创建任务前必须有可选项 */
+async function stubProjects(page: Page, handler: () => { body: unknown; status?: number }) {
+  const calls: string[] = [];
+  await page.route("**/api/v1/projects", async (route: Route) => {
+    calls.push(route.request().url());
+    const result = handler();
+    await route.fulfill({
+      body: JSON.stringify(result.body),
+      contentType: "application/json",
+      status: result.status ?? 200,
+    });
+  });
+  return calls;
+}
+
 /** 拦截环境查询接口，记录 host_id 参数 */
 async function stubEnvironments(
   page: Page,
@@ -195,6 +226,11 @@ async function openCreateModal(page: Page) {
   await page.getByRole("button", { name: "创建任务" }).click();
 }
 
+/** 选择关联项目（按 aria-label 定位下拉） */
+async function selectProject(page: Page, label: RegExp | string) {
+  await page.getByLabel("关联项目").click();
+  await page.locator(".ant-select-dropdown:visible").getByTitle(label).click();
+}
 /** 选择执行节点 */
 async function selectHost(page: Page, label: RegExp | string) {
   await page.getByLabel("执行节点").click();
@@ -225,16 +261,41 @@ async function selectVersion(page: Page, version: string) {
     .click();
 }
 
-/** 填写除节点、环境与角色之外的必填字段 */
+/**
+ * 填写除节点、环境与角色之外的必填字段。
+ *
+ * 关联项目同样是必填项：任务必须关联服务端已登记的项目，不能手填标识。
+ */
 async function fillCommonFields(page: Page) {
+  await selectProject(page, /示例服务/);
   await page.getByLabel("任务名称").fill("新建任务");
   await page.getByLabel("任务描述").fill("描述内容");
   await page.getByLabel("仓库地址").fill("ssh://git.example.com/team/repo");
   await page.getByRole("textbox", { name: "* 基础分支" }).fill("main");
 }
 
+/**
+ * 填写除关联项目之外的全部必填项。
+ *
+ * 表单会先收集字段级校验错误，只有其余必填项都合法时才会走到"外部数据"校验；要验证
+ * 项目缺失或查询失败时的阻止行为，必须先补齐其它字段。
+ */
+async function fillEverythingExceptProject(page: Page) {
+  await page.getByLabel("任务名称").fill("新建任务");
+  await page.getByLabel("任务描述").fill("描述内容");
+  await page.getByLabel("仓库地址").fill("ssh://git.example.com/team/repo");
+  await page.getByRole("textbox", { name: "* 基础分支" }).fill("main");
+  await selectHost(page, /构建机/);
+  await selectEnvironment(page, "go");
+  await selectVersion(page, "v0001");
+  await selectRole(page, "规划角色", /规划角色/);
+  await selectRole(page, "开发角色", /开发角色/);
+}
+
 test.beforeEach(async ({ page }) => {
   await stubHealth(page);
+  // 任务必须关联项目：默认提供一条真实项目记录，个别用例会用后注册的路由覆盖它。
+  await stubProjects(page, () => ({ body: { records: [sampleProject()], total: 1 } }));
 });
 
 test.describe("创建任务的节点与角色选择", () => {
@@ -275,6 +336,8 @@ test.describe("创建任务的节点与角色选择", () => {
     await page.getByRole("button", { name: "创 建" }).click();
 
     await expect.poll(() => created.length).toBe(1);
+    // 任务必须关联真实项目：提交体使用选择器返回的项目标识，不是手填文本。
+    expect(created[0]?.project_id).toBe("demo-service");
     expect(created[0]?.host_id).toBe("host-1");
     expect(created[0]?.planner_role_id).toBe("planner-1");
     expect(created[0]?.developer_role_id).toBe("dev-1");
@@ -552,5 +615,63 @@ test.describe("创建任务的节点与角色选择", () => {
     await expect.poll(() => listCalls.length).toBeGreaterThan(before);
     // 但不自动启动任务
     expect(launchCalls).toHaveLength(0);
+  });
+
+  test("项目查询失败时显示真实原因并阻止提交", async ({ page }) => {
+    await stubHosts(page, () => ({ body: { records: [sampleHost()], total: 1 } }));
+    await stubRoles(page, () => ({
+      body: {
+        records: [
+          sampleRole({ id: "planner-1", name: "规划角色" }),
+          sampleRole({ id: "dev-1", name: "开发角色", type: "developer" }),
+        ],
+        total: 2,
+      },
+    }));
+    await stubEnvironments(page, () => ({ body: { records: [sampleEnvironment()], total: 1 } }));
+    await stubTaskList(page);
+    // 后注册的路由优先匹配：用真实错误覆盖 beforeEach 里的默认项目列表。
+    await stubProjects(page, () => ({
+      body: { error: { code: "internal_error", message: "项目服务未初始化" } },
+      status: 503,
+    }));
+    const created = await stubCreateTask(page, () => ({ body: sampleTask() }));
+
+    await openCreateModal(page);
+    await expect(page.getByText("项目查询失败")).toBeVisible();
+    await expect(page.getByText("项目服务未初始化")).toBeVisible();
+    // 查询失败不是空列表：页面不提供任何项目选项，也不伪造默认项目
+    await expect(page.getByText("没有可用的项目")).toHaveCount(0);
+
+    await fillEverythingExceptProject(page);
+    await page.getByRole("button", { name: "创 建" }).click();
+    await expect(page.getByText(/项目数据尚未加载完成/)).toBeVisible();
+    expect(created).toHaveLength(0);
+  });
+
+  test("没有项目时提示先新增项目，不伪造默认项目", async ({ page }) => {
+    await stubHosts(page, () => ({ body: { records: [sampleHost()], total: 1 } }));
+    await stubRoles(page, () => ({
+      body: {
+        records: [
+          sampleRole({ id: "planner-1", name: "规划角色" }),
+          sampleRole({ id: "dev-1", name: "开发角色", type: "developer" }),
+        ],
+        total: 2,
+      },
+    }));
+    await stubEnvironments(page, () => ({ body: { records: [sampleEnvironment()], total: 1 } }));
+    await stubTaskList(page);
+    await stubProjects(page, () => ({ body: { records: [], total: 0 } }));
+    const created = await stubCreateTask(page, () => ({ body: sampleTask() }));
+
+    await openCreateModal(page);
+    await expect(page.getByText("没有可用的项目")).toBeVisible();
+    await expect(page.getByText(/任务必须关联项目/)).toBeVisible();
+
+    await fillEverythingExceptProject(page);
+    await page.getByRole("button", { name: "创 建" }).click();
+    await expect(page.getByText(/请选择项目/)).toBeVisible();
+    expect(created).toHaveLength(0);
   });
 });

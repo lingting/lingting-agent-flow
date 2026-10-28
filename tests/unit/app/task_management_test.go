@@ -20,6 +20,8 @@ type taskManagementFixture struct {
 	host      domain.ExecutionHost
 	planner   domain.Role
 	developer domain.Role
+	// project 是任务必须关联的项目记录。
+	project domain.Project
 }
 
 // newTaskManagementFixture 在测试工作空间中准备任务管理所需的最小数据。
@@ -46,6 +48,7 @@ func newTaskManagementFixture(t *testing.T) *taskManagementFixture {
 	fixture.planner = createManagementRole(t, db, ctx, domain.RoleTypePlanner, "规划师", now)
 	fixture.developer = createManagementRole(t, db, ctx, domain.RoleTypeDeveloper, "开发工程师", now)
 	fixture.host = createManagementHost(t, db, ctx, now)
+	fixture.project = testkit.CreateProject(t, db, testkit.DefaultTestProjectID, now)
 	return fixture
 }
 
@@ -103,6 +106,7 @@ func (f *taskManagementFixture) request(name, description string) app.CreateTask
 		Name:            name,
 		Description:     description,
 		HostID:          f.host.ID.String(),
+		ProjectID:       f.project.ID,
 		RepositoryURL:   "ssh://git.example.com/team/repo",
 		BaseBranch:      "main",
 		Environment:     "go",
@@ -184,6 +188,8 @@ func TestCreateTaskFromAPIValidatesInput(t *testing.T) {
 		"名称过长":   func(r *app.CreateTaskFromAPIRequest) { r.Name = string(make([]rune, 201)) },
 		"描述过长":   func(r *app.CreateTaskFromAPIRequest) { r.Description = string(make([]rune, 4001)) },
 		"项目标识非法": func(r *app.CreateTaskFromAPIRequest) { r.ProjectID = "Demo Project" },
+		"项目标识为空": func(r *app.CreateTaskFromAPIRequest) { r.ProjectID = "  " },
+		"项目不存在":  func(r *app.CreateTaskFromAPIRequest) { r.ProjectID = "missing-project" },
 	}
 	for name, mutate := range cases {
 		request := fixture.request("任务", "描述")
@@ -195,6 +201,67 @@ func TestCreateTaskFromAPIValidatesInput(t *testing.T) {
 		if !errors.Is(err, app.ErrTaskInvalidInput) && !errors.Is(err, domain.ErrInvalidValue) {
 			t.Fatalf("%s: 错误类别应为参数错误，实际: %v", name, err)
 		}
+	}
+}
+
+// TestCreateTaskInheritsProjectConfig 校验未给出的执行配置从项目继承。
+//
+// 这是项目存在的目的：同一项目的任务必须落在同一份代码、同一个分支、同一套环境
+// 与同一个缓存范围上，而不是靠每次建任务时手抄一遍。
+func TestCreateTaskInheritsProjectConfig(t *testing.T) {
+	t.Parallel()
+	fixture := newTaskManagementFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+
+	request := fixture.request("任务", "描述")
+	// 清空仓库、分支与环境，让它们只能来自项目记录。
+	request.RepositoryURL = ""
+	request.BaseBranch = ""
+	request.Environment = ""
+	task := fixture.create(t, ctx, request)
+
+	if task.Config.ProjectID != fixture.project.ID {
+		t.Fatalf("任务应关联项目 %s，实际: %s", fixture.project.ID, task.Config.ProjectID)
+	}
+	if task.RepositoryPath != testkit.DefaultTestRepositoryURL {
+		t.Fatalf("仓库地址未从项目继承: %s", task.RepositoryPath)
+	}
+	if task.BaseRef != testkit.DefaultTestBaseBranch {
+		t.Fatalf("基础分支未从项目继承: %s", task.BaseRef)
+	}
+	if task.Config.Environment.Name != testkit.DefaultTestEnvironment {
+		t.Fatalf("环境未从项目继承: %s", task.Config.Environment.Name)
+	}
+	if task.Config.WorkDir != domain.DefaultContainerWorkDir {
+		t.Fatalf("工作目录未从项目继承: %s", task.Config.WorkDir)
+	}
+}
+
+// TestCreateTaskOverridesProjectConfig 校验显式给出的执行配置优先于项目配置。
+func TestCreateTaskOverridesProjectConfig(t *testing.T) {
+	t.Parallel()
+	fixture := newTaskManagementFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+
+	request := fixture.request("任务", "描述")
+	request.RepositoryURL = "ssh://git.example.com/team/other"
+	request.BaseBranch = "release/1.x"
+	request.Environment = "node"
+	task := fixture.create(t, ctx, request)
+
+	if task.RepositoryPath != "ssh://git.example.com/team/other" {
+		t.Fatalf("显式仓库地址应优先于项目配置: %s", task.RepositoryPath)
+	}
+	if task.BaseRef != "release/1.x" {
+		t.Fatalf("显式基础分支应优先于项目配置: %s", task.BaseRef)
+	}
+	if task.Config.Environment.Name != "node" {
+		t.Fatalf("显式环境应优先于项目配置: %s", task.Config.Environment.Name)
+	}
+	if task.Config.ProjectID != fixture.project.ID {
+		t.Fatalf("覆盖执行配置不应改变项目关联: %s", task.Config.ProjectID)
 	}
 }
 

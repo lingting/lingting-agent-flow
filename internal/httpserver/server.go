@@ -34,6 +34,10 @@ type Options struct {
 	//
 	// 角色只在首次初始化时从配置导入，接口本身只读。
 	Roles *app.RoleService
+	// Projects 是项目管理服务，为空时项目接口报告服务不可用。
+	//
+	// 项目是任务必填的关联对象，因此它不是可选能力。
+	Projects *app.ProjectService
 	// Health 是健康检查服务，为空时健康检查接口报告服务不可用。
 	Health *app.HealthService
 	// SystemInfo 返回系统信息，为空时该接口报告服务不可用。
@@ -117,6 +121,7 @@ func New(options Options) (*Server, error) {
 	}
 	api := httpapi.NewHandler(httpapi.Deps{
 		Roles:             options.Roles,
+		Projects:          options.Projects,
 		Health:            options.Health,
 		SystemInfo:        options.SystemInfo,
 		Tasks:             options.Tasks,

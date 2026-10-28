@@ -64,7 +64,7 @@ type CreateTaskFromAPIRequest struct {
 	Name string
 	// Description 是任务描述或执行目标，必填。
 	Description string
-	// ProjectID 是可选的项目标识。
+	// ProjectID 是任务关联的项目标识，必填。
 	ProjectID string
 	// 以下字段与 CreateTaskRequest 同义，由接口层原样传入。
 	Priority                   domain.Priority
@@ -115,7 +115,7 @@ func (r CreateTaskFromAPIRequest) normalize() (CreateTaskRequest, error) {
 		)
 	}
 	projectID := strings.TrimSpace(r.ProjectID)
-	if err := domain.ValidateProjectID(projectID); err != nil {
+	if err := domain.RequireProjectID(projectID); err != nil {
 		return CreateTaskRequest{}, fmt.Errorf("%w: %w", ErrTaskInvalidInput, err)
 	}
 	return CreateTaskRequest{

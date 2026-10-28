@@ -136,6 +136,45 @@ function sampleHost(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/** 一份项目样本，字段与 Go 端 `httpapi.ProjectResponse` 一致 */
+function sampleProject(overrides: Record<string, unknown> = {}) {
+  return {
+    base_branch: "main",
+    caches: ["go-mod"],
+    created_at: "2026-10-28T02:00:00Z",
+    environment: "go",
+    id: "demo-service",
+    name: "示例服务",
+    repository_url: "ssh://git.example.com/team/repo",
+    updated_at: "2026-10-28T02:00:00Z",
+    work_dir: "/workspace/project",
+    ...overrides,
+  };
+}
+
+/** 拦截项目列表接口，默认返回一条真实项目记录 */
+async function stubProjects(
+  page: Page,
+  handler: () => { body: unknown; status?: number } = () => ({
+    body: { records: [sampleProject()], total: 1 },
+  }),
+) {
+  await page.route("**/api/v1/projects", async (route: Route) => {
+    const result = handler();
+    await route.fulfill({
+      body: JSON.stringify(result.body),
+      contentType: "application/json",
+      status: result.status ?? 200,
+    });
+  });
+}
+
+/** 通过项目选择器选中指定项目（按名称匹配） */
+async function selectProject(page: Page, label: RegExp | string) {
+  await page.getByLabel("关联项目").click();
+  await page.locator(".ant-select-dropdown:visible").getByTitle(label).click();
+}
+
 /** 一份角色样本，字段与 Go 端 `httpapi.RoleResponse` 一致 */
 function sampleRole(overrides: Record<string, unknown> = {}) {
   return {
@@ -279,6 +318,8 @@ async function stubTaskDetail(page: Page, handler: () => { body: unknown; status
 
 test.beforeEach(async ({ page }) => {
   await stubHealth(page);
+  // 任务必须关联项目：默认提供一条真实项目记录，创建任务弹窗才有可选项。
+  await stubProjects(page);
 });
 
 test.describe("统一任务启动", () => {
@@ -618,6 +659,7 @@ test.describe("创建任务的环境选择", () => {
     await expect(page.getByText("暂不可用于任务启动", { exact: false }).first()).toBeVisible();
 
     // 填完必填项后提交：环境未选中，必须被阻止
+    await selectProject(page, /示例服务/);
     await page.getByLabel("任务名称").fill("新建任务");
     await page.getByLabel("任务描述").fill("描述内容");
     await page.getByLabel("仓库地址").fill("ssh://git.example.com/team/repo");
@@ -680,6 +722,7 @@ test.describe("创建任务的环境选择", () => {
     await selectEnvironment(page, "go");
     await selectVersion(page, "v0002");
 
+    await selectProject(page, /示例服务/);
     await page.getByLabel("任务名称").fill("新建任务");
     await page.getByLabel("任务描述").fill("描述内容");
     await page.getByLabel("仓库地址").fill("ssh://git.example.com/team/repo");

@@ -33,7 +33,9 @@
   用户显式触发、不自动重放。**P4 整体仍不是 `completed`**：`P4-M5`（基于实测数据的优化）仍为
   `pending`（第一轮测量与决策评估已于 2026-10-28 完成，见
   [`P4-M5-measurement-and-optimization-assessment.md`](./P4-M5-measurement-and-optimization-assessment.md)），
-  其余 P4 子任务均已闭合。子任务 **M4-1（失败任务
+  其余 P4 子任务均已闭合；**G12（项目后端能力缺失）已于 2026-10-28 完成**（见
+  [`P4-G12-project-management.md`](./P4-G12-project-management.md)），它是 P4-M1 盘点中最后一项
+  未闭合的业务缺口，完成后 P4 只剩 `P4-M5`。子任务 **M4-1（失败任务
   [`P4-M4-1-task-retry-web-entry.md`](./P4-M4-1-task-retry-web-entry.md)：前端补齐
   `RetryEligibilityResponse` / `RetryTaskResponse` / `RetryTaskRequest` 类型与
   `fetchTaskRetryEligibility` / `retryTask`（`GET|POST /api/v1/tasks/{taskID}/retry[-eligibility]`），
@@ -513,13 +515,29 @@
     且同等后台负载下任务列表延迟未劣化。
   - **结论**：三个候选都缺"真实使用数据"，P4-M5 **保持 `pending`**；解除待定所需数据与
     下一步动作记录在交付物 §8。
-- **下一步**：P3 阶段已全部完成（M1–M5 均 `completed`），P4-M1 已完成，P4-M2-1 至
-  M2-7 均已完成（见上方"当前阶段与当前里程碑"）。按
-  [`ROADMAP.md`](./ROADMAP.md) 的优先级规则，下一步是 **P4-M3 —— 展示阶段进度、验证结果、
-  失败原因和恢复状态**，入口见
-  [`P4-product-experience-optimization.md`](./P4-product-experience-optimization.md)；
-  缺口依据见
-  [`P4-M1-api-web-gap-inventory.md`](./P4-M1-api-web-gap-inventory.md)。
+- **G12 项目管理能力已于 2026-10-28 完成（基线 `origin/master` `2cb21ca`）**：交付物为
+  [`P4-G12-project-management.md`](./P4-G12-project-management.md)。本轮从"恢复常规功能开发"
+  出发，先用代码证据核实 G12 的真实缺口而不是照抄缺口摘要：`domain.ProjectConfig` 与
+  `ValidateProjectID` 存在但**零生产调用者**，没有 `projects` 表、store、app 服务、CLI 与
+  HTTP；`task.Config.ProjectID` 只是一个受书写规则校验的**自由文本**，它的真实作用是**项目级
+  缓存卷的共享范围键**与**远程管理工作目录名**，因此拼错一个字就会让同一项目的任务落在不同
+  缓存卷与目录里，而且系统无法自行发现这种分裂。据此把 G12 定义为"项目从自由文本升级为受校验
+  的登记记录，并成为任务的必填关联对象"。落地内容：迁移 `0025_projects.sql`、领域实体
+  `domain.Project`（复用 `ProjectConfig` 作为环境配置部分，新增仓库地址 / 基础分支 / 逻辑删除）、
+  `storage.ProjectStore` 与 sqlite 实现、`app.ProjectService`（创建 / 整体更新 / 逻辑删除 /
+  查询，错误语义 `ErrProjectInvalidInput` / `ErrProjectNotFound` / `ErrProjectStateConflict`）、
+  四条 HTTP 路由（`GET|POST /api/v1/projects`、`GET|PUT|DELETE /api/v1/projects/{projectID}`）、
+  CLI `agentflow project add|list|show|update|remove`、前端项目页（真实 `ExTable` + 新增/修改
+  弹窗 + 逻辑删除确认写明后果）与创建任务弹窗的项目选择器（从自由文本输入改为真实项目下拉，
+  并按项目预填仓库 / 分支 / 工作目录 / 环境与可用版本）。任务创建改为**必须**关联项目：项目
+  标识为空、书写非法、不存在或已逻辑删除一律拒绝；未给出的执行配置从项目继承，显式给出的值
+  优先。**P4-M5 不受影响，仍为 `pending`**，本轮没有把它标记为完成。
+- **下一步**：P3 阶段已全部完成（M1–M5 均 `completed`），P4-M1、M2-1…M2-7、M3、M4 与 G12
+  均已完成（见上方"当前阶段与当前里程碑"）。P4 只剩 `P4-M5`，而它**缺少真实使用数据**，因此
+  不再继续推进数据依赖型优化（解除待定所需数据见
+  [`P4-M5-measurement-and-optimization-assessment.md`](./P4-M5-measurement-and-optimization-assessment.md) §8）。
+  后续入口按 [`ROADMAP.md`](./ROADMAP.md) 的"下一步工作的选择规则"选择**有明确代码证据的常规
+  功能缺口**；`P4-M1` 盘点的 P0/P1/P2/P3 缺口已全部闭合，新的候选需要重新盘点而不是照抄旧清单。
   P4-M2-7 的剩余风险见
   [`P4-M2-7-web-execution-operations.md`](./P4-M2-7-web-execution-operations.md) §6：
   同步长请求没有**流式**进度推送（轮询已由 M3-7 交付，SSE 仍未实现）、闭环未通过验证时
@@ -596,6 +614,7 @@
 | [`P4-M4-5-single-step-diagnostic-actions.md`](./P4-M4-5-single-step-diagnostic-actions.md) | P4-M4-5：单步诊断动作（初始化代码、确定性验证）（M2-7 已交付能力与 M4-5 剩余目标的边界、5 处真实缺口的代码证据、判定唯一决定结论的依据、逐项检查事实、结果不确定与服务端拒绝的区分、任务切换的票据判定、未改 Go 代码的理由、测试证据、剩余风险） |
 | [`P4-frontend-test-resource-governance.md`](./P4-frontend-test-resource-governance.md) | P4 工程质量：前端测试并发治理（真实资源模型核实、Playwright worker 4 / Vitest worker 4 默认值、非法输入拒绝、资源受限入口、能力边界、验收命令与既有失败隔离） |
 | [`P4-M5-measurement-and-optimization-assessment.md`](./P4-M5-measurement-and-optimization-assessment.md) | P4-M5 第一轮：基于真实数据的性能与架构优化评估（观测能力核实、证据分级、可复现测量基线与原始数据、候选 A/B/C 的证据与立项决策、测量局限、解除待定所需数据、实际命令与结果） |
+| [`P4-G12-project-management.md`](./P4-G12-project-management.md) | P4-G12：项目管理能力（原始缺口与代码核实、项目与任务 / 缓存 / 远程目录的关系、数据模型与迁移、领域 / 存储 / 应用 / HTTP / CLI / 前端完整调用链、任务必填关联与继承规则、测试证据、剩余风险） |
 
 ## 下一步工作的选择规则
 

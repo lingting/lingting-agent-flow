@@ -105,6 +105,30 @@ type RequirementStore interface {
 	ListRequirements(ctx context.Context, filter RequirementFilter) ([]domain.Requirement, error)
 }
 
+// ProjectFilter 约束项目查询条件，零值表示不限制。
+//
+// 逻辑删除的项目默认不返回：只有 IncludeDeleted 为 true 时才把已删除记录纳入
+// 查询范围，用于审计与历史核对。
+type ProjectFilter struct {
+	// IncludeDeleted 表示把已逻辑删除的项目也纳入查询。
+	IncludeDeleted bool
+}
+
+// ProjectStore 保存项目登记信息。
+//
+// 项目标识由调用方给出并与缓存卷共享范围、远程管理工作目录名绑定，因此读取必须
+// 区分"记录不存在"（ErrNotFound）与"记录已删除"：前者说明标识写错，后者说明项目
+// 已下线，两者都不能被当作可用项目继续建任务。
+type ProjectStore interface {
+	CreateProject(ctx context.Context, project domain.Project) error
+	// UpdateProject 按主键更新项目，标识不可修改。
+	UpdateProject(ctx context.Context, project domain.Project) error
+	// DeleteProject 逻辑删除项目：只写 deleted_at，不删除历史引用。
+	DeleteProject(ctx context.Context, id domain.ID) error
+	GetProject(ctx context.Context, id domain.ID) (*domain.Project, error)
+	ListProjects(ctx context.Context, filter ProjectFilter) ([]domain.Project, error)
+}
+
 // TaskFilter 约束任务查询条件，零值表示不限制。
 //
 // 逻辑删除的任务默认不返回：只有 IncludeDeleted 为 true 时才把已删除记录纳入
@@ -851,6 +875,8 @@ type Tx interface {
 	ExecutionHostStore
 	RequirementStore
 	TaskStore
+	// ProjectStore 提供项目登记信息的读写；项目是任务必填的关联对象。
+	ProjectStore
 	StepStore
 	AttemptStore
 	SessionStore

@@ -71,7 +71,9 @@ type CreateTaskRequest struct {
 	Environment string
 	// EnvironmentVersion 是锁定的环境版本标签，可空。
 	EnvironmentVersion string
-	// ProjectID 是可选的项目标识。
+	// ProjectID 是任务关联的项目标识，必填。
+	//
+	// 未给出的字段（仓库地址、基础分支、环境、版本、缓存、工作目录）从该项目继承。
 	ProjectID string
 	// Caches 是允许挂载的缓存类型。
 	Caches []string
@@ -199,11 +201,17 @@ func (s *TaskService) prepareTaskRequest(
 	if err := priority.Validate(); err != nil {
 		return preparedTask{}, fmt.Errorf("创建任务失败: %w", err)
 	}
-	repository, err := domain.ParseGitRepositoryURL(request.RepositoryURL)
+	project, err := resolveTaskProject(ctx, s.store, request.ProjectID)
+	if err != nil {
+		return preparedTask{}, err
+	}
+	repository, err := domain.ParseGitRepositoryURL(
+		firstNonBlank(request.RepositoryURL, project.RepositoryURL),
+	)
 	if err != nil {
 		return preparedTask{}, fmt.Errorf("创建任务失败: 仓库地址非法: %w", err)
 	}
-	baseBranch := strings.TrimSpace(request.BaseBranch)
+	baseBranch := firstNonBlank(request.BaseBranch, project.BaseBranch)
 	if baseBranch == "" {
 		return preparedTask{}, fmt.Errorf("创建任务失败: 必须显式指定基础分支")
 	}
@@ -217,7 +225,7 @@ func (s *TaskService) prepareTaskRequest(
 	}
 	environment, err := domain.NewEnvironmentRef(
 		domain.EnvironmentTypeLanguage,
-		request.Environment,
+		firstNonBlank(request.Environment, project.Environment.Name),
 	)
 	if err != nil {
 		return preparedTask{}, fmt.Errorf("创建任务失败: 环境配置非法: %w", err)
@@ -229,10 +237,10 @@ func (s *TaskService) prepareTaskRequest(
 	config := domain.TaskConfig{
 		Goal:                       goal,
 		Environment:                environment,
-		EnvironmentVersion:         strings.TrimSpace(request.EnvironmentVersion),
-		ProjectID:                  strings.TrimSpace(request.ProjectID),
-		Caches:                     request.Caches,
-		WorkDir:                    strings.TrimSpace(request.WorkDir),
+		EnvironmentVersion:         firstNonBlank(request.EnvironmentVersion, project.EnvironmentVersion),
+		ProjectID:                  project.ID,
+		Caches:                     inheritList(request.Caches, project.Caches),
+		WorkDir:                    firstNonBlank(request.WorkDir, project.EffectiveWorkDir()),
 		Verification:               request.Verification,
 		Retry:                      request.Retry,
 		MergeAfterPush:             request.MergeAfterPush,
@@ -483,4 +491,26 @@ func (s *TaskService) ListUnfinishedTasks(ctx context.Context) ([]domain.Task, e
 		return nil, fmt.Errorf("查询未结束任务失败: %w", err)
 	}
 	return tasks, nil
+}
+
+// firstNonBlank 返回第一个去空白后非空的取值。
+//
+// 建任务时它的语义固定为"调用方显式给出的值优先，缺省继承项目配置"：空字符串
+// 表示未覆盖，因此无法用空值表达"清空项目的缓存或工作目录"。这一取舍是有意的——
+// 建任务弹窗与 CLI 都只提交用户真正改过的字段。
+func firstNonBlank(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+// inheritList 在调用方未给出取值时继承项目配置的列表。
+func inheritList(values, fallback []string) []string {
+	if len(values) > 0 {
+		return values
+	}
+	return fallback
 }

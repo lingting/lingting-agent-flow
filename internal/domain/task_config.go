@@ -164,7 +164,9 @@ type TaskConfig struct {
 	Environment EnvironmentRef `json:"environment"`
 	// EnvironmentVersion 是锁定的环境版本标签，空值表示使用当前可用版本。
 	EnvironmentVersion string `json:"environment_version,omitempty"`
-	// ProjectID 是可选的项目标识，用于项目级缓存共享范围。
+	// ProjectID 是任务关联的项目标识，用于项目级缓存共享范围。
+	//
+	// 新建任务必须关联项目；历史任务可能为空，读取层不得把空值当成默认项目。
 	ProjectID string `json:"project_id,omitempty"`
 	// Caches 是允许挂载的缓存类型。
 	Caches []string `json:"caches,omitempty"`

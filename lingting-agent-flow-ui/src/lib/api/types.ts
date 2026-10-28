@@ -144,7 +144,8 @@ export type TaskListQuery = {
 export type CreateTaskRequest = {
   name: string;
   description: string;
-  project_id?: string;
+  /** 关联项目标识，必填：服务端要求它指向真实存在且未删除的项目 */
+  project_id: string;
   priority?: "low" | "normal" | "high";
   host_id: string;
   repository_url: string;
@@ -1664,4 +1665,66 @@ export type ContainerDisposalResponse = {
   detail?: string;
   /** 处置后的容器登记记录 */
   container: TaskContainer;
+};
+
+/**
+ * 项目登记记录，与 Go 端 `httpapi.ProjectResponse` 一致。
+ *
+ * 项目把"同一份代码 + 同一套执行环境"登记一次：仓库地址、基础分支、语言环境与版本、
+ * 缓存类型、容器内工作目录。创建任务时未填写的字段从项目继承。
+ *
+ * `id` 同时是项目级缓存的共享范围键与远程管理工作目录名，因此它必须指向真实记录：
+ * 服务端拒绝不存在的标识，前端不做任何本地补齐。
+ */
+export type Project = {
+  id: string;
+  name: string;
+  /** 已脱敏的仓库地址：内嵌凭据的地址在服务端被拒绝 */
+  repository_url: string;
+  /** 规范化后的基础分支名 */
+  base_branch: string;
+  /** 语言环境名称 */
+  environment: string;
+  /** 锁定的环境版本标签；缺省表示使用当前可用版本 */
+  environment_version?: string;
+  /** 允许挂载的缓存类型 */
+  caches: string[];
+  /** 生效的容器内项目工作目录 */
+  work_dir: string;
+  created_at: string;
+  updated_at: string;
+};
+
+/** 项目列表响应：项目数量有限，不分页，固定使用 records 包装 */
+export type ProjectListResponse = {
+  records: Project[];
+  total: number;
+};
+
+/** 新增项目的请求体；时间戳与删除标记只能由服务端写入 */
+export type CreateProjectRequest = {
+  id: string;
+  name: string;
+  repository_url: string;
+  base_branch: string;
+  environment: string;
+  environment_version?: string;
+  caches?: string[];
+  work_dir?: string;
+};
+
+/**
+ * 修改项目的请求体。
+ *
+ * 与执行节点的部分更新不同，这里按整体替换处理：所有字段都要给出，服务端不会保留
+ * 未提交的旧值。项目标识不在请求体中，不可修改。
+ */
+export type UpdateProjectRequest = {
+  name: string;
+  repository_url: string;
+  base_branch: string;
+  environment: string;
+  environment_version?: string;
+  caches?: string[];
+  work_dir?: string;
 };

@@ -13,6 +13,7 @@ import type {
   ContainerDisposalAction,
   ContainerDisposalResponse,
   CreateHostRequest,
+  CreateProjectRequest,
   CreateTaskRequest,
   Environment,
   EnvironmentListResponse,
@@ -22,6 +23,8 @@ import type {
   RetryEligibilityResponse,
   RetryTaskRequest,
   RetryTaskResponse,
+  Project,
+  ProjectListResponse,
   ResumeWorkflowRequest,
   RoleListResponse,
   StartTaskRequest,
@@ -38,6 +41,7 @@ import type {
   TaskListQuery,
   TaskListResponse,
   UpdateHostRequest,
+  UpdateProjectRequest,
 } from "./types";
 
 /** 健康检查路径 */
@@ -458,6 +462,106 @@ export const ROLES_PATH = `${API_PREFIX}/roles`;
  */
 export function fetchRoles(options: ApiRequestOptions = {}) {
   return apiRequest<RoleListResponse>(ROLES_PATH, options);
+}
+
+/** 项目集合路径 */
+export const PROJECTS_PATH = `${API_PREFIX}/projects`;
+
+/** 单个项目的路径 */
+export function projectPath(projectID: string): string {
+  if (!projectID.trim()) {
+    throw new Error("项目标识不能为空");
+  }
+  return `${PROJECTS_PATH}/${encodeURIComponent(projectID)}`;
+}
+
+/**
+ * 查询全部未删除的项目。
+ *
+ * 项目数量有限，接口不分页。已逻辑删除的项目不会返回：它们不能再被新任务关联，
+ * 前端不得把它们当作可选项。
+ */
+export function fetchProjects(options: ApiRequestOptions = {}) {
+  return apiRequest<ProjectListResponse>(PROJECTS_PATH, options);
+}
+
+/** 新增项目；标识冲突时服务端返回 409 */
+export function createProject(body: CreateProjectRequest, options: ApiRequestOptions = {}) {
+  return apiRequest<Project>(PROJECTS_PATH, {
+    ...options,
+    body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json", ...options.headers },
+    method: "POST",
+  });
+}
+
+/** 整体更新项目；未提交的字段不会保留旧值 */
+export function updateProject(
+  projectID: string,
+  body: UpdateProjectRequest,
+  options: ApiRequestOptions = {},
+) {
+  return apiRequest<Project>(projectPath(projectID), {
+    ...options,
+    body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json", ...options.headers },
+    method: "PUT",
+  });
+}
+
+/**
+ * 逻辑删除项目。
+ *
+ * 服务端成功时返回 204 且无响应体，因此这里不使用 `apiRequest`（它要求 JSON 响应体）。
+ * 删除只标记项目下线：历史任务、代码获取与代码保存记录仍保留该标识。
+ */
+export async function deleteProject(projectID: string, options: ApiRequestOptions = {}) {
+  const path = projectPath(projectID);
+  const method = "DELETE";
+  const controller = new AbortController();
+  const externalSignal = options.signal;
+  const abortFromCaller = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      throw new ApiError("aborted", "请求已取消");
+    }
+    externalSignal.addEventListener("abort", abortFromCaller, { once: true });
+  }
+  try {
+    let response: Response;
+    try {
+      response = await fetch(path, {
+        headers: { Accept: "application/json", ...options.headers },
+        method,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (externalSignal?.aborted) {
+        throw new ApiError("aborted", "请求已取消", { cause: error });
+      }
+      throw new ApiError("network", "无法连接 AgentFlow 服务", { cause: error });
+    }
+    if (response.ok) {
+      return { request: { method, path } };
+    }
+    const text = await response.text();
+    let detail: ApiErrorBody | undefined;
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      if (typeof parsed === "object" && parsed !== null && "error" in parsed) {
+        detail = (parsed as ApiErrorResponse).error;
+      }
+    } catch {
+      detail = undefined;
+    }
+    throw new ApiError("http", detail?.message ?? `服务返回错误状态 ${response.status}`, {
+      code: detail?.code,
+      requestId: detail?.request_id ?? response.headers.get("X-Request-Id") ?? undefined,
+      status: response.status,
+    });
+  } finally {
+    externalSignal?.removeEventListener("abort", abortFromCaller);
+  }
 }
 
 /** 新增执行节点；成功时返回 201 与真实初始状态（checking） */

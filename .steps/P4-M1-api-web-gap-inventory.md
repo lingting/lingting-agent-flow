@@ -405,6 +405,14 @@ HTTP 只有 `POST .../code-saves/{recordID}/verify-code-save`，而 `recordID` �
 
 ### G12 项目能力在后端缺失（P2）
 
+> **已于 P4-G12 闭合**（2026-10-28，基线 `origin/master` `2cb21ca`）：新增迁移
+> `0025_projects.sql`、`domain.Project`、`storage.ProjectStore`、`app.ProjectService`、
+> `GET|POST /api/v1/projects` 与 `GET|PUT|DELETE /api/v1/projects/{projectID}`、CLI
+> `agentflow project`、前端项目页与创建任务的项目选择器；任务创建改为**必须**关联真实项目，
+> 未给出的执行配置从项目继承。实施时核实出比本条更强的结论：`project_id` 同时是项目级缓存卷的
+> 共享范围键与远程管理工作目录名，因此自由文本写错会造成不可自愈的分裂。证据见
+> [`P4-G12-project-management.md`](./P4-G12-project-management.md)。以下为该盘点时的现场记录，
+> 保留不改。
 **事实**：`domain.ProjectConfig` 与 `ValidateProjectID` 存在，但**没有 `projects` 表**
 （`internal/storage/sqlite/migrations/` 中无该表）、没有 store、没有 app 服务、
 没有 CLI、没有 HTTP。`task.Config.ProjectID` 只是一个受校验的字符串，进入

@@ -178,11 +178,11 @@ func newTaskCreateCommand(a *app.App) *cobra.Command {
 	command.Flags().StringVar(&goal, "goal", "", "任务目标描述，省略时使用需求描述")
 	command.Flags().StringVar(&priority, "priority", "", "需求优先级：low、normal、high")
 	command.Flags().StringVar(&hostID, "host", "", "执行节点标识（必填）")
-	command.Flags().StringVar(&repositoryURL, "repo", "", "仓库地址，ssh://、https:// 或 host:path（必填）")
-	command.Flags().StringVar(&baseBranch, "base", "", "基础分支（必填）")
-	command.Flags().StringVar(&environment, "environment", "", "语言环境名称（必填）")
+	command.Flags().StringVar(&repositoryURL, "repo", "", "仓库地址，省略时使用项目配置")
+	command.Flags().StringVar(&baseBranch, "base", "", "基础分支，省略时使用项目配置")
+	command.Flags().StringVar(&environment, "environment", "", "语言环境名称，省略时使用项目配置")
 	command.Flags().StringVar(&environmentVer, "environment-version", "", "锁定的环境版本标签，例如 v0001")
-	command.Flags().StringVar(&projectID, "project", "", "项目标识，用于项目级缓存共享")
+	command.Flags().StringVar(&projectID, "project", "", "项目标识（必填），未给出的仓库/分支/环境/缓存/目录从项目继承")
 	command.Flags().StringSliceVar(&caches, "cache", nil, "允许挂载的缓存类型，可重复")
 	command.Flags().StringVar(&workDir, "workdir", "", "容器内项目目录，省略时使用默认目录")
 	command.Flags().StringArrayVar(
@@ -211,7 +211,7 @@ func newTaskCreateCommand(a *app.App) *cobra.Command {
 	command.Flags().IntVar(&verifyTimeout, "verify-timeout", 0, "单条验证命令默认超时秒数")
 	command.Flags().StringVar(&idempotencyKey, "idempotency-key", "", "幂等键，重复提交不会创建第二个任务")
 	for _, required := range []string{
-		"title", "host", "repo", "base", "environment", "planner-role", "developer-role",
+		"title", "host", "project", "planner-role", "developer-role",
 	} {
 		if err := command.MarkFlagRequired(required); err != nil {
 			panic(fmt.Sprintf("cli: 标记必需参数失败: %v", err))
