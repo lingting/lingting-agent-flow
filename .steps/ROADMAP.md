@@ -788,6 +788,20 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
   `review_summary`；是否并入反馈结构（用于"审查判定未通过后继续修复"这类未来场景）留待
   真实需求出现时决定。
 
+> **P4 常规工作项（2026-10-28，基线 `origin/master` `5fbf059`）：创建任务表单的字段收敛。**
+> 交付物为
+> [`P4-task-create-form-field-convergence.md`](./P4-task-create-form-field-convergence.md)。
+> 先按真实调用链逐字段核实"可安全继承 / 必须显式选择 / 可选覆盖"三分类（后端唯一权威是
+> `app.TaskService.prepareTaskRequest` 的 `firstNonBlank` / `inheritList`），结论是走通创建流程
+> **不存在重复操作**（可继承字段已被项目默认值预填），但存在三处可避免的交互负担：关联项目下的
+> 项目事实摘要行与平铺字段重复、且用户覆盖后与表单有效值不一致；容器内工作目录被角色配置与同源
+> 字段隔开；3 个 `required` 的继承字段插在"执行节点"与"角色配置"之间。据此只把仓库地址 / 基础分支 /
+> 容器内工作目录折叠为"默认继承关联项目"的可展开分组，收起摘要取自**表单当前值**与既有来源记录，
+> 语言环境与版本保持常显（依赖当前执行节点），关联项目 / 执行节点 / 角色仍必须显式选择。
+> **未修改任何 Go 代码、`CreateTaskRequest`、HTTP 契约与领域规则**；`pnpm test:unit:safe` 603 通过、
+> `pnpm test:e2e:safe` 229 通过 / 0 失败、`pnpm check` 与 `pnpm build` 通过（未执行 Go 测试）。
+> **P4-M5 仍为 `pending`**。
+
 ## 四阶段总览
 
 | 阶段 | 目标 | 必要性 | 主要依赖 | 退出条件（摘要） |

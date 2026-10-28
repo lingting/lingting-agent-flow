@@ -288,6 +288,27 @@ function fieldExtra(page: Page, label: string) {
   return page.locator(".ant-form-item").filter({ hasText: label }).locator(".ant-form-item-extra");
 }
 
+/** 收起摘要中的某一行（仓库地址 / 基础分支 / 容器内工作目录） */
+function summaryRow(page: Page, label: string) {
+  return page.locator(".ant-descriptions-item").filter({ hasText: label });
+}
+
+/** 展开"项目默认执行配置"：三个可继承字段默认收起 */
+async function expandProjectDefaults(page: Page) {
+  await page.getByRole("button", { name: /^展开修改仓库地址、基础分支与工作目录$/ }).click();
+}
+
+/** 收起"项目默认执行配置" */
+async function collapseProjectDefaults(page: Page) {
+  await page.getByRole("button", { name: /^收起仓库地址、基础分支与工作目录$/ }).click();
+}
+
+/** 选择角色 */
+async function selectRole(page: Page, ariaLabel: string, label: RegExp) {
+  await page.getByLabel(ariaLabel).click();
+  await page.locator(".ant-select-dropdown:visible").getByTitle(label).click();
+}
+
 test.beforeEach(async ({ page }) => {
   await stubHealth(page);
   await stubTaskList(page);
@@ -325,21 +346,119 @@ test.beforeEach(async ({ page }) => {
 });
 
 test.describe("创建任务时的项目配置继承与显式覆盖", () => {
-  test("项目默认值预填到表单，并标明取值来自项目", async ({ page }) => {
+  test("默认收起时只展示摘要，摘要取值与展开后的表单一致", async ({ page }) => {
     await stubProjects(page, [projectA(), projectB()]);
 
     await openCreateModal(page);
     await selectHost(page);
     await selectProject(page, /示例服务/);
 
+    // 三个可继承字段默认收起，只展示当前有效取值与来源。
+    await expect(page.getByLabel("仓库地址")).toBeHidden();
+    await expect(page.getByRole("textbox", { name: "* 基础分支" })).toBeHidden();
+    await expect(summaryRow(page, "仓库地址")).toContainText("ssh://git.example.com/team/repo");
+    await expect(summaryRow(page, "基础分支")).toContainText("main");
+    await expect(summaryRow(page, "容器内工作目录")).toContainText("/workspace/project");
+    await expect(summaryRow(page, "仓库地址")).toContainText(/来自项目「示例服务」的默认配置/);
+
+    // 语言环境与版本必须始终可见：它取决于当前执行节点，不能藏进收起区域。
+    await expect(selectedEnvironment(page, "go").first()).toBeVisible();
+    await expect(selectedVersion(page, "v0001").first()).toBeVisible();
+    await expect(page.getByText(/来自项目「示例服务」的默认配置/).first()).toBeVisible();
+
+    // 展开入口是可聚焦按钮：键盘回车即可展开，展开后字段值与摘要一致。
+    await page.getByRole("button", { name: /^展开修改/ }).focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("button", { name: /^收起仓库地址/ })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
     await expect(page.getByLabel("仓库地址")).toHaveValue("ssh://git.example.com/team/repo");
     await expect(page.getByRole("textbox", { name: "* 基础分支" })).toHaveValue("main");
     await expect(page.getByLabel("容器内工作目录（可选）")).toHaveValue("/workspace/project");
-    await expect(selectedEnvironment(page, "go").first()).toBeVisible();
-    await expect(selectedVersion(page, "v0001").first()).toBeVisible();
+  });
 
-    // 来源必须可辨识：不能把项目默认值展示成用户显式选择的事实。
-    await expect(page.getByText(/来自项目「示例服务」的默认配置/).first()).toBeVisible();
+  test("用户覆盖后收起：摘要显示覆盖值，再展开不丢失输入与来源", async ({ page }) => {
+    await stubProjects(page, [projectA(), projectB()]);
+
+    await openCreateModal(page);
+    await selectHost(page);
+    await selectProject(page, /示例服务/);
+    await expandProjectDefaults(page);
+    await page.getByLabel("仓库地址").fill("ssh://git.example.com/fork/repo");
+
+    await collapseProjectDefaults(page);
+    // 摘要必须与表单取值一致：把项目原始地址显示成任务配置会误导用户。
+    await expect(summaryRow(page, "仓库地址")).toContainText("ssh://git.example.com/fork/repo");
+    await expect(summaryRow(page, "仓库地址")).toContainText(/已手动设置/);
+    await expect(summaryRow(page, "仓库地址")).not.toContainText("ssh://git.example.com/team/repo");
+    await expect(summaryRow(page, "基础分支")).toContainText(/来自项目「示例服务」的默认配置/);
+
+    await expandProjectDefaults(page);
+    await expect(page.getByLabel("仓库地址")).toHaveValue("ssh://git.example.com/fork/repo");
+    await expect(fieldExtra(page, "仓库地址").getByText(/已手动设置/)).toBeVisible();
+  });
+
+  test("收起状态下必填字段没有取值时，提交会先展开该分组再显示字段错误", async ({ page }) => {
+    // 项目记录缺少仓库地址时界面不能伪造一个地址，也不能把错误藏在收起区域里。
+    await stubProjects(page, [projectA({ repository_url: "" })]);
+    const created = await stubCreateTask(page);
+
+    await openCreateModal(page);
+    await selectHost(page);
+    await selectProject(page, /示例服务/);
+
+    await expect(summaryRow(page, "仓库地址")).toContainText(/未填写/);
+    await expect(page.getByLabel("仓库地址")).toBeHidden();
+
+    await page.getByLabel("任务名称").fill("新建任务");
+    await page.getByLabel("任务描述").fill("描述内容");
+    await selectRole(page, "规划角色", /规划角色/);
+    await selectRole(page, "开发角色", /开发角色/);
+    await page.getByRole("button", { name: "创 建" }).click();
+
+    await expect(page.getByText("请输入仓库地址")).toBeVisible();
+    await expect(page.getByLabel("仓库地址")).toBeVisible();
+    expect(created).toHaveLength(0);
+  });
+
+  test("项目列表查询失败时摘要不显示来自项目，也不把空值当成继承配置", async ({ page }) => {
+    await page.route("**/api/v1/projects", (route) =>
+      route.fulfill({
+        body: JSON.stringify({ error: { code: "internal_error", message: "项目查询不可用" } }),
+        contentType: "application/json",
+        status: 500,
+      }),
+    );
+
+    await openCreateModal(page);
+    await selectHost(page);
+
+    await expect(page.getByText("项目查询失败")).toBeVisible();
+    await expect(page.getByText(/尚未选择关联项目/)).toBeVisible();
+    await expect(summaryRow(page, "仓库地址")).toContainText(/未填写/);
+    await expect(summaryRow(page, "基础分支")).toContainText(/未填写/);
+    await expect(page.getByText(/来自项目「/)).toHaveCount(0);
+  });
+
+  test("环境查询失败时不显示虚假的环境与版本", async ({ page }) => {
+    await stubProjects(page, [projectA()]);
+    await page.route("**/api/v1/environments?*", (route) =>
+      route.fulfill({
+        body: JSON.stringify({ error: { code: "internal_error", message: "环境查询不可用" } }),
+        contentType: "application/json",
+        status: 500,
+      }),
+    );
+
+    await openCreateModal(page);
+    await selectHost(page);
+    await selectProject(page, /示例服务/);
+
+    await expect(page.getByText("环境查询失败")).toBeVisible();
+    // 项目锁定的环境没有被预填：查询失败不等于"项目环境可用"。
+    await expect(selectedEnvironment(page, "go")).toHaveCount(0);
+    await expect(selectedVersion(page, "v0001")).toHaveCount(0);
   });
 
   test("手动修改仓库地址后切换项目：修改过的字段保留，其余字段跟随新项目", async ({ page }) => {
@@ -348,6 +467,7 @@ test.describe("创建任务时的项目配置继承与显式覆盖", () => {
     await openCreateModal(page);
     await selectHost(page);
     await selectProject(page, /示例服务/);
+    await expandProjectDefaults(page);
     await page.getByLabel("仓库地址").fill("ssh://git.example.com/fork/repo");
 
     await selectProject(page, /其他服务/);
@@ -391,7 +511,7 @@ test.describe("创建任务时的项目配置继承与显式覆盖", () => {
     await openCreateModal(page);
     // 没有执行节点就没有环境查询：此时只能预填与节点无关的字段。
     await selectProject(page, /示例服务/);
-    await expect(page.getByLabel("仓库地址")).toHaveValue("ssh://git.example.com/team/repo");
+    await expect(summaryRow(page, "仓库地址")).toContainText("ssh://git.example.com/team/repo");
     await expect(page.getByText("尚未选择执行节点")).toBeVisible();
 
     await selectHost(page);
@@ -414,7 +534,7 @@ test.describe("创建任务时的项目配置继承与显式覆盖", () => {
     await expect(selectedEnvironment(page, "python").first()).toBeVisible();
     await expect(selectedVersion(page, "v0003").first()).toBeVisible();
     // 项目默认值只填进未设置过的字段。
-    await expect(page.getByRole("textbox", { name: "* 基础分支" })).toHaveValue("main");
+    await expect(summaryRow(page, "基础分支")).toContainText("main");
     await expect(page.getByText(/已手动设置/).first()).toBeVisible();
   });
 
@@ -449,6 +569,7 @@ test.describe("创建任务时的项目配置继承与显式覆盖", () => {
     await page.getByLabel("任务名称").fill("新建任务");
     await page.getByLabel("任务描述").fill("描述内容");
     // 清空工作目录：空值表示"未覆盖"，由服务端继承项目配置。
+    await expandProjectDefaults(page);
     await page.getByLabel("容器内工作目录（可选）").fill("");
     await page.getByLabel("规划角色").click();
     await page

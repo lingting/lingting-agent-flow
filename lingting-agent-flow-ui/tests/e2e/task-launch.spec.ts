@@ -300,6 +300,15 @@ async function selectVersion(page: Page, version: string) {
     .click();
 }
 
+/**
+ * 展开"项目默认执行配置"：仓库地址、基础分支与容器内工作目录默认收起并继承关联项目，
+ * 要为本次任务覆盖它们必须先展开。
+ */
+async function expandProjectDefaults(page: Page) {
+  const button = page.getByRole("button", { name: /展开修改仓库地址、基础分支与工作目录/ });
+  if (await button.isVisible()) await button.click();
+}
+
 /** 拦截任务详情 */
 async function stubTaskDetail(page: Page, handler: () => { body: unknown; status?: number }) {
   await page.route("**/api/v1/tasks/task-1", async (route: Route) => {
@@ -662,6 +671,7 @@ test.describe("创建任务的环境选择", () => {
     await selectProject(page, /示例服务/);
     await page.getByLabel("任务名称").fill("新建任务");
     await page.getByLabel("任务描述").fill("描述内容");
+    await expandProjectDefaults(page);
     await page.getByLabel("仓库地址").fill("ssh://git.example.com/team/repo");
     await page.getByRole("textbox", { name: "* 基础分支" }).fill("main");
     await selectRole(page, "规划角色", /规划角色/);
@@ -725,6 +735,7 @@ test.describe("创建任务的环境选择", () => {
     await selectProject(page, /示例服务/);
     await page.getByLabel("任务名称").fill("新建任务");
     await page.getByLabel("任务描述").fill("描述内容");
+    await expandProjectDefaults(page);
     await page.getByLabel("仓库地址").fill("ssh://git.example.com/team/repo");
     await page.getByRole("textbox", { name: "* 基础分支" }).fill("main");
     await selectRole(page, "规划角色", /规划角色/);

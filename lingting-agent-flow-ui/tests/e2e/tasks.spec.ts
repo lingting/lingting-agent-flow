@@ -157,6 +157,15 @@ async function stubProjects(page: Page) {
   );
 }
 
+/**
+ * 展开"项目默认执行配置"：仓库地址、基础分支与容器内工作目录默认收起并继承关联项目，
+ * 要为本次任务覆盖它们必须先展开。
+ */
+async function expandProjectDefaults(page: Page) {
+  const button = page.getByRole("button", { name: /展开修改仓库地址、基础分支与工作目录/ });
+  if (await button.isVisible()) await button.click();
+}
+
 test.beforeEach(async ({ page }) => {
   await stubHealth(page);
   // 任务必须关联项目：创建任务弹窗需要真实项目可选项。
@@ -327,6 +336,7 @@ test.describe("任务操作", () => {
       .locator(".ant-select-dropdown:visible")
       .getByTitle(/构建机/)
       .click();
+    await expandProjectDefaults(page);
     await page.getByLabel("仓库地址").fill("ssh://git.example.com/team/repo");
     await page.getByRole("textbox", { name: "* 基础分支" }).fill("main");
     await page.getByLabel("语言环境").click();

@@ -262,6 +262,17 @@ async function selectVersion(page: Page, version: string) {
 }
 
 /**
+ * 展开"项目默认执行配置"。
+ *
+ * 仓库地址、基础分支与容器内工作目录默认继承关联项目并收起，只展示摘要；要为本次任务
+ * 覆盖它们必须先展开。
+ */
+async function expandProjectDefaults(page: Page) {
+  const button = page.getByRole("button", { name: /展开修改仓库地址、基础分支与工作目录/ });
+  if (await button.isVisible()) await button.click();
+}
+
+/**
  * 填写除节点、环境与角色之外的必填字段。
  *
  * 关联项目同样是必填项：任务必须关联服务端已登记的项目，不能手填标识。
@@ -270,6 +281,7 @@ async function fillCommonFields(page: Page) {
   await selectProject(page, /示例服务/);
   await page.getByLabel("任务名称").fill("新建任务");
   await page.getByLabel("任务描述").fill("描述内容");
+  await expandProjectDefaults(page);
   await page.getByLabel("仓库地址").fill("ssh://git.example.com/team/repo");
   await page.getByRole("textbox", { name: "* 基础分支" }).fill("main");
 }
@@ -283,6 +295,7 @@ async function fillCommonFields(page: Page) {
 async function fillEverythingExceptProject(page: Page) {
   await page.getByLabel("任务名称").fill("新建任务");
   await page.getByLabel("任务描述").fill("描述内容");
+  await expandProjectDefaults(page);
   await page.getByLabel("仓库地址").fill("ssh://git.example.com/team/repo");
   await page.getByRole("textbox", { name: "* 基础分支" }).fill("main");
   await selectHost(page, /构建机/);

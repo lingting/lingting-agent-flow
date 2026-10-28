@@ -564,14 +564,29 @@
   `CreateTaskRequest`、HTTP 契约与领域规则**；新增前端单元用例 8 个与 E2E 用例 7 个，
   `pnpm test:unit:safe` 597 通过、`pnpm test:e2e:safe` 225 通过 / 0 失败，`pnpm check` 与
   `pnpm build` 通过（未执行 Go 测试：未修改 Go 文件）。**P4-M5 仍为 `pending`**。
+- **创建任务表单的字段收敛已于 2026-10-28 完成**（基线 `origin/master` `5fbf059`，"恢复常规功能开发"
+  后的第四个常规工作项），交付物为
+  [`P4-task-create-form-field-convergence.md`](./P4-task-create-form-field-convergence.md)：先按真实调用链
+  逐字段核实"可安全继承 / 必须显式选择 / 可选覆盖"三分类（后端唯一权威是 `prepareTaskRequest` 的
+  `firstNonBlank` / `inheritList`），确认走通创建流程**不存在重复操作**，但存在三处可避免的交互负担——
+  ①`关联项目` 下的项目事实摘要行与平铺字段重复，且用户覆盖后与表单有效值不一致；②`容器内工作目录`
+  被角色配置与同源字段隔开；③3 个 `required` 的继承字段插在"执行节点"与"角色配置"之间。据此只把
+  仓库地址 / 基础分支 / 容器内工作目录折叠为"默认继承关联项目"的可展开分组（`ProjectDefaultsSection`
+  + 纯函数 `projectExecutionSummary`），摘要取自**表单当前值**与既有来源记录而不是项目原始值；
+  语言环境与版本**保持常显**（可用性取决于当前执行节点），关联项目 / 执行节点 / 角色仍必须显式选择；
+  折叠字段保持挂载以保住 `preserve={false}` 下的预填值，校验错误落在收起字段上时先自动展开。
+  **未修改任何 Go 代码、`CreateTaskRequest`、HTTP 契约与领域规则**；新增前端单元用例 6 个、E2E 用例
+  4 个并改写 1 个，`pnpm test:unit:safe` 603 通过、`pnpm test:e2e:safe` 229 通过 / 0 失败、
+  `pnpm check` 与 `pnpm build` 通过（未执行 Go 测试：未修改 Go 文件）。**P4-M5 仍为 `pending`**。
 - **下一步**：P3 阶段已全部完成（M1–M5 均 `completed`），P4-M1、M2-1…M2-7、M3、M4、G12 与
-  任务详情页体验复核、任务创建配置继承与显式覆盖均已完成（见上方"当前阶段与当前里程碑"）。
+  任务详情页体验复核、任务创建配置继承与显式覆盖、创建任务表单的字段收敛均已完成（见上方
+  "当前阶段与当前里程碑"）。
   P4 只剩 `P4-M5`，而它**缺少真实使用数据**，因此不再继续推进数据依赖型优化（解除待定所需数据见
   [`P4-M5-measurement-and-optimization-assessment.md`](./P4-M5-measurement-and-optimization-assessment.md) §8）。
   后续入口按 [`ROADMAP.md`](./ROADMAP.md) 的"下一步工作的选择规则"选择**有明确代码证据的常规
   功能缺口**；`P4-M1` 盘点的 P0/P1/P2/P3 缺口已全部闭合，新的候选需要重新盘点而不是照抄旧清单。
-  当前已有代码证据的候选（均未立项）：创建任务表单的字段收敛（从项目继承的字段折叠为"可展开
-  覆盖"）、私有仓库 Git 凭据支持、`verification_results` 遗留模型清理、任务详情页面板分组
+  当前已有代码证据的候选（均未立项）：私有仓库 Git 凭据支持、`verification_results` 遗留模型清理、
+  任务详情页面板分组
   （见 [`P4-task-detail-experience-review.md`](./P4-task-detail-experience-review.md) §8）。
   P4-M2-7 的剩余风险见
   [`P4-M2-7-web-execution-operations.md`](./P4-M2-7-web-execution-operations.md) §6：
@@ -652,6 +667,7 @@
 | [`P4-G12-project-management.md`](./P4-G12-project-management.md) | P4-G12：项目管理能力（原始缺口与代码核实、项目与任务 / 缓存 / 远程目录的关系、数据模型与迁移、领域 / 存储 / 应用 / HTTP / CLI / 前端完整调用链、任务必填关联与继承规则、测试证据、剩余风险） |
 | [`P4-task-detail-experience-review.md`](./P4-task-detail-experience-review.md) | P4 常规开发：任务详情页信息结构与操作可达性复核（真实页面结构与数据来源、6 处缺陷的代码证据与影响、最小修复方案、判定为合理的重复展示与死参数、新增 / 更新的测试断言、测试与构建结果、未解决项与后续候选、与 P4-M5 的关系） |
 | [`P4-task-create-project-inheritance.md`](./P4-task-create-project-inheritance.md) | P4 常规开发：任务创建时的项目配置继承与显式覆盖语义（后端继承规则核实、3 处缺陷的代码证据与修复前失败用例、字段级优先级与来源可见性规则、请求体转换、修改文件与行为变化、判定为合理未修改的 4 项、测试与构建结果、剩余风险、下一项候选、与 P4-M5 的关系） |
+| [`P4-task-create-form-field-convergence.md`](./P4-task-create-form-field-convergence.md) | P4 常规开发：创建任务表单的字段收敛（逐字段继承核查与三分类证据、3 处交互负担的代码证据、只折叠可继承文本字段的依据、收起摘要取自表单有效值与来源、语言环境与版本保持常显的理由、折叠保持挂载与校验失败自动展开、修改文件、测试与构建结果、剩余风险、下一项候选、与 P4-M5 的关系） |
 
 ## 下一步工作的选择规则
 

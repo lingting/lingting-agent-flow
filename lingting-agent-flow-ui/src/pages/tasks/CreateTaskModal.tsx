@@ -1,9 +1,8 @@
 import { Alert, Form, Input, Modal, Select, Space, Switch, Typography } from "antd";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { ApiError, createTask, type CreateTaskRequest, type Environment } from "@/lib/api";
 import {
-  describeProjectEnvironment,
   findProject,
   projectSelectOptions,
   resolveProjectSelection,
@@ -20,6 +19,12 @@ import {
   RESTORE_PROJECT_DEFAULT_LABEL,
   type ProjectPrefillField,
 } from "@/pages/tasks/projectPrefill";
+import {
+  NO_PROJECT_HINT,
+  projectExecutionSummary,
+  type ProjectExecutionSummaryRow,
+} from "@/pages/tasks/projectExecutionSummary";
+import { ProjectDefaultsSection } from "@/pages/tasks/ProjectDefaultsSection";
 import {
   hostSelectOptions,
   resolveHostSelection,
@@ -100,6 +105,16 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : "未知错误";
 }
 
+/** 校验错误是否落在默认为收起状态的字段上（收起时提示不可见，必须展开） */
+function isCollapsedFieldError(error: unknown): boolean {
+  const fields = (error as { errorFields?: { name?: (string | number)[] }[] }).errorFields;
+  if (!fields) return false;
+  return fields.some((field) => {
+    const name = field.name?.[0];
+    return typeof name === "string" && (PROJECT_TEXT_FIELDS as readonly string[]).includes(name);
+  });
+}
+
 export type CreateTaskModalProps = {
   open: boolean;
   onCancel: () => void;
@@ -130,6 +145,9 @@ export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalPr
   const watchedProjectID = Form.useWatch("project_id", form);
   const selectedEnvironment = Form.useWatch("environment", form);
   const selectedVersion = Form.useWatch("environment_version", form);
+  const watchedRepositoryURL = Form.useWatch("repository_url", form);
+  const watchedBaseBranch = Form.useWatch("base_branch", form);
+  const watchedWorkDir = Form.useWatch("work_dir", form);
   const hosts = useHosts();
   const roles = useRoles();
   const projects = useProjects();
@@ -168,6 +186,9 @@ export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalPr
   const [appliedFields, setAppliedFields] = useState<ProjectPrefillField[]>([]);
   /** 项目配置无法自动填入时的原因（例如项目环境在当前节点没有可用版本） */
   const [prefillNotice, setPrefillNotice] = useState<string>();
+  /** "项目默认执行配置"是否展开：属表单局部状态，关闭弹窗即重置，不做全局状态或持久化 */
+  const [configFieldsExpanded, setConfigFieldsExpanded] = useState(false);
+  const projectFieldsID = useId();
 
   const syncOverridden = (fields: ProjectPrefillField[]) => {
     overriddenRef.current = new Set(fields);
@@ -177,6 +198,29 @@ export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalPr
   /** 字段被用户改动后不再"来自项目默认值"，否则会把用户输入显示成继承值 */
   const clearApplied = (fields: readonly ProjectPrefillField[]) =>
     setAppliedFields((previous) => previous.filter((field) => !fields.includes(field)));
+
+  /** 收起状态下的执行配置摘要：取值取自表单，来源取自预填记录 */
+  const projectFieldRows = useMemo<ProjectExecutionSummaryRow[]>(
+    () =>
+      projectExecutionSummary({
+        applied: appliedFields,
+        current: {
+          base_branch: watchedBaseBranch,
+          repository_url: watchedRepositoryURL,
+          work_dir: watchedWorkDir,
+        },
+        overridden: overriddenFields,
+        project: selectedProject,
+      }),
+    [
+      appliedFields,
+      overriddenFields,
+      selectedProject,
+      watchedBaseBranch,
+      watchedRepositoryURL,
+      watchedWorkDir,
+    ],
+  );
 
   /**
    * 按当前项目与当前执行节点的环境列表应用项目默认值。
@@ -250,6 +294,7 @@ export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalPr
     syncOverridden([]);
     setAppliedFields([]);
     setPrefillNotice(undefined);
+    setConfigFieldsExpanded(false);
     // syncOverridden 每次渲染都会重建，但不是状态来源，只在打开时重置一次。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -342,8 +387,10 @@ export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalPr
     let values: CreateTaskFormValues;
     try {
       values = await form.validateFields();
-    } catch {
-      // 校验失败时 Form 已经在字段下方给出提示，这里不再重复提示。
+    } catch (cause) {
+      // 校验失败时 Form 已经在字段下方给出提示，这里不再重复提示；但错误落在收起状态的
+      // 字段上时提示看不见，必须先展开再返回。
+      if (isCollapsedFieldError(cause)) setConfigFieldsExpanded(true);
       return;
     }
     const projectSelection = resolveProjectSelection({
@@ -486,12 +533,6 @@ export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalPr
               </Form.Item>
             )}
           </Space>
-          {selectedProject && (
-            <Typography.Text type="secondary">
-              仓库 {selectedProject.repository_url} · 分支 {selectedProject.base_branch} · 环境{" "}
-              {describeProjectEnvironment(selectedProject)}
-            </Typography.Text>
-          )}
         </Form.Item>
         <Form.Item label="优先级" name="priority">
           <Select
@@ -553,25 +594,6 @@ export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalPr
           </Space>
         </Form.Item>
 
-        <Form.Item
-          extra={fieldExtra("repository_url")}
-          label="仓库地址"
-          name="repository_url"
-          rules={[{ message: "请输入仓库地址", required: true }]}
-        >
-          <Input placeholder="ssh://git.example.com/team/repo" />
-        </Form.Item>
-        <Space align="start" size="middle" style={{ display: "flex" }}>
-          <Form.Item
-            extra={fieldExtra("base_branch")}
-            label="基础分支"
-            name="base_branch"
-            rules={[{ message: "请输入基础分支", required: true }]}
-            style={{ flex: 1 }}
-          >
-            <Input placeholder="main" />
-          </Form.Item>
-        </Space>
         <Form.Item extra={environmentExtra()} label="语言环境与版本" required>
           <EnvironmentSelector
             environment={selectedEnvironment}
@@ -589,6 +611,41 @@ export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalPr
         <Form.Item hidden name="environment_version">
           <Input />
         </Form.Item>
+
+        {/* 仓库地址、基础分支与容器内工作目录都能从关联项目继承，默认收起：只展示当前有效
+            取值与来源，需要为本次任务覆盖时再展开。字段容器始终保持挂载——Form 设置了
+            preserve={false}，卸载字段会丢弃已经继承到的取值。 */}
+        <ProjectDefaultsSection
+          controls={projectFieldsID}
+          expanded={configFieldsExpanded}
+          hint={selectedProject ? undefined : NO_PROJECT_HINT}
+          rows={projectFieldRows}
+          onToggle={() => setConfigFieldsExpanded((value) => !value)}
+        />
+        <div id={projectFieldsID} style={{ display: configFieldsExpanded ? undefined : "none" }}>
+          <Form.Item
+            extra={fieldExtra("repository_url")}
+            label="仓库地址"
+            name="repository_url"
+            rules={[{ message: "请输入仓库地址", required: true }]}
+          >
+            <Input placeholder="ssh://git.example.com/team/repo" />
+          </Form.Item>
+          <Space align="start" size="middle" style={{ display: "flex" }}>
+            <Form.Item
+              extra={fieldExtra("base_branch")}
+              label="基础分支"
+              name="base_branch"
+              rules={[{ message: "请输入基础分支", required: true }]}
+              style={{ flex: 1 }}
+            >
+              <Input placeholder="main" />
+            </Form.Item>
+          </Space>
+          <Form.Item extra={fieldExtra("work_dir")} label="容器内工作目录（可选）" name="work_dir">
+            <Input placeholder="/workspace/project" />
+          </Form.Item>
+        </div>
 
         <Typography.Text strong>角色配置</Typography.Text>
         <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
@@ -689,9 +746,6 @@ export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalPr
           </>
         )}
 
-        <Form.Item extra={fieldExtra("work_dir")} label="容器内工作目录（可选）" name="work_dir">
-          <Input placeholder="/workspace/project" />
-        </Form.Item>
         <Form.Item
           label="必需验证命令（可选）"
           name="commands"
