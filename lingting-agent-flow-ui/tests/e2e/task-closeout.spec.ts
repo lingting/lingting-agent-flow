@@ -279,9 +279,9 @@ test.describe("任务最终结论与收尾闭环", () => {
     await page.goto("/tasks");
     await page.getByText("实现登录接口").first().click();
 
-    await expect(page.getByText("操作失败")).toBeVisible();
+    await expect(page.getByText("加载任务详情失败")).toBeVisible();
     await expect(page.getByText("任务不存在: task-1")).toBeVisible();
-    await expect(page.getByText("任务详情")).toHaveCount(0);
+    await expect(page.getByText("任务详情", { exact: true })).toHaveCount(0);
     await expect(page.getByText("已确认收尾")).toHaveCount(0);
     await expect(page.getByText("成功", { exact: true })).toHaveCount(0);
   });

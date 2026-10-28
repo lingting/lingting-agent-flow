@@ -24,6 +24,7 @@ import type {
   ValidationCheckResult,
   VerificationVerdict,
 } from "@/lib/api";
+import { taskStatusLabel } from "@/pages/tasks/status";
 
 /** 一次操作的展示结论 */
 export type OperationOutcome = {
@@ -295,6 +296,29 @@ export const EXECUTION_OUTCOME_LABEL: Record<StepExecutionOutcome, string> = {
 export function executionOutcomeLabel(outcome?: string): string {
   if (!outcome) return "—";
   return EXECUTION_OUTCOME_LABEL[outcome as StepExecutionOutcome] ?? outcome;
+}
+
+/**
+ * 代码初始化状态标签，取值来自 Go 端 `domain.CodeFetchStatus`。
+ *
+ * 它只表达"这一次代码初始化如何结束"，不代表记录已可靠写入（见 `persisted`），也不代表
+ * 步骤验收通过；与工作区初始化状态是不同的事实，因此单独一张映射表。
+ */
+export const CODE_FETCH_STATUS_LABEL: Record<string, string> = {
+  pending: "待执行",
+  running: "执行中",
+  succeeded: "已就绪",
+  failed: "失败",
+  cancelled: "已取消",
+  timed_out: "已超时",
+  skipped: "已就绪（未改动）",
+  uncertain: "结果不确定",
+};
+
+/** 读取代码初始化状态标签；未知取值原样展示 */
+export function codeFetchStatusLabel(status?: string): string {
+  if (!status) return "—";
+  return CODE_FETCH_STATUS_LABEL[status] ?? status;
 }
 
 /** 验证流程状态标签，取值来自 Go 端 `domain.ValidationRunStatus` */
@@ -617,7 +641,7 @@ export function canInitializeAttempt(task: Task, attempt?: Attempt): boolean {
 /** 把计划生成响应翻译为用户可读结论：只有 `persisted` 才代表计划已落库 */
 export function describePlanResult(result: PlanResponse): OperationOutcome {
   const details = [
-    `任务状态：${result.task_status}`,
+    `任务状态：${taskStatusLabel(result.task_status)}`,
     `计划：${result.persisted ? `已持久化 ${result.steps.length} 个步骤` : "未持久化"}`,
   ];
   if (result.summary) details.push(`摘要：${result.summary}`);
@@ -634,9 +658,9 @@ export function describePlanResult(result: PlanResponse): OperationOutcome {
 export function describeExecuteStepResult(result: ExecuteStepResponse): OperationOutcome {
   const details = [
     `执行结论：${executionOutcomeLabel(result.outcome)}`,
-    `尝试：第 ${result.attempt_number} 次（${result.attempt_status}）`,
+    `尝试：第 ${result.attempt_number} 次（${attemptStatusMeta(result.attempt_status).label}）`,
     `步骤状态：${stepStatusMeta(result.step_status).label}`,
-    `任务状态：${result.task_status}`,
+    `任务状态：${taskStatusLabel(result.task_status)}`,
   ];
   if (result.summary) details.push(`摘要：${result.summary}`);
   if (result.error) details.push(`原因：${result.error}`);
@@ -655,7 +679,10 @@ export function describeExecuteStepResult(result: ExecuteStepResponse): Operatio
 
 /** 把顺序执行响应翻译为用户可读结论：`stopped` 与 `success` 分别表达 */
 export function describeExecuteStepsResult(result: ExecuteStepsResponse): OperationOutcome {
-  const details = [`已执行步骤：${result.executed_steps} 个`, `任务状态：${result.task_status}`];
+  const details = [
+    `已执行步骤：${result.executed_steps} 个`,
+    `任务状态：${taskStatusLabel(result.task_status)}`,
+  ];
   for (const step of result.steps) {
     const summary = step.skipped
       ? `跳过（${step.skip_reason ?? "未执行"}）`
@@ -754,7 +781,7 @@ export function describeValidateResult(result: ValidateAttemptResponse): Operati
  */
 export function describeInitializeResult(result: InitializeCodeResponse): OperationOutcome {
   const details = [
-    `初始化状态：${result.status}`,
+    `初始化状态：${codeFetchStatusLabel(result.status)}`,
     `代码是否就绪：${result.succeeded ? "是" : "否"}`,
     `工作目录：${result.work_dir}`,
     `任务分支：${result.task_branch || "服务端未提供"}`,

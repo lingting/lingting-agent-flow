@@ -1544,3 +1544,72 @@ test.describe("不伪造能力", () => {
     expect(oldEntry).toHaveLength(0);
   });
 });
+
+test.describe("切换任务时的状态隔离", () => {
+  test("切换任务后不再用上一个任务的步骤标识发起查询", async ({ page }) => {
+    const first = sampleTask();
+    const second = sampleTask({ id: "task-2", name: "实现支付接口" });
+
+    await page.route("**/api/v1/tasks?*", (route: Route) =>
+      route.fulfill({
+        body: JSON.stringify({ current: 1, records: [first, second], size: 20, total: 2 }),
+        contentType: "application/json",
+        status: 200,
+      }),
+    );
+    await stubTaskDetail(page, first);
+    await stubWorkflow(page);
+    await stubSteps(page);
+    await stubAttempts(page, []);
+    await stubValidations(page, []);
+    await stubSessions(page);
+
+    await page.route("**/api/v1/tasks/task-2", (route: Route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      return route.fulfill({
+        body: JSON.stringify(second),
+        contentType: "application/json",
+        status: 200,
+      });
+    });
+    await page.route("**/api/v1/tasks/task-2/workflow", (route: Route) =>
+      route.fulfill({
+        body: JSON.stringify({
+          has_run: false,
+          steps: [],
+          task_id: "task-2",
+          task_status: "queued",
+        }),
+        contentType: "application/json",
+        status: 200,
+      }),
+    );
+
+    /**
+     * 记录发往新任务的"旧步骤"请求。
+     *
+     * 上一个任务选中的是 step-1；切换任务后若仍按旧标识查询，就会出现这类请求，
+     * 它们在新任务上必然失败，并且说明选中态跨任务泄漏了。
+     */
+    const staleStepRequests: string[] = [];
+    await page.route("**/api/v1/tasks/task-2/steps/**", (route: Route) => {
+      staleStepRequests.push(route.request().url());
+      return route.fulfill({
+        body: JSON.stringify({ error: { code: "not_found", message: "步骤不存在" } }),
+        contentType: "application/json",
+        status: 404,
+      });
+    });
+
+    await openDetail(page);
+    await selectStep(page);
+    // 步骤记录确实按 task-1 + step-1 查询过（空列表是服务端的真实结果）
+    await expect(page.getByText(/该步骤还没有任何真实执行尝试/)).toBeVisible();
+
+    // 切换到第二个任务：详情必须显示新任务，且不再保留上一个任务的步骤选择
+    await page.getByText("实现支付接口").first().click();
+    await expect(page.getByText("task-2")).toBeVisible();
+    await expect(page.getByText("步骤详情")).toHaveCount(0);
+    expect(staleStepRequests).toHaveLength(0);
+  });
+});

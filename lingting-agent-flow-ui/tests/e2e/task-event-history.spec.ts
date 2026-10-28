@@ -586,3 +586,47 @@ test.describe("自动刷新与副作用", () => {
     expect(writes).toEqual([]);
   });
 });
+
+/**
+ * 步骤流与任务历史的先后顺序。
+ *
+ * 事件时间线是任务维度的历史（一次 20 条并支持加载更多），不能插在步骤列表与步骤详情之间：
+ * 否则用户点开某个步骤后，必须越过整段历史才能看到刚选中的步骤详情与操作入口。
+ */
+test.describe("步骤详情与事件时间线的顺序", () => {
+  test("选中步骤后，步骤详情出现在事件时间线之前", async ({ page }) => {
+    await stubTaskList(page);
+    await stubTaskDetail(page);
+    await stubWorkflow(page);
+    await stubSteps(page);
+    await stubEmptyRecords(page);
+    await stubRepairCycles(page, () => ({
+      records: [],
+      step_id: "step-1",
+      task_id: "task-1",
+      total: 0,
+    }));
+    await stubEvents(page, () => ({
+      offset: 0,
+      records: [sampleEvent()],
+      size: 20,
+      task_id: "task-1",
+      total: 1,
+    }));
+
+    await openDetail(page);
+    await page.getByText("实现登录步骤", { exact: true }).first().click();
+
+    const detail = page.getByText("步骤详情").first();
+    const timeline = page.getByText("事件时间线").first();
+    await expect(detail).toBeVisible();
+    await expect(timeline).toBeVisible();
+
+    const detailBox = await detail.boundingBox();
+    const timelineBox = await timeline.boundingBox();
+    expect(detailBox).not.toBeNull();
+    expect(timelineBox).not.toBeNull();
+    // 步骤详情在事件时间线上方：选中步骤后不需要越过任务历史
+    expect(detailBox!.y).toBeLessThan(timelineBox!.y);
+  });
+});

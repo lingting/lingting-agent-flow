@@ -682,7 +682,7 @@ test.describe("失败、刷新与竞态", () => {
     await expect(page.getByText("第一个任务可以续跑")).toBeVisible();
 
     await page.getByText("补充接口测试").first().click();
-    await expect(page.getByText("任务详情")).toHaveCount(0);
+    await expect(page.getByText("任务详情", { exact: true })).toHaveCount(0);
     await expect(page.getByText("第一个任务可以续跑")).toHaveCount(0);
     await expect(page.getByText("续跑资格与阻塞原因")).toHaveCount(0);
   });

@@ -46,7 +46,15 @@ export function TaskExecutionPanel({
   stepsToken?: number;
   task: Task;
 }) {
-  const [selectedStepID, setSelectedStepID] = useState<string>();
+  /**
+   * 选中的步骤必须与它所属的任务一起保存。
+   *
+   * 切换任务时本组件不会被卸载，若只保存步骤标识，切换后的第一帧仍会按上一个任务的步骤
+   * 标识发起一次必然失败的查询，并把上一个任务的选中态短暂留在新任务界面上。因此选择里
+   * 同时记录任务标识，只有它与当前任务一致时才视为选中。
+   */
+  const [selection, setSelection] = useState<{ stepID: string; taskID: string }>();
+  const selectedStepID = selection?.taskID === task.id ? selection.stepID : undefined;
   const stepsState = useTaskSteps(task.id, stepsToken);
   const records = useStepRecords(task.id, selectedStepID, stepsToken);
   /**
@@ -82,10 +90,10 @@ export function TaskExecutionPanel({
   const clearOperation = operations.clear;
   const handleSelectStep = useCallback(
     (step: Step) => {
-      setSelectedStepID(step.id);
+      setSelection({ stepID: step.id, taskID: task.id });
       clearOperation();
     },
-    [clearOperation],
+    [clearOperation, task.id],
   );
 
   const busy = operations.state.running !== undefined;
@@ -126,12 +134,6 @@ export function TaskExecutionPanel({
         state={stepsState.state}
       />
 
-      <EventTimelinePanel
-        onLoadMore={events.loadMore}
-        onReload={events.reload}
-        state={events.state}
-      />
-
       {selectedStep ? (
         <StepDetailPanel
           key={selectedStep.id}
@@ -152,6 +154,17 @@ export function TaskExecutionPanel({
           />
         )
       )}
+
+      {/*
+        事件时间线放在步骤详情之后：它是任务维度的历史，一次可展示 20 条以上并支持
+        「加载更多」，若插在步骤列表与步骤详情之间，用户点开某个步骤后必须越过整段历史
+        才能看到刚选中的步骤详情与操作入口。读取时机不变（仍不参与 5 秒自动刷新）。
+      */}
+      <EventTimelinePanel
+        onLoadMore={events.loadMore}
+        onReload={events.reload}
+        state={events.state}
+      />
     </Flex>
   );
 }

@@ -222,20 +222,17 @@ function WorkflowPanel({ status }: { status: WorkflowStatusResponse }) {
           </>
         )}
       </Descriptions>
+      {/*
+        步骤的顺序、状态、失败原因与起止时间只在下方「计划步骤」中展示。
+
+        这里曾经也渲染一份步骤概览，但两份列表来自同一次读取的不同接口，状态取值一处是
+        中文标签、一处是服务端原始值，用户无法判断哪一份是权威信息；因此只保留单一
+        权威位置，并在本面板明确指路。
+      */}
       {status.steps.length > 0 && (
-        <Flex gap={4} vertical>
-          <Typography.Text strong>步骤进度</Typography.Text>
-          {status.steps.map((step) => (
-            <Flex align="center" gap="small" key={step.step_id}>
-              <Typography.Text type="secondary" style={{ width: 28 }}>
-                {step.sequence}
-              </Typography.Text>
-              <Typography.Text style={{ minWidth: 180 }}>{step.title}</Typography.Text>
-              <Typography.Text code>{step.status}</Typography.Text>
-              {step.error && <Typography.Text type="danger">{step.error}</Typography.Text>}
-            </Flex>
-          ))}
-        </Flex>
+        <Typography.Text type="secondary">
+          步骤顺序、状态与失败原因以「计划步骤」为准；本面板的数字只汇总执行记录。
+        </Typography.Text>
       )}
     </Flex>
   );
@@ -558,7 +555,7 @@ export function TasksPage() {
           action={<Button onClick={() => void refreshNow()} size="small" text="重试" />}
           description={snapshot.error}
           showIcon
-          title="操作失败"
+          title="加载任务详情失败"
           type="error"
         />
       )}
@@ -586,7 +583,9 @@ export function TasksPage() {
               action={<Button onClick={() => void refreshNow()} size="small" text="重试" />}
               description={snapshot.refreshError}
               showIcon
-              title="自动刷新失败"
+              // 标题必须与当前的刷新机制一致：自动刷新已停止时不存在"自动刷新失败"，
+              // 那一次失败只可能来自手动刷新，否则与同一行的"自动刷新已停止"自相矛盾。
+              title={autoRefreshOn ? "自动刷新失败" : "刷新失败"}
               type="warning"
             />
           )}

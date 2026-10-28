@@ -12,6 +12,7 @@
  *   3. 未知阻塞分类、未知任务状态与缺省可选字段都原样保留，并用中性文案说明。
  */
 import type { RetryEligibilityResponse, RetryTaskResponse } from "@/lib/api";
+import { workflowRunStatusMeta } from "@/pages/tasks/status";
 
 /** 一条阻塞分类的展示结论 */
 export type RetryBlockingMeta = {
@@ -268,9 +269,10 @@ export function describeRetryResult(
 
   if (result.workflow_started) {
     const run = result.run;
+    const runStatus = run ? workflowRunStatusMeta(run.status).label : "";
     details.push(
       run
-        ? `执行记录：${run.run_id}（${run.status}，已完成 ${run.completed_steps} / ${run.total_steps} 步）`
+        ? `执行记录：${run.run_id}（${runStatus}，已完成 ${run.completed_steps} / ${run.total_steps} 步）`
         : "执行记录：服务端未返回本次启动的执行记录",
     );
     return {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { StartTaskResponse, Task } from "../../src/lib/api";
+import type { StartTaskResponse, Task, TaskStatus } from "../../src/lib/api";
 import {
   canStartTask,
   describeLaunchResult,
@@ -126,7 +126,7 @@ describe("启动结论", () => {
     expect(outcome.kind).toBe("blocked");
     expect(outcome.title).toContain("未启动");
     expect(outcome.description).toContain("执行节点未通过环境预检");
-    expect(outcome.description).toContain("任务状态：queued");
+    expect(outcome.description).toContain("任务状态：等待执行");
     expect(outcome.description).not.toContain("工作流已启动");
   });
 
@@ -180,6 +180,25 @@ describe("启动结论", () => {
     );
 
     expect(outcome.description).toContain("初始化工作区");
-    expect(outcome.description).toContain("任务状态：recovery_required");
+    expect(outcome.description).toContain("任务状态：待核验");
+  });
+
+  it("任务状态用与页面一致的中文标签，未知取值原样保留", () => {
+    const known = describeLaunchResult(
+      launch({ stage: "workflow", task_status: "developing", workflow_started: false }),
+    );
+    // 与 `TASK_STATUS_META` 的标签一致：同一个事实不能一处写"开发中"、一处写"developing"
+    expect(known.description).toContain("任务状态：开发中");
+    expect(known.description).not.toContain("developing");
+
+    const unknown = describeLaunchResult(
+      launch({
+        stage: "workflow",
+        task_status: "future_status" as TaskStatus,
+        workflow_started: false,
+      }),
+    );
+    // 未知取值必须原样可见，不能被字典兜底掩盖
+    expect(unknown.description).toContain("任务状态：future_status");
   });
 });

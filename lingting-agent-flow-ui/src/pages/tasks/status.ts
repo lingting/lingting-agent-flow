@@ -6,7 +6,7 @@
  */
 import type { DictItem } from "lingting-react-ui";
 
-import type { Task, TaskStatus, WorkflowRun, WorkflowRunStatus } from "@/lib/api";
+import type { Task, TaskStatus, WorkflowRun, WorkflowRunStatus, WorkflowStage } from "@/lib/api";
 
 /** 状态展示信息 */
 export type TaskStatusMeta = {
@@ -65,6 +65,17 @@ export function taskStatusMeta(status: TaskStatus): TaskStatusMeta {
  */
 export function isKnownTaskStatus(status: string): status is TaskStatus {
   return Object.hasOwn(TASK_STATUS_META, status);
+}
+
+/**
+ * 把任务状态取值翻译为中文标签，未知取值原样返回。
+ *
+ * 用于纯文本结论（操作结果、启动结论）里引用任务状态：这些文字与页面上的状态标签必须
+ * 使用同一份映射，否则同一个事实会同时以"开发中"和"developing"两种形态出现。
+ */
+export function taskStatusLabel(status: string): string {
+  if (!Object.hasOwn(TASK_STATUS_LABEL, status)) return status;
+  return TASK_STATUS_LABEL[status as TaskStatus];
 }
 
 /**
@@ -136,6 +147,26 @@ export function workflowRunStatusMeta(status: WorkflowRunStatus): WorkflowRunSta
  */
 export function isKnownWorkflowRunStatus(status: string): status is WorkflowRunStatus {
   return Object.hasOwn(WORKFLOW_RUN_STATUS_META, status);
+}
+
+/**
+ * 工作流执行阶段的中文标签。
+ *
+ * 取值来自 Go 端 `domain.WorkflowStage`，这里只补充中文说明：阶段只表达"这一步在工作流
+ * 的哪个环节"，不代表任务成功，也不代表某一阶段已经完成。
+ */
+export const WORKFLOW_STAGE_LABEL: Record<WorkflowStage, string> = {
+  waiting: "等待开始",
+  step_execution: "执行开发步骤",
+  code_save: "保存代码",
+  finalize: "收尾",
+  stopped: "已停止",
+};
+
+/** 把工作流阶段取值翻译为中文标签，未知取值原样返回 */
+export function workflowStageLabel(stage: string): string {
+  if (!Object.hasOwn(WORKFLOW_STAGE_LABEL, stage)) return stage;
+  return WORKFLOW_STAGE_LABEL[stage as WorkflowStage];
 }
 
 /**

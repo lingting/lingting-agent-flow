@@ -56,6 +56,7 @@ import {
   TASK_STATUS_META,
   WORKFLOW_RUN_STATUS_DICT,
   WORKFLOW_RUN_STATUS_META,
+  workflowStageLabel,
 } from "@/pages/tasks/status";
 import {
   useResumeEligibility,
@@ -195,7 +196,9 @@ function ResumeEligibilityBody({ data }: { data: ResumeEligibilityResponse }) {
                   <Typography.Text>{run.status}</Typography.Text>
                 )}
                 <Typography.Text code>{run.run_id}</Typography.Text>
-                <Typography.Text type="secondary">阶段：{run.stage}</Typography.Text>
+                <Typography.Text type="secondary">
+                  阶段：{workflowStageLabel(run.stage)}
+                </Typography.Text>
               </Space>
               <Typography.Text type="secondary">
                 {`进度：已完成 ${run.completed_steps} / ${run.total_steps} 步`}

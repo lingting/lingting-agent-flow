@@ -218,6 +218,22 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > 给出的值优先。证据见 [`P4-G12-project-management.md`](./P4-G12-project-management.md)。
 > **P4-M5 不受影响，仍为 `pending`**：本轮没有把数据依赖型优化标记为完成，也没有重复进行缺少
 > 真实数据的评估。
+> **任务详情页信息结构与操作可达性复核已于 2026-10-28 `completed`**（基线 `origin/master`
+> `d6a6a19`）：这是"恢复常规功能开发"后的第二个工作项，不属于 P4-M1 的 G 项，也不属于 P4-M5。
+> 本轮先核实真实页面结构与每个事实的数据来源，再只修**能由代码直接证实**的 6 处缺陷：
+> （1）工作流面板与「计划步骤」重复渲染同一批步骤，且一处输出原始取值 `developing`、一处输出
+> "开发中"——改为单一权威位置并明确指路；（2）结论文本直接输出服务端枚举（任务状态、尝试状态、
+> 工作流状态、工作流阶段、代码初始化状态）——复用既有中文映射，未知取值原样保留；
+> （3）"详情读取失败"与"有副作用的操作失败"共用标题"操作失败"——前者改为"加载任务详情失败"；
+> （4）自动刷新已停止时手动刷新失败仍显示"自动刷新失败"——标题按真实刷新机制区分；
+> （5）切换任务后仍保留上一个任务的选中步骤，并按旧步骤标识向新任务发起一次必然失败的静默查询
+> ——选中态与任务标识绑定；（6）步骤详情被整段任务事件时间线隔开——事件时间线移到步骤详情之后。
+> **未修改任何 Go 代码、HTTP 契约、状态机、恢复 / 重试资格、容器生命周期、验证规则与数据库结构**；
+> 新增前端单元用例 7 个与 E2E 用例 4 个，`pnpm test:unit:safe` 589 通过、`pnpm test:e2e:safe`
+> 218 通过 / 0 失败，`pnpm check` 与 `pnpm build` 通过。证据见
+> [`P4-task-detail-experience-review.md`](./P4-task-detail-experience-review.md)。
+> **P4-M5 不受影响，仍为 `pending`**：本轮缺陷全部是提示矛盾与信息结构问题，不涉及性能、并发、
+> 存储或架构，也没有产生可用于性能立项的数据。
 > **P4-M3 已为 `completed`**：M3-2 已由 P4-M2-7 满足，M3-1、M3-3、M3-4、M3-5、
 > M3-6、M3-7 与 M3-8 全部完成。**M3-8（事件时间线与修复周期历史）于 2026-10-27 完成**：
 > 核实出 `ListEventsByTask` 生产代码零调用者且排序只有 `ORDER BY id`、`EventFilter`
@@ -850,3 +866,4 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - [P4-frontend-test-resource-governance.md](./P4-frontend-test-resource-governance.md)
 - [P4-M5-measurement-and-optimization-assessment.md](./P4-M5-measurement-and-optimization-assessment.md)
 - [P4-G12-project-management.md](./P4-G12-project-management.md)
+- [P4-task-detail-experience-review.md](./P4-task-detail-experience-review.md)

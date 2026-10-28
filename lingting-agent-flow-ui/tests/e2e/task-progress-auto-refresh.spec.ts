@@ -519,3 +519,90 @@ test.describe("刷新失败与手动刷新", () => {
     expect(details.length).toBeGreaterThanOrEqual(2);
   });
 });
+
+test.describe("刷新提示与真实机制一致", () => {
+  test("自动刷新已停止时，手动刷新失败不被写成自动刷新失败", async ({ page }) => {
+    await stubTaskList(page);
+    // 工作流已进入终态：自动刷新按真实状态停止，页面上明确写着「自动刷新已停止」
+    await stubTaskDetail(page, () => ({
+      body: sampleTask({ status: "completed", status_finished: true, status_terminal: true }),
+    }));
+    let failing = false;
+    await stubWorkflow(page, () =>
+      failing
+        ? { body: { error: { code: "internal_error", message: "服务内部错误" } }, status: 500 }
+        : {
+            body: workflowBody(
+              {
+                completed_steps: 2,
+                stage: "finalize",
+                status: "completed",
+                status_active: false,
+                status_terminal: true,
+              },
+              { task_status: "completed" },
+            ),
+          },
+    );
+    await stubExecutionRecords(page);
+
+    await openDetail(page);
+    await expect(page.getByText("自动刷新已停止")).toBeVisible();
+    await expect(page.getByText("已完成 2 / 2 步")).toBeVisible();
+
+    failing = true;
+    await page.getByText("刷新进度", { exact: true }).click();
+
+    // 提示必须说明是"刷新失败"而不是"自动刷新失败"：自动刷新此时根本没有在运行
+    await expect(page.getByText("刷新失败", { exact: true })).toBeVisible();
+    await expect(page.getByText(/服务内部错误/)).toBeVisible();
+    await expect(page.getByText("自动刷新失败")).toHaveCount(0);
+    // 上一次成功的进度仍然展示，刷新失败不被当作数据消失
+    await expect(page.getByText("已完成 2 / 2 步")).toBeVisible();
+  });
+});
+
+test.describe("步骤事实的单一展示位置", () => {
+  test("工作流面板不再重复列出步骤，而是指向计划步骤", async ({ page }) => {
+    await stubTaskList(page);
+    await stubTaskDetail(page, () => ({ body: sampleTask() }));
+    await stubWorkflow(page, () => ({
+      body: {
+        has_run: true,
+        run: sampleRun({ current_step_id: "step-1" }),
+        steps: [
+          {
+            sequence: 1,
+            status: "developing",
+            step_id: "step-1",
+            step_type: "develop",
+            title: "实现登录步骤",
+          },
+          {
+            sequence: 2,
+            status: "pending",
+            step_id: "step-2",
+            step_type: "develop",
+            title: "补充单元测试",
+          },
+        ],
+        task_id: "task-1",
+        task_status: "developing",
+      },
+    }));
+    await stubExecutionRecords(page);
+
+    await openDetail(page);
+
+    // 工作流面板只给汇总数字，并明确指向唯一权威位置
+    await expect(page.getByText("已完成 0 / 2 步")).toBeVisible();
+    await expect(
+      page.getByText("步骤顺序、状态与失败原因以「计划步骤」为准；本面板的数字只汇总执行记录。"),
+    ).toBeVisible();
+    // 工作流响应里独有的第 2 步不再被渲染成第二份步骤列表
+    await expect(page.getByText("补充单元测试")).toHaveCount(0);
+    // 计划步骤仍然完整展示，且同一标题只出现一次
+    await expect(page.getByText("共 1 个步骤")).toBeVisible();
+    await expect(page.getByText("实现登录步骤")).toHaveCount(1);
+  });
+});

@@ -784,3 +784,117 @@ describe("错误描述", () => {
     expect(isNotFound(new Error("其他"))).toBe(false);
   });
 });
+
+/**
+ * 结论文本里的状态取值必须与页面上的状态标签同源。
+ *
+ * 这些 details 直接展示给用户，同一段文字里既出现"步骤状态：已完成"又出现"任务状态：developing"
+ * 会让同一个事实有两种写法，用户无法与页面标签对应；未知取值仍必须原样保留。
+ */
+describe("结论文本里的状态取值", () => {
+  /** 一份单步骤执行响应样本 */
+  function executeStep(overrides: Partial<ExecuteStepResponse> = {}): ExecuteStepResponse {
+    return {
+      archive_status: "not_attempted",
+      attempt_id: "attempt-1",
+      attempt_number: 1,
+      attempt_status: "completed",
+      exit_code: 0,
+      export_status: "not_attempted",
+      finalized: true,
+      finished_at: "2026-10-26T08:01:00Z",
+      outcome: "completed",
+      started_at: "2026-10-26T08:00:00Z",
+      step_id: "step-1",
+      step_status: "developing",
+      success: true,
+      task_id: "task-1",
+      task_status: "developing",
+      ...overrides,
+    };
+  }
+
+  /** 一份顺序执行响应样本 */
+  function executeSteps(overrides: Partial<ExecuteStepsResponse> = {}): ExecuteStepsResponse {
+    return {
+      executed_steps: 1,
+      steps: [],
+      stopped: false,
+      success: true,
+      finished_at: "2026-10-26T08:05:00Z",
+      started_at: "2026-10-26T08:00:00Z",
+      task_id: "task-1",
+      task_status: "developing",
+      ...overrides,
+    };
+  }
+
+  /** 一份代码初始化响应样本 */
+  function initializeCode(overrides: Partial<InitializeCodeResponse> = {}): InitializeCodeResponse {
+    return {
+      attempt_id: "attempt-1",
+      container_id: "container-1",
+      finished_at: "2026-10-26T08:04:00Z",
+      persisted: true,
+      record_id: "record-1",
+      source_type: "git",
+      started_at: "2026-10-26T08:00:00Z",
+      status: "succeeded",
+      step_id: "step-1",
+      succeeded: true,
+      task_branch: "agent/task-1",
+      task_id: "task-1",
+      work_dir: "/workspace/project",
+      ...overrides,
+    };
+  }
+
+  it("任务状态、尝试状态与步骤状态使用同一份中文映射", () => {
+    const text = describeExecuteStepResult(
+      executeStep({ attempt_status: "completed", step_status: "developing" }),
+    ).details.join("；");
+
+    expect(text).toContain("尝试：第 1 次（正常结束）");
+    expect(text).toContain("步骤状态：开发中");
+    expect(text).toContain("任务状态：开发中");
+    expect(text).not.toContain("completed");
+    expect(text).not.toContain("developing");
+  });
+
+  it("顺序执行与计划生成的任务状态同样中文化", () => {
+    expect(describeExecuteStepsResult(executeSteps()).details.join("；")).toContain(
+      "任务状态：开发中",
+    );
+    expect(
+      describePlanResult({
+        persisted: true,
+        steps: [],
+        task_id: "task-1",
+        task_status: "planned",
+      }).details.join("；"),
+    ).toContain("任务状态：计划已确认");
+  });
+
+  it("代码初始化状态使用中文标签", () => {
+    expect(describeInitializeResult(initializeCode()).details.join("；")).toContain(
+      "初始化状态：已就绪",
+    );
+  });
+
+  it("未知状态取值原样保留，不被字典兜底掩盖", () => {
+    const text = describeExecuteStepResult(
+      executeStep({
+        attempt_status: "future_attempt_status",
+        task_status: "future_task_status" as TaskStatus,
+      }),
+    ).details.join("；");
+    expect(text).toContain("（future_attempt_status）");
+    expect(text).toContain("任务状态：future_task_status");
+
+    expect(
+      describeInitializeResult(initializeCode({ status: "future_fetch_status" })).details.join(
+        "；",
+      ),
+    ).toContain("初始化状态：future_fetch_status");
+  });
+});

@@ -410,6 +410,9 @@ describe("重试结果展示", () => {
     expect(outcome.details.join("｜")).toContain("失败 → 当前 开发中");
     expect(outcome.details.join("｜")).toContain("run-1");
     expect(outcome.details.join("｜")).toContain("执行代次：3");
+    // 执行记录里的工作流状态与页面标签同源，不出现原始取值 running
+    expect(outcome.details.join("｜")).toContain("（执行中，已完成 0 / 2 步）");
+    expect(outcome.details.join("｜")).not.toContain("（running，");
   });
 
   it("workflow_started=false 时明确说明工作流没有启动，并给出真实阶段与原因", () => {

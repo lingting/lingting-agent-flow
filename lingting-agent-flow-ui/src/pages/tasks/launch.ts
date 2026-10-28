@@ -5,6 +5,7 @@
  * 只补充中文标签，不新增阶段名，也不把任何中间阶段显示为成功。
  */
 import type { StartTaskResponse, Task, TaskLaunchStage, TaskWorkspaceInitStatus } from "@/lib/api";
+import { taskStatusLabel } from "@/pages/tasks/status";
 
 /** 启动阶段的中文标签与说明 */
 export type TaskLaunchStageMeta = {
@@ -98,7 +99,7 @@ export function describeLaunchResult(result: StartTaskResponse): TaskLaunchOutco
   const stage = launchStageMeta(result.stage);
   const parts = [
     `阶段：${stage.label}（${stage.description}）`,
-    `任务状态：${result.task_status}`,
+    `任务状态：${taskStatusLabel(result.task_status)}`,
     `容器：${result.container_prepared ? "本次已创建" : result.container_id ? "复用既有容器" : "未准备"}`,
     `工作区：${workspaceStatusLabel(result.workspace_status)}`,
     `计划：${result.plan_persisted ? `已持久化 ${result.plan_steps.length} 个步骤` : "未持久化"}`,

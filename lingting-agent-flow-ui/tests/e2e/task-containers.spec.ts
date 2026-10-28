@@ -578,8 +578,10 @@ test.describe("处置结果展示", () => {
     // 处置结论保留：详情刷新失败只附加提示，不抹除已取得的结论
     await expect(page.getByText(/处置已完成：删除容器/)).toBeVisible();
     await expect(page.getByText(/上方结论仍然有效/)).toBeVisible();
-    // 页面顶部同时给出任务详情刷新失败提示（与容器面板的提示是两处独立提示）
-    await expect(page.getByText(/自动刷新失败|操作失败/).first()).toBeVisible();
+    // 页面级刷新失败提示与容器面板自己的「状态刷新失败」是两处独立提示：
+    // 这里断言页面级的标题与说明，避免只匹配一个可能在多处出现的短语。
+    await expect(page.getByText("刷新失败", { exact: true })).toBeVisible();
+    await expect(page.getByText(/下方展示的是上一次成功获取的状态/)).toBeVisible();
   });
 });
 

@@ -35,7 +35,10 @@
   [`P4-M5-measurement-and-optimization-assessment.md`](./P4-M5-measurement-and-optimization-assessment.md)），
   其余 P4 子任务均已闭合；**G12（项目后端能力缺失）已于 2026-10-28 完成**（见
   [`P4-G12-project-management.md`](./P4-G12-project-management.md)），它是 P4-M1 盘点中最后一项
-  未闭合的业务缺口，完成后 P4 只剩 `P4-M5`。子任务 **M4-1（失败任务
+  未闭合的业务缺口，完成后 P4 只剩 `P4-M5`；此后又完成一次**任务详情页信息结构与操作可达性
+  复核**（2026-10-28，见
+  [`P4-task-detail-experience-review.md`](./P4-task-detail-experience-review.md)），修复 6 处由代码
+  直接证实的可读性与结构缺陷，未触碰 Go 代码与业务规则。子任务 **M4-1（失败任务
   [`P4-M4-1-task-retry-web-entry.md`](./P4-M4-1-task-retry-web-entry.md)：前端补齐
   `RetryEligibilityResponse` / `RetryTaskResponse` / `RetryTaskRequest` 类型与
   `fetchTaskRetryEligibility` / `retryTask`（`GET|POST /api/v1/tasks/{taskID}/retry[-eligibility]`），
@@ -532,12 +535,30 @@
   并按项目预填仓库 / 分支 / 工作目录 / 环境与可用版本）。任务创建改为**必须**关联项目：项目
   标识为空、书写非法、不存在或已逻辑删除一律拒绝；未给出的执行配置从项目继承，显式给出的值
   优先。**P4-M5 不受影响，仍为 `pending`**，本轮没有把它标记为完成。
-- **下一步**：P3 阶段已全部完成（M1–M5 均 `completed`），P4-M1、M2-1…M2-7、M3、M4 与 G12
-  均已完成（见上方"当前阶段与当前里程碑"）。P4 只剩 `P4-M5`，而它**缺少真实使用数据**，因此
-  不再继续推进数据依赖型优化（解除待定所需数据见
+- **任务详情页信息结构与操作可达性复核已于 2026-10-28 完成（基线 `origin/master` `d6a6a19`）**：
+  交付物为
+  [`P4-task-detail-experience-review.md`](./P4-task-detail-experience-review.md)。这是"恢复常规功能
+  开发"后的第二个工作项，**不是** P4-M1 缺口清单中的 G 项，也**不是** P4-M5。按当前代码核实出
+  6 处能由代码直接证实的缺陷并全部按最小改动修复：①工作流面板与「计划步骤」重复渲染同一批步骤，
+  且一处输出原始取值 `developing`、一处输出"开发中"（改为单一权威位置 + 明确指路）；②结论文本
+  直接输出服务端枚举（任务状态、尝试状态、工作流状态、工作流阶段、代码初始化状态共 5 类，改为
+  复用既有中文映射，未知取值原样保留）；③"详情读取失败"与"有副作用的操作失败"共用标题
+  "操作失败"（前者改为"加载任务详情失败"）；④自动刷新已停止时手动刷新失败仍显示"自动刷新失败"
+  （标题按真实机制区分）；⑤切换任务后仍保留上一个任务的选中步骤，并按旧步骤标识向新任务发起
+  一次必然失败的静默查询（选中态与任务标识绑定）；⑥步骤详情被整段任务事件时间线隔开
+  （事件时间线移到步骤详情之后）。**本轮未修改任何 Go 代码、HTTP 契约、状态机、恢复 / 重试资格、
+  容器生命周期、验证规则与数据库结构**；新增前端单元用例 7 个与 E2E 用例 4 个，
+  `pnpm test:unit:safe` 589 通过、`pnpm test:e2e:safe` 218 通过 / 0 失败，`pnpm check` 与
+  `pnpm build` 通过。**P4-M5 仍为 `pending`**。
+- **下一步**：P3 阶段已全部完成（M1–M5 均 `completed`），P4-M1、M2-1…M2-7、M3、M4、G12 与
+  任务详情页体验复核均已完成（见上方"当前阶段与当前里程碑"）。P4 只剩 `P4-M5`，而它**缺少真实
+  使用数据**，因此不再继续推进数据依赖型优化（解除待定所需数据见
   [`P4-M5-measurement-and-optimization-assessment.md`](./P4-M5-measurement-and-optimization-assessment.md) §8）。
   后续入口按 [`ROADMAP.md`](./ROADMAP.md) 的"下一步工作的选择规则"选择**有明确代码证据的常规
   功能缺口**；`P4-M1` 盘点的 P0/P1/P2/P3 缺口已全部闭合，新的候选需要重新盘点而不是照抄旧清单。
+  当前已有代码证据的候选（均未立项）：创建任务表单的字段收敛（从项目继承的字段折叠为"可展开
+  覆盖"）、私有仓库 Git 凭据支持、`verification_results` 遗留模型清理、任务详情页面板分组
+  （见 [`P4-task-detail-experience-review.md`](./P4-task-detail-experience-review.md) §8）。
   P4-M2-7 的剩余风险见
   [`P4-M2-7-web-execution-operations.md`](./P4-M2-7-web-execution-operations.md) §6：
   同步长请求没有**流式**进度推送（轮询已由 M3-7 交付，SSE 仍未实现）、闭环未通过验证时
@@ -615,6 +636,7 @@
 | [`P4-frontend-test-resource-governance.md`](./P4-frontend-test-resource-governance.md) | P4 工程质量：前端测试并发治理（真实资源模型核实、Playwright worker 4 / Vitest worker 4 默认值、非法输入拒绝、资源受限入口、能力边界、验收命令与既有失败隔离） |
 | [`P4-M5-measurement-and-optimization-assessment.md`](./P4-M5-measurement-and-optimization-assessment.md) | P4-M5 第一轮：基于真实数据的性能与架构优化评估（观测能力核实、证据分级、可复现测量基线与原始数据、候选 A/B/C 的证据与立项决策、测量局限、解除待定所需数据、实际命令与结果） |
 | [`P4-G12-project-management.md`](./P4-G12-project-management.md) | P4-G12：项目管理能力（原始缺口与代码核实、项目与任务 / 缓存 / 远程目录的关系、数据模型与迁移、领域 / 存储 / 应用 / HTTP / CLI / 前端完整调用链、任务必填关联与继承规则、测试证据、剩余风险） |
+| [`P4-task-detail-experience-review.md`](./P4-task-detail-experience-review.md) | P4 常规开发：任务详情页信息结构与操作可达性复核（真实页面结构与数据来源、6 处缺陷的代码证据与影响、最小修复方案、判定为合理的重复展示与死参数、新增 / 更新的测试断言、测试与构建结果、未解决项与后续候选、与 P4-M5 的关系） |
 
 ## 下一步工作的选择规则
 

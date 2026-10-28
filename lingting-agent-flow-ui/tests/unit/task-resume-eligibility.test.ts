@@ -28,6 +28,7 @@ import {
   type ResumeSnapshot,
 } from "../../src/pages/tasks/useResumeEligibility";
 import { describeApiError } from "../../src/pages/tasks/useExecutionRecords";
+import { workflowStageLabel } from "../../src/pages/tasks/status";
 import { printArtifactDir } from "../internal/artifacts";
 
 printArtifactDir();
@@ -508,5 +509,23 @@ describe("加载状态与竞态", () => {
     expect(resumeResponseAccepted(2, 2, false)).toBe(true);
     expect(resumeResponseAccepted(1, 2, false)).toBe(false);
     expect(resumeResponseAccepted(2, 2, true)).toBe(false);
+  });
+});
+
+/**
+ * 面板展示的工作流阶段必须中文化：`task_status`、`run.status` 都用既有映射，只剩阶段曾经
+ * 直接渲染 `step_execution` 这类原始取值。
+ */
+describe("工作流阶段标签", () => {
+  it("覆盖 Go 端 domain.WorkflowStage 的每一个取值", () => {
+    expect(workflowStageLabel("waiting")).toBe("等待开始");
+    expect(workflowStageLabel("step_execution")).toBe("执行开发步骤");
+    expect(workflowStageLabel("code_save")).toBe("保存代码");
+    expect(workflowStageLabel("finalize")).toBe("收尾");
+    expect(workflowStageLabel("stopped")).toBe("已停止");
+  });
+
+  it("未知阶段原样保留，不猜测语义", () => {
+    expect(workflowStageLabel("future_stage")).toBe("future_stage");
   });
 });
