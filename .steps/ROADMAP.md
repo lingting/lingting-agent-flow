@@ -191,6 +191,21 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > 代码初始化业务规则，未新增接口、Hook 或刷新循环**。新增前端单元测试 10 个与 E2E 8 个；
 > `pnpm test:unit:safe` 557 通过、`pnpm test:e2e:safe` 205 通过 / 0 失败，`pnpm check` 与
 > `pnpm build` 通过。证据见 `P4-M4-5-single-step-diagnostic-actions.md`。
+> **P4-M5 第一轮核对已完成（2026-10-28，基线 `origin/master` `cf546939`），状态仍为 `pending`**：
+> 本轮先核实观测能力、再建立可复核基线，**未修改任何生产代码 / 前端代码 / 数据库结构 / 测试**，
+> 交付 `P4-M5-measurement-and-optimization-assessment.md`。三个关键结论：
+> （1）**观测能力**——没有访问日志、请求耗时、指标、追踪、pprof 或 `/metrics`，健康检查只覆盖
+> `http_api` 与 `database`，`TaskScheduler.Status` 有定义但**零生产调用者**且其 `Active` 只统计
+> 本进程已登记的分派，**不等于**数据库名额占用（真实占用来源是 `countOccupiedSlots`）；
+> （2）**候选 B（任务列表分页）暂缓**——分页是真实的服务端分页（`LIMIT/OFFSET` + 独立
+> `COUNT(*)`、默认 20 / 上限 100、超限 400、稳定排序 `created_at DESC, rowid DESC`），前端只在
+> 页/筛选变化与 4 处显式动作后重载；实测首屏 `size=20` 中位数 1 000 任务 2.8 ms、10 000 任务
+> 9.1 ms、50 000 任务 39.0 ms（深偏移 175–251 ms），现实规模下无可感知问题；
+> （3）**候选 A（G17）与新增候选 C 需要继续测量**——A 缺等待现场与队列样本，且最小成本测量
+> 方式是一次只读 SQL 而不是新接口；C 是机制事实（调度扫描每 1 秒遍历全部非终态任务与全部排队
+> 任务，实测 50 000 库上 3 000 个历史 `failed` → 13.1% 单核空闲占用、402 个排队 → 8.4%），
+> 但真实库的 `tasks.status` 分布未知，且同等负载下任务列表延迟未劣化。解除待定所需数据与
+> 下一步动作记录在交付物 §8。
 > **P4-M3 已为 `completed`**：M3-2 已由 P4-M2-7 满足，M3-1、M3-3、M3-4、M3-5、
 > M3-6、M3-7 与 M3-8 全部完成。**M3-8（事件时间线与修复周期历史）于 2026-10-27 完成**：
 > 核实出 `ListEventsByTask` 生产代码零调用者且排序只有 `ORDER BY id`、`EventFilter`
@@ -679,7 +694,10 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
     **G18 工作流步骤起止时间恒为空已于 P4-M3-6 闭合**
     （领域状态机按"真正开始 / 周期结束"写时间，工作流状态接口补齐 `started_at` /
     `finished_at` 映射，步骤列表展示真实起止时间与耗时，缺失显示占位符而不伪造）。
-  - P3 三项：G17 调度名额可见性；**G19 进度自动刷新已于 P4-M3-7 闭合**（任务详情与执行
+  - P3 三项：**G17 调度名额可见性经 P4-M5 第一轮核实判为"需要继续测量"、未进入实施**（现有
+    `TaskScheduler.Status` 零生产调用者，且 `Active` 只是本进程登记的分派数、不等于数据库名额
+    占用，直接暴露会误导；最小成本测量方式是一次只读 SQL，见
+    [`P4-M5-measurement-and-optimization-assessment.md`](./P4-M5-measurement-and-optimization-assessment.md) §5.1）；**G19 进度自动刷新已于 P4-M3-7 闭合**（任务详情与执行
     进度按 5 秒周期自动刷新，活动状态判定依据 `domain.WorkflowRunStatus.IsActive()` 与
     `TaskStatus.IsActive()`，终态与等待人工处置后停止，页面隐藏暂停、恢复前台立即刷新，
     刷新失败保留上一次成功快照且不被当作工作流终止，全程只读）；**G20 的两项单步诊断动作
@@ -806,3 +824,4 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - [P4-M3-5-code-save-status-display.md](./P4-M3-5-code-save-status-display.md)
 - [P4-M3-4-resume-eligibility-display.md](./P4-M3-4-resume-eligibility-display.md)
 - [P4-frontend-test-resource-governance.md](./P4-frontend-test-resource-governance.md)
+- [P4-M5-measurement-and-optimization-assessment.md](./P4-M5-measurement-and-optimization-assessment.md)

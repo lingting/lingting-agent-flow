@@ -31,7 +31,9 @@
   `failed` / `blocked` / `recovery_required` 三类现场都能在 Web 上被理解并处置（M4-1 重试、
   M4-2 核验、M4-3 容器处置、M4-4 恢复、M4-5 单步诊断共同覆盖），且所有有副作用的操作都需要
   用户显式触发、不自动重放。**P4 整体仍不是 `completed`**：`P4-M5`（基于实测数据的优化）仍为
-  `pending`，其余 P4 子任务均已闭合。子任务 **M4-1（失败任务
+  `pending`（第一轮测量与决策评估已于 2026-10-28 完成，见
+  [`P4-M5-measurement-and-optimization-assessment.md`](./P4-M5-measurement-and-optimization-assessment.md)），
+  其余 P4 子任务均已闭合。子任务 **M4-1（失败任务
   [`P4-M4-1-task-retry-web-entry.md`](./P4-M4-1-task-retry-web-entry.md)：前端补齐
   `RetryEligibilityResponse` / `RetryTaskResponse` / `RetryTaskRequest` 类型与
   `fetchTaskRetryEligibility` / `retryTask`（`GET|POST /api/v1/tasks/{taskID}/retry[-eligibility]`），
@@ -491,6 +493,26 @@
   3 个失败项已用 `git stash -u` 在未修改的基线上逐个复现，确认为既有问题、非本次引入，
   本次未修复（涉及业务逻辑判断，需单独立项）。本轮**未修改任何前置业务代码与测试断言**，
   也未提供任何 CPU 硬上限——降低 worker 属于软限制，不得表述为 CPU 百分比上限。
+- **P4-M5 第一轮核对已完成（2026-10-28，基线 `origin/master` `cf54693`）**：交付物
+  [`P4-M5-measurement-and-optimization-assessment.md`](./P4-M5-measurement-and-optimization-assessment.md)。
+  本轮先核实观测能力、再建立可复核基线，**未修改任何生产代码 / 前端代码 / 数据库结构 / 测试**：
+  - **观测能力核实**：没有访问日志、请求耗时、指标、追踪、pprof 或 `/metrics`；`/api/v1/health`
+    只覆盖 `http_api` 与 `database`；`TaskScheduler.Status` 有定义但**零生产调用者**，且
+    `Active` 只统计本进程已登记的分派，**不等于**数据库名额占用（真实占用来源是
+    `countOccupiedSlots`），直接对外暴露会误导。
+  - **候选 A（G17 调度名额可见性）→ 需要继续测量**：无"用户遇到名额等待"的现场，也无队列
+    长度/等待时间样本；最小成本测量方式是**只读 SQL**（`tasks.status`、`events` 的
+    `task.started` 与 `tasks.created_at`），不需要新接口。
+  - **候选 B（任务列表分页）→ 暂缓**：分页是真实的服务端分页（`LIMIT/OFFSET` + 独立
+    `COUNT(*)`、默认 20 / 上限 100、超限 400、`ORDER BY created_at DESC, rowid DESC`），
+    前端只在页/筛选变化与 4 处显式动作后重载。实测首屏 `size=20` 中位数：1 000 任务 2.8 ms、
+    10 000 任务 9.1 ms、50 000 任务 39.0 ms（深偏移 175–251 ms）。现实规模下无可感知问题。
+  - **候选 C（本轮新增）→ 需要继续测量**：调度扫描每 1 秒遍历全部非终态任务与全部排队任务
+    （量级 `1 + 非终态数 + 1 + 4 × 排队数` 次查询/秒）。实测 50 000 任务库：3 000 个历史
+    `failed` → 13.1% 单核空闲占用，402 个排队 → 8.4%；但真实库的 `tasks.status` 分布未知，
+    且同等后台负载下任务列表延迟未劣化。
+  - **结论**：三个候选都缺"真实使用数据"，P4-M5 **保持 `pending`**；解除待定所需数据与
+    下一步动作记录在交付物 §8。
 - **下一步**：P3 阶段已全部完成（M1–M5 均 `completed`），P4-M1 已完成，P4-M2-1 至
   M2-7 均已完成（见上方"当前阶段与当前里程碑"）。按
   [`ROADMAP.md`](./ROADMAP.md) 的优先级规则，下一步是 **P4-M3 —— 展示阶段进度、验证结果、
@@ -573,6 +595,7 @@
 | [`P4-M4-4-resume-eligibility-web-action.md`](./P4-M4-4-resume-eligibility-web-action.md) | P4-M4-4：基于服务端续跑资格的工作流恢复操作（实施前资格/入口/服务端前置条件的代码证据、恢复入口脱钩的四个真实缺口、判定顺序与"不读取任务状态"依据、受理 ≠ 成功 ≠ 完成的语义拆分、任务切换与刷新失败边界、测试证据、剩余风险） |
 | [`P4-M4-5-single-step-diagnostic-actions.md`](./P4-M4-5-single-step-diagnostic-actions.md) | P4-M4-5：单步诊断动作（初始化代码、确定性验证）（M2-7 已交付能力与 M4-5 剩余目标的边界、5 处真实缺口的代码证据、判定唯一决定结论的依据、逐项检查事实、结果不确定与服务端拒绝的区分、任务切换的票据判定、未改 Go 代码的理由、测试证据、剩余风险） |
 | [`P4-frontend-test-resource-governance.md`](./P4-frontend-test-resource-governance.md) | P4 工程质量：前端测试并发治理（真实资源模型核实、Playwright worker 4 / Vitest worker 4 默认值、非法输入拒绝、资源受限入口、能力边界、验收命令与既有失败隔离） |
+| [`P4-M5-measurement-and-optimization-assessment.md`](./P4-M5-measurement-and-optimization-assessment.md) | P4-M5 第一轮：基于真实数据的性能与架构优化评估（观测能力核实、证据分级、可复现测量基线与原始数据、候选 A/B/C 的证据与立项决策、测量局限、解除待定所需数据、实际命令与结果） |
 
 ## 下一步工作的选择规则
 
