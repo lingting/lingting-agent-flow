@@ -1,5 +1,5 @@
 import { Alert, Form, Input, Modal, Select, Space, Switch, Typography } from "antd";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ApiError, createTask, type CreateTaskRequest, type Environment } from "@/lib/api";
 import {
@@ -11,7 +11,15 @@ import {
 import { useProjects } from "@/pages/projects/useProjects";
 import { EnvironmentSelector } from "@/pages/tasks/EnvironmentSelector";
 import { resolveEnvironmentSelection } from "@/pages/tasks/environments";
-import { projectTaskPrefill } from "@/pages/tasks/projectPrefill";
+import {
+  MANUAL_OVERRIDE_LABEL,
+  PROJECT_TEXT_FIELDS,
+  projectDefaultSourceLabel,
+  projectFieldSourceLabel,
+  projectTaskPrefill,
+  RESTORE_PROJECT_DEFAULT_LABEL,
+  type ProjectPrefillField,
+} from "@/pages/tasks/projectPrefill";
 import {
   hostSelectOptions,
   resolveHostSelection,
@@ -153,58 +161,174 @@ export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalPr
     [],
   );
 
+  /** 用户显式设置过取值的字段：这些字段不会被项目默认值覆盖 */
+  const overriddenRef = useRef<Set<ProjectPrefillField>>(new Set());
+  const [overriddenFields, setOverriddenFields] = useState<ProjectPrefillField[]>([]);
+  /** 当前取值由项目默认值写入的字段；只表达表单交互事实，不代表服务端最终配置 */
+  const [appliedFields, setAppliedFields] = useState<ProjectPrefillField[]>([]);
+  /** 项目配置无法自动填入时的原因（例如项目环境在当前节点没有可用版本） */
+  const [prefillNotice, setPrefillNotice] = useState<string>();
+
+  const syncOverridden = (fields: ProjectPrefillField[]) => {
+    overriddenRef.current = new Set(fields);
+    setOverriddenFields(fields);
+  };
+
+  /** 字段被用户改动后不再"来自项目默认值"，否则会把用户输入显示成继承值 */
+  const clearApplied = (fields: readonly ProjectPrefillField[]) =>
+    setAppliedFields((previous) => previous.filter((field) => !fields.includes(field)));
+
   /**
-   * 计算当前项目可以预填到表单的字段。
+   * 按当前项目与当前执行节点的环境列表应用项目默认值。
    *
-   * 环境与版本只在当前执行节点的环境列表已加载时才预填：跨节点的旧选择会被提交校验
-   * 拒绝，提前塞进一个该节点并不存在的环境只会制造必然失败的配置。
+   * 只写入用户没有显式设置过的字段；用户设置过的字段保持原值，并在界面上标明来源。
+   * 环境与版本只在环境列表已加载时才预填：跨节点的旧选择会被提交校验拒绝，提前塞进
+   * 一个该节点并不存在的环境只会制造必然失败的配置。
    */
-  const projectPrefillFor = (projectID?: string) =>
-    projectTaskPrefill({
-      environments: environments.environments,
-      environmentsLoaded: environments.status === "ready",
-      project: findProject(projects.projects, projectID),
-    });
+  const applyProjectPrefill = useCallback(
+    (projectID?: string) => {
+      const result = projectTaskPrefill({
+        current: {
+          environment: form.getFieldValue("environment") as string | undefined,
+          environment_version: form.getFieldValue("environment_version") as string | undefined,
+        },
+        environments: environments.environments,
+        environmentsLoaded: environments.status === "ready",
+        project: findProject(projects.projects, projectID),
+        userOverrides: [...overriddenRef.current],
+      });
+      setAppliedFields(result.applied);
+      setPrefillNotice(result.environmentUnavailable);
+      form.setFieldsValue(result.values);
+    },
+    [environments.environments, environments.status, form, projects.projects],
+  );
 
   /**
    * 表单字段联动。
    *
-   *   - 选择项目：预填仓库地址、基础分支、工作目录，环境与版本按当前节点的真实环境
-   *     列表决定是否预填；用户之后仍可手工覆盖，服务端以请求体为准。
+   *   - 选择项目：按项目默认值预填仍在使用默认值的字段；用户显式设置过的字段保持不变，
+   *     服务端以请求体为准。
    *   - 执行节点变化：清除与旧节点关联的环境与版本，避免提交跨节点的旧选择。
+   *   - 文本字段被改动：记为"用户显式设置"，空值表示未覆盖（与 `firstNonBlank` 一致）。
    */
   const handleValuesChange = (changed: Partial<CreateTaskFormValues>) => {
+    const next = new Set(overriddenRef.current);
     if ("host_id" in changed) {
       form.setFieldsValue({ environment: undefined, environment_version: undefined });
+      // 节点变化让旧环境与版本失效：清空并要求重新选择，同时取消"用户已选"的标记。
+      next.delete("environment");
+      next.delete("environment_version");
+      clearApplied(["environment", "environment_version"]);
     }
-    if ("project_id" in changed) {
-      form.setFieldsValue(projectPrefillFor(changed.project_id));
+    const changedTextFields = PROJECT_TEXT_FIELDS.filter((field) => field in changed);
+    for (const field of changedTextFields) {
+      if (changed[field]?.trim()) next.add(field);
+      else next.delete(field);
     }
+    if (changedTextFields.length > 0) clearApplied(changedTextFields);
+    // 只有可能改变"用户显式设置"集合的变化才写状态，其余字段（名称、描述等）不触发。
+    if ("host_id" in changed || changedTextFields.length > 0) syncOverridden([...next]);
+    if ("project_id" in changed) applyProjectPrefill(changed.project_id);
   };
 
   /**
-   * 环境列表就绪后补齐项目预填。
+   * 环境列表就绪或项目列表刷新后补齐项目预填。
    *
    * 覆盖"先选项目、后选节点"的顺序：节点变化会清空环境与版本，等新节点的环境列表
-   * 加载完成后才谈得上按项目预填。已经选过环境时不覆盖用户的选择。
+   * 加载完成后才谈得上按项目预填。用户已经显式选过环境时不会被覆盖。
    */
   useEffect(() => {
     if (environments.status !== "ready") return;
     if (!watchedProjectID) return;
-    if (form.getFieldValue("environment")) return;
-    const prefill = projectPrefillFor(watchedProjectID);
-    if (!prefill.environment) return;
-    form.setFieldsValue({
-      environment: prefill.environment,
-      environment_version: prefill.environment_version,
-    });
-    // projectPrefillFor 依赖 environments 与 projects，两者已在依赖列表中体现。
+    applyProjectPrefill(watchedProjectID);
+  }, [applyProjectPrefill, environments.status, watchedProjectID]);
+
+  /** 每次打开弹窗都是一次新的表单会话：用户显式设置的记录不能跨会话残留 */
+  useEffect(() => {
+    if (!open) return;
+    syncOverridden([]);
+    setAppliedFields([]);
+    setPrefillNotice(undefined);
+    // syncOverridden 每次渲染都会重建，但不是状态来源，只在打开时重置一次。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [environments.status, environments.environments, projects.projects, watchedProjectID, form]);
+  }, [open]);
 
   /** 环境变化：版本必须重新选择，旧环境的版本不适用于新环境 */
   const handleEnvironmentChange = (environment?: Environment) => {
     form.setFieldsValue({ environment: environment?.name, environment_version: undefined });
+    const next = new Set(overriddenRef.current);
+    if (environment?.name) next.add("environment");
+    else next.delete("environment");
+    next.delete("environment_version");
+    syncOverridden([...next]);
+    clearApplied(["environment", "environment_version"]);
+  };
+
+  /** 版本变化：只有用户真实选择的版本才记为"显式设置" */
+  const handleVersionChange = (value?: string) => {
+    form.setFieldsValue({ environment_version: value });
+    const next = new Set(overriddenRef.current);
+    if (value?.trim()) next.add("environment_version");
+    else next.delete("environment_version");
+    syncOverridden([...next]);
+    clearApplied(["environment_version"]);
+  };
+
+  /**
+   * 恢复指定字段的项目默认值。
+   *
+   * 只有"用户显式设置过"的字段才提供该操作：否则用户只能手抄仓库地址等配置。
+   */
+  const restoreProjectDefaults = (fields: ProjectPrefillField[]) => {
+    const next = new Set(overriddenRef.current);
+    for (const field of fields) next.delete(field);
+    syncOverridden([...next]);
+    applyProjectPrefill(watchedProjectID);
+  };
+
+  /** 单个字段的取值来源说明 */
+  const fieldExtra = (field: ProjectPrefillField) => {
+    const label = projectFieldSourceLabel({
+      applied: appliedFields.includes(field),
+      overridden: overriddenFields.includes(field),
+      project: selectedProject,
+    });
+    if (!label) return undefined;
+    return (
+      <Space size={8}>
+        <span>{label}</span>
+        {overriddenFields.includes(field) && selectedProject && (
+          <Typography.Link onClick={() => restoreProjectDefaults([field])}>
+            {RESTORE_PROJECT_DEFAULT_LABEL}
+          </Typography.Link>
+        )}
+      </Space>
+    );
+  };
+
+  /** 语言环境与版本共用一个表单项，来源说明按"用户选过"优先于"项目默认值" */
+  const environmentExtra = () => {
+    const overridden =
+      overriddenFields.includes("environment") || overriddenFields.includes("environment_version");
+    if (overridden) {
+      return (
+        <Space size={8}>
+          <span>{MANUAL_OVERRIDE_LABEL}</span>
+          {selectedProject && (
+            <Typography.Link
+              onClick={() => restoreProjectDefaults(["environment", "environment_version"])}
+            >
+              {RESTORE_PROJECT_DEFAULT_LABEL}
+            </Typography.Link>
+          )}
+        </Space>
+      );
+    }
+    if (appliedFields.includes("environment") && selectedProject) {
+      return projectDefaultSourceLabel(selectedProject);
+    }
+    return prefillNotice;
   };
 
   /**
@@ -430,6 +554,7 @@ export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalPr
         </Form.Item>
 
         <Form.Item
+          extra={fieldExtra("repository_url")}
           label="仓库地址"
           name="repository_url"
           rules={[{ message: "请输入仓库地址", required: true }]}
@@ -438,6 +563,7 @@ export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalPr
         </Form.Item>
         <Space align="start" size="middle" style={{ display: "flex" }}>
           <Form.Item
+            extra={fieldExtra("base_branch")}
             label="基础分支"
             name="base_branch"
             rules={[{ message: "请输入基础分支", required: true }]}
@@ -446,14 +572,14 @@ export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalPr
             <Input placeholder="main" />
           </Form.Item>
         </Space>
-        <Form.Item label="语言环境与版本" required>
+        <Form.Item extra={environmentExtra()} label="语言环境与版本" required>
           <EnvironmentSelector
             environment={selectedEnvironment}
             hostID={watchedHostID}
             query={environments}
             version={selectedVersion}
             onEnvironmentChange={handleEnvironmentChange}
-            onVersionChange={(value) => form.setFieldsValue({ environment_version: value })}
+            onVersionChange={handleVersionChange}
           />
         </Form.Item>
         {/* 环境与版本仍作为表单字段保存，但只能由上面的选择器写入，不接受手工输入。 */}
@@ -563,7 +689,7 @@ export function CreateTaskModal({ open, onCancel, onCreated }: CreateTaskModalPr
           </>
         )}
 
-        <Form.Item label="容器内工作目录（可选）" name="work_dir">
+        <Form.Item extra={fieldExtra("work_dir")} label="容器内工作目录（可选）" name="work_dir">
           <Input placeholder="/workspace/project" />
         </Form.Item>
         <Form.Item

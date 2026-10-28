@@ -24,7 +24,11 @@ import {
   toProjectFormValues,
   toUpdateProjectRequest,
 } from "../../src/pages/projects/projects";
-import { projectTaskPrefill } from "../../src/pages/tasks/projectPrefill";
+import {
+  MANUAL_OVERRIDE_LABEL,
+  projectFieldSourceLabel,
+  projectTaskPrefill,
+} from "../../src/pages/tasks/projectPrefill";
 import { printArtifactDir } from "../internal/artifacts";
 
 printArtifactDir();
@@ -287,7 +291,7 @@ describe("项目预填任务表单", () => {
   it("未选择项目时不改动任何字段", () => {
     expect(
       projectTaskPrefill({ environments: [], environmentsLoaded: true, project: undefined }),
-    ).toEqual({});
+    ).toEqual({ applied: [], values: {} });
   });
 
   it("环境未加载时只预填仓库、分支与工作目录", () => {
@@ -296,11 +300,12 @@ describe("项目预填任务表单", () => {
       environmentsLoaded: false,
       project: sampleProject(),
     });
-    expect(prefill).toEqual({
+    expect(prefill.values).toEqual({
       base_branch: "main",
       repository_url: "ssh://git.example.com/team/repo",
       work_dir: "/workspace/project",
     });
+    expect(prefill.applied).toEqual(["repository_url", "base_branch", "work_dir"]);
   });
 
   it("环境存在且版本可用时一并预填环境与版本", () => {
@@ -309,8 +314,10 @@ describe("项目预填任务表单", () => {
       environmentsLoaded: true,
       project: sampleProject({ environment_version: "v0002" }),
     });
-    expect(prefill.environment).toBe("go");
-    expect(prefill.environment_version).toBe("v0002");
+    expect(prefill.values.environment).toBe("go");
+    expect(prefill.values.environment_version).toBe("v0002");
+    expect(prefill.applied).toContain("environment");
+    expect(prefill.applied).toContain("environment_version");
   });
 
   it("项目版本不在可用版本中时只预填环境，不猜版本", () => {
@@ -319,18 +326,22 @@ describe("项目预填任务表单", () => {
       environmentsLoaded: true,
       project: sampleProject({ environment_version: "v0001" }),
     });
-    expect(prefill.environment).toBe("go");
-    expect(prefill.environment_version).toBeUndefined();
+    expect(prefill.values.environment).toBe("go");
+    expect(prefill.values.environment_version).toBeUndefined();
+    expect(prefill.applied).not.toContain("environment_version");
   });
 
-  it("当前节点没有该项目环境时不预填环境", () => {
+  it("当前节点没有该项目环境时不预填环境，并说明原因", () => {
     const prefill = projectTaskPrefill({
       environments: [sampleEnvironment({ name: "node" })],
       environmentsLoaded: true,
       project: sampleProject(),
     });
-    expect(prefill.environment).toBeUndefined();
-    expect(prefill.repository_url).toBe("ssh://git.example.com/team/repo");
+    expect(prefill.values.environment).toBeUndefined();
+    expect(prefill.values.repository_url).toBe("ssh://git.example.com/team/repo");
+    expect(prefill.environmentUnavailable).toBe(
+      "项目环境「go」不在当前执行节点的环境列表中，未自动填入",
+    );
   });
 
   it("环境存在但没有可用版本时不预填环境", () => {
@@ -353,8 +364,136 @@ describe("项目预填任务表单", () => {
       environmentsLoaded: true,
       project: sampleProject({ environment_version: "v0001" }),
     });
-    expect(prefill.environment).toBeUndefined();
-    expect(prefill.environment_version).toBeUndefined();
-    expect(prefill.base_branch).toBe("main");
+    expect(prefill.values.environment).toBeUndefined();
+    expect(prefill.values.environment_version).toBeUndefined();
+    expect(prefill.values.base_branch).toBe("main");
+    expect(prefill.environmentUnavailable).toBe(
+      "项目环境「go」在当前执行节点没有可用版本，未自动填入",
+    );
+  });
+
+  it("用户显式设置过的字段不会被项目覆盖，其余字段跟随项目", () => {
+    // 切换项目的语义：显式覆盖保留，未覆盖的字段重新应用新项目默认值。
+    const prefill = projectTaskPrefill({
+      environments: [sampleEnvironment()],
+      environmentsLoaded: true,
+      project: sampleProject({
+        base_branch: "release/1.x",
+        environment: "node",
+        environment_version: "v0002",
+        repository_url: "ssh://git.example.com/team/other",
+        work_dir: "/workspace/other",
+      }),
+      userOverrides: ["repository_url"],
+    });
+    expect(prefill.values.repository_url).toBeUndefined();
+    expect(prefill.applied).not.toContain("repository_url");
+    expect(prefill.values.base_branch).toBe("release/1.x");
+    expect(prefill.values.work_dir).toBe("/workspace/other");
+  });
+
+  it("用户显式选择的环境不会被项目覆盖，版本仍属于该环境时保留", () => {
+    const prefill = projectTaskPrefill({
+      current: { environment: "node", environment_version: "v0002" },
+      environments: [
+        sampleEnvironment({ name: "go" }),
+        sampleEnvironment({
+          current_version: "v0002",
+          latest_version: "v0002",
+          name: "node",
+          versions: [{ ...sampleEnvironment().versions[0], version: "v0002" }],
+        }),
+      ],
+      environmentsLoaded: true,
+      project: sampleProject({ environment_version: "v0001" }),
+      userOverrides: ["environment", "environment_version"],
+    });
+    expect(prefill.values.environment).toBeUndefined();
+    expect(prefill.values.environment_version).toBeUndefined();
+    expect(prefill.applied).not.toContain("environment");
+  });
+
+  it("环境被项目默认值改写时清空旧环境的版本", () => {
+    // 版本只能在它所属的环境里有意义：环境换掉以后旧版本必须重新选择。
+    const prefill = projectTaskPrefill({
+      current: { environment: "go", environment_version: "v0003" },
+      environments: [
+        sampleEnvironment({ name: "go" }),
+        sampleEnvironment({
+          current_version: "v0002",
+          latest_version: "v0002",
+          name: "node",
+          versions: [{ ...sampleEnvironment().versions[0], version: "v0002" }],
+        }),
+      ],
+      environmentsLoaded: true,
+      project: sampleProject({ environment: "node", environment_version: "v0009" }),
+    });
+    expect(prefill.values.environment).toBe("node");
+    expect("environment_version" in prefill.values).toBe(true);
+    expect(prefill.values.environment_version).toBeUndefined();
+  });
+
+  it("用户选定的版本不属于当前环境时被清空", () => {
+    const prefill = projectTaskPrefill({
+      current: { environment: "node", environment_version: "v0001" },
+      environments: [
+        sampleEnvironment({
+          current_version: "v0002",
+          latest_version: "v0002",
+          name: "node",
+          versions: [{ ...sampleEnvironment().versions[0], version: "v0002" }],
+        }),
+      ],
+      environmentsLoaded: true,
+      project: sampleProject({ environment: "node" }),
+      userOverrides: ["environment", "environment_version"],
+    });
+    expect("environment_version" in prefill.values).toBe(true);
+    expect(prefill.values.environment_version).toBeUndefined();
+  });
+
+  it("项目没有锁定版本时保留用户已选的有效版本", () => {
+    const prefill = projectTaskPrefill({
+      current: { environment: "node", environment_version: "v0002" },
+      environments: [
+        sampleEnvironment({
+          current_version: "v0002",
+          latest_version: "v0002",
+          name: "node",
+          versions: [{ ...sampleEnvironment().versions[0], version: "v0002" }],
+        }),
+      ],
+      environmentsLoaded: true,
+      project: sampleProject({ environment: "node", environment_version: undefined }),
+    });
+    expect(prefill.values.environment).toBe("node");
+    expect(prefill.values.environment_version).toBeUndefined();
+    expect(prefill.environmentUnavailable).toBeUndefined();
+  });
+});
+
+describe("项目字段的取值来源说明", () => {
+  const project = sampleProject();
+
+  it("由项目默认值写入且未被改动时说明来自项目", () => {
+    expect(projectFieldSourceLabel({ applied: true, overridden: false, project })).toBe(
+      "来自项目「示例服务」的默认配置",
+    );
+  });
+
+  it("用户显式设置过时说明是手动设置", () => {
+    expect(projectFieldSourceLabel({ applied: false, overridden: true, project })).toBe(
+      MANUAL_OVERRIDE_LABEL,
+    );
+    // 用户显式设置优先：即使上一次由项目写入，也不再声称来自项目。
+    expect(projectFieldSourceLabel({ applied: true, overridden: true, project })).toBe(
+      MANUAL_OVERRIDE_LABEL,
+    );
+  });
+
+  it("既不是项目默认值也不是显式设置时不给出来源说明", () => {
+    expect(projectFieldSourceLabel({ applied: false, overridden: false, project })).toBeUndefined();
+    expect(projectFieldSourceLabel({ applied: true, overridden: false })).toBeUndefined();
   });
 });

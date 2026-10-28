@@ -550,9 +550,23 @@
   容器生命周期、验证规则与数据库结构**；新增前端单元用例 7 个与 E2E 用例 4 个，
   `pnpm test:unit:safe` 589 通过、`pnpm test:e2e:safe` 218 通过 / 0 失败，`pnpm check` 与
   `pnpm build` 通过。**P4-M5 仍为 `pending`**。
+- **任务创建时的项目配置继承与显式覆盖已于 2026-10-28 完成**（基线 `origin/master` `c625dfb`，
+  "恢复常规功能开发"后的第三个工作项），交付物为
+  [`P4-task-create-project-inheritance.md`](./P4-task-create-project-inheritance.md)：G12 之后项目已经
+  承载仓库地址 / 基础分支 / 工作目录 / 环境与版本，但核实出预填与"用户显式设置"之间**没有优先级**——
+  ①切换项目会静默覆盖用户手改过的仓库地址 / 基础分支 / 工作目录；②切换项目把环境换成新项目的环境时，
+  旧环境的版本仍留在表单里（界面同时显示 `node` 环境与 go 的 `v0001`，该组合提交时必被拒绝）；
+  ③没有任何字段来源标识。三处缺陷**先写 E2E 复现再修复**（未改生产代码时 4 failed / 1 passed），
+  修复后把优先级与来源可见性统一实现为 `projectPrefill.ts` 的纯函数规则（显式设置优先、空值表示
+  未覆盖且与 Go 端 `firstNonBlank` 一致、版本必须属于当前环境、不伪造不可用环境），`CreateTaskModal`
+  记录用户显式设置过的字段、项目切换与异步环境加载只更新未覆盖字段，节点切换仍清空环境与版本并丢弃
+  这两个字段的标记，字段下方如实显示来源并仅在显式设置时提供 `恢复项目默认值`。**未修改任何 Go 代码、
+  `CreateTaskRequest`、HTTP 契约与领域规则**；新增前端单元用例 8 个与 E2E 用例 7 个，
+  `pnpm test:unit:safe` 597 通过、`pnpm test:e2e:safe` 225 通过 / 0 失败，`pnpm check` 与
+  `pnpm build` 通过（未执行 Go 测试：未修改 Go 文件）。**P4-M5 仍为 `pending`**。
 - **下一步**：P3 阶段已全部完成（M1–M5 均 `completed`），P4-M1、M2-1…M2-7、M3、M4、G12 与
-  任务详情页体验复核均已完成（见上方"当前阶段与当前里程碑"）。P4 只剩 `P4-M5`，而它**缺少真实
-  使用数据**，因此不再继续推进数据依赖型优化（解除待定所需数据见
+  任务详情页体验复核、任务创建配置继承与显式覆盖均已完成（见上方"当前阶段与当前里程碑"）。
+  P4 只剩 `P4-M5`，而它**缺少真实使用数据**，因此不再继续推进数据依赖型优化（解除待定所需数据见
   [`P4-M5-measurement-and-optimization-assessment.md`](./P4-M5-measurement-and-optimization-assessment.md) §8）。
   后续入口按 [`ROADMAP.md`](./ROADMAP.md) 的"下一步工作的选择规则"选择**有明确代码证据的常规
   功能缺口**；`P4-M1` 盘点的 P0/P1/P2/P3 缺口已全部闭合，新的候选需要重新盘点而不是照抄旧清单。
@@ -637,6 +651,7 @@
 | [`P4-M5-measurement-and-optimization-assessment.md`](./P4-M5-measurement-and-optimization-assessment.md) | P4-M5 第一轮：基于真实数据的性能与架构优化评估（观测能力核实、证据分级、可复现测量基线与原始数据、候选 A/B/C 的证据与立项决策、测量局限、解除待定所需数据、实际命令与结果） |
 | [`P4-G12-project-management.md`](./P4-G12-project-management.md) | P4-G12：项目管理能力（原始缺口与代码核实、项目与任务 / 缓存 / 远程目录的关系、数据模型与迁移、领域 / 存储 / 应用 / HTTP / CLI / 前端完整调用链、任务必填关联与继承规则、测试证据、剩余风险） |
 | [`P4-task-detail-experience-review.md`](./P4-task-detail-experience-review.md) | P4 常规开发：任务详情页信息结构与操作可达性复核（真实页面结构与数据来源、6 处缺陷的代码证据与影响、最小修复方案、判定为合理的重复展示与死参数、新增 / 更新的测试断言、测试与构建结果、未解决项与后续候选、与 P4-M5 的关系） |
+| [`P4-task-create-project-inheritance.md`](./P4-task-create-project-inheritance.md) | P4 常规开发：任务创建时的项目配置继承与显式覆盖语义（后端继承规则核实、3 处缺陷的代码证据与修复前失败用例、字段级优先级与来源可见性规则、请求体转换、修改文件与行为变化、判定为合理未修改的 4 项、测试与构建结果、剩余风险、下一项候选、与 P4-M5 的关系） |
 
 ## 下一步工作的选择规则
 
