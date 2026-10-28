@@ -737,3 +737,86 @@ test.describe("在途防重与竞态隔离", () => {
     await expect(deleteContainerButton(page)).toBeEnabled();
   });
 });
+
+/**
+ * 容器列表的刷新时机。
+ *
+ * 容器由环境准备与重试阶段创建，处置入口必须指向当前真实的容器记录。容器列表不参与
+ * 按周期的自动刷新，只在任务状态真的迁移时重新读取：重试会重开任务并准备新的执行环境，
+ * 若此时不重新读取，面板会一直展示已经被替换掉的旧容器。
+ */
+test.describe("容器列表的刷新时机", () => {
+  /** 一份重试响应样本，字段与 Go 端 `httpapi.RetryTaskResponse` 一致 */
+  function sampleRetry(overrides: Record<string, unknown> = {}) {
+    return {
+      lease_epoch: 3,
+      lease_owner: "retry-1",
+      previous_status: "failed",
+      task_id: "task-1",
+      task_status: "preparing",
+      workflow_started: false,
+      ...overrides,
+    };
+  }
+
+  test("重试导致任务状态迁移后重新读取容器列表", async ({ page }) => {
+    let replaced = false;
+    let status = "failed";
+    await stubTaskList(page);
+    await page.route("**/api/v1/tasks/task-1", (route: Route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      return route.fulfill({
+        body: JSON.stringify(sampleTask({ status, status_finished: status === "failed" })),
+        contentType: "application/json",
+        status: 200,
+      });
+    });
+    await stubWorkflow(page);
+    await stubStepsEmpty(page);
+    await stubOtherPanels(page);
+    await stubContainers(page, () => ({
+      body: {
+        records: [
+          replaced
+            ? sampleContainer({ id: "container-2", name: "agentflow-container-2" })
+            : sampleContainer(),
+        ],
+        total: 1,
+      },
+    }));
+    // 覆盖 stubOtherPanels 中的同名拦截：本次任务允许重试
+    await page.route("**/api/v1/tasks/task-1/retry-eligibility", (route: Route) =>
+      route.fulfill({
+        body: JSON.stringify({
+          blocking: null,
+          can_retry: true,
+          summary: "允许开启一次新的执行周期",
+          task_id: "task-1",
+          task_status: "failed",
+        }),
+        contentType: "application/json",
+        status: 200,
+      }),
+    );
+    await page.route("**/api/v1/tasks/task-1/retry", (route: Route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      // 真实重试会重开任务并准备新的执行环境
+      replaced = true;
+      status = "preparing";
+      return route.fulfill({
+        body: JSON.stringify(sampleRetry()),
+        contentType: "application/json",
+        status: 202,
+      });
+    });
+
+    await openDetail(page);
+    await expect(page.getByText("container-1", { exact: true })).toBeVisible();
+
+    await page.getByRole("button", { name: "重试任务", exact: true }).click();
+
+    // 状态迁移触发的重新读取：面板展示的是重试后新准备的容器
+    await expect(page.getByText("container-2", { exact: true })).toBeVisible();
+    await expect(page.getByText("container-1", { exact: true })).toHaveCount(0);
+  });
+});

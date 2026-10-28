@@ -628,6 +628,47 @@ describe("一轮快照的变换", () => {
     });
     expect(running.dirty.resume).toBeFalsy();
   });
+
+  /**
+   * 容器记录只在任务状态真的迁移时重新读取：
+   *   - 首轮（没有上一条任务快照）不递增，否则面板挂载时已经读过一次，会重复请求；
+   *   - 同一状态内的普通轮询不递增，容器列表不参与按周期刷新；
+   *   - 状态迁移（环境准备、重试重开、收尾）时递增一次，处置入口指向的才是当前容器。
+   */
+  it("任务状态迁移时才刷新容器记录", () => {
+    const previous = {
+      loading: false,
+      task: task({ status: "failed" }),
+      taskID: "task-1",
+      workflow: workflow(),
+    };
+
+    // 首轮：面板挂载时已经读过一次容器列表，这里不重复要求
+    expect(
+      applySnapshotRound({ previous: { loading: false }, target: "task-1", task: task() }).dirty
+        .containers,
+    ).toBeFalsy();
+
+    // 同一状态内的普通轮询：不重新读取
+    expect(
+      applySnapshotRound({
+        previous,
+        target: "task-1",
+        task: task({ status: "failed" }),
+        workflow: workflow(),
+      }).dirty.containers,
+    ).toBeFalsy();
+
+    // 任务状态迁移：重试会重开任务并准备新的执行环境
+    expect(
+      applySnapshotRound({
+        previous,
+        target: "task-1",
+        task: task({ status: "preparing" }),
+        workflow: workflow({ run: run({ status: "pending", status_active: false }) }),
+      }).dirty.containers,
+    ).toBe(true);
+  });
 });
 
 describe("策略与提示的对应关系", () => {

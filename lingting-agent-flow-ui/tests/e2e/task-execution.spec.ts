@@ -1130,6 +1130,110 @@ test.describe("验证与诊断操作", () => {
     await expect(page.getByText(/正在执行：确定性验证/)).toHaveCount(0);
     await expect(page.getByText(/验证通过/)).toHaveCount(0);
   });
+
+  /**
+   * 切换任务后，上一个任务的计划步骤不得留在新任务的「计划步骤」里。
+   *
+   * 这条不变式当前由两层保障：切换任务时快照立即进入 `loading`（任务详情区块与其中的
+   * 执行面板被卸载），以及数据加载器按归属标识作废缓存。用例只断言用户可见的结果：
+   * 新任务的步骤查询失败时显示加载失败，而不是展示上一个任务的步骤。
+   */
+  test("切换任务后不展示上一个任务的计划步骤", async ({ page }) => {
+    const first = sampleTask();
+    const second = sampleTask({ id: "task-2", name: "补充接口测试" });
+    await stubTaskList(page);
+    await page.unroute("**/api/v1/tasks?*");
+    await page.route("**/api/v1/tasks?*", (route: Route) =>
+      route.fulfill({
+        body: JSON.stringify({ current: 1, records: [first, second], size: 20, total: 2 }),
+        contentType: "application/json",
+        status: 200,
+      }),
+    );
+    await stubTaskDetail(page, first);
+    await page.route("**/api/v1/tasks/task-2", (route: Route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      return route.fulfill({
+        body: JSON.stringify(second),
+        contentType: "application/json",
+        status: 200,
+      });
+    });
+    await stubWorkflow(page);
+    await page.route("**/api/v1/tasks/task-2/workflow", (route: Route) =>
+      route.fulfill({
+        body: JSON.stringify({
+          has_run: false,
+          steps: [],
+          task_id: "task-2",
+          task_status: "developing",
+        }),
+        contentType: "application/json",
+        status: 200,
+      }),
+    );
+    await stubSteps(page, [sampleStep()]);
+    // 新任务的步骤查询失败：此时不能回退到上一个任务的步骤
+    await page.route("**/api/v1/tasks/task-2/steps?*", (route: Route) =>
+      route.fulfill({
+        body: JSON.stringify({ error: { code: "internal", message: "服务内部错误" } }),
+        contentType: "application/json",
+        status: 500,
+      }),
+    );
+
+    await openDetail(page);
+    await expect(page.getByText("实现登录步骤")).toBeVisible();
+
+    await page.getByText("补充接口测试").first().click();
+
+    await expect(page.getByText("加载步骤失败")).toBeVisible();
+    await expect(page.getByText("实现登录步骤")).toHaveCount(0);
+    await expect(page.getByText(/共 \d+ 个步骤/)).toHaveCount(0);
+  });
+
+  /**
+   * 切换步骤后，上一个步骤的尝试与验证历史不得留在新步骤的详情里。
+   *
+   * 执行记录的缓存归属"任务 + 步骤"：新步骤的首次查询失败时必须显示加载失败，
+   * 而不是把上一个步骤的尝试当作"当前步骤的旧数据"继续展示。
+   */
+  test("切换步骤后不展示上一个步骤的执行记录", async ({ page }) => {
+    await stubTaskList(page);
+    await stubTaskDetail(page);
+    await stubWorkflow(page);
+    await stubSteps(page, [
+      sampleStep(),
+      sampleStep({ id: "step-2", name: "补充单元测试", sequence: 2 }),
+    ]);
+    await stubAttempts(page, [sampleAttempt()]);
+    await stubValidations(page, []);
+    await stubSessions(page);
+    // 第二个步骤的执行记录查询失败
+    await page.route("**/api/v1/tasks/task-1/steps/step-2/attempts?*", (route: Route) =>
+      route.fulfill({
+        body: JSON.stringify({ error: { code: "internal", message: "服务内部错误" } }),
+        contentType: "application/json",
+        status: 500,
+      }),
+    );
+    await page.route("**/api/v1/tasks/task-1/steps/step-2/validations", (route: Route) =>
+      route.fulfill({
+        body: JSON.stringify({ error: { code: "internal", message: "服务内部错误" } }),
+        contentType: "application/json",
+        status: 500,
+      }),
+    );
+
+    await openDetail(page);
+    await selectStep(page);
+    await expect(page.getByText(/第 1 次尝试/)).toBeVisible();
+
+    await page.getByText("补充单元测试").click();
+
+    await expect(page.getByText("加载执行记录失败")).toBeVisible();
+    await expect(page.getByText(/第 1 次尝试/)).toHaveCount(0);
+  });
 });
 
 test.describe("尝试与会话历史展示", () => {
@@ -1173,6 +1277,34 @@ test.describe("尝试与会话历史展示", () => {
     // 取消尝试没有 error_class / failure_stage，因此不出现虚构分类。
     await expect(page.getByText(/错误分类/)).toHaveCount(1);
     await expect(page.getByText(/失败阶段/)).toHaveCount(1);
+  });
+  /**
+   * 语义审查与步骤失败阶段都是服务端枚举：页面必须用中文标签展示，
+   * 不能把 `needs_human_review` / `execute` 这类原始取值直接吐给用户。
+   */
+  test("语义审查结果与步骤失败阶段使用中文标签", async ({ page }) => {
+    await stubTaskList(page);
+    await stubTaskDetail(page);
+    await stubWorkflow(page);
+    await stubSteps(page, [sampleStep({ failure_stage: "verify", status: "failed" })]);
+    await stubAttempts(page, [sampleAttempt({ status: "failed" })]);
+    await stubValidations(page, [
+      sampleValidation({ review_ran: true, review_status: "needs_human_review" }),
+    ]);
+    await stubSessions(page);
+
+    await openDetail(page);
+    await selectStep(page);
+
+    // 步骤失败阶段复用尝试阶段的同一份中文映射
+    await expect(page.getByText("失败阶段", { exact: true })).toBeVisible();
+    await expect(page.getByText("验证阶段", { exact: true })).toBeVisible();
+    await expect(page.getByText("verify", { exact: true })).toHaveCount(0);
+
+    // 语义审查结论中文化；需要人工复核不等于验证通过
+    await expect(page.getByText("语义审查：需要人工复核")).toBeVisible();
+    await expect(page.getByText(/needs_human_review/)).toHaveCount(0);
+    await expect(page.getByText(/审查通过/)).toHaveCount(0);
   });
 
   test("布尔事实为 false 时不产生超时与取消警告", async ({ page }) => {

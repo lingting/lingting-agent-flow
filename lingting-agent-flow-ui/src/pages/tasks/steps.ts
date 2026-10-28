@@ -315,6 +315,33 @@ export const CODE_FETCH_STATUS_LABEL: Record<string, string> = {
   uncertain: "结果不确定",
 };
 
+/**
+ * 语义审查结果标签，取值来自 Go 端 `domain.ReviewStatus`
+ * （`internal/domain/validation_decision.go`）。
+ *
+ * 它描述"语义审查本身发生了什么"，与验证结论（`verdict`）是两件独立的事：
+ * `needs_human_review` 不等于通过，`unparseable` / `invalid_output` / `call_failed`
+ * 也不等于代码有问题。零值表示本次没有要求语义审查。
+ */
+export const REVIEW_STATUS_LABEL: Record<string, string> = {
+  passed: "审查通过",
+  failed: "审查未通过",
+  needs_human_review: "需要人工复核",
+  unparseable: "输出无法解析",
+  invalid_output: "输出未通过校验",
+  call_failed: "调用失败",
+  timed_out: "已超时",
+  cancelled: "已取消",
+  interrupted: "已中断",
+  not_configured: "未配置验证角色",
+};
+
+/** 读取语义审查结果标签；缺省显示占位符，未知取值原样展示 */
+export function reviewStatusLabel(status?: string): string {
+  if (!status) return "—";
+  return REVIEW_STATUS_LABEL[status] ?? status;
+}
+
 /** 读取代码初始化状态标签；未知取值原样展示 */
 export function codeFetchStatusLabel(status?: string): string {
   if (!status) return "—";

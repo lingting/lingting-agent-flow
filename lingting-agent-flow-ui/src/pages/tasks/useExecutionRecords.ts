@@ -65,24 +65,37 @@ export function isNotFound(error: unknown): boolean {
 /**
  * 一次请求的通用加载器：忽略过期响应，支持手动刷新与外部刷新令牌。
  *
+ * `owner` 是这批数据归属的记录标识（任务标识，或"任务 + 步骤"）。它变化意味着这是另一条
+ * 记录，上一条记录的缓存必须立即失效：同一任务内切换步骤不会卸载步骤详情，若缓存保留，
+ * 新步骤的首次查询失败时会把上一个步骤的尝试与验证历史当作"当前步骤的旧数据"长期展示。
+ * 同一记录内的刷新失败仍然保留旧数据。
+ *
  * `token` 由自动刷新提供：值变化时重新读取一次（同一任务、同一份服务端状态确实变了），
  * 调用方不需要知道定时器的存在。
  */
 function useLoader<T>(
   load: ((signal: AbortSignal) => Promise<T>) | undefined,
-  deps: readonly unknown[],
+  owner: string,
   token?: number,
 ): { state: LoadState<T>; reload: () => void } {
   const [state, setState] = useState<LoadState<T>>({ status: "idle" });
   const [nonce, setNonce] = useState(0);
   // 保存最近一次成功的数据：刷新失败时不清空，避免把"刷新失败"显示成"没有数据"。
   const dataRef = useRef<T | undefined>(undefined);
+  /** 缓存归属的记录标识：与 `owner` 不一致时缓存必须作废 */
+  const ownerRef = useRef("");
   const loadRef = useRef(load);
   loadRef.current = load;
 
   const reload = useCallback(() => setNonce((value) => value + 1), []);
 
   useEffect(() => {
+    // 归属变化：立刻丢弃上一条记录的缓存，避免跨任务 / 跨步骤展示别处的数据。
+    // 这里不做"保留旧数据"的降级，因为旧数据描述的已经不是当前记录。
+    if (ownerRef.current !== owner) {
+      ownerRef.current = owner;
+      dataRef.current = undefined;
+    }
     const loader = loadRef.current;
     if (!loader) {
       dataRef.current = undefined;
@@ -111,9 +124,9 @@ function useLoader<T>(
         setState({ data: previous, error: message, status: "ready" });
       });
     return () => controller.abort();
-    // deps 由调用方给出，nonce 与 token 只用于触发重新加载。
+    // owner 与 token 只用于触发重新加载；nonce 供手动刷新使用。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [...deps, nonce, token]);
+  }, [owner, nonce, token]);
 
   return { reload, state };
 }
@@ -132,7 +145,7 @@ export function useTaskSteps(
       ? (signal) =>
           fetchTaskSteps(trimmed, { size: 100 }, { signal }).then(({ data }) => data.records)
       : undefined,
-    [trimmed],
+    trimmed,
     token,
   );
   return { reload, state };
@@ -159,7 +172,7 @@ export function useTaskCodeSaves(
     trimmed
       ? (signal) => fetchTaskCodeSaves(trimmed, { signal }).then(({ data }) => data.records)
       : undefined,
-    [trimmed],
+    trimmed,
     token,
   );
   return { reload, state };
@@ -178,6 +191,9 @@ export type StepRecords = {
  *
  * 会话按尝试逐个查询：执行记录接口只在尝试维度提供会话列表，没有"步骤下全部会话"
  * 的入口。任何一个尝试的会话查询失败都不会让整份现场变成错误，只是该尝试缺少会话。
+ *
+ * 缓存归属"任务 + 步骤"：换任务、换步骤都会作废上一次的尝试与验证历史，不能把上一个
+ * 步骤的现场当作新步骤的旧数据展示。
  */
 export function useStepRecords(
   taskID?: string,
@@ -215,7 +231,7 @@ export function useStepRecords(
           return { attempts, sessions, validations: validationsResult.data };
         }
       : undefined,
-    [task, step],
+    `${task}/${step}`,
     token,
   );
   return { reload, state };

@@ -77,9 +77,10 @@ export function useTaskLiveSnapshot(taskID?: string): {
   const schedulerRef = useRef<RefreshScheduler | undefined>(undefined);
 
   const bumpTokens = useCallback((dirty: Partial<Record<keyof RefreshTokens, boolean>>) => {
-    if (!dirty.steps && !dirty.codeSaves && !dirty.resume) return;
+    if (!dirty.steps && !dirty.codeSaves && !dirty.resume && !dirty.containers) return;
     setTokens((current) => ({
       codeSaves: current.codeSaves + (dirty.codeSaves ? 1 : 0),
+      containers: current.containers + (dirty.containers ? 1 : 0),
       resume: current.resume + (dirty.resume ? 1 : 0),
       steps: current.steps + (dirty.steps ? 1 : 0),
     }));

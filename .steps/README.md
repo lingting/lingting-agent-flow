@@ -38,7 +38,12 @@
   未闭合的业务缺口，完成后 P4 只剩 `P4-M5`；此后又完成一次**任务详情页信息结构与操作可达性
   复核**（2026-10-28，见
   [`P4-task-detail-experience-review.md`](./P4-task-detail-experience-review.md)），修复 6 处由代码
-  直接证实的可读性与结构缺陷，未触碰 Go 代码与业务规则。子任务 **M4-1（失败任务
+  直接证实的可读性与结构缺陷，未触碰 Go 代码与业务规则；再后又完成一次**任务详情页面板职责与
+  操作可达性复核**（2026-10-28，基线 `cbaee84`，见
+  [`P4-task-detail-panel-organization.md`](./P4-task-detail-panel-organization.md)），判定面板职责
+  划分与现有顺序合理、无证据支持折叠分组，只修复 4 处"数据归属 / 原始枚举 / 刷新时机"缺陷
+  （D7 只读加载器不按归属作废缓存、D8 语义审查原始枚举、D9 步骤失败阶段原始枚举、D10 容器列表
+  刷新令牌未接线），同样未触碰 Go 代码与业务规则。子任务 **M4-1（失败任务
   [`P4-M4-1-task-retry-web-entry.md`](./P4-M4-1-task-retry-web-entry.md)：前端补齐
   `RetryEligibilityResponse` / `RetryTaskResponse` / `RetryTaskRequest` 类型与
   `fetchTaskRetryEligibility` / `retryTask`（`GET|POST /api/v1/tasks/{taskID}/retry[-eligibility]`），
@@ -578,16 +583,34 @@
   **未修改任何 Go 代码、`CreateTaskRequest`、HTTP 契约与领域规则**；新增前端单元用例 6 个、E2E 用例
   4 个并改写 1 个，`pnpm test:unit:safe` 603 通过、`pnpm test:e2e:safe` 229 通过 / 0 失败、
   `pnpm check` 与 `pnpm build` 通过（未执行 Go 测试：未修改 Go 文件）。**P4-M5 仍为 `pending`**。
+- **任务详情页面板职责与操作可达性复核已于 2026-10-28 完成**（基线 `origin/master` `cbaee84`，
+  "恢复常规功能开发"后的第五个常规工作项），交付物为
+  [`P4-task-detail-panel-organization.md`](./P4-task-detail-panel-organization.md)：从 `TasksPage.tsx`
+  的真实引用出发逐个核实 12 个面板的数据来源、归属（任务级 / 步骤级）与刷新触发，确认
+  **只有「步骤详情」及其内部三块依赖选中步骤**，其余都是任务级事实；把"同一事实是否两处取值
+  不同"逐项核对后，工作流执行记录与代码保存记录在「续跑资格」面板中的重复展示被判为**合理的
+  现场证据**（同一 `WorkflowRunResponse` 来源、随同一次刷新同步），事件时间线上移与 9 个面板的
+  折叠分组被列为**待验证假设**（无真实使用数据，不重排）。据此只修复 4 处由代码与用例直接证实的
+  缺陷：①只读加载器 `useLoader` 不按归属作废缓存，切换步骤后新步骤查询失败时会把上一个步骤的
+  尝试与会话当作"当前步骤旧数据"长期展示（改为显式 `owner`）；②`语义审查：needs_human_review`
+  等 `domain.ReviewStatus` 原始枚举直接输出（新增 `REVIEW_STATUS_LABEL`）；③步骤失败阶段输出
+  `execute` / `verify`（复用既有 `ATTEMPT_FAILURE_STAGE_LABEL`）；④容器列表的外部刷新令牌从未
+  接线，重试重开任务后仍指向被替换的旧容器（`RefreshTokens` 增加 `containers`，只在任务状态
+  迁移时递增，首轮不递增、不并入周期刷新）。**未修改任何 Go 代码、HTTP 契约、领域规则、状态机、
+  重试 / 续跑资格、容器生命周期与远程操作语义**；新增单元用例 4 个、E2E 用例 3 个，
+  `pnpm test:unit:safe` 607 通过、`pnpm test:e2e:safe` 233 通过 / 0 失败、`pnpm check` 与
+  `pnpm build` 通过（未执行 Go 测试：未修改 Go 文件）。**P4-M5 仍为 `pending`**。
 - **下一步**：P3 阶段已全部完成（M1–M5 均 `completed`），P4-M1、M2-1…M2-7、M3、M4、G12 与
-  任务详情页体验复核、任务创建配置继承与显式覆盖、创建任务表单的字段收敛均已完成（见上方
+  任务详情页体验复核、任务创建配置继承与显式覆盖、创建任务表单的字段收敛、任务详情页面板职责与
+  操作可达性复核均已完成（见上方
   "当前阶段与当前里程碑"）。
   P4 只剩 `P4-M5`，而它**缺少真实使用数据**，因此不再继续推进数据依赖型优化（解除待定所需数据见
   [`P4-M5-measurement-and-optimization-assessment.md`](./P4-M5-measurement-and-optimization-assessment.md) §8）。
   后续入口按 [`ROADMAP.md`](./ROADMAP.md) 的"下一步工作的选择规则"选择**有明确代码证据的常规
   功能缺口**；`P4-M1` 盘点的 P0/P1/P2/P3 缺口已全部闭合，新的候选需要重新盘点而不是照抄旧清单。
   当前已有代码证据的候选（均未立项）：私有仓库 Git 凭据支持、`verification_results` 遗留模型清理、
-  任务详情页面板分组
-  （见 [`P4-task-detail-experience-review.md`](./P4-task-detail-experience-review.md) §8）。
+  步骤级动作按钮的禁用原因展示
+  （见 [`P4-task-detail-panel-organization.md`](./P4-task-detail-panel-organization.md) §10）。
   P4-M2-7 的剩余风险见
   [`P4-M2-7-web-execution-operations.md`](./P4-M2-7-web-execution-operations.md) §6：
   同步长请求没有**流式**进度推送（轮询已由 M3-7 交付，SSE 仍未实现）、闭环未通过验证时
@@ -668,6 +691,7 @@
 | [`P4-task-detail-experience-review.md`](./P4-task-detail-experience-review.md) | P4 常规开发：任务详情页信息结构与操作可达性复核（真实页面结构与数据来源、6 处缺陷的代码证据与影响、最小修复方案、判定为合理的重复展示与死参数、新增 / 更新的测试断言、测试与构建结果、未解决项与后续候选、与 P4-M5 的关系） |
 | [`P4-task-create-project-inheritance.md`](./P4-task-create-project-inheritance.md) | P4 常规开发：任务创建时的项目配置继承与显式覆盖语义（后端继承规则核实、3 处缺陷的代码证据与修复前失败用例、字段级优先级与来源可见性规则、请求体转换、修改文件与行为变化、判定为合理未修改的 4 项、测试与构建结果、剩余风险、下一项候选、与 P4-M5 的关系） |
 | [`P4-task-create-form-field-convergence.md`](./P4-task-create-form-field-convergence.md) | P4 常规开发：创建任务表单的字段收敛（逐字段继承核查与三分类证据、3 处交互负担的代码证据、只折叠可继承文本字段的依据、收起摘要取自表单有效值与来源、语言环境与版本保持常显的理由、折叠保持挂载与校验失败自动展开、修改文件、测试与构建结果、剩余风险、下一项候选、与 P4-M5 的关系） |
+| [`P4-task-detail-panel-organization.md`](./P4-task-detail-panel-organization.md) | P4 常规开发：任务详情页面板职责与操作可达性复核（12 个面板的数据来源 / 归属 / 刷新触发、上一轮 6 项修复的回归核对、重复展示与折叠分组的逐项判定、4 处缺陷的代码证据与最小修复、修改文件与行为变化、测试与构建结果、用例有效性核对、保留的合理设计与待验证假设、剩余风险、下一项候选、与 P4-M5 的关系） |
 
 ## 下一步工作的选择规则
 

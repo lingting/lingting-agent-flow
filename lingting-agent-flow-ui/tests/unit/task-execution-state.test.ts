@@ -33,6 +33,8 @@ import {
   describePlanResult,
   describeValidateResult,
   executionOutcomeLabel,
+  REVIEW_STATUS_LABEL,
+  reviewStatusLabel,
   STEP_STATUS_META,
   stepStatusMeta,
   stepTypeLabel,
@@ -896,5 +898,47 @@ describe("结论文本里的状态取值", () => {
         "；",
       ),
     ).toContain("初始化状态：future_fetch_status");
+  });
+});
+
+/**
+ * 语义审查是验证结果面板里的一个独立事实：它描述"审查本身发生了什么"，
+ * 与验证结论互不替代。取值来自 Go 端 `domain.ReviewStatus`，必须中文化展示，
+ * 未知取值原样保留以便诊断。
+ */
+describe("语义审查结果标签", () => {
+  it("覆盖 domain.ReviewStatus 的全部非零取值", () => {
+    expect(Object.keys(REVIEW_STATUS_LABEL).sort()).toEqual(
+      [
+        "call_failed",
+        "cancelled",
+        "failed",
+        "interrupted",
+        "invalid_output",
+        "needs_human_review",
+        "not_configured",
+        "passed",
+        "timed_out",
+        "unparseable",
+      ].sort(),
+    );
+  });
+
+  it("需要人工复核与输出异常都不被表述为审查通过", () => {
+    expect(reviewStatusLabel("needs_human_review")).toBe("需要人工复核");
+    expect(reviewStatusLabel("unparseable")).toBe("输出无法解析");
+    expect(reviewStatusLabel("invalid_output")).toBe("输出未通过校验");
+    expect(reviewStatusLabel("call_failed")).toBe("调用失败");
+    // 只有 `passed` 才能读成"审查通过"：其余取值都不得与它同义
+    for (const status of ["needs_human_review", "unparseable", "invalid_output", "call_failed"]) {
+      expect(reviewStatusLabel(status)).not.toBe(reviewStatusLabel("passed"));
+      expect(reviewStatusLabel(status)).not.toBe("审查通过");
+    }
+  });
+
+  it("零值显示占位符，未知取值原样保留", () => {
+    expect(reviewStatusLabel()).toBe("—");
+    expect(reviewStatusLabel("")).toBe("—");
+    expect(reviewStatusLabel("future_review_status")).toBe("future_review_status");
   });
 });

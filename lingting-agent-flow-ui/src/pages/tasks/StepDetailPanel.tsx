@@ -16,6 +16,7 @@ import type { Attempt, Session, Step, Task, ValidationHistoryResponse } from "@/
 import {
   ATTEMPT_STATUS_META,
   attemptFailureFacts,
+  attemptFailureStageLabel,
   attemptStatusMeta,
   canExecuteAndValidate,
   canExecuteStep,
@@ -25,6 +26,7 @@ import {
   CHECK_STATUS_LABEL,
   checkStatusLabel,
   isKnownStepStatus,
+  reviewStatusLabel,
   sessionArchiveStatusLabel,
   sessionExportStatusLabel,
   sessionRunStatusLabel,
@@ -158,7 +160,7 @@ function ValidationRunBlock({
       )}
       {run.review_ran && (
         <Typography.Text type="secondary">
-          语义审查：{run.review_status ?? "—"}
+          语义审查：{reviewStatusLabel(run.review_status)}
           {run.review_summary ? `，${run.review_summary}` : ""}
         </Typography.Text>
       )}
@@ -382,7 +384,8 @@ export function StepDetailPanel({
         )}
         {step.failure_stage && (
           <Descriptions.Item label="失败阶段" span={2}>
-            {step.failure_stage}
+            {/* 失败阶段与尝试共用同一组阶段名（execute / verify / recover），走同一份中文映射 */}
+            {attemptFailureStageLabel(step.failure_stage)}
           </Descriptions.Item>
         )}
         {step.output_summary && (

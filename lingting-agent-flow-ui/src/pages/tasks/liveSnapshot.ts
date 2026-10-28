@@ -37,10 +37,12 @@ export type RefreshTokens = {
   codeSaves: number;
   /** 续跑资格与阻塞原因 */
   resume: number;
+  /** 任务容器记录（含处置入口） */
+  containers: number;
 };
 
 /** 初始令牌：面板首次挂载时自行加载一次 */
-export const INITIAL_TOKENS: RefreshTokens = { codeSaves: 0, resume: 0, steps: 0 };
+export const INITIAL_TOKENS: RefreshTokens = { codeSaves: 0, containers: 0, resume: 0, steps: 0 };
 
 /** 一次读取的原始结果 */
 export type SnapshotRoundInput = {
@@ -113,6 +115,11 @@ export function applySnapshotRound(input: SnapshotRoundInput): SnapshotRoundResu
   const stage = run?.stage;
   return {
     dirty: onlyDirty({
+      // 容器记录只在任务状态真的迁移时重新读取：容器由环境准备 / 重试阶段创建或处置，
+      // 这些变化只体现在任务状态上。容器列表仍不并入按周期的刷新，避免紧挨着破坏性
+      // 操作产生隐式读取风暴。
+      // 首轮（`previous.task` 为空）不递增：面板挂载时已经读过一次，否则会重复请求。
+      containers: previous.task !== undefined && task.status !== previous.task.status,
       // 代码保存记录只在代码保存相关阶段发生变化时重新读取。
       codeSaves:
         (stage === "code_save" || stage === "finalize" || task.status === "saving") &&

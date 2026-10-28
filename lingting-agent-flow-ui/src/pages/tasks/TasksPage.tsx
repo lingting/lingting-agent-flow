@@ -625,7 +625,13 @@ export function TasksPage() {
               token={tokens.resume}
             />
           )}
-          {selected && <TaskContainerPanel onRefreshTask={refreshTaskDetail} task={selected} />}
+          {selected && (
+            <TaskContainerPanel
+              onRefreshTask={refreshTaskDetail}
+              task={selected}
+              token={tokens.containers}
+            />
+          )}
           {selected && <RetryTaskPanel onRefreshTask={refreshTaskDetail} task={selected} />}
         </Flex>
       )}
