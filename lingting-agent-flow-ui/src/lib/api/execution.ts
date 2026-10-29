@@ -10,7 +10,8 @@
  *   - 顺序执行：`{taskID}/execute-steps`
  *   - 步骤：`{taskID}/steps`、`{taskID}/steps/{stepID}/execute`、
  *     `{taskID}/steps/{stepID}/execute-and-validate`、
- *     `{taskID}/steps/{stepID}/open-repair-cycle`
+ *     `{taskID}/steps/{stepID}/open-repair-cycle`（写）与
+ *     `{taskID}/steps/{stepID}/repair-cycle-eligibility`（只读资格）
  *   - 尝试：`{taskID}/steps/{stepID}/attempts`、
  *     `{taskID}/steps/{stepID}/attempts/{attemptID}/validate`、
  *     `{taskID}/steps/{stepID}/attempts/{attemptID}/initialize-code`
@@ -36,6 +37,7 @@ import type {
   InitializeCodeResponse,
   OpenRepairCycleResponse,
   PlanRequest,
+  RepairCycleEligibilityResponse,
   RepairCycleHistoryResponse,
   PlanResponse,
   SessionListResponse,
@@ -97,6 +99,11 @@ export function stepExecuteAndValidatePath(taskID: string, stepID: string): stri
 /** 显式开启修复周期路径 */
 export function stepOpenRepairCyclePath(taskID: string, stepID: string): string {
   return `${stepPath(taskID, stepID)}/open-repair-cycle`;
+}
+
+/** 修复周期开启资格（只读）路径 */
+export function stepRepairCycleEligibilityPath(taskID: string, stepID: string): string {
+  return `${stepPath(taskID, stepID)}/repair-cycle-eligibility`;
 }
 
 /** 尝试集合路径 */
@@ -376,5 +383,23 @@ export function openRepairCycle(taskID: string, stepID: string, options: ApiRequ
   return apiRequest<OpenRepairCycleResponse>(
     stepOpenRepairCyclePath(taskID, stepID),
     postOptions({}, options),
+  );
+}
+
+/**
+ * 查询某步骤当前是否允许开启新的执行周期（只读）。
+ *
+ * 结论完全来自服务端依据持久化记录的计算：不登记周期、不结束周期、不执行任何
+ * Agent 调用，也不产生远程副作用。只有 `can_open_cycle` 为 true 时页面才允许提交
+ * `openRepairCycle`；该结论只代表读取时刻的现场，写入口仍会重新校验。
+ */
+export function fetchStepRepairCycleEligibility(
+  taskID: string,
+  stepID: string,
+  options: ApiRequestOptions = {},
+) {
+  return apiRequest<RepairCycleEligibilityResponse>(
+    stepRepairCycleEligibilityPath(taskID, stepID),
+    options,
   );
 }

@@ -243,6 +243,75 @@ async function stubSessions(page: Page, sessions: unknown[] = []) {
   );
 }
 
+/** 一份修复周期开启资格样本，字段与 Go 端 `httpapi.RepairCycleEligibilityResponse` 一致 */
+function sampleRepairCycleEligibility(overrides: Record<string, unknown> = {}) {
+  return {
+    active_cycle: false,
+    attempts: 1,
+    blocking: [] as string[],
+    can_open_cycle: true,
+    consumed_attempts: 1,
+    cycle_sequence: 1,
+    max_attempts: 1,
+    remaining_attempts: 0,
+    step_id: "step-1",
+    step_status: "failed",
+    summary: "允许开启新的执行周期：上一周期已用 1 次尝试，新周期上限 1",
+    task_id: "task-1",
+    task_status: "developing",
+    ...overrides,
+  };
+}
+
+/** 拦截修复周期开启资格查询；默认返回"允许开启" */
+async function stubRepairCycleEligibility(page: Page, overrides: Record<string, unknown> = {}) {
+  const calls: string[] = [];
+  await page.route(
+    "**/api/v1/tasks/task-1/steps/step-1/repair-cycle-eligibility",
+    (route: Route) => {
+      calls.push(route.request().url());
+      return route.fulfill({
+        body: JSON.stringify(sampleRepairCycleEligibility(overrides)),
+        contentType: "application/json",
+        status: 200,
+      });
+    },
+  );
+  return calls;
+}
+
+/**
+ * 资格查询的默认替身：明确"不允许开启（缺少执行记录）"。
+ *
+ * 这是页面渲染的确定性前提：没有它，资格请求会落到真实开发服务器上，按钮状态取决于
+ * 本机是否恰好有后端在运行。需要"允许开启"的用例在用例体内重新注册路由覆盖它。
+ */
+async function stubRepairCycleEligibilityDefault(page: Page) {
+  // 匹配任意步骤：切换步骤的用例同样需要确定的资格响应，而不是落到真实开发服务器。
+  await page.route("**/api/v1/tasks/task-1/steps/*/repair-cycle-eligibility", (route: Route) => {
+    const matched = /steps\/([^/]+)\/repair-cycle-eligibility/.exec(route.request().url());
+    const stepID = matched?.[1] ?? "step-1";
+    return route.fulfill({
+      body: JSON.stringify(
+        sampleRepairCycleEligibility({
+          attempts: 0,
+          blocking: ["new_cycle_denied"],
+          can_open_cycle: false,
+          consumed_attempts: 0,
+          cycle_sequence: 0,
+          max_attempts: 1,
+          remaining_attempts: 1,
+          step_id: stepID,
+          step_status: "pending",
+          summary: "该步骤还没有任何执行记录，首轮执行本身就是第一个执行周期",
+        }),
+      ),
+      contentType: "application/json",
+      status: 200,
+    });
+  });
+}
+
 /** 拦截验证失败反馈 */
 async function stubFeedback(page: Page, handler: () => { body: unknown; status?: number }) {
   await page.route(
@@ -274,6 +343,9 @@ async function selectStep(page: Page) {
 
 test.beforeEach(async ({ page }) => {
   await stubHealth(page);
+  // 步骤详情的「开启新执行周期」按钮由服务端资格决定，因此每个用例都必须有确定的
+  // 资格响应；需要"允许开启"的用例在用例体内重新注册路由覆盖这条默认替身。
+  await stubRepairCycleEligibilityDefault(page);
 });
 
 test.describe("计划与步骤可见", () => {
@@ -1421,7 +1493,9 @@ test.describe("尝试与会话历史展示", () => {
 });
 
 test.describe("修复周期", () => {
-  test("修复周期被拒绝时展示服务端原因，不显示成功也不自动重试", async ({ page }) => {
+  test("资格允许但写入被拒绝时展示服务端原因，不显示成功也不自动重试", async ({ page }) => {
+    // 资格查询与写操作是两个独立校验：查询说允许，写请求仍可能因现场已变化被拒。
+    const eligibilityCalls = await stubRepairCycleEligibility(page);
     await stubTaskList(page);
     await stubTaskDetail(page);
     await stubWorkflow(page);
@@ -1451,10 +1525,13 @@ test.describe("修复周期", () => {
     await expect(page.getByText("已开启新的执行周期")).toHaveCount(0);
 
     await page.waitForTimeout(500);
+    // 写请求只发一次（不因为资格查询说允许就自动重发），且拒绝后重新读取了资格。
     expect(calls).toHaveLength(1);
+    expect(eligibilityCalls.length).toBeGreaterThanOrEqual(2);
   });
 
   test("修复周期成功后重新读取步骤与执行记录", async ({ page }) => {
+    await stubRepairCycleEligibility(page);
     await stubTaskList(page);
     await stubTaskDetail(page);
     await stubWorkflow(page);
@@ -1488,6 +1565,100 @@ test.describe("修复周期", () => {
     await expect(
       page.getByText("该操作只登记新的预算作用域，不会自动执行；随后仍需显式发起执行。"),
     ).toBeVisible();
+  });
+});
+
+test.describe("修复周期开启资格", () => {
+  test("服务端阻塞时按钮禁用并展示真实阻塞原因", async ({ page }) => {
+    await stubRepairCycleEligibility(page, {
+      attempts: 2,
+      blocking: ["new_cycle_denied"],
+      can_open_cycle: false,
+      consumed_attempts: 1,
+      max_attempts: 3,
+      remaining_attempts: 2,
+      summary: "当前执行周期仍有剩余预算（已用 1 / 3），不允许通过开启新周期重置预算",
+    });
+    await stubTaskList(page);
+    await stubTaskDetail(page);
+    await stubWorkflow(page);
+    await stubSteps(page);
+    await stubAttempts(page);
+    await stubValidations(page, []);
+    await stubSessions(page);
+
+    const calls: string[] = [];
+    await page.route("**/api/v1/tasks/task-1/steps/step-1/open-repair-cycle", (route: Route) => {
+      calls.push(route.request().url());
+      return route.fulfill({ body: "{}", contentType: "application/json", status: 200 });
+    });
+
+    await openDetail(page);
+    await selectStep(page);
+
+    await expect(page.getByRole("button", { name: "开启新执行周期" })).toBeDisabled();
+    // 原因直接展示在页面上（不依赖悬停），并且是服务端给出的真实说明。
+    await expect(page.getByText(/当前执行周期仍有剩余预算/)).toBeVisible();
+    await expect(page.getByText(/服务端阻塞类别：当前不满足开启新周期的条件/)).toBeVisible();
+    await expect(page.getByText(/已用 1 \/ 3 次，剩余 2 次/)).toBeVisible();
+
+    const hint = reasonHint(page, "开启新执行周期");
+    await expect(hint).toHaveAttribute("aria-label", /仍有剩余预算/);
+    await hint.click();
+    await page.waitForTimeout(300);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("资格查询失败时不放行，并说明资格未知而不是预算原因", async ({ page }) => {
+    await page.route(
+      "**/api/v1/tasks/task-1/steps/step-1/repair-cycle-eligibility",
+      (route: Route) =>
+        route.fulfill({
+          body: JSON.stringify({
+            error: { code: "internal_error", message: "服务内部错误" },
+          }),
+          contentType: "application/json",
+          status: 500,
+        }),
+    );
+    await stubTaskList(page);
+    await stubTaskDetail(page);
+    await stubWorkflow(page);
+    await stubSteps(page);
+    await stubAttempts(page);
+    await stubValidations(page, []);
+    await stubSessions(page);
+
+    await openDetail(page);
+    await selectStep(page);
+
+    await expect(page.getByRole("button", { name: "开启新执行周期" })).toBeDisabled();
+    await expect(page.getByText(/资格未知/)).toBeVisible();
+    await expect(reasonHint(page, "开启新执行周期")).toHaveAttribute(
+      "aria-label",
+      /无法确认开启新执行周期的资格/,
+    );
+    // 资格未知不能被读成"预算耗尽"这类未经证明的业务原因。
+    await expect(page.getByText(/剩余周期预算/)).toHaveCount(0);
+    await expect(page.getByText(/仍有剩余预算/)).toHaveCount(0);
+  });
+
+  test("首次执行前不允许通过开启新周期重置预算", async ({ page }) => {
+    // 默认替身即"没有执行记录"的现场。
+    await stubTaskList(page);
+    await stubTaskDetail(page);
+    await stubWorkflow(page);
+    await stubSteps(page, [sampleStep({ status: "pending" })]);
+    await stubAttempts(page, []);
+    await stubValidations(page, []);
+    await stubSessions(page);
+
+    await openDetail(page);
+    await selectStep(page);
+
+    await expect(page.getByRole("button", { name: "开启新执行周期" })).toBeDisabled();
+    // 服务端说明与"首轮即第一个周期"的说明都会出现，因此只断言至少一处可见。
+    await expect(page.getByText(/首轮执行本身就是第一个执行周期/).first()).toBeVisible();
   });
 });
 
@@ -1726,7 +1897,15 @@ test.describe("步骤操作的禁用原因", () => {
     expect(executeCalls).toHaveLength(0);
   });
 
-  test("步骤状态不允许时说明步骤状态，但同一现场仍可开启新执行周期", async ({ page }) => {
+  test("步骤状态不允许时说明步骤状态，修复周期原因来自服务端资格", async ({ page }) => {
+    // 已完成的步骤在服务端同样"不可开始执行"，因此资格查询给出 execution_active：
+    // 页面既不自己编造原因，也不再假设"已完成仍可开启新周期"。
+    await stubRepairCycleEligibility(page, {
+      blocking: ["execution_active"],
+      can_open_cycle: false,
+      step_status: "completed",
+      summary: "步骤仍被一次执行占用，不能启动第二个执行者",
+    });
     await stubTaskList(page);
     await stubTaskDetail(page);
     await stubWorkflow(page);
@@ -1743,12 +1922,23 @@ test.describe("步骤操作的禁用原因", () => {
     await hint.hover();
     await expect(visibleTooltip(page)).toContainText("只有待执行、等待重试、失败或待核验");
 
-    // 修复周期的前置条件与执行入口不同：已完成的步骤仍可显式开启新周期，因此不得提示禁用
-    await expect(reasonHint(page, "开启新执行周期")).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "开启新执行周期" })).toBeEnabled();
+    // 修复周期这一条完全由服务端资格决定：拒绝时按钮禁用，原因是服务端给出的说明。
+    await expect(page.getByRole("button", { name: "开启新执行周期" })).toBeDisabled();
+    await expect(reasonHint(page, "开启新执行周期")).toHaveAttribute(
+      "aria-label",
+      /步骤仍被一次执行占用/,
+    );
   });
 
   test("步骤仍被尝试占用时说明占用原因", async ({ page }) => {
+    // 占用是对三个动作都成立的现场；修复周期这一条由服务端在资格里给出 execution_active。
+    await stubRepairCycleEligibility(page, {
+      attempts: 1,
+      blocking: ["execution_active"],
+      can_open_cycle: false,
+      step_status: "developing",
+      summary: "步骤仍被一次执行占用，不能启动第二个执行者",
+    });
     await stubTaskList(page);
     await stubTaskDetail(page);
     await stubWorkflow(page);
@@ -1764,10 +1954,8 @@ test.describe("步骤操作的禁用原因", () => {
       "aria-label",
       /仍被当前执行尝试占用/,
     );
-    await expect(reasonHint(page, "开启新执行周期")).toHaveAttribute(
-      "aria-label",
-      /仍被当前执行尝试占用/,
-    );
+    // 修复周期这一条的原因来自服务端 summary，措辞与前端判定无关，只要求真的说明"被占用"
+    await expect(reasonHint(page, "开启新执行周期")).toHaveAttribute("aria-label", /占用/);
   });
 
   test("非 Agent 步骤说明由服务端直接执行", async ({ page }) => {
@@ -1788,6 +1976,8 @@ test.describe("步骤操作的禁用原因", () => {
   });
 
   test("允许执行时不显示任何禁用原因，并按原契约调用接口", async ({ page }) => {
+    // 三个动作同时可用：修复周期的资格也要求服务端明确允许。
+    await stubRepairCycleEligibility(page);
     const calls: string[] = [];
     await page.route("**/api/v1/tasks/task-1/steps/step-1/execute", (route: Route) => {
       calls.push(route.request().url());

@@ -885,6 +885,37 @@ export type RepairCycleHistoryResponse = {
 };
 
 /**
+ * 某个步骤"能否开启新的执行周期"的只读资格结论，
+ * 与 Go 端 `httpapi.RepairCycleEligibilityResponse` 一一对应。
+ *
+ * 三组事实互不替代：
+ *   - 归属与状态：`task_id` / `step_id` / `task_status` / `step_status`；
+ *   - 结论：`can_open_cycle` 只在服务端没有阻塞项时为 true，`blocking` 是稳定类别，
+ *     未知类别必须原样展示，不能映射成"允许"；`summary` 是面向用户的说明；
+ *   - 预算事实：`active_cycle` / `cycle_sequence` / `max_attempts` /
+ *     `consumed_attempts` / `remaining_attempts` / `attempts`，全部由服务端依据
+ *     持久化记录计算，前端不自行推断。
+ *
+ * `can_open_cycle` 为 true 只表示预算作用域可以登记：它不代表可以执行开发、
+ * 验证已经通过或任务即将完成。该结论只描述读取时刻的现场。
+ */
+export type RepairCycleEligibilityResponse = {
+  task_id: string;
+  step_id: string;
+  task_status: string;
+  step_status: string;
+  can_open_cycle: boolean;
+  /** 稳定阻塞类别；允许时为空数组 */
+  blocking: string[];
+  summary: string;
+  active_cycle: boolean;
+  cycle_sequence: number;
+  max_attempts: number;
+  consumed_attempts: number;
+  remaining_attempts: number;
+  attempts: number;
+};
+/**
  * 某个步骤的验证历史，与 Go 端 `httpapi.ValidationHistoryResponse` 一一对应。
  *
  * `state` 是服务端从最新记录派生的验证状态，前端不自行从原始记录推断。

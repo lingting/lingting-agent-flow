@@ -149,7 +149,7 @@ tests/e2e/task-create-selectors.spec.ts` → 2 failed / 21 passed（与本轮相
    最长可达数小时（超时上限 21600 秒）。前端不设客户端超时，因此一次长执行期间页面只能
    显示"正在执行"，没有进度推送（进度轮询归 P4-M3 M3-7）。用户刷新页面会丢失本地结论
    （服务端记录仍在）。
-2. **闭环 500 的语义损失 —— 已由后续工作处理（2026-10-31）**：本条原始结论是"未通过验证
+2. **闭环 500 的语义损失 —— 已由后续工作处理（2026-10-29）**：本条原始结论是"未通过验证
    时服务端返回统一错误结构，`verified`、`round`、`attempts`、`checks` 等结构化事实不在响应体
    内，要展示完整结构需要后端调整契约"。该契约调整已实施：`httpapi.ErrorResponse` 增加可选
    `operation_result`（复用 `ExecuteAndValidateStepResponse`），只在确实产生开发尝试且不是
@@ -157,9 +157,19 @@ tests/e2e/task-create-selectors.spec.ts` → 2 failed / 21 passed（与本轮相
    [`P4-execute-and-validate-failure-response.md`](./P4-execute-and-validate-failure-response.md)。
    仍未处理的部分：失败响应不含原始 stdout / stderr 与完整容器输出（需要完整输出时仍要查
    执行记录）。
-3. **修复周期可用性只能粗判**：前端只能排除"任务不允许推进"与"步骤被占用"两类现场，
-   预算是否用尽、上一周期是否收敛只能由服务端判定，因此按钮常亮但可能被 409 拒绝。
-   这是有意取舍：拒绝原因原样展示，不伪造可用性。
+3. **修复周期可用性只能粗判 —— 已由后续工作处理（2026-10-29）**：本条原始结论是"前端只能排除
+   '任务不允许推进'与'步骤被占用'两类现场，预算是否用尽、上一周期是否收敛只能由服务端判定，
+   因此按钮常亮但可能被 409 拒绝"。该缺口已落地：新增只读
+   `GET /api/v1/tasks/{taskID}/steps/{stepID}/repair-cycle-eligibility`，由
+   `app.StepWorkflowService.RepairCycleEligibility` 复用 `decideRepairStart` /
+   `domain.DecideRepairStart` 读取真实周期与尝试历史，返回 `can_open_cycle`、稳定阻塞类别、
+   面向用户的 `summary` 与预算事实；前端「开启新执行周期」按钮只在该结论明确允许时可用，
+   加载中、查询失败、刷新中或快照已过期一律不放行，服务端给出的阻塞原因直接展示在按钮下方。
+   详见 [`P4-repair-cycle-eligibility.md`](./P4-repair-cycle-eligibility.md)。
+   **写请求仍会重新读取并完整校验现场**：查询结论只是读取时刻的快照，409 仍原样展示并触发
+   一次资格重新查询，客户端不会因为"查询说允许"就自动重发。
+   仍未处理的部分：容器与执行节点预检、验证配置不参与资格判定（它们决定能否真实执行，而不是
+   能否登记预算作用域），因此"资格允许"不等于"随后的执行一定会被受理"。
 4. **计划覆盖不可用**：服务端拒绝覆盖已有计划，前端因此在有步骤时不显示生成入口；
    真正的"重新规划"需要计划版本化能力，未立项。
 5. **会话查询是 N+1**：`useStepRecords` 对每个尝试单独查询会话列表（执行记录接口只在

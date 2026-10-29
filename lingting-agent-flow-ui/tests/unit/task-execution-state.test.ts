@@ -6,6 +6,7 @@ import type {
   ExecuteStepResponse,
   ExecuteStepsResponse,
   InitializeCodeResponse,
+  RepairCycleEligibilityResponse,
   OpenRepairCycleResponse,
   PlanResponse,
   Step,
@@ -22,7 +23,6 @@ import {
   canExecuteStep,
   canGeneratePlan,
   canInitializeAttempt,
-  canOpenRepairCycle,
   canRunSteps,
   canValidateAttempt,
   describeExecuteAndValidate,
@@ -32,7 +32,6 @@ import {
   describeInitializeResult,
   describeOpenRepairCycleResult,
   describePlanResult,
-  describeRepairCycle,
   describeStepExecution,
   describeValidateResult,
   executionOutcomeLabel,
@@ -50,6 +49,13 @@ import {
   validationStateLabel,
   verdictMeta,
 } from "../../src/pages/tasks/steps";
+import {
+  describeRepairCycleAction,
+  describeRepairCycleFacts,
+  eligibilityBelongsTo,
+  repairCycleBlockerLabel,
+  type RepairCycleEligibilityState,
+} from "../../src/pages/tasks/repairCycleEligibility";
 import { describeApiError, isNotFound } from "../../src/pages/tasks/useExecutionRecords";
 import { ApiError } from "../../src/lib/api";
 import { printArtifactDir } from "../internal/artifacts";
@@ -107,6 +113,49 @@ function attempt(overrides: Partial<Attempt> = {}): Attempt {
     timed_out: false,
     ...overrides,
   };
+}
+
+/** 资格判定的归属：默认与样例任务 / 步骤一致 */
+function owner(overrides: { taskID?: string; stepID?: string } = {}) {
+  return { stepID: "step-1", taskID: "task-1", ...overrides };
+}
+
+/** 一份修复周期资格样本（默认：上一周期预算已用尽，服务端允许开启新周期） */
+function eligibility(
+  overrides: Partial<RepairCycleEligibilityResponse> = {},
+): RepairCycleEligibilityResponse {
+  return {
+    active_cycle: false,
+    attempts: 1,
+    blocking: [],
+    can_open_cycle: true,
+    consumed_attempts: 1,
+    cycle_sequence: 1,
+    max_attempts: 1,
+    remaining_attempts: 0,
+    step_id: "step-1",
+    step_status: "failed",
+    summary: "允许开启新的执行周期：上一周期已用 1 次尝试，新周期上限 1",
+    task_id: "task-1",
+    task_status: "developing",
+    ...overrides,
+  };
+}
+
+/** 一份"服务端已给出结论"的资格状态 */
+function readyEligibility(
+  overrides: Partial<RepairCycleEligibilityResponse> = {},
+): RepairCycleEligibilityState {
+  return { data: eligibility(overrides), status: "ready" };
+}
+
+/** 一份"服务端明确拒绝"的资格状态 */
+function deniedEligibility(
+  blocking: string[],
+  summary = "当前执行周期仍有剩余预算（已用 1 / 3），不允许通过开启新周期重置预算",
+  overrides: Partial<RepairCycleEligibilityResponse> = {},
+): RepairCycleEligibilityState {
+  return readyEligibility({ blocking, can_open_cycle: false, summary, ...overrides });
 }
 
 describe("步骤状态元数据", () => {
@@ -289,11 +338,45 @@ describe("步骤级操作可用性", () => {
     expect(canExecuteAndValidate(task(), step({ status: "verifying" }))).toBe(false);
   });
 
-  it("开启修复周期只排除明确不可能的现场", () => {
-    expect(canOpenRepairCycle(task(), step())).toBe(true);
-    expect(canOpenRepairCycle(task(), step({ current_attempt_id: "attempt-1" }))).toBe(false);
-    expect(canOpenRepairCycle(task({ status: "queued" }), step())).toBe(false);
-    expect(canOpenRepairCycle(task(), undefined)).toBe(false);
+  it("开启修复周期只由服务端资格决定", () => {
+    // 服务端允许：放行，且不产生任何前端自己的禁用原因。
+    expect(describeRepairCycleAction(readyEligibility(), owner())).toEqual({
+      allowed: true,
+      reason: "",
+    });
+    // 服务端拒绝：不放行，原因是服务端给出的真实说明。
+    const denied = describeRepairCycleAction(deniedEligibility(["new_cycle_denied"]), owner());
+    expect(denied.allowed).toBe(false);
+    expect(denied.reason).toContain("仍有剩余预算");
+    // 前端不再自行排除"步骤被占用"或"任务状态不允许"：这两类现场由服务端在
+    // 资格查询里给出 execution_active / task_status_not_executable 阻塞类别。
+    for (const blocking of ["execution_active", "task_status_not_executable"]) {
+      expect(describeRepairCycleAction(deniedEligibility([blocking]), owner()).allowed).toBe(false);
+    }
+  });
+
+  it("资格未知、未归属与刷新失败一律不放行", () => {
+    const cases: RepairCycleEligibilityState[] = [
+      { status: "idle" },
+      { status: "loading" },
+      { error: "无法连接 AgentFlow 服务", status: "error" },
+      // 快照归属不符：它描述的是另一个任务或步骤。
+      readyEligibility({ step_id: "step-2" }),
+    ];
+    for (const state of cases) {
+      const action = describeRepairCycleAction(state, owner());
+      expect(action.allowed).toBe(false);
+      expect(action.reason.length).toBeGreaterThan(0);
+    }
+    // 刷新失败：快照仍然展示，但明确它可能已过期且不得据此放行。
+    const stale: RepairCycleEligibilityState = {
+      data: eligibility(),
+      error: "请求超时",
+      status: "ready",
+    };
+    const staleAction = describeRepairCycleAction(stale, owner());
+    expect(staleAction.allowed).toBe(false);
+    expect(staleAction.reason).toContain("可能已经过期");
   });
 
   it("顺序执行要求存在未结束的步骤", () => {
@@ -301,6 +384,19 @@ describe("步骤级操作可用性", () => {
     expect(canRunSteps(task(), [step({ status: "completed" })])).toBe(false);
     expect(canRunSteps(task(), [step({ status: "skipped" })])).toBe(false);
     expect(canRunSteps(task({ status: "queued" }), [step()])).toBe(false);
+  });
+  it("重新查询期间保留旧快照但不放行", () => {
+    const refreshing: RepairCycleEligibilityState = {
+      data: eligibility(),
+      refreshing: true,
+      status: "ready",
+    };
+
+    const action = describeRepairCycleAction(refreshing, owner());
+
+    expect(action.allowed).toBe(false);
+    expect(action.reason).toContain("正在重新确认");
+    expect(describeRepairCycleFacts(refreshing, owner()).join(" ")).toContain("正在重新查询");
   });
 
   it("生成计划要求允许规划且没有任何步骤（服务端拒绝覆盖已有计划）", () => {
@@ -336,7 +432,10 @@ describe("步骤级操作的禁用原因", () => {
   it("允许执行时不产生任何禁用原因", () => {
     expect(describeStepExecution(task(), step())).toEqual({ allowed: true, reason: "" });
     expect(describeExecuteAndValidate(task(), step())).toEqual({ allowed: true, reason: "" });
-    expect(describeRepairCycle(task(), step())).toEqual({ allowed: true, reason: "" });
+    expect(describeRepairCycleAction(readyEligibility(), owner())).toEqual({
+      allowed: true,
+      reason: "",
+    });
   });
 
   it("任务状态层的原因是真实状态，不是模糊的不可用", () => {
@@ -419,25 +518,56 @@ describe("步骤级操作的禁用原因", () => {
     }
   });
 
-  it("修复周期的前置条件与执行入口不同：已完成的步骤仍可开启新周期", () => {
-    const completed = step({ status: "completed" });
-
-    expect(describeStepExecution(task(), completed).allowed).toBe(false);
-    expect(describeRepairCycle(task(), completed).allowed).toBe(true);
-    // 步骤类型只约束执行入口，不影响修复周期
-    expect(describeRepairCycle(task(), step({ step_type: "verify" })).allowed).toBe(true);
-    // 占用与任务状态对两者都成立
-    expect(describeRepairCycle(task(), step({ current_attempt_id: "attempt-1" })).allowed).toBe(
-      false,
+  it("修复周期准入只读资格状态，不读任务或步骤对象", () => {
+    // 函数只接受资格状态与归属：任务状态、步骤状态与步骤类型都不再参与判定，
+    // 因此前端不可能出现"第二套粗判"。执行入口仍按这三项判定（见上方用例）。
+    expect(describeRepairCycleAction(readyEligibility(), owner())).toEqual({
+      allowed: true,
+      reason: "",
+    });
+    // 服务端对"步骤当前不可开始执行"给出的类别是 execution_active，页面原样展示原因。
+    const blocked = describeRepairCycleAction(
+      deniedEligibility(["execution_active"], "步骤仍被一次执行占用，不能启动第二个执行者"),
+      owner(),
     );
-    expect(describeRepairCycle(task({ status: "queued" }), step()).allowed).toBe(false);
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.reason).toContain("步骤仍被一次执行占用");
   });
 
   it("缺少步骤时修复周期给出明确原因而不是静默禁用", () => {
-    const blocked = describeRepairCycle(task(), undefined);
+    const blocked = describeRepairCycleAction({ status: "idle" }, { stepID: "", taskID: "task-1" });
 
     expect(blocked.allowed).toBe(false);
     expect(blocked.reason).toContain("尚未选择步骤");
+  });
+
+  it("阻塞类别未知时原样保留，不映射成允许", () => {
+    expect(repairCycleBlockerLabel("execution_active")).toBe("步骤仍被当前执行占用");
+    expect(repairCycleBlockerLabel("future_blocker")).toBe("future_blocker");
+
+    const action = describeRepairCycleAction(deniedEligibility(["future_blocker"], ""), owner());
+    expect(action.allowed).toBe(false);
+    expect(action.reason).toContain("future_blocker");
+  });
+
+  it("资格事实直接展示，并明确「只登记预算」与首次执行的边界", () => {
+    const allowed = describeRepairCycleFacts(readyEligibility(), owner());
+    expect(allowed.join(" ")).toContain("只登记预算");
+    expect(allowed.join(" ")).toContain("已用 1 / 1 次");
+
+    const firstRun = describeRepairCycleFacts(
+      deniedEligibility(["new_cycle_denied"], "该步骤还没有任何执行记录", {
+        attempts: 0,
+        can_open_cycle: false,
+        consumed_attempts: 0,
+      }),
+      owner(),
+    );
+    expect(firstRun.join(" ")).toContain("首轮执行本身就是第一个执行周期");
+
+    // 快照归属不符时不展示任何事实，避免把别处的资格读成本步骤的结论。
+    expect(describeRepairCycleFacts(readyEligibility({ task_id: "task-2" }), owner())).toEqual([]);
+    expect(eligibilityBelongsTo(eligibility(), owner())).toBe(true);
   });
 
   it("原因与实际可用性结论始终一致，且不允许时必有原因", () => {
@@ -463,16 +593,25 @@ describe("步骤级操作的禁用原因", () => {
       for (const currentStep of steps) {
         const execution = describeStepExecution(currentTask, currentStep);
         const closure = describeExecuteAndValidate(currentTask, currentStep);
-        const repair = describeRepairCycle(currentTask, currentStep);
 
         expect(execution.allowed).toBe(canExecuteStep(currentTask, currentStep));
         expect(closure.allowed).toBe(canExecuteAndValidate(currentTask, currentStep));
-        expect(repair.allowed).toBe(canOpenRepairCycle(currentTask, currentStep));
-        for (const result of [execution, closure, repair]) {
+        for (const result of [execution, closure]) {
           expect(result.allowed ? result.reason === "" : result.reason.length > 0).toBe(true);
         }
         expect(closure).toEqual(execution);
       }
+    }
+    // 修复周期的准入不读取任务或步骤状态：它只取决于服务端资格结论。
+    const repairCases: RepairCycleEligibilityState[] = [
+      readyEligibility(),
+      deniedEligibility(["new_cycle_denied"]),
+      { status: "loading" },
+      { error: "请求超时", status: "error" },
+    ];
+    for (const state of repairCases) {
+      const action = describeRepairCycleAction(state, owner());
+      expect(action.allowed).toBe(action.reason === "");
     }
   });
 });

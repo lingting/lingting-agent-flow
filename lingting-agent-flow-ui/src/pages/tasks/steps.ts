@@ -630,26 +630,11 @@ export function canExecuteAndValidate(task: Task, step: Step): boolean {
   return describeExecuteAndValidate(task, step).allowed;
 }
 
-/**
- * 开启新修复周期的准入结论与原因。
- *
- * 服务端只在上一周期已收敛、且预算用尽或策略不再允许修复时才允许开启；前端无法
- * 判断预算，因此这里只排除"明确不可能成功"的现场（任务不允许推进、步骤被占用）。
- */
-export function describeRepairCycle(task: Task, step?: Step): ActionEligibility {
-  if (!step) return blockedAction("尚未选择步骤，无法开启新的执行周期。");
-  const taskGate = describeStepTaskGate(task);
-  if (!taskGate.allowed) return taskGate;
-  if (step.current_attempt_id) {
-    return blockedAction("该步骤仍被当前执行尝试占用，需要等当前周期收敛后才能开启新的执行周期。");
-  }
-  return ACTION_ALLOWED;
-}
-
-/** 步骤是否可显式开启新的修复周期，条件与 `describeRepairCycle` 完全一致 */
-export function canOpenRepairCycle(task: Task, step?: Step): boolean {
-  return describeRepairCycle(task, step).allowed;
-}
+// 「开启新执行周期」的准入不再由本模块判断：它同时依赖预算是否耗尽、上一周期是否
+// 已收敛与历史尝试的周期归属，这些事实只有服务端能确定。唯一权威入口是
+// `GET .../repair-cycle-eligibility`，判定与原因翻译见 `repairCycleEligibility.ts`。
+//
+// 这里刻意不再保留"前端粗判"版本：同时存在两套判定会让同一个按钮出现两种结论。
 
 /** 是否可以顺序执行：任务允许推进步骤，且存在未结束的步骤 */
 export function canRunSteps(task: Task, steps: Step[]): boolean {

@@ -10,6 +10,7 @@ import {
   executeStep,
   executeSteps,
   fetchStepAttempts,
+  fetchStepRepairCycleEligibility,
   fetchStepRepairCycles,
   fetchStepValidations,
   fetchTaskEvents,
@@ -719,5 +720,71 @@ describe("事件时间线与修复周期历史查询", () => {
 
   it("步骤标识为空时直接拒绝，不拼出无效路径", () => {
     expect(() => fetchStepRepairCycles("task-1", "  ")).toThrowError("步骤标识不能为空");
+  });
+});
+
+describe("修复周期开启资格（只读）", () => {
+  it("按任务与步骤构造只读路径并解析真实字段", async () => {
+    const spy = vi.fn(async () =>
+      jsonResponse({
+        active_cycle: false,
+        attempts: 1,
+        blocking: ["new_cycle_denied"],
+        can_open_cycle: false,
+        consumed_attempts: 1,
+        cycle_sequence: 1,
+        max_attempts: 3,
+        remaining_attempts: 2,
+        step_id: "step-1",
+        step_status: "failed",
+        summary: "当前执行周期仍有剩余预算（已用 1 / 3），不允许通过开启新周期重置预算",
+        task_id: "task-1",
+        task_status: "developing",
+      }),
+    );
+    vi.stubGlobal("fetch", spy);
+
+    const { data } = await fetchStepRepairCycleEligibility("task-1", "step-1");
+
+    const [target, init] = spy.mock.calls[0] as unknown as [string, RequestInit];
+    expect(target).toBe(`${TASKS_PATH}/task-1/steps/step-1/repair-cycle-eligibility`);
+    // 只读查询：不得使用写方法。
+    expect(init.method ?? "GET").toBe("GET");
+    expect(data.can_open_cycle).toBe(false);
+    expect(data.blocking).toEqual(["new_cycle_denied"]);
+    expect(data.max_attempts).toBe(3);
+    expect(data.remaining_attempts).toBe(2);
+    expect(data.attempts).toBe(1);
+  });
+
+  it("允许开启时阻塞列表为空，未知分类原样保留", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          active_cycle: true,
+          attempts: 2,
+          blocking: [],
+          can_open_cycle: true,
+          consumed_attempts: 3,
+          cycle_sequence: 2,
+          max_attempts: 3,
+          remaining_attempts: 0,
+          step_id: "step-1",
+          step_status: "failed",
+          summary: "允许开启新的执行周期",
+          task_id: "task-1",
+          task_status: "developing",
+        }),
+      ),
+    );
+    const { data } = await fetchStepRepairCycleEligibility("task-1", "step-1");
+    expect(data.can_open_cycle).toBe(true);
+    expect(data.blocking).toEqual([]);
+    expect(data.active_cycle).toBe(true);
+  });
+
+  it("步骤标识为空时直接拒绝，不拼出无效路径", () => {
+    expect(() => fetchStepRepairCycleEligibility("task-1", " ")).toThrowError("步骤标识不能为空");
   });
 });

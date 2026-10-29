@@ -119,7 +119,7 @@
   里。步骤较多或已展开大量尝试时，点击后的"正在执行 / 失败 / 结果不确定"提示可能落在视口之外。
   这需要真实视口与真实使用证据（当前无法只从代码判断是否真的看不见），本轮不移动面板、不新增
   第二份结论展示（那会造成新的重复展示）。
-- **已闭合（2026-10-30）**：步骤详情的三个动作按钮禁用时没有原因提示（`canExecuteStep` 只看任务状态、
+- **已闭合（2026-10-29）**：步骤详情的三个动作按钮禁用时没有原因提示（`canExecuteStep` 只看任务状态、
   步骤类型与占用），而重试 / 恢复 / 执行操作的按钮都有 tooltip。这与上一轮登记的"任务列表启动按钮无
   禁用原因提示"是同一类一致性问题；两项已在
   [`P4-disabled-action-reasons.md`](./P4-disabled-action-reasons.md) 一并处理（准入条件未变，只是把已
@@ -357,7 +357,7 @@
    的读取方是 `app.TaskService.Detail` 的 `TaskDetail.Verifications`（CLI 从不打印该字段），
    写入方为零；领域类型、`storage.VerificationStore` 与其 SQLite 实现、该读取方一并删除，
    遗留表与历史数据保留（未新增删除迁移）。
-2. ~~**步骤级动作按钮的禁用原因**~~：**已于 2026-10-30 完成**
+2. ~~**步骤级动作按钮的禁用原因**~~：**已于 2026-10-29 完成**
    （[`P4-disabled-action-reasons.md`](./P4-disabled-action-reasons.md)）。`canExecuteStep` /
    `canExecuteAndValidate` / `canOpenRepairCycle` 的三个前置条件已在注释里写明，本轮把它们改造成同时
    返回 `allowed` 与 `reason` 的纯函数并显示出来，同时覆盖任务列表的启动按钮。

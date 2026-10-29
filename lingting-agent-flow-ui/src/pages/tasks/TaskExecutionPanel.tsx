@@ -19,6 +19,7 @@ import { OperationOutcomePanel } from "@/pages/tasks/OperationOutcomePanel";
 import { StepDetailPanel } from "@/pages/tasks/StepDetailPanel";
 import { StepListPanel } from "@/pages/tasks/StepListPanel";
 import { canGeneratePlan, canRunSteps } from "@/pages/tasks/steps";
+import { useRepairCycleEligibility } from "@/pages/tasks/useRepairCycleEligibility";
 import { EventTimelinePanel } from "@/pages/tasks/EventTimelinePanel";
 import { useExecutionOperations, OPERATION_LABEL } from "@/pages/tasks/useExecutionOperations";
 import {
@@ -58,6 +59,20 @@ export function TaskExecutionPanel({
   const stepsState = useTaskSteps(task.id, stepsToken);
   const records = useStepRecords(task.id, selectedStepID, stepsToken);
   /**
+   * 「开启新执行周期」的服务端资格。
+   *
+   * 它只回答"这一步现在能不能开启新周期"，与步骤/尝试/验证的只读加载器分开：
+   *   - 只读，不登记周期、不执行任何 Agent 调用；
+   *   - 与当前任务 + 选中步骤绑定，切换任一方都会作废旧快照；
+   *   - 不并入 5 秒任务快照循环：只在首次读取、步骤事实真的变化（`stepsToken`）与
+   *     动作结束后重新查询。
+   */
+  const repairEligibility = useRepairCycleEligibility({
+    stepID: selectedStepID,
+    taskID: task.id,
+    token: stepsToken,
+  });
+  /**
    * 事件时间线独立于步骤选择：事件属于任务维度，切换步骤不应该重新读取历史。
    *
    * 它只在打开任务、手动刷新、"加载更多"与父组件给出的 `stepsToken` 变化时读取，
@@ -76,6 +91,9 @@ export function TaskExecutionPanel({
     const failures: string[] = [];
     stepsState.reload();
     records.reload();
+    // 任何动作都可能改变"能否开启新执行周期"的现场（步骤占用、预算、周期收敛），
+    // 因此动作结束后必须重新查询资格，而不是继续沿用动作前的结论。
+    repairEligibility.reload();
     try {
       const taskFailures = await onRefreshTask();
       failures.push(...taskFailures);
@@ -83,7 +101,7 @@ export function TaskExecutionPanel({
       failures.push(`任务状态（${describeApiError(cause)}）`);
     }
     return failures;
-  }, [onRefreshTask, records.reload, stepsState.reload]);
+  }, [onRefreshTask, records.reload, repairEligibility.reload, stepsState.reload]);
 
   const operations = useExecutionOperations({ refresh: refreshAll, taskID: task.id });
 
@@ -141,6 +159,7 @@ export function TaskExecutionPanel({
           operations={operations}
           records={records.state}
           recordsToken={stepsToken}
+          repairEligibility={repairEligibility.state}
           step={selectedStep}
           task={task}
         />

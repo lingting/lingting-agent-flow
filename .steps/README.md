@@ -45,18 +45,27 @@
   （D7 只读加载器不按归属作废缓存、D8 语义审查原始枚举、D9 步骤失败阶段原始枚举、D10 容器列表
   刷新令牌未接线），同样未触碰 Go 代码与业务规则；服务端第一版验收（2026-10-29，结论 `completed`）
   与远程真实测试资源治理（2026-10-29，结论 `completed`）之后恢复前端常规开发，又完成一次**禁用操作的
-  原因提示**（2026-10-30，基线 `d76f656`，见
+  原因提示**（2026-10-29，基线 `d76f656`，见
   [`P4-disabled-action-reasons.md`](./P4-disabled-action-reasons.md)），把任务列表「启动」与步骤详情三个
   动作的既有准入判定改造成同时返回 `allowed` / `reason` 的纯函数并显示真实禁用原因，准入条件未变；
   再后完成**私有仓库认证的产品边界落定与 `verification_results` 遗留模型清理**（2026-10-29，基线
   `042a33d`）：前者把用户已作出的产品范围决定写进 `AGENTS.md` 与用户文档，后者删除了已证实无生产
   写入方、唯一读取方也不被展示的旧验证模型，遗留表与历史数据保留（未新增删除迁移）。**P4-M5 仍为
   `pending`**，本轮没有产生任何真实使用数据。
-  此后完成**开发—验证闭环失败响应保留结构化执行结果**（2026-10-31，基线 `630ea42`，见
+  此后完成**开发—验证闭环失败响应保留结构化执行结果**（2026-10-29，基线 `630ea42`，见
   [`P4-execute-and-validate-failure-response.md`](./P4-execute-and-validate-failure-response.md)）：
   把既有闭环 DTO 以可选 `operation_result` 附加到失败响应（只在确实执行过且非 `internal_error`
   时出现，状态码与 `error.code` 不变），并把真实执行详情接入失败结果面板，
   `P4-M2-7` §6 的"闭环 500 语义损失"因此闭合；**P4-M5 仍为 `pending`**。
+  本轮又完成**修复周期开启资格查询与服务端阻塞原因展示**（2026-10-29，基线 `b09adaf`，见
+  [`P4-repair-cycle-eligibility.md`](./P4-repair-cycle-eligibility.md)）：新增只读
+  `GET /api/v1/tasks/{taskID}/steps/{stepID}/repair-cycle-eligibility`，由
+  `app.StepWorkflowService.RepairCycleEligibility` 复用 `decideRepairStart` /
+  `domain.DecideRepairStart` 读取真实周期与尝试历史，返回 `can_open_cycle`、稳定阻塞类别、
+  `summary` 与预算事实；前端「开启新执行周期」按钮改为只在该结论明确允许时可用（加载中、
+  查询失败、刷新中、快照过期一律不放行），服务端阻塞原因直接展示在按钮下方，写入口仍独立
+  完整校验、409 原样展示并触发一次资格重新查询；`P4-M2-7` §6 的"修复周期可用性只能粗判"
+  因此闭合，**P4-M5 仍为 `pending`**。
   子任务 **M4-1（失败任务
   [`P4-M4-1-task-retry-web-entry.md`](./P4-M4-1-task-retry-web-entry.md)：前端补齐
   `RetryEligibilityResponse` / `RetryTaskResponse` / `RetryTaskRequest` 类型与
@@ -614,7 +623,7 @@
   重试 / 续跑资格、容器生命周期与远程操作语义**；新增单元用例 4 个、E2E 用例 3 个，
   `pnpm test:unit:safe` 607 通过、`pnpm test:e2e:safe` 233 通过 / 0 失败、`pnpm check` 与
   `pnpm build` 通过（未执行 Go 测试：未修改 Go 文件）。**P4-M5 仍为 `pending`**。
-- **禁用操作的原因提示已于 2026-10-30 完成**（基线 `origin/master` `d76f656`，"恢复常规功能开发"后的
+- **禁用操作的原因提示已于 2026-10-29 完成**（基线 `origin/master` `d76f656`，"恢复常规功能开发"后的
   第六个常规工作项），交付物为
   [`P4-disabled-action-reasons.md`](./P4-disabled-action-reasons.md)：任务列表的「启动」与任务详情的
   「执行步骤 / 开发—验证闭环 / 开启新执行周期」在禁用时只呈现灰按钮，而重试、续跑与执行操作都各有说明。
@@ -647,7 +656,7 @@
   因此表与历史数据原样保留，仅清理运行时读写代码（部分清理，不宣称"表已删除"）。
   验证：`gofmt -l internal cmd tests` 无输出、`go vet ./...` 无输出、`go build ./...` 通过；
   **未执行任何测试**（未获测试授权）。
-- **开发—验证闭环失败时保留结构化执行结果已于 2026-10-31 完成**（基线 `origin/master`
+- **开发—验证闭环失败时保留结构化执行结果已于 2026-10-29 完成**（基线 `origin/master`
   `630ea42`，"恢复常规功能开发"后的第七个常规工作项），交付物为
   [`P4-execute-and-validate-failure-response.md`](./P4-execute-and-validate-failure-response.md)：
   闭环的结构化结果类型与 `executeAndValidateResponse` 映射早已存在，但**失败路径不使用它**——
@@ -668,6 +677,33 @@
   `gofmt -l` / `go vet ./...` 无输出、`go build ./...` 通过、`tsc --noEmit` 通过、
   `vp lint` 与 `vp fmt --check` 对改动文件通过、`git diff --check` 无输出；
   **未执行任何测试**（未获测试授权）。**P4-M5 仍为 `pending`**。
+- **修复周期开启资格查询与服务端阻塞原因展示已于 2026-10-29 完成**（基线 `origin/master`
+  `b09adaf`，"恢复常规功能开发"后的第八个常规工作项），交付物为
+  [`P4-repair-cycle-eligibility.md`](./P4-repair-cycle-eligibility.md)：核实出前端的
+  `describeRepairCycle` / `canOpenRepairCycle` 只能检查"任务不允许推进"与"步骤被占用"两类现场，
+  预算是否耗尽、上一周期是否收敛、历史尝试的周期归属是否可解释全部由服务端判定，因此按钮常亮
+  却可能被 409 拒绝。本轮新增**只读**资格查询
+  `GET /api/v1/tasks/{taskID}/steps/{stepID}/repair-cycle-eligibility`：应用层
+  `app.StepWorkflowService.RepairCycleEligibility` 按"任务准入 → `checkPrerequisites` →
+  `decideRepairStart(ctx, step, true)`"的顺序复用既有判定，返回 `can_open_cycle`、稳定阻塞类别
+  （周期类直接复用 `domain.RepairFailureClass` 取值，只补充 `cancel_requested` /
+  `task_status_not_executable` / `prerequisite_incomplete` / `cycle_ownership_unconfirmed`）、
+  `summary` 与预算事实（`active_cycle` / `cycle_sequence` / `max_attempts` /
+  `consumed_attempts` / `remaining_attempts` / `attempts`）。查询不登记周期、不结束周期、
+  不写事件、不改状态、不领取租约、不启动 Agent；读取失败如实返回错误而不是伪装成
+  `can_open_cycle=false`。前端新增纯函数模块 `repairCycleEligibility.ts` 与唯一状态 Hook
+  `useRepairCycleEligibility.ts`（票据 + 归属作废 + 刷新中/失败保留快照但不放行），
+  「开启新执行周期」按钮只在该结论明确允许时可用，服务端阻塞原因直接展示在按钮下方；
+  `steps.ts` 删除了那版粗判函数，避免同一按钮出现两种结论。写入口 `OpenRepairCycle` 未改动，
+  仍重新读取并完整校验，409 原样展示并触发一次资格重新查询，客户端不自动重发。
+  **未修改 `domain.DecideRepairStart`、修复上限、自动修复策略、周期关闭语义、任务状态机、
+  工作流编排与租约协议**；既有测试文件只更新契约与断言（未新建测试文件）。
+  `gofmt -l` / `go vet ./...` 无输出、`go build ./...` 通过、`tsc --noEmit` 通过、
+  `vp fmt --check`（改动文件）与 `vp lint` 通过、`git diff --check` 无输出；
+  **未执行任何测试**（未获测试授权）。**P4-M5 仍为 `pending`**。
+  审计同时查明上一轮"已完成步骤仍可开启新周期"的说法不成立：`completed` / `cancelled` /
+  `skipped` 会被 `decideRepairStart` 判为 `execution_active`，真实写入口本来就会 409
+  （本轮按服务端结论展示，未修改领域规则，细节见交付物 §1.3）。
 - **下一步**：P3 阶段已全部完成（M1–M5 均 `completed`），P4-M1、M2-1…M2-7、M3、M4、G12 与
   任务详情页体验复核、任务创建配置继承与显式覆盖、创建任务表单的字段收敛、任务详情页面板职责与
   操作可达性复核均已完成（见上方
@@ -677,16 +713,19 @@
   后续入口按 [`ROADMAP.md`](./ROADMAP.md) 的"下一步工作的选择规则"选择**有明确代码证据的常规
   功能缺口**；`P4-M1` 盘点的 P0/P1/P2/P3 缺口已全部闭合，新的候选需要重新盘点而不是照抄旧清单。
   私有仓库 Git 凭据支持已由用户明确决定**不纳入产品范围**（2026-10-29），不再作为候选；
-  `verification_results` 遗留模型清理与"步骤级动作按钮的禁用原因"均已于 2026-10-29 / 2026-10-30
+  `verification_results` 遗留模型清理与"步骤级动作按钮的禁用原因"均已于 2026-10-29 / 2026-10-29
   完成（见 [`P4-task-detail-panel-organization.md`](./P4-task-detail-panel-organization.md) §10），
   因此**当前没有任何已立项的常规功能候选**，下一项需要先重新盘点并给出代码证据。
-  闭环失败响应的结构化事实丢失已于 2026-10-31 处理（见
-  [`P4-execute-and-validate-failure-response.md`](./P4-execute-and-validate-failure-response.md)），
-  它是本轮在"重新盘点"之前唯一有直接代码证据的缺口。
+  闭环失败响应的结构化事实丢失已于 2026-10-29 处理（见
+  [`P4-execute-and-validate-failure-response.md`](./P4-execute-and-validate-failure-response.md)）；
+  修复周期开启资格只能粗判也已于 2026-10-29 处理（见
+  [`P4-repair-cycle-eligibility.md`](./P4-repair-cycle-eligibility.md)），它是"重新盘点"之前
+  同样有直接代码证据的缺口。
   P4-M2-7 的剩余风险见
   [`P4-M2-7-web-execution-operations.md`](./P4-M2-7-web-execution-operations.md) §6：
   同步长请求没有**流式**进度推送（轮询已由 M3-7 交付，SSE 仍未实现）、
-  修复周期可用性只能粗判（预算由服务端判定）、
+  修复周期可用性只能粗判 —— **已由 2026-10-29 的只读资格查询闭合**（容器与执行节点预检仍不参与
+  资格判定，因此"资格允许"不等于"随后执行一定被受理"）、
   计划不可覆盖、会话查询为按尝试的 N+1 请求。
   P3-M5 的交接事项见
   [`P3-M5-multi-task-acceptance.md`](./P3-M5-multi-task-acceptance.md) §8：并发上限是
@@ -797,6 +836,7 @@
 | [`P4-task-detail-panel-organization.md`](./P4-task-detail-panel-organization.md) | P4 常规开发：任务详情页面板职责与操作可达性复核（12 个面板的数据来源 / 归属 / 刷新触发、上一轮 6 项修复的回归核对、重复展示与折叠分组的逐项判定、4 处缺陷的代码证据与最小修复、修改文件与行为变化、测试与构建结果、用例有效性核对、保留的合理设计与待验证假设、剩余风险、下一项候选、与 P4-M5 的关系） |
 | [`P4-disabled-action-reasons.md`](./P4-disabled-action-reasons.md) | P4 常规开发：禁用操作的原因提示（四类操作的既有准入条件与原因来源、`{ allowed, reason }` 纯函数与布尔投影的关系、antd `Button` / `LinkButton` / `Tooltip` 的真实 DOM 行为核实、可聚焦包装层与键盘可读方案、修改文件与行为变化、测试与构建结果、保留的设计与剩余风险、与 P4-M5 的关系） |
 | [`P4-execute-and-validate-failure-response.md`](./P4-execute-and-validate-failure-response.md) | P4 常规开发：开发—验证闭环失败时保留结构化执行结果（失败路径丢失执行事实的调用链证据、`operation_result` 的放置位置与兼容性依据、附加条件与安全边界、保留 / 省略的事实清单、前端结构守卫与失败面板展示、业务失败与结果不确定的边界、非测试检查结果与剩余风险） |
+| [`P4-repair-cycle-eligibility.md`](./P4-repair-cycle-eligibility.md) | P4 常规开发：修复周期开启资格查询与服务端阻塞原因展示（前端粗判与领域判定的差异证据、只读路由与响应字段来源、稳定阻塞类别与错误语义、与写入口的一致性边界、前端加载 / 刷新 / 归属作废与过期快照处理、非测试检查结果、剩余风险与未执行的测试） |
 
 ## 下一步工作的选择规则
 

@@ -6,7 +6,8 @@
  * 三条硬约束：
  *   - 所有动作的任务、步骤与尝试标识都来自当前真实记录，没有手填入口；
  *   - 动作进行中禁用全部动作按钮，重复点击不会发出第二个请求；
- *   - 服务端拒绝原因原样展示，前端不把它翻译成"成功"或"重试即可"。
+ *   - 服务端拒绝原因原样展示，前端不把它翻译成"成功"或"重试即可"；
+ *   - 「开启新执行周期」的可用性只来自服务端资格查询，资格未知时不放行。
  */
 import { Alert, Descriptions, Flex, Space, Typography } from "antd";
 import { Button, DictTag, type DictItem, LinkButton } from "lingting-react-ui";
@@ -21,12 +22,10 @@ import {
   canExecuteAndValidate,
   canExecuteStep,
   canInitializeAttempt,
-  canOpenRepairCycle,
   canValidateAttempt,
   CHECK_STATUS_LABEL,
   checkStatusLabel,
   describeExecuteAndValidate,
-  describeRepairCycle,
   describeStepExecution,
   isKnownStepStatus,
   reviewStatusLabel,
@@ -43,6 +42,11 @@ import {
   VERDICT_META,
 } from "@/pages/tasks/steps";
 import { DisabledActionHint } from "@/pages/tasks/DisabledActionHint";
+import {
+  describeRepairCycleAction,
+  describeRepairCycleFacts,
+  type RepairCycleEligibilityState,
+} from "@/pages/tasks/repairCycleEligibility";
 import { RepairCyclePanel } from "@/pages/tasks/RepairCyclePanel";
 import type { ExecutionOperations } from "@/pages/tasks/useExecutionOperations";
 import { OPERATION_LABEL } from "@/pages/tasks/useExecutionOperations";
@@ -327,6 +331,7 @@ export function StepDetailPanel({
   task,
   onReload,
   recordsToken,
+  repairEligibility,
 }: {
   operations: ExecutionOperations;
   records: LoadState<StepRecords>;
@@ -335,6 +340,13 @@ export function StepDetailPanel({
   onReload: () => void;
   /** 步骤相关事实变化令牌：变化时重新读取该步骤的修复周期历史 */
   recordsToken?: number;
+  /**
+   * 服务端给出的"能否开启新的执行周期"资格。
+   *
+   * 判定完全依赖它：前端不再自行复制预算与周期归属规则，加载中、查询失败或快照
+   * 过期时一律不放行。
+   */
+  repairEligibility: RepairCycleEligibilityState;
 }) {
   const [showAllValidations, setShowAllValidations] = useState(false);
   const busy = operations.state.running !== undefined;
@@ -347,7 +359,19 @@ export function StepDetailPanel({
    */
   const executeReason = busy ? "" : describeStepExecution(task, step).reason;
   const validateReason = busy ? "" : describeExecuteAndValidate(task, step).reason;
-  const repairReason = busy ? "" : describeRepairCycle(task, step).reason;
+  /**
+   * 「开启新执行周期」的准入完全来自服务端资格查询：它同时覆盖预算是否用尽、
+   * 上一周期是否已收敛与历史尝试的周期归属，这些都不是前端能判断的事实。
+   */
+  const repairAction = describeRepairCycleAction(repairEligibility, {
+    stepID: step.id,
+    taskID: task.id,
+  });
+  const repairFacts = describeRepairCycleFacts(repairEligibility, {
+    stepID: step.id,
+    taskID: task.id,
+  });
+  const repairReason = busy ? "" : repairAction.reason;
   /**
    * 修复周期历史独立加载：它换步骤才重新读取，且只在步骤相关事实真的变化时
    * （`recordsToken`）重新读取，不参与 5 秒任务快照的刷新循环。
@@ -437,7 +461,7 @@ export function StepDetailPanel({
         </DisabledActionHint>
         <DisabledActionHint label={OPERATION_LABEL["open-repair-cycle"]} reason={repairReason}>
           <Button
-            disabled={busy || !canOpenRepairCycle(task, step)}
+            disabled={busy || !repairAction.allowed}
             loading={
               operations.state.running?.key === "open-repair-cycle" &&
               operations.state.running.stepID === step.id
@@ -452,6 +476,19 @@ export function StepDetailPanel({
         单步骤执行只调用 Developer，不包含验证；开发—验证闭环在开发通过后立即执行确定性验证，
         只有验证真实通过才会把步骤收口为已完成。开启新执行周期只登记预算，不会自动执行。
       </Typography.Text>
+      {/*
+        「开启新执行周期」的资格直接展示在按钮下方：悬停提示只在禁用时可读，而
+        "资格未知"与"预算用尽"是两种完全不同的现场，必须在页面上就能区分。
+      */}
+      {repairFacts.length > 0 && (
+        <Flex gap={2} vertical>
+          {repairFacts.map((fact) => (
+            <Typography.Text key={fact} type="secondary">
+              {fact}
+            </Typography.Text>
+          ))}
+        </Flex>
+      )}
 
       {records.status === "loading" && (
         <Typography.Text type="secondary">正在加载执行记录…</Typography.Text>

@@ -319,6 +319,20 @@ func reopenCyclePath(taskID, stepID string) string {
 	return httpapi.PathTasks + "/" + taskID + "/steps/" + stepID + "/open-repair-cycle"
 }
 
+// repairCycleEligibilityPath 返回"能否开启新的执行周期"只读查询的路径。
+func repairCycleEligibilityPath(taskID, stepID string) string {
+	return httpapi.PathTasks + "/" + taskID + "/steps/" + stepID + "/repair-cycle-eligibility"
+}
+
+// get 发送一次只读请求。
+func (f *workflowAPIFixture) get(t *testing.T, target string) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, target, nil)
+	recorder := httptest.NewRecorder()
+	f.handler.ServeHTTP(recorder, request)
+	return recorder
+}
+
 // post 发送一次闭环请求。
 func (f *workflowAPIFixture) post(t *testing.T, target string, body any) *httptest.ResponseRecorder {
 	t.Helper()
@@ -676,5 +690,136 @@ func TestListValidationsAPIEmpty(t *testing.T) {
 	}
 	if response.Total != 0 {
 		t.Fatalf("验证历史条数不符: %d", response.Total)
+	}
+}
+
+// TestRepairCycleEligibilityAPINeverExecuted 验证首次执行前不允许重置预算。
+//
+// 从未执行过的步骤首轮执行本身就是第一个执行周期，因此"开启新周期"必须被拒绝，
+// 且拒绝原因来自已有的 domain 判定（new_cycle_denied），不是新造的业务规则。
+func TestRepairCycleEligibilityAPINeverExecuted(t *testing.T) {
+	t.Parallel()
+	fixture := newWorkflowAPIFixture(t)
+	recorder := fixture.get(t, repairCycleEligibilityPath(
+		fixture.task.ID.String(),
+		fixture.step.ID.String(),
+	))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("期望 200，实际 %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response httpapi.RepairCycleEligibilityResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if response.CanOpenCycle {
+		t.Fatal("从未执行过的步骤不允许开启新执行周期")
+	}
+	if len(response.Blocking) != 1 ||
+		response.Blocking[0] != string(domain.RepairClassNewCycleDenied) {
+		t.Fatalf("阻塞类别不符: %v", response.Blocking)
+	}
+	if response.Summary == "" {
+		t.Fatal("拒绝时必须给出可读说明")
+	}
+	if response.Attempts != 0 || response.ConsumedAttempts != 0 {
+		t.Fatalf("没有执行记录时不应统计尝试: %+v", response)
+	}
+	if response.TaskStatus != string(fixture.task.Status) ||
+		response.StepStatus != string(fixture.step.Status) {
+		t.Fatalf("状态回显不符: %+v", response)
+	}
+	// 只读查询不得产生任何执行副作用。
+	if fixture.port.agentCalls != 0 || fixture.port.execCalls != 0 {
+		t.Fatalf(
+			"资格查询不得调用执行器，实际 agent=%d exec=%d",
+			fixture.port.agentCalls,
+			fixture.port.execCalls,
+		)
+	}
+}
+
+// TestRepairCycleEligibilityAPIBudgetExhaustedAllows 验证预算用尽后资格允许开启。
+//
+// 与 TestListValidationsAPI 中"显式开启执行周期"的现场一致：闭环一次失败后预算用尽，
+// 此时资格查询必须给出与真实写操作相同的结论。
+func TestRepairCycleEligibilityAPIBudgetExhaustedAllows(t *testing.T) {
+	t.Parallel()
+	fixture := newWorkflowAPIFixture(t)
+	fixture.port.checkExitCode = 1
+	if recorder := fixture.post(t, workflowPath(
+		fixture.task.ID.String(),
+		fixture.step.ID.String(),
+	), nil); recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("闭环应返回 500，实际 %d: %s", recorder.Code, recorder.Body.String())
+	}
+	recorder := fixture.get(t, repairCycleEligibilityPath(
+		fixture.task.ID.String(),
+		fixture.step.ID.String(),
+	))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("期望 200，实际 %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response httpapi.RepairCycleEligibilityResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if !response.CanOpenCycle {
+		t.Fatalf("预算用尽后应允许开启新周期: %+v", response)
+	}
+	if len(response.Blocking) != 0 {
+		t.Fatalf("允许时阻塞列表必须为空: %v", response.Blocking)
+	}
+	if response.Attempts != 1 || response.ConsumedAttempts != 1 {
+		t.Fatalf("尝试统计不符: %+v", response)
+	}
+	if response.MaxAttempts != 1 || response.RemainingAttempts != 0 {
+		t.Fatalf("预算事实不符: %+v", response)
+	}
+	// 查询本身不开启周期：再次查询仍应给出同一结论，且执行周期登记数量不变。
+	cycles, err := fixture.db.ListRepairCyclesByStep(fixture.ctx, fixture.step.ID)
+	if err != nil {
+		t.Fatalf("读取执行周期失败: %v", err)
+	}
+	if len(cycles) != 1 {
+		t.Fatalf("资格查询不得写入新的执行周期，实际 %d 条", len(cycles))
+	}
+}
+
+// TestRepairCycleEligibilityAPIMethodNotAllowed 验证只读查询拒绝写方法。
+func TestRepairCycleEligibilityAPIMethodNotAllowed(t *testing.T) {
+	t.Parallel()
+	fixture := newWorkflowAPIFixture(t)
+	recorder := fixture.post(t, repairCycleEligibilityPath(
+		fixture.task.ID.String(),
+		fixture.step.ID.String(),
+	), nil)
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("期望 405，实际 %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if allow := recorder.Header().Get("Allow"); allow != "GET, HEAD" {
+		t.Fatalf("Allow 头不符: %s", allow)
+	}
+}
+
+// TestRepairCycleEligibilityAPINotFound 验证归属不符与不存在返回同一个 404。
+func TestRepairCycleEligibilityAPINotFound(t *testing.T) {
+	t.Parallel()
+	fixture := newWorkflowAPIFixture(t)
+	cases := map[string]string{
+		"任务不存在": repairCycleEligibilityPath("task-missing", fixture.step.ID.String()),
+		"步骤不存在": repairCycleEligibilityPath(fixture.task.ID.String(), "step-missing"),
+	}
+	for name, target := range cases {
+		recorder := fixture.get(t, target)
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("%s 期望 404，实际 %d: %s", name, recorder.Code, recorder.Body.String())
+		}
+		var response httpapi.ErrorResponse
+		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+			t.Fatalf("%s 解析错误响应失败: %v", name, err)
+		}
+		if response.Error.Code != httpapi.CodeNotFound {
+			t.Fatalf("%s 错误代码不符: %s", name, response.Error.Code)
+		}
 	}
 }

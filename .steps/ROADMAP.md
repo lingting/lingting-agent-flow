@@ -872,7 +872,7 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > 遗留风险：`TestRemoteE2EFullChain` 在规划阶段步骤上继承任务级文件检查，模型输出不确定时
 > 会出现业务断言抖动（与资源回收无关，详见该文档 §6.4 / §8）。
 
-> **当前下一步（2026-10-30）：禁用操作的原因提示，结论 `completed`**，交付物
+> **当前下一步（2026-10-29）：禁用操作的原因提示，结论 `completed`**，交付物
 > [`P4-disabled-action-reasons.md`](./P4-disabled-action-reasons.md)。这是远程真实测试资源治理收口后
 > 恢复的常规前端工作项，不属于 P4-M1 的 G 项，也不属于 P4-M5。核实出的问题是一致性缺陷而非规则缺陷：
 > 任务列表的「启动」与步骤详情的「执行步骤 / 开发—验证闭环 / 开启新执行周期」在禁用时只有灰按钮，
@@ -886,7 +886,7 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > **未修改任何 Go 代码、HTTP 契约、请求/响应 DTO、领域规则或状态机**；新增前端单元用例 18 个、
 > E2E 用例 12 个，`pnpm test:unit:safe` 626 通过、`pnpm test:e2e:safe` 245 通过 / 0 失败、
 > `pnpm check` 与 `pnpm build` 通过（未执行 Go 测试）。**P4-M5 仍为 `pending`**。
-> **P4 常规工作项（2026-10-31，基线 `origin/master` `630ea42`）：开发—验证闭环失败时保留结构化执行结果。**
+> **P4 常规工作项（2026-10-29，基线 `origin/master` `630ea42`）：开发—验证闭环失败时保留结构化执行结果。**
 > 交付物为
 > [`P4-execute-and-validate-failure-response.md`](./P4-execute-and-validate-failure-response.md)。
 > 这是"恢复常规功能开发"后的第七个常规工作项，不属于 P4-M1 的 G 项，也不属于 P4-M5。
@@ -911,6 +911,38 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > `gofmt -l` / `go vet ./...` 无输出、`go build ./...` 通过、`tsc --noEmit` 通过、
 > `vp lint` 与 `vp fmt --check` 对改动文件通过、`git diff --check` 无输出；
 > **未执行任何测试**（未获测试授权）。**P4-M5 仍为 `pending`**。
+> **P4 常规工作项（2026-10-29，基线 `origin/master` `b09adaf`）：修复周期开启资格查询与服务端阻塞原因展示。**
+> 交付物为
+> [`P4-repair-cycle-eligibility.md`](./P4-repair-cycle-eligibility.md)。
+> 这是"恢复常规功能开发"后的第八个常规工作项，不属于 P4-M1 的 G 项，也不属于 P4-M5。
+> 核实出的缺口是**前端判定不完整**而不是缺少判定：`steps.ts` 的 `describeRepairCycle` /
+> `canOpenRepairCycle` 只看任务状态与步骤占用，因此"预算是否耗尽、上一周期是否收敛、
+> 历史尝试的周期归属是否可解释、从未执行过的步骤是否应当拒绝"全部落在服务端，按钮常亮却
+> 可能被 409 拒绝。
+> 本轮新增**只读** `GET /api/v1/tasks/{taskID}/steps/{stepID}/repair-cycle-eligibility`：
+> 应用层 `app.StepWorkflowService.RepairCycleEligibility` 按"任务准入 →
+> `domain.CheckStepPrerequisites` → `decideRepairStart(ctx, step, true)`"的顺序复用既有判定，
+> 返回 `can_open_cycle`、稳定阻塞类别、`summary` 与预算事实。阻塞类别中周期类**直接复用**
+> `domain.RepairFailureClass` 取值，只补充 `cancel_requested` / `task_status_not_executable` /
+> `prerequisite_incomplete` / `cycle_ownership_unconfirmed` 四项入口条件与数据不一致类别。
+> 查询不登记周期、不结束周期、不写事件、不改状态、不领取租约、不启动 Agent；读取失败如实
+> 返回错误，不伪装成 `can_open_cycle=false`。
+> 前端新增纯函数模块 `repairCycleEligibility.ts` 与唯一状态 Hook `useRepairCycleEligibility.ts`
+> （序号 + 任务/步骤归属票据、切换即作废旧快照、刷新中与刷新失败保留快照但一律不放行），
+> 「开启新执行周期」按钮只在该结论明确允许时可用，服务端阻塞原因直接展示在按钮下方；
+> `steps.ts` 删除了那版粗判函数，避免同一个按钮出现两种结论。
+> **写入口 `OpenRepairCycle` 未改动**：仍重新读取现场并完整校验，409 原样展示并触发一次资格
+> 重新查询，客户端不自动重发；查询结论只代表读取时刻。
+> **未修改 `domain.DecideRepairStart`、修复上限、自动修复策略、周期关闭语义、任务状态机、
+> 工作流编排与租约协议**；没有引入轮询循环、SSE/WebSocket、计划版本化或会话查询优化；
+> 既有测试文件只更新契约与断言，未新建测试文件。
+> `gofmt -l` / `go vet ./...` 无输出、`go build ./...` 通过、`tsc --noEmit` 通过、
+> `vp fmt --check`（改动文件）与 `vp lint` 通过、`git diff --check` 无输出；
+> **未执行任何测试**（未获测试授权）。**P4-M5 仍为 `pending`**。
+> 审计同时查明：`decideRepairStart` 的 `StepOccupied` 由 `CurrentAttemptID` 与
+> `StepStatus.CanStartExecution()` 共同决定，因此 `completed` / `cancelled` / `skipped`
+> 会被服务端判为 `execution_active`。上一轮文档中"已完成步骤仍可开启新周期"的结论因此不成立，
+> 本轮按服务端结论展示，未修改领域规则（细节见交付物 §1.3）。
 >
 
 ## 四阶段总览
@@ -1013,6 +1045,7 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - [P4-task-detail-panel-organization.md](./P4-task-detail-panel-organization.md)
 - [P4-disabled-action-reasons.md](./P4-disabled-action-reasons.md)
 - [P4-execute-and-validate-failure-response.md](./P4-execute-and-validate-failure-response.md)
+- [P4-repair-cycle-eligibility.md](./P4-repair-cycle-eligibility.md)
 - [remote-test-resource-cleanup.md](./remote-test-resource-cleanup.md)
 
 ## 验收记录

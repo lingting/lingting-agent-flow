@@ -267,6 +267,7 @@ make web-dev            # 等价于 cd lingting-agent-flow-ui && pnpm dev
 | POST   | `/api/v1/tasks/{taskID}/steps/{stepID}/attempts/{attemptID}/initialize-code` | 容器内初始化代码 |
 | GET    | `/api/v1/tasks/{taskID}/steps/{stepID}/validations` | 验证历史（流程状态与结论分列）  |
 | POST   | `/api/v1/tasks/{taskID}/steps/{stepID}/open-repair-cycle` | 显式开启新的执行周期（重置修复预算） |
+| GET    | `/api/v1/tasks/{taskID}/steps/{stepID}/repair-cycle-eligibility` | 只读查询能否开启新的执行周期（阻塞类别与预算事实） |
 | POST   | `/api/v1/tasks/{taskID}/retry`  | 失败任务的显式重试，返回 202 与真实状态              |
 | GET    | `/api/v1/tasks/{taskID}/retry-eligibility` | 只读查询重试资格与阻塞分类                |
 | POST   | `/api/v1/tasks/{taskID}/code-saves/{recordID}/verify-code-save` | 只读核验代码保存记录 |
@@ -1161,7 +1162,8 @@ SSH、容器、Pi 或代码保存能力，也不会在服务不可达时退回�
   `GET /tasks/{id}/resume-eligibility`
 - 单步骤：`POST /tasks/{id}/steps/{sid}/execute`、`.../execute-and-validate`、
   `POST /tasks/{id}/steps/{sid}/attempts/{aid}/validate`、`.../initialize-code`、
-  `POST /tasks/{id}/steps/{sid}/open-repair-cycle`、`POST /tasks/{id}/execute-steps`
+  `POST /tasks/{id}/steps/{sid}/open-repair-cycle`、
+  `GET /tasks/{id}/steps/{sid}/repair-cycle-eligibility`、`POST /tasks/{id}/execute-steps`
 - 代码保存：`GET /tasks/{id}/code-saves`、
   `POST /tasks/{id}/code-saves/{rid}/verify-code-save`
 - 容器：`GET /tasks/{id}/containers`、`POST .../containers/{cid}/delete`、

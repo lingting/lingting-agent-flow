@@ -1,6 +1,6 @@
 # P4：禁用操作的原因提示（常规功能开发，不属于 P4-M5）
 
-> - **状态**：`completed`（2026-10-30，基于 `origin/master` `d76f656`）
+> - **状态**：`completed`（2026-10-29，基于 `origin/master` `d76f656`）
 > - **基线**：`origin/master` = `d76f656eb18827a39d22fd5d63996a74d9ddc81a`（`远程真实测试资源治理`），
 >   当前分支 `master`，本轮开始前 `git status --porcelain -uno` 无输出（工作区干净）。
 > - **性质**：这是"恢复常规功能开发"后的第六个常规工作项，**不是** P4-M5 性能优化。触发依据是
@@ -24,6 +24,13 @@
 | 执行并验证 | 步骤详情「开发—验证闭环」 | `canExecuteAndValidate`（前端可见条件与执行步骤完全相同） | 同上（服务端另有验证配置与修复预算校验，前端不伪造这部分结论） |
 | 开启新的修复周期 | 步骤详情「开启新执行周期」 | `canOpenRepairCycle`（任务状态 + 步骤占用） | "该步骤仍被当前执行尝试占用，需要等当前周期收敛后才能开启新的执行周期。" |
 
+> **后续变更（2026-10-29）**：表中第四行的"任务状态 + 步骤占用"粗判已被服务端资格取代。
+> 新增只读 `GET /api/v1/tasks/{taskID}/steps/{stepID}/repair-cycle-eligibility` 后，
+> `steps.ts` 不再导出 `describeRepairCycle` / `canOpenRepairCycle`，原因与可用性改由
+> `repairCycleEligibility.ts` 的 `describeRepairCycleAction` / `describeRepairCycleFacts`
+> 依据服务端 `can_open_cycle`、`blocking` 与 `summary` 给出（加载中 / 查询失败 / 刷新中
+> 一律不放行）。本文件其余三行的判定来源与文案未变。详见
+> [`P4-repair-cycle-eligibility.md`](./P4-repair-cycle-eligibility.md)。
 **规则本身没有任何变化**：`canStartTask` / `canExecuteStep` / `canExecuteAndValidate` /
 `canOpenRepairCycle` 的返回值与修改前逐条一致（新增用例用矩阵逐组合断言），只是改为返回
 `{ allowed, reason }` 的纯函数后再取 `.allowed`，因此不存在"判定一套、文案另一套"的漂移空间。
@@ -112,6 +119,14 @@ describeRepairCycle(task, step?)       -> canOpenRepairCycle
 步骤类型），被占用与任务状态层则对三个操作同时成立；新增用例对这三条差异逐一断言。执行并验证的
 前端可见条件与执行步骤完全相同（服务端另有验证配置与修复预算校验，前端拿不到），因此它复用同一份
 判定与同一份原因，而不是另写一段。
+
+> **更正（2026-10-29）**：上述"已完成步骤仍可开启新执行周期"的差异**并不成立**。
+> `decideRepairStart` 的 `StepOccupied` 由
+> `step.CurrentAttemptID != nil || !step.Status.CanStartExecution()` 计算，因此
+> `completed` / `cancelled` / `skipped` 会被服务端判为 `execution_active`，
+> 真实写入口 `open-repair-cycle` 会用 409 拒绝。本轮之后按钮改由服务端资格决定，
+> 已完成步骤会禁用并展示该原因；本轮未修改领域规则，细节见
+> [`P4-repair-cycle-eligibility.md`](./P4-repair-cycle-eligibility.md) §1.3。
 
 动作进行中（`operations.state.running !== undefined`）与启动按钮一样处理：按钮仍禁用，但不展示业务
 原因。

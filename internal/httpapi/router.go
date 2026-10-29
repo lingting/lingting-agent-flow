@@ -262,6 +262,13 @@ func (rt *router) tasksHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// 执行周期资格查询与"显式开启执行周期"共享 {taskID}/steps/{stepID} 前缀，
+	// 且都以 repair-cycle 开头。资格查询是只读的，与后面的执行记录查询形状不重叠，
+	// 但必须先于 isExecutionRecordPath 判定，否则会被当成 steps 下的未知资源返回 404。
+	if taskID, stepID, ok := parseRepairCycleEligibilityPath(r.URL.Path); ok {
+		rt.stepExec.serveRepairCycleEligibility(w, r, taskID, stepID)
+		return
+	}
 	// 开发—验证闭环与单步骤执行共享 {taskID}/steps/{stepID} 前缀，且都是写操作，
 	// 因此必须先判定闭环形状，再判定单步骤执行形状。
 	if taskID, stepID, ok := parseOpenRepairCyclePath(r.URL.Path); ok {
