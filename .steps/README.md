@@ -800,7 +800,23 @@
   `vp lint` / `git diff --check`），**未运行任何测试**，因此不声称推送链路已被测试覆盖。
   `P4-M2-7` §6 的"进度可见性"部分因此闭合（仍不含数字百分比、token 流与 stdout/stderr 流），
   **`P4-M5` 仍为 `pending`**。
-  下一步候选：为推送链路补受控集成用例（需先获得测试授权）；`P4-M5` 继续等待真实使用数据。
+  下一步候选：为推送链路补受控用例（服务端 HTTP 契约用例与前端纯函数断言已补，两者均未执行，
+  见下文）；浏览器侧 E2E 仍缺；`P4-M5` 继续等待真实使用数据。
+- **SSE 重连失败上限修正与既有契约覆盖（2026-10-30，基线 `origin/master` `cdb1356`）已完成，
+  结论：正确性修复（本轮范围内）**，交付物为
+  [`P4-task-event-stream.md`](./P4-task-event-stream.md) §10：核实出前端 `useTaskEventStream`
+  的停止判定写成 `failures > EVENT_STREAM_MAX_FAILURES`，使"连续失败 5 次即停止自动重连"实际
+  退化成第 6 次才停止（第 5 次失败后仍排一次间隔被 15s 封顶的重连），与常量注释和界面语义不符。
+  修复把边界收敛为纯函数 `eventStreamReconnectExhausted`（`failures >= 5`），运行时 `onerror`
+  调用同一函数；退避序列（1s / 2s / 4s / 8s、封顶 15s）、连接代次、任务切换清理、游标推进、
+  事件去重、历史分页与"手动重连保留已收到事件"语义均未改动。既有测试文件只补断言、未新建
+  文件：前端单测覆盖失败 0 / 4 / 5 / 6 的边界与退避封顶，
+  `tests/unit/httpapi/history_test.go` 扩展现有夹具与"服务未装配 503"用例，并覆盖实时流的
+  响应头、非法游标 400、未知任务 404、非 GET 405、已持久化事件的实际推送与游标推进、
+  关闭信号下以 EOF 收敛、已送达游标重连不重放。按授权只做非测试检查（`gofmt` / `go vet` /
+  `go build` / `tsc --noEmit` / `vp fmt --check` / `vp lint` / `git diff --check` / 行尾检查），
+  **未运行任何测试**，因此不声称这些断言已通过；浏览器侧 `EventSource`、心跳与多批背压仍需
+  另行授权专项验收。**`P4-M5` 仍为 `pending`**，本轮未采集或伪造任何使用数据。
 
 > 阶段与里程碑的状态可能随开发推进而变化，以上仅为撰写本路线图时的快照；最新状态
 > 以 `ROADMAP.md` 的"当前实现状态摘要"、`P1-single-task-e2e.md` 的里程碑表与
@@ -855,7 +871,7 @@
 | [`P4-disabled-action-reasons.md`](./P4-disabled-action-reasons.md) | P4 常规开发：禁用操作的原因提示（四类操作的既有准入条件与原因来源、`{ allowed, reason }` 纯函数与布尔投影的关系、antd `Button` / `LinkButton` / `Tooltip` 的真实 DOM 行为核实、可聚焦包装层与键盘可读方案、修改文件与行为变化、测试与构建结果、保留的设计与剩余风险、与 P4-M5 的关系） |
 | [`P4-execute-and-validate-failure-response.md`](./P4-execute-and-validate-failure-response.md) | P4 常规开发：开发—验证闭环失败时保留结构化执行结果（失败路径丢失执行事实的调用链证据、`operation_result` 的放置位置与兼容性依据、附加条件与安全边界、保留 / 省略的事实清单、前端结构守卫与失败面板展示、业务失败与结果不确定的边界、非测试检查结果与剩余风险） |
 | [`P4-repair-cycle-eligibility.md`](./P4-repair-cycle-eligibility.md) | P4 常规开发：修复周期开启资格查询与服务端阻塞原因展示（前端粗判与领域判定的差异证据、只读路由与响应字段来源、稳定阻塞类别与错误语义、与写入口的一致性边界、前端加载 / 刷新 / 归属作废与过期快照处理、非测试检查结果、剩余风险与未执行的测试） |
-| [`P4-task-event-stream.md`](./P4-task-event-stream.md) | P4 常规开发：任务事件实时推送（SSE）与 Web 实时展示（实施前的服务端 / 前端代码证据、`GET /tasks/{taskID}/events/stream` 契约与错误语义、事件自增标识游标与断线补发、`latest_event_id` 消除"查询 ↔ 连接"窗口、服务端长连接关闭信号、前端连接生命周期与重连退避、与历史分页并存的独立实时区域、收到事件后的合并状态确认、文件清单与调用链、实际执行的非测试检查、未执行测试与剩余风险） |
+| [`P4-task-event-stream.md`](./P4-task-event-stream.md) | P4 常规开发：任务事件实时推送（SSE）与 Web 实时展示（实施前的服务端 / 前端代码证据、`GET /tasks/{taskID}/events/stream` 契约与错误语义、事件自增标识游标与断线补发、`latest_event_id` 消除"查询 ↔ 连接"窗口、服务端长连接关闭信号、前端连接生命周期与重连退避、与历史分页并存的独立实时区域、收到事件后的合并状态确认、文件清单与调用链、实际执行的非测试检查、未执行测试与剩余风险；§10 重连失败上限的原始错误与修复后语义、既有 SSE 契约用例的补充范围、未覆盖的实时推送行为与专项验收条件） |
 
 ## 下一步工作的选择规则
 

@@ -49,14 +49,33 @@ export const EVENT_STREAM_RECONNECT_BASE_MS = 1_000;
 /** 重连退避的最大间隔（毫秒）：封顶后仍会重试，不会退化成高频请求 */
 export const EVENT_STREAM_RECONNECT_MAX_MS = 15_000;
 /**
- * 连续失败多少次后停止自动重连。
+ * 连续失败次数达到该值即停止自动重连。
  *
  * 停止而不是无限重试：服务可能已经停止或被删除任务，无限后台重连只会持续制造无用
  * 请求。停止后由用户点「重新连接」显式恢复，历史查询不受影响。
+ *
+ * 语义是"达到即停止"，不是"超过才停止"：第 5 次失败之后不再安排下一次重连，因此
+ * 自动重连最多只排 4 次。边界判定集中在 `eventStreamReconnectExhausted`，Hook 里
+ * 不再内联比较表达式，避免常量注释与实现各说一套。
  */
 export const EVENT_STREAM_MAX_FAILURES = 5;
 
-/** 按失败次数计算下一次重连的等待时间 */
+/**
+ * 连续失败次数是否已达到停止自动重连的阈值。
+ *
+ * `failures` 是已经发生的连续失败次数（首次失败为 1）。抽成纯函数是为了让运行时
+ * 判定与测试断言共用同一份实现，而不是各写一遍相同规则。
+ */
+export function eventStreamReconnectExhausted(failures: number): boolean {
+  return failures >= EVENT_STREAM_MAX_FAILURES;
+}
+
+/**
+ * 按连续失败次数计算下一次重连的等待时间：1 秒起，每次翻倍，封顶 15 秒。
+ *
+ * 封顶只保证退避不会退化成高频请求；"是否还有下一次重连"由
+ * `eventStreamReconnectExhausted` 决定，当前阈值下不会排到 15 秒那一档。
+ */
 export function eventStreamReconnectDelay(failures: number): number {
   if (failures <= 1) return EVENT_STREAM_RECONNECT_BASE_MS;
   const grown = EVENT_STREAM_RECONNECT_BASE_MS * 2 ** (failures - 1);
@@ -189,7 +208,7 @@ export function useTaskEventStream(options: {
       if (sourceRef.current === source) sourceRef.current = undefined;
       if (generation !== generationRef.current) return;
       failuresRef.current += 1;
-      const exhausted = failuresRef.current > EVENT_STREAM_MAX_FAILURES;
+      const exhausted = eventStreamReconnectExhausted(failuresRef.current);
       if (exhausted) {
         setState((current) => ({
           ...current,

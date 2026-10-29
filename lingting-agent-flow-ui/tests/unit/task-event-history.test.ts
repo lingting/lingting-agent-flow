@@ -17,6 +17,13 @@ import {
   REPAIR_CYCLE_OPEN_TEXT,
   repairCycleDisplay,
 } from "../../src/pages/tasks/history";
+import {
+  EVENT_STREAM_MAX_FAILURES,
+  EVENT_STREAM_RECONNECT_BASE_MS,
+  EVENT_STREAM_RECONNECT_MAX_MS,
+  eventStreamReconnectDelay,
+  eventStreamReconnectExhausted,
+} from "../../src/pages/tasks/useTaskEventStream";
 import { printArtifactDir } from "../internal/artifacts";
 
 printArtifactDir();
@@ -212,5 +219,36 @@ describe("修复周期展示", () => {
 
   it("空历史文案明确说明不代表未执行", () => {
     expect(REPAIR_CYCLE_EMPTY_TEXT).toBe("暂无修复周期记录");
+  });
+});
+
+/**
+ * 重连退避与"连续失败多少次后停止自动重连"。
+ *
+ * 边界是"达到即停止"：曾经用 `failures > EVENT_STREAM_MAX_FAILURES` 判定，导致第 5
+ * 次失败仍然排下一次重连、第 6 次才停止。这里直接断言运行中的 Hook 所调用的同一个
+ * 纯函数，避免测试另写一套规则。
+ */
+describe("重连退避与失败上限", () => {
+  it("首次失败 1 秒起、逐次翻倍，并按 15 秒封顶", () => {
+    expect(eventStreamReconnectDelay(0)).toBe(EVENT_STREAM_RECONNECT_BASE_MS);
+    expect(eventStreamReconnectDelay(1)).toBe(1_000);
+    expect(eventStreamReconnectDelay(2)).toBe(2_000);
+    expect(eventStreamReconnectDelay(3)).toBe(4_000);
+    expect(eventStreamReconnectDelay(4)).toBe(8_000);
+    expect(eventStreamReconnectDelay(5)).toBe(EVENT_STREAM_RECONNECT_MAX_MS);
+    expect(eventStreamReconnectDelay(6)).toBe(EVENT_STREAM_RECONNECT_MAX_MS);
+    expect(eventStreamReconnectDelay(20)).toBe(EVENT_STREAM_RECONNECT_MAX_MS);
+  });
+
+  it("连续失败达到 5 次即停止自动重连", () => {
+    expect(EVENT_STREAM_MAX_FAILURES).toBe(5);
+    // 没有失败、失败 4 次都还允许重连。
+    expect(eventStreamReconnectExhausted(0)).toBe(false);
+    expect(eventStreamReconnectExhausted(4)).toBe(false);
+    // 第 5 次失败不再安排下一次重连。
+    expect(eventStreamReconnectExhausted(5)).toBe(true);
+    // 超过阈值仍然保持停止，不会因为计数继续增长而"恢复"重连。
+    expect(eventStreamReconnectExhausted(6)).toBe(true);
   });
 });

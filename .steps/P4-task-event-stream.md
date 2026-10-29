@@ -142,8 +142,9 @@ t1: GET .../events/stream?last_event_id=L
   任何回调因代次不符被丢弃，且收到的帧还要校验 `task_id` 与当前任务一致。
 - `initialCursor` 只在建立第一条连接时使用，之后游标只由收到的帧推进：历史刷新会让该值
   变大，若跟着跳过去，已推送但未处理的中间事件就会被跳过。
-- 断线：主动 `close()` 后按 1s / 2s / 4s / 8s / 16→15s 封顶退避重连（`eventStreamReconnectDelay`），
-  连续失败超过 5 次停止自动重连并显示「重新连接」按钮。**这不是数据轮询**：每次重连都是一条
+- 断线：主动 `close()` 后按 1s / 2s / 4s / 8s 退避重连（`eventStreamReconnectDelay`，封顶
+  15s），连续失败达到 5 次（`EVENT_STREAM_MAX_FAILURES`，判定由纯函数
+  `eventStreamReconnectExhausted` 给出）即停止自动重连并显示「重新连接」按钮。**这不是数据轮询**：每次重连都是一条
   带游标的长连接，中间不存在固定周期的数据请求。
 - 环境不支持 `EventSource` 时明确报错，而不是显示成"暂无事件"。
 
@@ -241,8 +242,9 @@ t1: GET .../events/stream?last_event_id=L
 
 1. **既有 E2E 桩不含 `latest_event_id`**：`tests/e2e/task-event-history.spec.ts` 的事件桩
    响应没有该字段，前端因此在桩环境下不会建立连接（`initialCursor` 缺省即不连接，这是刻意
-   的"不猜起点"）。这意味着既有 E2E 不会意外产生流请求，但也意味着**当前没有任何测试覆盖
-   真实推送链路**。
+   的"不猜起点"）。这意味着既有 E2E 不会意外产生流请求，也意味着**浏览器侧仍没有真实推送
+   链路的覆盖**；服务端推送与游标推进已由 §10.3 的 `tests/unit/httpapi/history_test.go`
+   用例覆盖（本轮授权范围内只更新断言，未执行）。
 2. **推送延迟上限 1 秒**：轮询型 SSE 的固有取舍。事件量很大时会话内仍是分批读取（每批 100），
    未做背压控制：如果某任务的事件可以在极短时间内超过这个速率，客户端会看到连续多帧而不是
    被合并。
@@ -258,7 +260,78 @@ t1: GET .../events/stream?last_event_id=L
 
 ## 9. 下一步候选
 
-- 为推送链路补一个受控的集成用例（需要用户授权测试后才能执行）。
+- 为推送链路补受控用例：服务端 HTTP 契约用例已补入 `tests/unit/httpapi/history_test.go` 与前端
+  纯函数断言（§10.3），但**未执行**，仍需用户明确授权测试后才能运行；浏览器侧 E2E 与真实
+  `EventSource` 连接仍未覆盖。
 - 若真实使用中出现"历史中间段未加载"的困惑，再评估是否把历史分页改为"最新在前"（属于
   历史查询契约变更，需单独立项）。
 - `P4-M5` 仍为 `pending`：本轮没有任何来自真实使用数据的测量。
+
+---
+
+## 10. 重连失败上限修复与既有契约覆盖（2026-10-30）
+
+> 基线：`origin/master` = `cdb1356e4032cef28bae6ffd9ed8445338dc7463`（即本文件 §1–§9 那个
+> 提交）。开工前执行了 `git fetch origin`：远端未前进，当前分支 `master`、`HEAD` 与
+> `origin/master` 一致，工作区干净（`git status` 无输出）。本轮是范围受限的正确性修复，
+> **不是** `P4-M5` 性能优化，`P4-M5` 仍为 `pending`。
+
+### 10.1 缺陷证据（修复前 → 修复后）
+
+| 项目 | 修复前 | 修复后 |
+|---|---|---|
+| 判定 | `failuresRef.current > EVENT_STREAM_MAX_FAILURES` | `eventStreamReconnectExhausted(failuresRef.current)`，即 `failures >= EVENT_STREAM_MAX_FAILURES` |
+| 实际行为 | 第 5 次失败仍排一次重连（间隔被 15s 封顶），第 6 次失败才停止 | 第 5 次失败即停止自动重连 |
+| 与常量注释 / 界面语义 | 注释写"允许的连续失败次数 = 5"，实现等效于 6 | 一致 |
+
+因此自动重连节奏为：失败 1 次 → 1s 后重连；2 次 → 2s；3 次 → 4s；4 次 → 8s；第 5 次失败 →
+停止并显示「重新连接」。退避函数本身未改（1s 起、每次翻倍、封顶 15s），只是封顶那一档在当前
+阈值下不会再被用到。
+
+### 10.2 修复方式
+
+- 生产代码 `lingting-agent-flow-ui/src/pages/tasks/useTaskEventStream.ts`：新增纯函数
+  `eventStreamReconnectExhausted(failures)` 承载"达到即停止"的边界，`source.onerror` 调用
+  同一个函数，不再内联比较表达式；常量与退避函数的注释改为与实现一致的表述。
+- 未引入新定时器、轮询机制或第二套连接状态；连接代次、任务切换清理、游标推进、事件去重、
+  历史分页、手动重连保留已收到事件等既有行为均未改动。
+
+### 10.3 既有测试文件的补充（未新建测试文件）
+
+| 文件 | 补充内容 |
+|---|---|
+| `lingting-agent-flow-ui/tests/unit/task-event-history.test.ts` | 新增 `describe("重连退避与失败上限")`：失败 0 / 4 不停止、达到 5 停止、6 仍停止；退避 1s / 2s / 4s / 8s 与 15s 封顶，均直接断言 Hook 运行时使用的同一批纯函数 |
+| `tests/unit/httpapi/history_test.go` | fixture 增加流的关闭信号（并保证既有用例行为不变）；新增实时流 HTTP 契约用例：非 GET → 405 + `Allow: GET`、非法游标（非整数 / 负数 / 大于最新标识）→ 400 `invalid_request`、不存在的任务 → 404 `not_found`、服务未装配 → 503（并入既有 503 用例）、已持久化事件的实际推送（响应头、帧 `id:`、JSON 字段、不出现 `payload`）、流建立后新写入事件的增量推送与游标推进、关闭信号下以 EOF 收敛、用已送达游标重连不重放 |
+
+上述断言**尚未执行**（见 §10.6），因此不能据此声称任何行为已通过测试验证。
+
+### 10.4 SSE 仍未覆盖的行为
+
+- 浏览器侧真实 `EventSource` 连接：既有 E2E 桩不含 `latest_event_id`，前端因此不建立连接，
+  `tests/e2e/task-event-history.spec.ts` 未增加流用例。
+- 前端连接生命周期本身：退避定时器实际触发、`reconnecting` → `error` 状态迁移、「重新连接」
+  按钮点击、任务切换丢帧只在纯函数层面被断言，没有组件级或浏览器级验证。
+- 心跳帧（15 秒注释帧）、超过单批 100 条的背压、`shutdown` 对多条在途连接的影响、
+  `Last-Event-ID` 请求头优先于查询参数的端到端行为都未验证。
+- 后续专项验收的前置条件：需要用户明确授权测试，并需要一个可在用例内可控启停的流式夹具；
+  本轮已有的 `httptest.Server` + 关闭信号是最小可行起点。
+
+### 10.5 本轮实际执行的非测试检查
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| Go 格式 | `gofmt -l internal cmd tests` | 无输出 |
+| Go 静态检查 | `go vet ./...` | 无输出（同时确认新增测试文件可编译，未执行） |
+| Go 编译 | `go build ./...` | 通过 |
+| 前端类型检查 | `pnpm exec tsc --noEmit` | 退出码 0（含 `tests/**/*.ts`） |
+| 前端格式 | `pnpm exec vp fmt --check <两个改动文件>` | 通过 |
+| 前端 lint / 类型感知 | `pnpm exec vp lint` | 退出码 0 |
+| 空白与行尾 | `git diff --check`、逐文件统计 CR | 无空白错误；改动文件 CR 计数为 0（全部 LF） |
+| 完整 diff 审阅 | `git diff` | 已逐文件审阅，无无关改动 |
+
+### 10.6 未执行的测试
+
+- `go test ./...`（含 `tests/unit/httpapi`）、`pnpm test:unit:safe`、`pnpm test:e2e:safe` 全部
+  **未执行**：本轮未获测试授权。
+- 未创建任何测试文件、临时脚本或一次性验证代码；未改动 `--maxWorkers 4` / `--workers=4` 设置。
+- 因此本轮结论只包含"缺陷证据 + 修复方式 + 已补断言"，**不包含测试通过结论**。
