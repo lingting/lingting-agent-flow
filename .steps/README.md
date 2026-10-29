@@ -643,6 +643,22 @@
   P1 遗留的真实缺口是私有仓库 Git 凭据支持
   （`source.GitCredentialProvider` / `codesaver.GitCredentialProvider` 无实现），
   记录在 `ROADMAP.md` 的"尚未实现"。
+- **服务端第一版验收（2026-10-29，基线 `origin/master` `9c79a2c`）已完成，结论 `completed`**，
+  交付物为 [`SERVER-v1-acceptance.md`](./SERVER-v1-acceptance.md)：代码层面的第一版必需链路
+  （统一启动 → 开发与验证 → 修复循环 → 代码保存 → 会话归档与收尾 → 恢复与重试 → 并发与隔离）
+  全部成立，且有本轮实际执行的本地证据与真实远程证据。
+  真实远程完整链路（容器内 Clone → 计划 → 开发 → 确定性验证 → 语义审查 → 代码保存 → 会话归档 →
+  收尾）已在远程主机网络调整后真实跑通：容器真实创建、2 个步骤全部通过、`push=succeeded`、
+  5 个会话全部归档、`workflow_runs` 与 `tasks` 同为完成终态且 `result=succeeded`；同一轮的
+  `remote/docker`（6）、`remote/agent`（2）、`remote/codesaver`（1）、`remote/workflow`（4）
+  与真实 SSH（6）套件全部通过。
+  过程记录：本轮上午同一套件曾失败，根因是远程侧出网被阻断/过滤（容器内 `git clone` 已走镜像内置的
+  `ssh.github.com:443`，TCP 建连后收不到 SSH banner；宿主机拉镜像也超时），**不是端口选择问题，
+  也不是产品缺陷**；网络恢复后 Clone 从 602 s 的挂起变为 17 s 完成。
+  本轮同时修复了 1 处第一版必需缺陷：验证失败**只由 Validator 语义审查给出**时，结构化反馈不会
+  被写入，修复循环停在 `feedback_unavailable` 并被错误归类为"验证证据未可靠写入"；修复后该路径能
+  进入有上限的修复循环并在上限处停止，新增 2 个链路级用例覆盖。
+  **真实远程链路已复核通过，前端功能开发冻结解除**，后续按 P4 剩余项推进。
 
 > 阶段与里程碑的状态可能随开发推进而变化，以上仅为撰写本路线图时的快照；最新状态
 > 以 `ROADMAP.md` 的"当前实现状态摘要"、`P1-single-task-e2e.md` 的里程碑表与
@@ -653,6 +669,7 @@
 | 文档 | 内容 |
 |---|---|
 | [`ROADMAP.md`](./ROADMAP.md) | 项目最终业务目标、端到端主流程概览、四阶段总览、推进顺序、现状摘要、暂缓事项 |
+| [`SERVER-v1-acceptance.md`](./SERVER-v1-acceptance.md) | 服务端第一版验收记录：范围裁定（必需 / 证据不足 / 明确非目标 / 文档冲突）、7 环节验收矩阵与代码+测试证据、本轮实际执行的命令与结果、真实远程完整链路与全部远程套件的实际结果（含上午因出网受阻失败的根因与排除过程）、修复的第一版缺陷、剩余后续增强与最终判定 |
 | [`P1-single-task-e2e.md`](./P1-single-task-e2e.md) | P1：单任务完整开发闭环（当前优先，最详细） |
 | [`P2-reliability-recovery.md`](./P2-reliability-recovery.md) | P2：流程可靠性与恢复 |
 | [`P2-M1-recovery-boundaries.md`](./P2-M1-recovery-boundaries.md) | P2-M1：全链路状态持久化与恢复边界清单（14 阶段矩阵、启动恢复调用链、缺陷与测试缺口） |

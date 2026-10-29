@@ -167,8 +167,10 @@ type ValidationFeedbackInput struct {
 
 // NewValidationFailureFeedback 依据验证记录与检查结果构建失败反馈。
 //
-// 只有确实存在未通过的检查时才应调用本函数：结论为通过时没有需要修复的问题。
-// 输出摘要与原因在这里统一脱敏与裁剪，调用方不需要再次处理。
+// 只要结论不是通过就应调用本函数：失败可能由未通过的确定性检查给出，也可能只由
+// 语义审查给出（此时检查列表为空，结论摘要就是唯一可引用的失败依据）。结论为通过时
+// 没有需要修复的问题，不应调用。输出摘要与原因在这里统一脱敏与裁剪，调用方不需要
+// 再次处理。
 func NewValidationFailureFeedback(
 	input ValidationFeedbackInput,
 	at time.Time,

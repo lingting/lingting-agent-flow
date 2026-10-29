@@ -816,6 +816,36 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > **未修改任何 Go 代码、HTTP 契约、领域规则、状态机、重试 / 续跑资格、容器生命周期与远程操作语义**；
 > `pnpm test:unit:safe` 607 通过、`pnpm test:e2e:safe` 233 通过 / 0 失败、`pnpm check` 与
 > `pnpm build` 通过（未执行 Go 测试）。**P4-M5 仍为 `pending`**。
+>
+> **服务端第一版验收（2026-10-29，基线 `origin/master` `9c79a2c`）已完成，结论 `completed`**，
+> 交付物为 [`SERVER-v1-acceptance.md`](./SERVER-v1-acceptance.md)。本轮不依赖任何历史 `completed`
+> 标记：从 `internal/cli/server.go` 的工厂装配与 `internal/server/server.go` 的生命周期注册出发
+> 逐条确认"能力是否真的接在生产路径上"，再定位当前基线的链路级测试。
+> 结论要点：
+> （1）**代码层面第一版必需链路全部成立**——统一启动（容器 → 工作区 → 计划 → 编排）、
+> Developer + 确定性检查 + Validator 语义审查、有上限且预算持久化的修复循环、代码保存三阶段与
+> 核验恢复、会话归档核验与收尾栅栏、取消/中断/重启恢复、显式重试与续跑资格、有界并发与租约
+> fencing 都有生产代码与可复现的测试证据（本地 1811 unit + 465 local integration + 64 e2e 全部
+> 通过，含 `-race`）。
+> （2）**真实远程本轮全部通过**：`remote/workflow` 4（含完整链路 `TestRemoteE2EFullChain`）、
+> `remote/docker` 6、`remote/agent` 2、`remote/codesaver` 1、真实 SSH 6；远程主机 Docker
+> CLI/Engine `29.7.2`、API `1.55` 满足基线。
+> （3）**完整链路已真实跑通**（不是"容忍 blocked 也算过"）：容器真实创建、仓库 commit 真实检出、
+> 2 个步骤全部通过、`push=succeeded`、5 个会话全部归档、`workflow_runs` 与 `tasks` 同为完成终态
+> 且 `result=succeeded`。
+> （4）**过程记录**：本轮上午同一套件曾失败，根因是远程侧出网被阻断/过滤 —— 容器内 `git clone`
+> 走的是镜像内置的 `ssh.github.com:443`（**不是 22**：`Raw()` 是 scp 形式、git 不会传 `-p`，
+> `ssh -G` 解析为 443，容器内 `verifySSHClientConfig` 也通过了），错误 `kex_exchange_identification`
+> 说明 TCP 建连成功但 SSH banner 不返回；宿主机拉取镜像同样超时。调整远程（WSL）网络配置后
+> Clone 从 602 s 的挂起变为 17 s 完成，全套远程用例立即通过，确认是环境限制而非产品缺陷。
+> 主机版本（29.7.2 / 1.55）与 P3-M5 记录的（29.9.1 / 1.56）不同，说明测试目标在 2026-10-28 后
+> 已被更换，**历史远程记录不能代表当前主机**。
+> （5）**本轮修复 1 处第一版必需缺陷**：验证失败只由语义审查给出时 `persistFeedback` 因"无未通过
+> 检查"而不写反馈，修复循环停在 `feedback_unavailable` 并被映射为 `verification_unconfirmed`；
+> 修复后该路径可进入有上限修复循环（上限处 `attempts_exhausted`，关闭修复时 `verification_failed`），
+> 第二轮提示词携带上一轮审查结论，新增 2 个链路级用例（`e2e_review_test.go`）。
+> （6）根 `README.md` 的两处过期清单（"第一版目标（尚未实现）"与"尚未实现的接口"）已按代码事实
+> 重写。**前置条件已满足，前端功能开发冻结解除**；P4 仅剩 `P4-M5` 待推进。
 
 ## 四阶段总览
 
@@ -915,3 +945,7 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - [P4-G12-project-management.md](./P4-G12-project-management.md)
 - [P4-task-detail-experience-review.md](./P4-task-detail-experience-review.md)
 - [P4-task-detail-panel-organization.md](./P4-task-detail-panel-organization.md)
+
+## 验收记录
+
+- [SERVER-v1-acceptance.md](./SERVER-v1-acceptance.md) —— 服务端第一版验收（结论 `completed`，含真实远程完整链路证据）

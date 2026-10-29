@@ -381,8 +381,11 @@ P2 主要补齐更系统的恢复语义与恢复验收。
 ### P2-M5 补齐关键恢复场景的集成测试与恢复验收
 
 - **ID**：`P2-M5`
-- **状态**：`completed`（2026-10-25，基于 `master` HEAD `40460d4` 实施与核实；
-  真实远程 merge / 容器残留证据仍缺，见文末"剩余风险"）
+- **状态**：`completed`（2026-10-25，基于 `master` HEAD `40460d4` 实施与核实；当时真实远程
+  merge 与容器残留证据仍缺）。**2026-10-29 复核更新**：容器 `unknown` / 孤儿现场的真实远程证据
+  已由 P3-M5 与本轮远程 Docker 套件补齐（`tests/integration/remote/docker/` 6 个用例通过），
+  真实远程"合并成功"也已由 `tests/integration/remote/codesaver/` 覆盖；**仍然缺的是 merge 结果
+  不确定后的真实远程核验**。详见 [`SERVER-v1-acceptance.md`](./SERVER-v1-acceptance.md) §8。
 - **必要性**：恢复语义必须靠真实持久化事实验证，不能只靠方法返回值。
 - **当前证据**：`tests/integration/local/workflow/recovery_test.go`（11 个用例）、
   `tests/integration/local/codesaver/`（4 个恢复用例，真实 Git）、

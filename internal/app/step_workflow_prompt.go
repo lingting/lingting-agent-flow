@@ -32,7 +32,10 @@ func stepWorkflowPrompt(
 	if err != nil {
 		return "", err
 	}
-	if feedback == nil || len(feedback.Checks) == 0 {
+	// 失败依据可能只来自语义审查：此时没有未通过的检查，但结论摘要是修复
+	// 唯一可引用的说明，因此不能因为检查列表为空就整段省略。
+	if feedback == nil ||
+		(len(feedback.Checks) == 0 && strings.TrimSpace(feedback.Summary) == "") {
 		return base, nil
 	}
 	var builder strings.Builder

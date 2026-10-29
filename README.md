@@ -6,25 +6,31 @@ AgentFlow 是一个使用 Go 编写的本地优先 AI 编码工作流编排器�
 
 ## 当前开发阶段
 
-AgentFlow 处于**单步骤执行阶段**。当前仓库包含工程骨架、可运行的 CLI、配置加载与校验、结构化日志封装、SQLite 数据模型与版本化迁移、执行节点管理与完整的 SSH 连接层、容器内 Pi Runner，以及**单步骤执行协调器**。
+AgentFlow 的服务端第一版功能已经实现：P1（单任务完整开发闭环）、P2（流程可靠性与恢复）与
+P3（多任务执行与调度）的服务端范围都在当前代码中成立，并有基于真实 SQLite、正式迁移与生产
+服务装配的链路级测试证据。**第一版验收结论为 `completed`**：真实远程完整链路
+（容器内 Git Clone → 计划 → 开发 → 确定性验证 → 语义审查 → 代码保存 → 会话归档 → 收尾）已真实
+跑通（2 个步骤全部通过、`push=succeeded`、5 个会话全部归档、任务与执行记录同为完成终态），
+同一轮的全部真实远程套件也通过。验收矩阵、实际执行的测试结果与后续增强项见
+[`.steps/SERVER-v1-acceptance.md`](.steps/SERVER-v1-acceptance.md)。
 
 执行节点已支持本机私钥认证、严格的主机密钥校验、带超时与取消的远程命令执行、SFTP
 文件传输、远程 Home 与工作空间解析，以及**执行节点环境预检**（SSH 连接、Docker 版本与
 API 兼容性、Docker CLI 帮助信息、基础 Dockerfile 的外部 `FROM` 镜像元数据）。
 
-单步骤执行已打通 `HTTP API → Task Service → Step Execution Service → Pi Runner` 的闭环：
-可以通过接口对**明确指定的 Step** 发起一次真实 Pi 调用，并把 Attempt、Session 与状态变化
-持久化。在它之上还有单步骤开发—验证闭环与**任务级工作流编排器**：按数据库中已持久化的计划
-顺序推进开发与验证步骤，并在收尾阶段复用 CodeSaver。
+主流程入口固定为 `POST /api/v1/tasks/{taskID}/start`：它按"准备容器 → 初始化任务工作区 →
+生成并持久化计划 → 启动任务级工作流"推进，已完成的阶段不会重复执行，任一阶段失败立即停止且
+不重放外部操作。工作流本身只消费已持久化的计划、不创建容器：每个开发步骤都经过 Developer →
+确定性必需检查 → Validator 语义审查（任务配置了验证角色时）→ 未通过时进入有上限的修复循环，
+全部步骤通过后进入代码保存（commit / push / 可选 merge）、会话归档核验与领域收尾决策。
 
 任务执行只存在于 `agentflow server` 进程内：旧的全能引擎包（`internal/workflow`）与
 `agentflow task retry` / `task recover` 命令已移除，`agentflow task run` 改为调用
 `POST /api/v1/tasks/{taskID}/execute-workflow` 并轮询真实进度。计划生成已提供独立入口
-（`POST /api/v1/tasks/{taskID}/plan`），编排器本身仍只消费已持久化的计划、不创建容器：
-启动前要求任务已有受管理且运行中的容器与已持久化的计划步骤，否则返回前置条件错误或状态
-冲突。多任务并发调度已实现（`app.TaskScheduler`，复用 `scheduler.max_concurrent_tasks`），
-失败任务的显式重试已提供入口（`POST /api/v1/tasks/{taskID}/retry` 与
-`GET .../retry-eligibility`）；**无需用户确认的自动重试仍未实现**，调度器只领取 `queued`。
+（`POST /api/v1/tasks/{taskID}/plan`）。多任务并发调度已实现（`app.TaskScheduler`，复用
+`scheduler.max_concurrent_tasks`），失败任务的显式重试已提供入口
+（`POST /api/v1/tasks/{taskID}/retry` 与 `GET .../retry-eligibility`）；**无需用户确认的自动重试
+仍是明确非目标**，调度器只领取 `queued`。业务页面（任务、机器、项目、环境）已接入真实接口。
 文档只会在对应能力落地后才声明其可用。
 
 ## 第一版功能范围
@@ -95,21 +101,16 @@ API 兼容性、Docker CLI 帮助信息、基础 Dockerfile 的外部 `FROM` 镜
   `pending` / `running` 的工作区初始化记录收敛为 `uncertain`。两者都在服务启动时执行，
   都不重放任何 Agent 调用或代码获取；所属任务仍有未结束执行记录时不抢占。
 
-第一版目标（尚未实现）：
+第一版明确不包含（非目标，不属于"尚未实现"的承诺）：
 
-- 持久化任务队列，并限制同时执行的任务数量。
 - 计划版本化与重新规划：计划生成入口拒绝覆盖已有计划，重新规划尚未设计。
-- Planner → Developer → Validator 的自动串联中的 Validator Agent 环节：当前只执行确定性
-  检查，编排器不发起 Validator Session 调用。
-- 自动重试与退避策略。
-- 以验证结果驱动的修复循环（确定性验证与 Validator 阶段）。
-- 相互隔离的 Git Worktree。
-- 远程 Docker 容器创建、启动与销毁的自动编排（容器能力与 `execenv` 已提供，但不由工作流
-  自动创建）。
-- Commit、Push 与 Merge 的自动编排（代码获取与任务分支管理已提供接口与命令）。
-- 可恢复的任务状态：旧的 `task retry` / `task recover` 命令已随 `internal/workflow` 引擎包
-  一并移除，当前恢复只通过 `POST /api/v1/tasks/{taskID}/resume-workflow` 执行。
-- 业务 Web 页面（当前只有 Web 外壳与连接状态）。
+- 无需用户确认的自动重试与退避策略：失败任务必须由用户显式重试，调度器只领取 `queued`。
+- 相互隔离的 Git Worktree：第一版的任务隔离边界是"每任务一个容器 + `agent/<task-id>` 分支"。
+- 容器自动销毁：失败与中断必须保留现场，清理只能由用户显式选择 `delete` 或 `detach`。
+- 私有仓库 Git 凭据存储：需要凭据存储设计与安全评审，第一版按"凭据不落库、不进日志"处理。
+- 跨数据库的全局并发配额：并发上限的语义是"同一份数据库上的名额上限"。
+- 本机执行环境（`local_linux` / `local_darwin` / `local_windows`）：`internal/execenv` 直接返回
+  `ErrUnsupportedKind`，不允许回退到宿主机执行。
 
 ## 技术栈
 
@@ -125,7 +126,10 @@ API 兼容性、Docker CLI 帮助信息、基础 Dockerfile 的外部 `FROM` 镜
 - Go 标准库 `testing`（测试）
 - Makefile（构建入口）
 
-Pi RPC、Git Worktree、React 与 TypeScript 属于后续阶段的技术选型，当前尚未引入。
+前端使用 React + TypeScript，组件库为 `lingting-react-ui`，构建与依赖管理为 Vite+ 与 pnpm，
+产物通过 `//go:embed` 嵌入 Go 可执行文件。Pi RPC 模式与 Git Worktree 仍是**明确不引入**的技术选型：
+Pi 只以 `pi --print --session <path> --model <id>` 的非交互方式在容器内调用，任务隔离依靠容器与
+任务分支。
 
 ## 环境依赖
 
@@ -1139,23 +1143,38 @@ SSH、容器、Pi 或代码保存能力，也不会在服务不可达时退回�
 
 本轮不引入自动重试、后台恢复调度与新的工作流功能：恢复语义先由人工核验确立。
 
-### 尚未实现的接口
+### 业务接口与 Web 接入现状
 
-项目、环境、容器、角色与 Agent 调度均**没有** HTTP 接口。代码保存只有按记录标识的只读
-核验入口（`POST /api/v1/tasks/{taskID}/code-saves/{recordID}/verify-code-save`），**没有
-记录列表接口**，因此记录标识目前只能从 CLI（`agentflow code status`）或
-`GET .../resume-eligibility` 的未决记录中取得。Web 页面中的项目、环境与设置入口仍为占位
-说明，连接指示器只表示 HTTP API 的可用性，不代表 SSH、Docker 或 Pi Agent 已就绪。
+业务接口全部挂在 `/api/v1` 下。任务、项目、环境、角色、执行节点、容器、代码保存、执行记录、
+验证反馈与事件时间线都有 HTTP 入口，任务相关的稳定路由包括：
 
-任务页面已接入真实接口：任务创建/查看/取消/删除、工作流启动/取消/恢复与工作流进度面板；
-**尚未接入统一启动 `/start`、计划生成、步骤级执行、验证历史、失败反馈与重试入口**。
-机器页面已接入执行节点接口与环境预检结果展示。
+- 统一启动与计划：`POST /tasks/{id}/start`、`POST /tasks/{id}/plan`
+- 任务级编排：`POST /tasks/{id}/execute-workflow`、`GET /tasks/{id}/workflow`、
+  `POST /tasks/{id}/cancel-workflow`、`POST /tasks/{id}/resume-workflow`
+- 重试与续跑：`POST /tasks/{id}/retry`、`GET /tasks/{id}/retry-eligibility`、
+  `GET /tasks/{id}/resume-eligibility`
+- 单步骤：`POST /tasks/{id}/steps/{sid}/execute`、`.../execute-and-validate`、
+  `POST /tasks/{id}/steps/{sid}/attempts/{aid}/validate`、`.../initialize-code`、
+  `POST /tasks/{id}/steps/{sid}/open-repair-cycle`、`POST /tasks/{id}/execute-steps`
+- 代码保存：`GET /tasks/{id}/code-saves`、
+  `POST /tasks/{id}/code-saves/{rid}/verify-code-save`
+- 容器：`GET /tasks/{id}/containers`、`POST .../containers/{cid}/delete`、
+  `POST .../containers/{cid}/detach`
+- 历史：`GET /tasks/{id}/events`、`GET /tasks/{id}/steps/{sid}/repair-cycles`、
+  `GET /tasks/{id}/steps/{sid}/validations/{rid}/feedback`、`GET /tasks/{id}/steps/{sid}/validations`
+- 基础资料：`GET|POST /projects`、`GET|PUT|DELETE /projects/{pid}`、`GET /environments`、
+  `GET /environments/{type}/{name}/versions/{version}`、`GET /roles`、
+  `GET|POST /hosts` 与单节点路径
+
+Web 页面已接入真实接口：任务（创建、详情、取消、删除、统一启动、工作流进度与取消/恢复、
+计划生成、步骤级执行与诊断、验证结果与失败反馈、代码保存与核验、容器处置、重试与续跑资格、
+事件时间线与修复周期）、机器（执行节点与环境预检结果）、项目与环境（列表与详情）。设置页面
+仍为占位说明；连接指示器只表示 HTTP API 的可用性，不代表 SSH、Docker 或 Pi Agent 已就绪。
 
 后台服务注册了执行节点环境预检、单步骤执行协调器、确定性验证引擎、开发—验证闭环协调器、
-任务级工作流编排器、任务调度器、任务租约残留核验、容器/代码获取/代码保存恢复扫描与执行
-记录残留收敛。`agentflow server` 启动后提供 API、页面、环境预检、单步骤执行、显式顺序
-执行、单步骤开发—验证闭环、计划生成、任务级工作流编排、有界并发自动调度与失败任务显式
-重试能力；**无需用户确认的自动重试仍未实现**。
+任务级工作流编排器、统一启动服务、任务租约残留核验、任务调度器、容器 / 代码获取 / 代码保存
+恢复扫描与执行记录残留收敛，全部由 `agentflow server` 的生命周期按注册顺序启动、按逆序停止。
+**无需用户确认的自动重试仍是明确非目标。**
 
 ## 容器内 Pi Runner 与 Session 生命周期
 

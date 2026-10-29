@@ -168,7 +168,11 @@ func (s *StepWorkflowService) persistFeedback(
 	if result.ValidationRunID.IsEmpty() {
 		return false
 	}
-	if len(failedChecksOf(result.Checks)) == 0 {
+	// 失败依据可以来自两处：未通过的确定性检查，或语义审查给出的结论摘要。
+	// 两者都为空时才无法构成可引用的修复依据，此时不写反馈，避免生成一条
+	// "没有说明任何问题"的记录。
+	if len(failedChecksOf(result.Checks)) == 0 &&
+		strings.TrimSpace(result.ValidationFailureSummary) == "" {
 		return false
 	}
 	attempt, err := s.store.GetAttempt(context.WithoutCancel(ctx), result.AttemptID)
