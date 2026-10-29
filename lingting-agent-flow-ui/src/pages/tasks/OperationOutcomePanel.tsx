@@ -49,9 +49,26 @@ export function OperationOutcomePanel({ state }: { state: ExecutionOperationsSta
       )}
       {failure && (
         <Alert
-          description={failure.message}
+          description={
+            <Flex gap={2} vertical>
+              <Typography.Text>{failure.message}</Typography.Text>
+              {/* 服务端补充的执行详情只陈述已经发生的事实，不改变"未通过"的结论 */}
+              {failure.facts && failure.facts.length > 0 && (
+                <>
+                  <Typography.Text type="secondary">
+                    服务端本次执行详情（不代表操作成功）：
+                  </Typography.Text>
+                  {failure.facts.map((fact) => (
+                    <Typography.Text key={fact}>{fact}</Typography.Text>
+                  ))}
+                </>
+              )}
+            </Flex>
+          }
           showIcon
-          title={`${describeTarget(failure.key, failure.stepID)}失败`}
+          title={`${describeTarget(failure.key, failure.stepID)}${
+            failure.facts ? "未通过" : "失败"
+          }`}
           type="error"
         />
       )}

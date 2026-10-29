@@ -383,6 +383,34 @@ describe("执行类写操作", () => {
               code: "execution_failed",
               message: "步骤未通过验证（failed）: 必需检查未通过: build",
             },
+            // 服务端在失败响应里附带的结构化执行事实，必须能被原样读到。
+            operation_result: {
+              attempt_number: 1,
+              attempts: 1,
+              developer_finalized: true,
+              exit_code: 0,
+              feedback_persisted: true,
+              finalized: true,
+              finished_at: "2026-10-26T08:10:00Z",
+              infrastructure_error: false,
+              max_attempts: 3,
+              outcome: "completed",
+              repair_decision: "stop",
+              round: 1,
+              started_at: "2026-10-26T08:00:00Z",
+              step_id: "step-1",
+              step_status: "failed",
+              task_id: "task-1",
+              task_status: "developing",
+              validation_failure_summary: "必需检查未通过: build",
+              validation_passed: false,
+              validation_persisted: true,
+              validation_ran: true,
+              validation_status: "completed",
+              validation_verdict: "failed",
+              verification_state: "failed",
+              verified: false,
+            },
           },
           { status: 500 },
         ),
@@ -396,6 +424,8 @@ describe("执行类写操作", () => {
     expect(error.status).toBe(500);
     expect(error.code).toBe("execution_failed");
     expect(error.message).toContain("步骤未通过验证");
+    // 失败响应必须保留服务端给出的结构化执行事实，且不得被读成成功。
+    expect(error.body).toMatchObject({ operation_result: { verified: false } });
   });
 
   it("验证请求解析流程状态、结论与持久化结果", async () => {

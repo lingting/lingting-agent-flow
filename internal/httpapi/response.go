@@ -44,11 +44,35 @@ type ErrorBody struct {
 // ErrorResponse 是统一的错误响应结构，前端只需解析这一个形状。
 type ErrorResponse struct {
 	Error ErrorBody `json:"error"`
+	// OperationResult 是可选的结构化执行事实，只在服务端确实产生了可以安全输出的执行
+	// 结果时出现，缺省时不输出该字段，响应形状与旧版本完全一致。
+	//
+	// 它的存在不改变错误语义：带该字段的响应仍然是失败响应，`error.code` 依旧是权威的
+	// 失败类别，`operation_result.verified` 为 true 也不代表本次 HTTP 请求成功。
+	OperationResult *ExecuteAndValidateStepResponse `json:"operation_result,omitempty"`
 }
 
 // errorResponse 构造错误响应。
 func errorResponse(code, message, requestID string) ErrorResponse {
 	return ErrorResponse{Error: ErrorBody{Code: code, Message: message, RequestID: requestID}}
+}
+
+// writeErrorWithOperationResult 写出可选携带结构化执行事实的统一错误响应。
+//
+// operationResult 为 nil 时与 writeError 完全等价：没有产生可靠执行结果的失败路径保持
+// 原有响应形状。
+func writeErrorWithOperationResult(
+	w http.ResponseWriter,
+	r *http.Request,
+	logger *slog.Logger,
+	status int,
+	code string,
+	message string,
+	operationResult *ExecuteAndValidateStepResponse,
+) {
+	payload := errorResponse(code, message, requestIDFrom(r.Context()))
+	payload.OperationResult = operationResult
+	writeJSON(w, r, logger, status, payload)
 }
 
 // writeJSON 以 JSON 写出响应，编码失败时只记录日志，不再改动已写出的状态码。

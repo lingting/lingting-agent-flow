@@ -886,6 +886,32 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > **未修改任何 Go 代码、HTTP 契约、请求/响应 DTO、领域规则或状态机**；新增前端单元用例 18 个、
 > E2E 用例 12 个，`pnpm test:unit:safe` 626 通过、`pnpm test:e2e:safe` 245 通过 / 0 失败、
 > `pnpm check` 与 `pnpm build` 通过（未执行 Go 测试）。**P4-M5 仍为 `pending`**。
+> **P4 常规工作项（2026-10-31，基线 `origin/master` `630ea42`）：开发—验证闭环失败时保留结构化执行结果。**
+> 交付物为
+> [`P4-execute-and-validate-failure-response.md`](./P4-execute-and-validate-failure-response.md)。
+> 这是"恢复常规功能开发"后的第七个常规工作项，不属于 P4-M1 的 G 项，也不属于 P4-M5。
+> 核实出的问题不是缺能力而是**失败路径漏用已有能力**：闭环的结构化结果类型
+> （`ExecuteAndValidateStepResponse`）与映射函数（`executeAndValidateResponse`）都已存在，
+> 但 `serveExecuteAndValidate` 的两个业务失败分支与 `err != nil` 时的 `writeWorkflowError`
+> 都只写统一错误结构，`verified` / `validation_verdict` / `checks` / `round` / `attempts` 等
+> 真实执行事实不在响应体里；前端 `useExecutionOperations` 只保留 `describeApiError` 的一条
+> 消息，`OperationOutcomePanel` 只渲染 `failure.message`。
+> 本轮在 `httpapi.ErrorResponse` 外层增加**可选** `operation_result`（字段类型就是既有 DTO，
+> 不新增第二套结果模型），并新增 `writeErrorWithOperationResult`；附加条件只有两个：本次请求
+> 确实创建并执行过一次开发尝试（`AttemptID` 非空）、且错误代码不是 `internal_error`
+> （未知异常下无法确认事实可信，也不能越过既有内部错误隐藏策略）。参数非法、不存在、状态
+> 冲突、前置条件缺失、验证配置无效与预算拒绝一律保持原有响应形状。
+> **状态码与 `error.code` 完全不变**（`500 execution_failed` / `500 execution_not_persisted`），
+> 未验证通过的步骤仍然不是 200。前端新增纯函数守卫 `executeAndValidateResultFromBody` 做结构
+> 校验（不做强制类型转换），失败分支把既有 `describeExecuteAndValidateResult` 的事实存入
+> `failure.facts`，面板先显示服务端错误消息、再以"服务端本次执行详情（不代表操作成功）"分组
+> 列出逐条事实；超时 / 网络中断 / 取消仍只提示结果无法确认且不自动重发。
+> **未修改验证结论判定、修复预算、任务状态机、工作流收尾与其他接口的失败语义**；既有测试文件
+> 只更新契约与断言，未新建测试文件。
+> `gofmt -l` / `go vet ./...` 无输出、`go build ./...` 通过、`tsc --noEmit` 通过、
+> `vp lint` 与 `vp fmt --check` 对改动文件通过、`git diff --check` 无输出；
+> **未执行任何测试**（未获测试授权）。**P4-M5 仍为 `pending`**。
+>
 
 ## 四阶段总览
 
@@ -986,6 +1012,7 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - [P4-task-detail-experience-review.md](./P4-task-detail-experience-review.md)
 - [P4-task-detail-panel-organization.md](./P4-task-detail-panel-organization.md)
 - [P4-disabled-action-reasons.md](./P4-disabled-action-reasons.md)
+- [P4-execute-and-validate-failure-response.md](./P4-execute-and-validate-failure-response.md)
 - [remote-test-resource-cleanup.md](./remote-test-resource-cleanup.md)
 
 ## 验收记录

@@ -52,6 +52,11 @@
   `042a33d`）：前者把用户已作出的产品范围决定写进 `AGENTS.md` 与用户文档，后者删除了已证实无生产
   写入方、唯一读取方也不被展示的旧验证模型，遗留表与历史数据保留（未新增删除迁移）。**P4-M5 仍为
   `pending`**，本轮没有产生任何真实使用数据。
+  此后完成**开发—验证闭环失败响应保留结构化执行结果**（2026-10-31，基线 `630ea42`，见
+  [`P4-execute-and-validate-failure-response.md`](./P4-execute-and-validate-failure-response.md)）：
+  把既有闭环 DTO 以可选 `operation_result` 附加到失败响应（只在确实执行过且非 `internal_error`
+  时出现，状态码与 `error.code` 不变），并把真实执行详情接入失败结果面板，
+  `P4-M2-7` §6 的"闭环 500 语义损失"因此闭合；**P4-M5 仍为 `pending`**。
   子任务 **M4-1（失败任务
   [`P4-M4-1-task-retry-web-entry.md`](./P4-M4-1-task-retry-web-entry.md)：前端补齐
   `RetryEligibilityResponse` / `RetryTaskResponse` / `RetryTaskRequest` 类型与
@@ -642,6 +647,27 @@
   因此表与历史数据原样保留，仅清理运行时读写代码（部分清理，不宣称"表已删除"）。
   验证：`gofmt -l internal cmd tests` 无输出、`go vet ./...` 无输出、`go build ./...` 通过；
   **未执行任何测试**（未获测试授权）。
+- **开发—验证闭环失败时保留结构化执行结果已于 2026-10-31 完成**（基线 `origin/master`
+  `630ea42`，"恢复常规功能开发"后的第七个常规工作项），交付物为
+  [`P4-execute-and-validate-failure-response.md`](./P4-execute-and-validate-failure-response.md)：
+  闭环的结构化结果类型与 `executeAndValidateResponse` 映射早已存在，但**失败路径不使用它**——
+  `serveExecuteAndValidate` 的两个业务失败分支和在 `err != nil` 时的 `writeWorkflowError` 都只写
+  统一错误结构，`verified` / `validation_verdict` / `checks` / `round` / `attempts` 等真实执行事实
+  根本不在响应体里，前端 `useExecutionOperations` 也只保留 `describeApiError` 的一条消息，
+  `OperationOutcomePanel` 只显示 `failure.message`。本轮在 `httpapi.ErrorResponse` 上增加**可选**
+  `operation_result`（复用既有 `ExecuteAndValidateStepResponse`，不新增第二套 DTO），并新增
+  `writeErrorWithOperationResult`：只有"确实创建并执行过一次开发尝试（`AttemptID` 非空）且不是
+  未知内部错误"时才附加，参数 / 不存在 / 冲突 / 前置条件 / 验证配置无效与 `internal_error` 一律
+  保持原有响应形状。状态码与 `error.code` 完全不变（仍为 `500 execution_failed` /
+  `500 execution_not_persisted`），失败没有被改写成 200。前端新增纯函数守卫
+  `executeAndValidateResultFromBody` 做结构校验（不做强制类型转换），失败分支把
+  `describeExecuteAndValidateResult` 的事实存入 `failure.facts`，面板先显示服务端错误消息、
+  再以"服务端本次执行详情（不代表操作成功）"分组列出逐条事实；超时 / 网络中断 / 取消仍只提示
+  结果无法确认且不自动重发，防重、任务票据与迟到响应丢弃逻辑未改动。**未修改领域规则、状态机、
+  验证结论判定与工作流收尾**；既有测试文件只更新契约与断言（未新建测试文件）。
+  `gofmt -l` / `go vet ./...` 无输出、`go build ./...` 通过、`tsc --noEmit` 通过、
+  `vp lint` 与 `vp fmt --check` 对改动文件通过、`git diff --check` 无输出；
+  **未执行任何测试**（未获测试授权）。**P4-M5 仍为 `pending`**。
 - **下一步**：P3 阶段已全部完成（M1–M5 均 `completed`），P4-M1、M2-1…M2-7、M3、M4、G12 与
   任务详情页体验复核、任务创建配置继承与显式覆盖、创建任务表单的字段收敛、任务详情页面板职责与
   操作可达性复核均已完成（见上方
@@ -654,11 +680,13 @@
   `verification_results` 遗留模型清理与"步骤级动作按钮的禁用原因"均已于 2026-10-29 / 2026-10-30
   完成（见 [`P4-task-detail-panel-organization.md`](./P4-task-detail-panel-organization.md) §10），
   因此**当前没有任何已立项的常规功能候选**，下一项需要先重新盘点并给出代码证据。
+  闭环失败响应的结构化事实丢失已于 2026-10-31 处理（见
+  [`P4-execute-and-validate-failure-response.md`](./P4-execute-and-validate-failure-response.md)），
+  它是本轮在"重新盘点"之前唯一有直接代码证据的缺口。
   P4-M2-7 的剩余风险见
   [`P4-M2-7-web-execution-operations.md`](./P4-M2-7-web-execution-operations.md) §6：
-  同步长请求没有**流式**进度推送（轮询已由 M3-7 交付，SSE 仍未实现）、闭环未通过验证时
-  结构化事实只在 500 错误体之外
-  （需后端调整契约才能展示完整结论）、修复周期可用性只能粗判（预算由服务端判定）、
+  同步长请求没有**流式**进度推送（轮询已由 M3-7 交付，SSE 仍未实现）、
+  修复周期可用性只能粗判（预算由服务端判定）、
   计划不可覆盖、会话查询为按尝试的 N+1 请求。
   P3-M5 的交接事项见
   [`P3-M5-multi-task-acceptance.md`](./P3-M5-multi-task-acceptance.md) §8：并发上限是
@@ -768,6 +796,7 @@
 | [`P4-task-create-form-field-convergence.md`](./P4-task-create-form-field-convergence.md) | P4 常规开发：创建任务表单的字段收敛（逐字段继承核查与三分类证据、3 处交互负担的代码证据、只折叠可继承文本字段的依据、收起摘要取自表单有效值与来源、语言环境与版本保持常显的理由、折叠保持挂载与校验失败自动展开、修改文件、测试与构建结果、剩余风险、下一项候选、与 P4-M5 的关系） |
 | [`P4-task-detail-panel-organization.md`](./P4-task-detail-panel-organization.md) | P4 常规开发：任务详情页面板职责与操作可达性复核（12 个面板的数据来源 / 归属 / 刷新触发、上一轮 6 项修复的回归核对、重复展示与折叠分组的逐项判定、4 处缺陷的代码证据与最小修复、修改文件与行为变化、测试与构建结果、用例有效性核对、保留的合理设计与待验证假设、剩余风险、下一项候选、与 P4-M5 的关系） |
 | [`P4-disabled-action-reasons.md`](./P4-disabled-action-reasons.md) | P4 常规开发：禁用操作的原因提示（四类操作的既有准入条件与原因来源、`{ allowed, reason }` 纯函数与布尔投影的关系、antd `Button` / `LinkButton` / `Tooltip` 的真实 DOM 行为核实、可聚焦包装层与键盘可读方案、修改文件与行为变化、测试与构建结果、保留的设计与剩余风险、与 P4-M5 的关系） |
+| [`P4-execute-and-validate-failure-response.md`](./P4-execute-and-validate-failure-response.md) | P4 常规开发：开发—验证闭环失败时保留结构化执行结果（失败路径丢失执行事实的调用链证据、`operation_result` 的放置位置与兼容性依据、附加条件与安全边界、保留 / 省略的事实清单、前端结构守卫与失败面板展示、业务失败与结果不确定的边界、非测试检查结果与剩余风险） |
 
 ## 下一步工作的选择规则
 

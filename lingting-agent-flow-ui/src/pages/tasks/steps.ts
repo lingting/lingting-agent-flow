@@ -803,6 +803,38 @@ export function describeExecuteStepsResult(result: ExecuteStepsResponse): Operat
   };
 }
 
+/**
+ * 从失败响应体中取出开发—验证闭环的结构化执行事实。
+ *
+ * 服务端只在本次请求确实产生了执行结果时才附加 `operation_result`；前置条件失败、
+ * 状态冲突、目标不存在与其他接口的错误响应都不会有该字段，此时返回 `undefined`，
+ * 界面维持原来的错误展示。
+ *
+ * 这里只做结构校验，不推断业务结论：字段取值照实交给 `describeExecuteAndValidateResult`
+ * 翻译，`verified` 是否成立仍由服务端响应决定。
+ */
+export function executeAndValidateResultFromBody(
+  body: unknown,
+): ExecuteAndValidateStepResponse | undefined {
+  if (typeof body !== "object" || body === null) return undefined;
+  const candidate = (body as { operation_result?: unknown }).operation_result;
+  if (typeof candidate !== "object" || candidate === null) return undefined;
+  const facts = candidate as Partial<ExecuteAndValidateStepResponse>;
+  if (
+    typeof facts.task_id !== "string" ||
+    typeof facts.step_id !== "string" ||
+    typeof facts.validation_ran !== "boolean" ||
+    typeof facts.validation_persisted !== "boolean" ||
+    typeof facts.verified !== "boolean" ||
+    typeof facts.step_status !== "string" ||
+    typeof facts.task_status !== "string" ||
+    typeof facts.repair_decision !== "string"
+  ) {
+    return undefined;
+  }
+  return facts as ExecuteAndValidateStepResponse;
+}
+
 /** 把开发—验证闭环响应翻译为用户可读结论：只有 `verified` 才算通过 */
 export function describeExecuteAndValidateResult(
   result: ExecuteAndValidateStepResponse,

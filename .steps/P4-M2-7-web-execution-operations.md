@@ -149,9 +149,14 @@ tests/e2e/task-create-selectors.spec.ts` → 2 failed / 21 passed（与本轮相
    最长可达数小时（超时上限 21600 秒）。前端不设客户端超时，因此一次长执行期间页面只能
    显示"正在执行"，没有进度推送（进度轮询归 P4-M3 M3-7）。用户刷新页面会丢失本地结论
    （服务端记录仍在）。
-2. **闭环 500 的语义损失**：未通过验证时服务端返回统一错误结构，`verified`、`round`、
-   `attempts`、`checks` 等结构化事实不在响应体内。前端只能展示服务端 message；要展示完整
-   结构需要后端调整契约，本轮按"不修改后端 API 契约来迁就 UI"的约束未做。
+2. **闭环 500 的语义损失 —— 已由后续工作处理（2026-10-31）**：本条原始结论是"未通过验证
+   时服务端返回统一错误结构，`verified`、`round`、`attempts`、`checks` 等结构化事实不在响应体
+   内，要展示完整结构需要后端调整契约"。该契约调整已实施：`httpapi.ErrorResponse` 增加可选
+   `operation_result`（复用 `ExecuteAndValidateStepResponse`），只在确实产生开发尝试且不是
+   未知内部错误时附加；前端在失败面板中显示真实执行详情并明确"不代表操作成功"。详见
+   [`P4-execute-and-validate-failure-response.md`](./P4-execute-and-validate-failure-response.md)。
+   仍未处理的部分：失败响应不含原始 stdout / stderr 与完整容器输出（需要完整输出时仍要查
+   执行记录）。
 3. **修复周期可用性只能粗判**：前端只能排除"任务不允许推进"与"步骤被占用"两类现场，
    预算是否用尽、上一周期是否收敛只能由服务端判定，因此按钮常亮但可能被 409 拒绝。
    这是有意取舍：拒绝原因原样展示，不伪造可用性。

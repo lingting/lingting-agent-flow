@@ -37,6 +37,7 @@ import {
   describeOpenRepairCycleResult,
   describePlanResult,
   describeValidateResult,
+  executeAndValidateResultFromBody,
   isUncertainOperationError,
   OPERATION_UNKNOWN_OUTCOME_HINT,
   type OperationOutcome,
@@ -60,6 +61,18 @@ export type OperationTarget = {
   attemptID?: string;
 };
 
+/**
+ * 一次失败的展示信息。
+ *
+ * `facts` 只在服务端确实在失败响应中给出了结构化执行事实（`operation_result`）时存在，
+ * 逐条说明这次执行真实发生了什么。它与 `message` 一起展示，但不会改变"这次操作没有
+ * 成功"的结论，也不能被读作验证通过。
+ */
+export type OperationFailure = OperationTarget & {
+  message: string;
+  facts?: string[];
+};
+
 /** 动作区的完整状态 */
 export type ExecutionOperationsState = {
   /** 正在执行的动作；存在时所有动作按钮都应禁用 */
@@ -67,7 +80,7 @@ export type ExecutionOperationsState = {
   /** 最近一次成功结论 */
   outcome?: OperationTarget & { result: OperationOutcome };
   /** 最近一次请求失败的业务错误 */
-  failure?: OperationTarget & { message: string };
+  failure?: OperationFailure;
   /**
    * 请求结果无法确认（超时、网络中断或调用方取消）。
    *
@@ -89,6 +102,20 @@ export const OPERATION_LABEL: Record<OperationKey, string> = {
   "initialize-code": "初始化代码",
   "open-repair-cycle": "开启新执行周期",
 };
+
+/**
+ * 从失败响应中取出闭环执行事实，并翻译为逐条说明。
+ *
+ * 只有开发—验证闭环会在失败响应里附加 `operation_result`；其他动作的错误响应没有该
+ * 字段，因此显示方式完全不变。超时、网络中断与调用方取消拿不到服务端响应，这里返回
+ * `undefined`，由 `uncertain` 单独提示"结果无法确认"。
+ */
+function failureFactsOf(cause: unknown): string[] | undefined {
+  if (!(cause instanceof ApiError)) return undefined;
+  const result = executeAndValidateResultFromBody(cause.body);
+  if (!result) return undefined;
+  return describeExecuteAndValidateResult(result).details;
+}
 
 /**
  * 执行类操作的调用入口。
@@ -160,7 +187,16 @@ export function useExecutionOperations(options: {
             cause instanceof ApiError && isUncertainOperationError(cause.kind)
               ? OPERATION_UNKNOWN_OUTCOME_HINT
               : undefined;
-          setState({ failure: { ...target, message: describeApiError(cause) }, uncertain });
+          // 服务端在失败响应里给出结构化执行事实时一并保留：它与错误说明并列展示，
+          // 既不会把失败读成成功，也不会因为只显示一条消息而丢掉已经发生的执行细节。
+          setState({
+            failure: {
+              ...target,
+              message: describeApiError(cause),
+              facts: failureFactsOf(cause),
+            },
+            uncertain,
+          });
         }
       } finally {
         runningRef.current = false;

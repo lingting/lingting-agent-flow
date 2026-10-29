@@ -36,6 +36,7 @@ import {
   describeStepExecution,
   describeValidateResult,
   executionOutcomeLabel,
+  executeAndValidateResultFromBody,
   REVIEW_STATUS_LABEL,
   reviewStatusLabel,
   STEP_STATUS_META,
@@ -634,6 +635,16 @@ describe("执行结论翻译", () => {
     expect(outcome.details.join(" ")).toContain("验证是否发起：是");
     expect(outcome.details.join(" ")).toContain("必需检查未通过: build");
     expect(outcome.details.join(" ")).toContain("已消耗 2 / 3 次尝试");
+    // 失败响应体里的结构化执行事实必须能被读出，且不会被误判为成功。
+    const failureBody = {
+      error: { code: "execution_failed", message: "步骤未通过验证" },
+      operation_result: result,
+    };
+    expect(executeAndValidateResultFromBody(failureBody)?.verified).toBe(false);
+    // 没有真实执行结果的失败（状态冲突等）不得被读成执行详情。
+    expect(
+      executeAndValidateResultFromBody({ error: { code: "state_conflict", message: "冲突" } }),
+    ).toBeUndefined();
   });
 
   it("闭环未发起验证时如实说明原因", () => {

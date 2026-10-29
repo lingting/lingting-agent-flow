@@ -402,6 +402,23 @@ func TestExecuteAndValidateAPIVerificationFailedReturns500(t *testing.T) {
 	if response.Error.Code != httpapi.CodeExecutionFailed {
 		t.Fatalf("错误代码不符: %s", response.Error.Code)
 	}
+	// 执行已经真实发生：失败响应必须带上结构化执行事实，而不是只给一条错误消息。
+	facts := response.OperationResult
+	if facts == nil {
+		t.Fatalf("闭环已产生执行结果时失败响应必须携带 operation_result")
+	}
+	if facts.Verified {
+		t.Fatalf("未通过验证的响应不得标记为已验证: %+v", facts)
+	}
+	if !facts.ValidationRan || facts.ValidationVerdict != string(domain.VerificationVerdictFailed) {
+		t.Fatalf("结构化结果必须保留真实验证事实: %+v", facts)
+	}
+	if len(facts.Checks) == 0 {
+		t.Fatal("失败响应必须保留逐项检查结果")
+	}
+	if facts.StepStatus == string(domain.StepStatusCompleted) {
+		t.Fatalf("失败响应不得把步骤展示为已完成: %s", facts.StepStatus)
+	}
 	if response.Error.Message == "" {
 		t.Fatal("错误响应必须给出说明")
 	}
@@ -437,6 +454,24 @@ func TestExecuteAndValidateAPIDeveloperFailureReturns500(t *testing.T) {
 	}
 	if fixture.port.execCalls != 0 {
 		t.Fatalf("开发失败后不应执行任何检查命令: %d", fixture.port.execCalls)
+	}
+	// 开发失败同样是真实执行：结构化事实必须保留，但验证没有被发起。
+	var response httpapi.ErrorResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("解析错误响应失败: %v", err)
+	}
+	facts := response.OperationResult
+	if facts == nil {
+		t.Fatalf("开发阶段已执行时失败响应必须携带 operation_result")
+	}
+	if facts.ValidationRan {
+		t.Fatal("开发失败不应声称发起了验证")
+	}
+	if facts.Outcome != string(domain.StepExecutionFailed) {
+		t.Fatalf("开发结论不符: %s", facts.Outcome)
+	}
+	if facts.Verified {
+		t.Fatal("开发失败不得标记为已验证")
 	}
 }
 
@@ -474,6 +509,9 @@ func TestExecuteAndValidateAPINotFound(t *testing.T) {
 	if response.Error.Code != httpapi.CodeNotFound {
 		t.Fatalf("错误代码不符: %s", response.Error.Code)
 	}
+	if response.OperationResult != nil {
+		t.Fatal("没有产生执行结果时不得附加 operation_result")
+	}
 	if fixture.port.agentCalls != 0 {
 		t.Fatal("目标不存在时不应调用执行器")
 	}
@@ -508,6 +546,9 @@ func TestExecuteAndValidateAPIConflict(t *testing.T) {
 	if response.Error.Code != httpapi.CodeConflict {
 		t.Fatalf("错误代码不符: %s", response.Error.Code)
 	}
+	if response.OperationResult != nil {
+		t.Fatal("状态冲突没有产生执行结果，不得附加 operation_result")
+	}
 	if fixture.port.agentCalls != 0 {
 		t.Fatal("状态冲突时不应调用执行器")
 	}
@@ -538,6 +579,9 @@ func TestExecuteAndValidateAPIInvalidConfigReturns400(t *testing.T) {
 	}
 	if response.Error.Code != httpapi.CodeInvalidRequest {
 		t.Fatalf("错误代码不符: %s", response.Error.Code)
+	}
+	if response.OperationResult != nil {
+		t.Fatal("验证配置无效时尚未开始执行，不得附加 operation_result")
 	}
 	if fixture.port.agentCalls != 0 {
 		t.Fatal("验证配置无效时不应调用执行器")

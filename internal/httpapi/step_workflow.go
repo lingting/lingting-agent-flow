@@ -176,27 +176,33 @@ func (h *stepExecutionHandler) serveExecuteAndValidate(
 		return
 	}
 	response := executeAndValidateResponse(result)
+	// 失败响应同样携带已经产生的执行事实：调用方不必只凭一条错误消息猜测执行细节。
+	// 附加字段不改变失败语义——HTTP 状态码与错误代码仍是权威结论，验证未通过的步骤
+	// 永远返回 500。
+	operationResult := workflowOperationResult(result)
 	switch {
 	case result.ValidationRan && !result.ValidationPersisted:
 		// 验证结论没能可靠保存时不能返回成功。
-		writeError(
+		writeErrorWithOperationResult(
 			w,
 			r,
 			h.logger,
 			http.StatusInternalServerError,
 			CodeExecutionNotPersisted,
 			workflowNotPersistedMessage(result),
+			operationResult,
 		)
 		return
 	case !result.Verified:
 		// 未验证通过的步骤不是成功响应：调用方必须看到真实状态与原因。
-		writeError(
+		writeErrorWithOperationResult(
 			w,
 			r,
 			h.logger,
 			http.StatusInternalServerError,
 			CodeExecutionFailed,
 			workflowFailureMessage(result),
+			operationResult,
 		)
 		return
 	}
@@ -213,13 +219,14 @@ func (h *stepExecutionHandler) writeWorkflowError(
 	err error,
 ) {
 	if errors.Is(err, app.ErrValidationNotPersisted) {
-		writeError(
+		writeErrorWithOperationResult(
 			w,
 			r,
 			h.logger,
 			http.StatusInternalServerError,
 			CodeExecutionNotPersisted,
 			workflowNotPersistedMessage(result),
+			workflowOperationResult(result),
 		)
 		return
 	}
@@ -259,7 +266,29 @@ func (h *stepExecutionHandler) writeWorkflowError(
 		h.logger.ErrorContext(r.Context(), "步骤闭环接口处理失败", "error", message)
 		message = "服务内部错误"
 	}
-	writeError(w, r, h.logger, status, code, message)
+	// 只有非内部错误才附加执行事实：未知异常下既无法确认结构化结果可信，也不应把
+	// 内部错误原文随结构化字段带进响应，既有内部错误隐藏策略必须继续生效。
+	var operationResult *ExecuteAndValidateStepResponse
+	if code != CodeInternal {
+		operationResult = workflowOperationResult(result)
+	}
+	writeErrorWithOperationResult(w, r, h.logger, status, code, message, operationResult)
+}
+
+// workflowOperationResult 返回可以安全附加到失败响应中的闭环执行事实。
+//
+// 判定只看一个事实：本次请求是否真的创建并执行过一次开发尝试（AttemptID 非空）。
+// 状态冲突、前置条件缺失、验证配置无效与目标不存在都在创建 Attempt 之前返回，此时任何
+// "执行结论"都是零值推断，不能附加到响应里。
+//
+// 返回的结构体复用成功路径的同一套映射，字段仍来自真实执行：持久化标记与写入失败原因
+// 如实保留，因此"已执行但未落库"不会被读成成功，也不会被读成代码验证失败。
+func workflowOperationResult(result app.ExecuteAndValidateResult) *ExecuteAndValidateStepResponse {
+	if result.AttemptID.IsEmpty() {
+		return nil
+	}
+	response := executeAndValidateResponse(result)
+	return &response
 }
 
 // toAppRequest 把请求体转换为应用层请求。
