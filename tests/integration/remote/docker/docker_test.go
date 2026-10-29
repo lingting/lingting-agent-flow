@@ -166,14 +166,21 @@ func randomSuffix(t *testing.T) string {
 
 // remoteTestRoot 返回本次用例专属的远程测试目录。
 //
-// 该目录位于远程 Home 下的 agentflow-tests 中，与生产工作空间完全隔离。
+// 目录统一位于远程 Home 下的 .lingting/agentflow-tests/docker，与生产工作空间
+// (~/.lingting/agentflow) 完全隔离；路径解析与目录创建统一由 testkit 提供，避免各
+// 测试包各自拼接路径导致目录漂移。
 func remoteTestRoot(t *testing.T, ctx context.Context, client sshclient.Client, suffix string) string {
 	t.Helper()
-	home, err := sshclient.ResolveHome(ctx, client, remoteOpTimeout)
+	root, err := testkit.ResolveRemoteTestRoot(
+		ctx,
+		client,
+		remoteOpTimeout,
+		testkit.RemoteTestPackageDocker,
+		suffix,
+	)
 	if err != nil {
-		t.Fatalf("解析远程 Home 失败: %v", err)
+		t.Fatalf("准备远程测试目录失败: %v", err)
 	}
-	root := path.Join(home, "agentflow-tests", "docker", suffix)
 	t.Logf("REMOTE_TEST_DIR=%s", root)
 	return root
 }
@@ -250,14 +257,8 @@ func TestRemoteDockerContainerLifecycle(t *testing.T) {
 	dockerID := createAndStartTestContainer(t, ctx, runner, container, imageRef)
 	t.Logf("TEST_CONTAINER=%s DOCKER_ID=%s", container.Name, dockerID)
 
-	// 测试结束后只删除本次创建并已核验所有权的测试容器。
-	t.Cleanup(func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cleanupCancel()
-		if _, err := runner.RemoveContainer(cleanupCtx, dockerID); err != nil {
-			t.Logf("WARN 清理测试容器失败: %v", err)
-		}
-	})
+	// 测试容器由 createAndStartTestContainer 在创建之前登记清理责任：用例结束时会
+	// 停止并删除容器，并按真实远程状态核验它确实已不存在。
 
 	verifyOwnershipAndRunning(t, ctx, runner, container, dockerID)
 	verifyExecAndLogs(t, ctx, runner, dockerID)
@@ -359,6 +360,12 @@ func createAndStartTestContainer(
 	imageRef string,
 ) string {
 	t.Helper()
+	// 创建之前登记清理责任：此时容器名称已知，即使创建返回失败或后续启动失败，
+	// 也不会因为提前退出而失去清理与核验能力。
+	tracked := containerRun.Track(t, runner, testkit.TrackedContainer{
+		Name:   container.Name,
+		Record: &container,
+	})
 	dockerID, err := runner.CreateContainer(ctx, docker.CreateContainerSpec{
 		Container: container,
 		ImageRef:  imageRef,
@@ -367,6 +374,7 @@ func createAndStartTestContainer(
 	if err != nil {
 		t.Fatalf("创建测试容器失败: %v", err)
 	}
+	tracked.DockerID = dockerID
 	if err := runner.StartContainer(ctx, dockerID); err != nil {
 		t.Fatalf("启动测试容器失败: %v", err)
 	}

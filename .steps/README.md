@@ -658,7 +658,20 @@
   本轮同时修复了 1 处第一版必需缺陷：验证失败**只由 Validator 语义审查给出**时，结构化反馈不会
   被写入，修复循环停在 `feedback_unavailable` 并被错误归类为"验证证据未可靠写入"；修复后该路径能
   进入有上限的修复循环并在上限处停止，新增 2 个链路级用例覆盖。
-  **真实远程链路已复核通过，前端功能开发冻结解除**，后续按 P4 剩余项推进。
+  **真实远程链路已复核通过，前端功能开发冻结解除**。
+- **远程真实测试资源治理（2026-10-29，基线 `master` `7d96dce`）已完成，结论 `completed`**，
+  交付物为 [`remote-test-resource-cleanup.md`](./remote-test-resource-cleanup.md)：
+  全部远程真实测试（`remote/{docker,agent,codesaver,workflow}` 与 `tests/integration/ssh`）
+  的远程主机资源目录统一到 `~/.lingting/agentflow-tests/<测试包>/<用例标识>`（旧
+  `~/agentflow-tests` 与 `~/.lingting/agentflow-e2e` 废弃）；测试容器改为**创建前登记清理
+  责任**、删除后**核验真实状态**，并在每个测试包的 `TestMain` 中于 `testkit.Main` 内、
+  日志刷新之前执行**基于真实 `docker ps -a` 的零残留最终核验**（核验失败会改变进程退出码）。
+  本轮真实执行 `go test -count=1 -timeout 50m -p 1 -v ./tests/integration/remote/...`
+  → 13 passed / 4 个包，4 个包的 `REMOTE_CONTAINER_VERIFY` 全部 `PASS`；测试结束后远程
+  `docker ps -a` 只剩测试前就存在的非测试容器 `pgsql-server`，测试前缀容器数量为 0。
+  过程中发现并修复了 `remote/codesaver` 的 `defer client.Close()` 早于容器清理执行导致的
+  真实残留（首次运行即被最终核验判 `FAIL`，不是静默通过）。**下一步先收口该资源治理结论，
+  再决定 P4 前端工作的恢复时机。**
 
 > 阶段与里程碑的状态可能随开发推进而变化，以上仅为撰写本路线图时的快照；最新状态
 > 以 `ROADMAP.md` 的"当前实现状态摘要"、`P1-single-task-e2e.md` 的里程碑表与
@@ -670,6 +683,7 @@
 |---|---|
 | [`ROADMAP.md`](./ROADMAP.md) | 项目最终业务目标、端到端主流程概览、四阶段总览、推进顺序、现状摘要、暂缓事项 |
 | [`SERVER-v1-acceptance.md`](./SERVER-v1-acceptance.md) | 服务端第一版验收记录：范围裁定（必需 / 证据不足 / 明确非目标 / 文档冲突）、7 环节验收矩阵与代码+测试证据、本轮实际执行的命令与结果、真实远程完整链路与全部远程套件的实际结果（含上午因出网受阻失败的根因与排除过程）、修复的第一版缺陷、剩余后续增强与最终判定 |
+| [`remote-test-resource-cleanup.md`](./remote-test-resource-cleanup.md) | 远程真实测试资源治理：统一远程测试目录（`~/.lingting/agentflow-tests`）、容器创建前登记清理责任、删除后按真实状态核验、包级 `docker ps -a` 零残留最终核验、实施中发现并修复的真实残留缺陷、本轮实际远程执行结果与剩余风险 |
 | [`P1-single-task-e2e.md`](./P1-single-task-e2e.md) | P1：单任务完整开发闭环（当前优先，最详细） |
 | [`P2-reliability-recovery.md`](./P2-reliability-recovery.md) | P2：流程可靠性与恢复 |
 | [`P2-M1-recovery-boundaries.md`](./P2-M1-recovery-boundaries.md) | P2-M1：全链路状态持久化与恢复边界清单（14 阶段矩阵、启动恢复调用链、缺陷与测试缺口） |

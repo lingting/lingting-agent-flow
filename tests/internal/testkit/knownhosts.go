@@ -31,7 +31,10 @@ import (
 // 时视为配置错误并让测试失败，避免"配置了文件却仍然报主机密钥未知"的误判。
 func KnownHostsSources(t *testing.T) []string {
 	t.Helper()
-	sources, explicit := knownHostsSourcePaths(t)
+	sources, explicit, err := resolveKnownHostsSources()
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	if len(sources) == 0 {
 		if explicit {
 			t.Fatalf(
@@ -41,19 +44,31 @@ func KnownHostsSources(t *testing.T) []string {
 		}
 		return nil
 	}
-	snapshotDir := filepath.Join(Dir(t), "known_hosts-snapshot")
+	snapshots, err := snapshotKnownHosts(Dir(t), sources)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	return snapshots
+}
+
+// snapshotKnownHosts 把 known_hosts 来源复制进指定目录并返回快照路径。
+//
+// 校验只读快照，用户真实文件不会被任何代码写入；该函数不依赖 *testing.T，
+// 因此包级最终核验也可以复用同一套快照逻辑。
+func snapshotKnownHosts(baseDir string, sources []string) ([]string, error) {
+	snapshotDir := filepath.Join(baseDir, "known_hosts-snapshot")
 	if err := os.MkdirAll(snapshotDir, 0o700); err != nil {
-		t.Fatalf("创建 known_hosts 快照目录失败: %s: %v", snapshotDir, err)
+		return nil, fmt.Errorf("创建 known_hosts 快照目录失败: %s: %w", snapshotDir, err)
 	}
 	snapshots := make([]string, 0, len(sources))
 	for index, source := range sources {
 		target := filepath.Join(snapshotDir, fmt.Sprintf("%02d_%s", index, filepath.Base(source)))
 		if err := copyKnownHostsFile(source, target); err != nil {
-			t.Fatalf("复制 known_hosts 快照失败: %s -> %s: %v", source, target, err)
+			return nil, fmt.Errorf("复制 known_hosts 快照失败: %s -> %s: %w", source, target, err)
 		}
 		snapshots = append(snapshots, target)
 	}
-	return snapshots
+	return snapshots, nil
 }
 
 // knownHostsSourcePaths 解析参与校验的 known_hosts 来源路径。
@@ -61,31 +76,50 @@ func KnownHostsSources(t *testing.T) []string {
 // explicit 表示这些路径来自配置而不是本机 OpenSSH 的默认位置。
 func knownHostsSourcePaths(t *testing.T) (paths []string, explicit bool) {
 	t.Helper()
-	config, _ := LoadSSHConfig(t)
-	for _, path := range config.KnownHosts {
+	paths, explicit, err := resolveKnownHostsSources()
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	return paths, explicit
+}
+
+// resolveKnownHostsSources 解析参与校验的 known_hosts 来源路径，不依赖 *testing.T。
+//
+// 显式配置但文件不可读时返回错误而不是回落到空信任库，使"配置写错"与"连接层缺陷"
+// 可以区分；包级最终核验复用同一套解析逻辑。
+func resolveKnownHostsSources() (paths []string, explicit bool, err error) {
+	configDir, err := configDirPath()
+	if err != nil {
+		return nil, false, err
+	}
+	configPath := filepath.Join(configDir, SSHConfigFile)
+	var document sshDocument
+	if _, decodeErr := decodeDocument(configPath, &document); decodeErr != nil {
+		return nil, false, decodeErr
+	}
+	for _, path := range document.SSH.KnownHosts {
 		trimmed := strings.TrimSpace(path)
 		if trimmed == "" {
 			continue
 		}
 		explicit = true
-		if _, err := os.Stat(trimmed); err != nil {
-			t.Fatalf(
-				"%s 中 ssh.known_hosts 指向的文件不可读: %s: %v"+
+		if _, statErr := os.Stat(trimmed); statErr != nil {
+			return nil, true, fmt.Errorf(
+				"%s 中 ssh.known_hosts 指向的文件不可读: %s: %w"+
 					"（请修改配置，或删除该字段以复用本机 ~/.ssh/known_hosts）",
-				ConfigPath(t, SSHConfigFile),
+				configPath,
 				trimmed,
-				err,
+				statErr,
 			)
 		}
 		paths = append(paths, trimmed)
 	}
 	if len(paths) > 0 {
-		return paths, explicit
+		return paths, explicit, nil
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Logf("无法解析本机用户 Home，主机密钥校验没有可用的 known_hosts 来源: %v", err)
-		return nil, false
+	home, homeErr := os.UserHomeDir()
+	if homeErr != nil {
+		return nil, false, nil
 	}
 	for _, candidate := range []string{
 		filepath.Join(home, ".ssh", "known_hosts"),
@@ -96,7 +130,7 @@ func knownHostsSourcePaths(t *testing.T) (paths []string, explicit bool) {
 		}
 		paths = append(paths, candidate)
 	}
-	return paths, false
+	return paths, false, nil
 }
 
 // copyKnownHostsFile 把一个 known_hosts 文件复制到测试工作空间。

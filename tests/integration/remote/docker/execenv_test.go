@@ -46,13 +46,7 @@ func TestRemoteExecPassesWorkDirAndEnv(t *testing.T) {
 	container := newRemoteTestContainer(t, imageRef, imageID, suffix)
 	dockerID := createAndStartTestContainer(t, ctx, runner, container, imageRef)
 	t.Logf("TEST_CONTAINER=%s DOCKER_ID=%s", container.Name, dockerID)
-	t.Cleanup(func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cleanupCancel()
-		if _, err := runner.RemoveContainer(cleanupCtx, dockerID); err != nil {
-			t.Logf("WARN 清理测试容器失败: %v", err)
-		}
-	})
+	// 容器清理责任已在创建前登记，用例结束时会复核远程状态。
 
 	// 准备容器内项目目录，模拟执行环境的工作区。
 	if _, err := runner.ExecCommandIn(ctx, dockerID, []string{

@@ -481,3 +481,62 @@ Planner 生成 2 个步骤并落库（每步都带任务级必需命令）；Dev
    结论为 `confirmed_applied` 且不重放。
 3. **给 Clone 失败信息补上实际传输目标**（诊断可读性）：在 `internal/source` 的错误摘要中包含
    解析后的主机与端口（不泄露凭据），避免再次出现"看错误文本推测端口"的情况。
+
+## 11. 补充验收：远程真实测试资源治理（2026-10-29 追加）
+
+> 本节是**第一版验收之后的补充要求**，不重复 §1–§10 的审计，也不改写任何历史结论：
+> 上面记录的基线、命令与 `PASS` 结果都保留为当时那一轮的事实。本节只记录新增的
+> "远程真实测试目录统一 + 测试容器零残留"要求的实施与验收。
+> 交付物：[`remote-test-resource-cleanup.md`](./remote-test-resource-cleanup.md)。
+
+### 11.1 新增要求
+
+1. 远程真实测试资源统一到 `~/.lingting/agentflow-tests/<测试包>/<用例标识>`
+   （废弃 `~/agentflow-tests` 与 `~/.lingting/agentflow-e2e`）。
+2. 每个测试容器在创建之前登记清理责任；创建失败、启动失败、中途失败与正常结束都能回收。
+3. 清理必须核验真实状态：删除后容器仍在或状态无法确认即判失败，不允许只 `WARN` 后通过。
+4. 每个真实远程测试包在全部测试结束后、日志刷新之前，用真实 `docker ps -a` 做零残留最终
+   核验，核验失败会改变进程退出码。
+5. 生产容器、其他测试运行的活动容器、共享镜像与缓存卷不得被误删。
+
+### 11.2 本轮实际执行的验证
+
+| 命令 | 结果 |
+|---|---|
+| `gofmt -l cmd internal tests` | 无输出 |
+| `go vet ./...` | 无问题 |
+| `go test -count=1 ./tests/unit/testkit/...` | 50 passed |
+| `go test -count=1 ./tests/integration/local/docker/...` | 17 passed |
+| `go test -count=1 ./tests/integration/local/workflow/...` | 116 passed |
+| `go test -count=1 -timeout 50m -p 1 -v ./tests/integration/remote/...` | **13 passed / 0 failed**（`remote/docker` 6、`remote/agent` 2、`remote/codesaver` 1、`remote/workflow` 4） |
+| `go test -count=1 ./tests/integration/ssh/...` | 6 passed |
+
+远程零残留证据（测试结束后直接查询远程主机）：
+
+```text
+279fd62835cf  pgsql-server  running  Up 3 hours      # 测试前就存在的非测试容器
+docker ps -a --format '{{.Names}}' | grep -cE '^agentflow-(test|codesaver)-'  →  0
+```
+
+四个测试包各自的日志均输出 `REMOTE_CONTAINER_VERIFY run=<包> status=PASS` 与
+`FINALIZER name=remote-container-cleanup-<包> status=PASS`；`baseline=1 final=1`
+与上述清单一致。
+
+### 11.3 本轮发现并修复的缺陷
+
+`tests/integration/remote/codesaver` 用 `defer client.Close()` 关闭 SSH 连接，而容器清理
+注册为 `t.Cleanup`：`defer` 先于 `t.Cleanup` 执行，导致清理拿不到连接
+（`ssh_unavailable`），容器真实残留。新的最终核验立刻判为
+`REMOTE_CONTAINER_VERIFY ... status=FAIL` 并让进程以非 0 退出（未静默通过），随后把连接
+关闭改为 `workspace.Cleanup(client.Close)`，残留容器按名称与 `agentflow.managed` 标签核验
+归属后手工清除，重跑得到零残留。
+
+### 11.4 与第一版历史结论的关系
+
+- §5.1 的"4 passed / 6 passed / 2 passed / 1 passed"是**第一版验收那一轮**的事实，保持原样；
+  §11.2 是本轮在补充要求下的实际执行结果。
+- 第一版判定（`completed`）不变；本轮新增要求也判定 `completed`。
+- 遗留风险（不影响本轮判定）：`TestRemoteE2EFullChain` 的规划阶段步骤继承任务级文件检查，
+  真实模型输出不确定时会出现业务断言抖动；本轮同一份代码两次重跑均 `PASS`，该抖动与资源
+  回收无关，详见 `remote-test-resource-cleanup.md` §6.4 / §8。
+- 下一项工作：先收口本节的资源治理结论，再决定 P4 前端（`P4-M5`）的恢复时机。

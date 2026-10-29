@@ -865,6 +865,75 @@ func (r *Runner) ListAgentFlowContainers(
 	return ids, nil
 }
 
+// ContainerListEntry 是容器清单中的一项。
+type ContainerListEntry struct {
+	// ID 是容器 ID。
+	ID string
+	// Name 是容器名称，不含前导斜杠。
+	Name string
+}
+
+// ListContainersOptions 描述一次容器清单查询。
+type ListContainersOptions struct {
+	// All 为 true 时包含已停止容器，等价于 docker ps --all。
+	All bool
+	// NameFilters 是 name 过滤条件；Docker 按名称子串匹配，调用方需自行核对全名。
+	NameFilters []string
+}
+
+// ListContainers 列出远程机器上容器的 ID 与名称。
+//
+// 该方法是只读查询，只返回身份信息；容器归属仍必须由 InspectContainer 与
+// VerifyOwnership 核验，删除前禁止仅凭本结果判定所有权。
+func (r *Runner) ListContainers(
+	ctx context.Context,
+	options ListContainersOptions,
+) ([]ContainerListEntry, error) {
+	args := make([]string, 0, 2+2*len(options.NameFilters))
+	if options.All {
+		args = append(args, "--all")
+	}
+	for _, name := range options.NameFilters {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			continue
+		}
+		args = append(args, "--filter", "name="+trimmed)
+	}
+	args = append(args, "--format", "{{.ID}}\t{{.Names}}")
+	command, err := dockerCommand("ps", args...)
+	if err != nil {
+		return nil, err
+	}
+	run, runErr := r.RunQuery(ctx, "docker ps", command)
+	if runErr != nil {
+		return nil, runErr
+	}
+	return parseContainerList(run.Stdout), nil
+}
+
+// parseContainerList 解析 docker ps 的 {{.ID}}\t{{.Names}} 输出。
+func parseContainerList(output string) []ContainerListEntry {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	entries := make([]ContainerListEntry, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		fields := strings.SplitN(trimmed, "\t", 2)
+		entry := ContainerListEntry{ID: strings.TrimSpace(fields[0])}
+		if len(fields) == 2 {
+			entry.Name = strings.TrimPrefix(strings.TrimSpace(fields[1]), "/")
+		}
+		if entry.ID == "" {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
 // CopyFromContainer 用 docker cp 把容器内文件复制到远程宿主机路径。
 //
 // 该方法统一走本包的 Docker 命令构造入口，使 docker cp 与其余命令使用相同的 API 基准，

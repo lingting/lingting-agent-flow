@@ -133,9 +133,9 @@ func RequiredCLICommands() []CLICommand {
 		{
 			Subcommand: "ps",
 			Options: []CLIOption{
-				{Name: "--all", Source: "ListAgentFlowContainers"},
-				{Name: "--filter", Source: "ListAgentFlowContainers"},
-				{Name: "--format", Source: "ListAgentFlowContainers"},
+				{Name: "--all", Source: "ListAgentFlowContainers/ListContainers"},
+				{Name: "--filter", Source: "ListAgentFlowContainers/ListContainers"},
+				{Name: "--format", Source: "ListAgentFlowContainers/ListContainers"},
 			},
 			Source: "ListAgentFlowContainers",
 		},

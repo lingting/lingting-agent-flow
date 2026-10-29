@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/lingting/agentflow/internal/sshclient"
+	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
 // remoteOpTimeout 是单次远程操作的超时上限。
@@ -60,11 +61,17 @@ func TestRealSSHRemoteWorkspace(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), remoteOpTimeout)
 	defer cancel()
-	home, err := sshclient.ResolveHome(ctx, connection.Client, remoteOpTimeout)
+	// 远程测试资源统一落在 .lingting/agentflow-tests/ssh 下，与本机测试产物目录无关。
+	remoteRoot, err := testkit.ResolveRemoteTestRoot(
+		ctx,
+		connection.Client,
+		remoteOpTimeout,
+		testkit.RemoteTestPackageSSH,
+		randomSuffix(t),
+	)
 	if err != nil {
-		t.Fatalf("解析远程 Home 失败: %v", err)
+		t.Fatalf("创建远程测试目录失败: %v", err)
 	}
-	remoteRoot := path.Join(home, "agentflow-tests", randomSuffix(t))
 	remoteDir, err := sshclient.EnsureWorkspace(ctx, connection.Client, remoteRoot, true)
 	if err != nil {
 		t.Fatalf("创建远程测试目录失败: %v", err)
@@ -256,11 +263,17 @@ func TestRealSSHDownloadSizeLimit(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), remoteOpTimeout)
 	defer cancel()
-	home, err := sshclient.ResolveHome(ctx, connection.Client, remoteOpTimeout)
+	// 远程测试资源统一落在 .lingting/agentflow-tests/ssh 下，与本机测试产物目录无关。
+	remoteRoot, err := testkit.ResolveRemoteTestRoot(
+		ctx,
+		connection.Client,
+		remoteOpTimeout,
+		testkit.RemoteTestPackageSSH,
+		randomSuffix(t),
+	)
 	if err != nil {
-		t.Fatalf("解析远程 Home 失败: %v", err)
+		t.Fatalf("创建远程测试目录失败: %v", err)
 	}
-	remoteRoot := path.Join(home, "agentflow-tests", randomSuffix(t))
 	remoteDir, err := sshclient.EnsureWorkspace(ctx, connection.Client, remoteRoot, true)
 	if err != nil {
 		t.Fatalf("创建远程测试目录失败: %v", err)

@@ -200,6 +200,30 @@ Unix 套接字时该用例输出 `WARN [SKIP]` 并跳过，其余用例仍会执
 真实远程 Docker 测试只使用带随机后缀的测试镜像标签、容器名称与远程目录，并只清理
 自己创建并已核验所有权的测试容器；不会执行全局 prune，也不会删除共享镜像或缓存卷。
 
+### 远程真实测试目录与容器零残留
+
+- 远程主机上的测试资源统一位于 `<远程 Home>/.lingting/agentflow-tests/<测试包>/<用例标识>`，
+  由 `tests/internal/testkit` 的 `RemoteTestRoot` / `ResolveRemoteTestRoot` 统一解析与创建；
+  旧路径 `~/agentflow-tests` 与 `~/.lingting/agentflow-e2e` 已废弃，不再写入。
+  子目录按测试包划分（`agent` / `docker` / `codesaver` / `workflow` / `ssh`），
+  新增测试包必须在 `testkit` 的白名单中登记。
+- 远程主机目录与容器内部目录是两套约定：`/workspace/project`、`/tmp/agentflow/sessions`
+  等容器内路径不受该规则影响；本机测试产物仍使用
+  `os.TempDir()/lingting-agent-flow-tests/`。
+- 每个测试容器都必须在**创建之前**登记清理责任（`testkit.ContainerRun.Track`），取得真实
+  Docker ID 后立即补写；创建失败、启动失败与后续步骤失败都不允许失去清理能力。
+- 清理必须核验真实状态（`testkit.CleanupContainer`）：删除前核验所有权（所有权不符时
+  禁止删除），删除后重新检查容器是否真的不存在；状态无法确认按清理失败处理。
+  删除方法的返回值不能作为"容器已不存在"的证据，清理失败也不能只打印 `WARN` 后通过。
+- 每个真实远程测试包在 `TestMain` 中通过 `testkit.RegisterContainerFinalizer` 注册包级
+  最终核验：`testkit.Main` 在全部测试（含 `t.Parallel`）结束之后、日志刷新之前执行它，
+  用真实 `docker ps -a` 清单确认本次运行的容器已全部消失；核验失败会让测试进程以非零码
+  退出。远程测试未启用时该核验报告 `SKIP`，不虚构"零残留通过"。
+- 校验发现的日志行固定为 `REMOTE_CONTAINER_CLEANUP`、`REMOTE_CONTAINER_EVIDENCE`、
+  `REMOTE_CONTAINER_BASELINE` / `REMOTE_CONTAINER_FINAL`、`REMOTE_CONTAINER_RESIDUE`、
+  `REMOTE_CONTAINER_PREEXISTING`、`REMOTE_CONTAINER_VERIFY` 与 `FINALIZER`。
+- 机制与验收证据见 `.steps/remote-test-resource-cleanup.md`。
+
 ## 测试配置
 
 需要真实外部依赖的测试统一由 `tests/config/` 下的 YAML 配置驱动，示例文件随仓库提交，
@@ -294,7 +318,8 @@ go test -count=1 -v ./tests/integration/remote/docker/...
 - Docker 相关测试必须在 `tests/config/docker.yml` 中显式启用 `docker.remote_enabled`
   才允许修改真实远程 Docker；本机测试一律使用执行替身或路径映射，不依赖本机是否安装
   Docker。
-- 测试结束不得删除测试工作空间与产物；真实远程测试的远程测试目录同样保留。
+- 测试结束不得删除测试工作空间与产物；真实远程测试的远程测试目录同样保留（只回收测试
+  容器，不删除共享镜像、缓存卷与非测试容器）。
 
 ## 远程执行测试分层
 

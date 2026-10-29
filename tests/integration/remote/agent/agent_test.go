@@ -335,34 +335,22 @@ func dockerfilePath(t *testing.T) string {
 }
 
 // remoteTempRoot 返回本次用例在远端 Home 下的专属临时根目录。
+//
+// 目录统一位于远程 Home 下的 .lingting/agentflow-tests/agent，与生产工作空间
+// (~/.lingting/agentflow) 完全隔离；解析与创建统一由 testkit 提供。
 func remoteTempRoot(t *testing.T, ctx context.Context, client sshclient.Client) string {
 	t.Helper()
-	home, err := sshclient.ResolveHome(ctx, client, remoteOpTimeout)
+	root, err := testkit.ResolveRemoteTestRoot(
+		ctx,
+		client,
+		remoteOpTimeout,
+		testkit.RemoteTestPackageAgent,
+	)
 	if err != nil {
-		t.Fatalf("解析远程 Home 失败: %v", err)
-	}
-	root := path.Join(home, "agentflow-tests", "agent")
-	if err := ensureRemoteDir(ctx, client, root); err != nil {
-		t.Fatalf("创建远程测试目录失败: %v", err)
+		t.Fatalf("准备远程测试目录失败: %v", err)
 	}
 	t.Logf("REMOTE_TEST_ROOT=%s", root)
 	return root
-}
-
-// ensureRemoteDir 在远端创建目录。
-func ensureRemoteDir(ctx context.Context, client sshclient.Client, dir string) error {
-	command, err := sshclient.ShellCommand("mkdir", "-p", dir)
-	if err != nil {
-		return err
-	}
-	run, runErr := client.Run(ctx, command, sshclient.RunOptions{Timeout: remoteOpTimeout})
-	if runErr != nil {
-		return runErr
-	}
-	if !run.Succeeded() {
-		return fmt.Errorf("mkdir 退出码 %d: %s", run.ExitCode, run.Stderr)
-	}
-	return nil
 }
 
 // resolveGitConfig 返回测试使用的 Git 仓库与凭证配置。
@@ -676,6 +664,11 @@ func createContainer(
 	if err := exec.runner.CheckRunContract(ctx, image); err != nil {
 		t.Fatalf("镜像 %s 不满足运行契约: %v", image, err)
 	}
+	// 创建之前登记清理责任：容器名称已知，创建或启动失败也不会失去清理能力。
+	tracked := containerRun.Track(t, exec.runner, testkit.TrackedContainer{
+		Name:   record.Name,
+		Record: &record,
+	})
 	dockerID, err := exec.runner.CreateContainer(ctx, docker.CreateContainerSpec{
 		Container: record,
 		ImageRef:  image,
@@ -684,6 +677,8 @@ func createContainer(
 	if err != nil {
 		t.Fatalf("创建测试容器失败: %v", err)
 	}
+	// 取得真实容器 ID 后立即补写登记信息，后续步骤失败也能精确清理。
+	tracked.DockerID = dockerID
 	if err := record.MarkCreated(dockerID, domain.DockerStateCreated, time.Now()); err != nil {
 		t.Fatalf("记录容器创建结果失败: %v", err)
 	}
@@ -703,23 +698,8 @@ func createContainer(
 	if !inspect.Running {
 		t.Fatalf("测试容器未进入运行状态: %s", inspect.State)
 	}
-	// 只删除本次测试创建的容器；删除前再次核验所有权。
-	t.Cleanup(func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), remoteOpTimeout)
-		defer cancel()
-		observed, inspectErr := exec.runner.InspectContainer(cleanupCtx, dockerID)
-		if inspectErr != nil {
-			t.Logf("清理前未找到测试容器（可能已删除）: %v", inspectErr)
-			return
-		}
-		if ownershipErr := docker.VerifyOwnership(observed, record); ownershipErr != nil {
-			t.Logf("跳过清理：容器所有权不符: %v", ownershipErr)
-			return
-		}
-		if _, removeErr := exec.runner.RemoveContainer(cleanupCtx, dockerID); removeErr != nil {
-			t.Logf("删除测试容器失败: %v", removeErr)
-		}
-	})
+	// 只删除本次测试创建的容器；清理会在删除前重新核验所有权，并在删除后核验容器
+	// 确实已不存在。
 	t.Logf("TEST_CONTAINER=%s (%s)", record.ID, dockerID)
 	return record
 }

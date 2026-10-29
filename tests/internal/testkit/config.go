@@ -263,10 +263,11 @@ func ContainerPiSettingsFile(config ContainerPiConfig) []byte {
 // 该目录不存在是正常情况（仓库只提交示例文件），调用方按"缺少配置"处理。
 func ConfigDir(t *testing.T) string {
 	t.Helper()
-	if configured := strings.TrimSpace(os.Getenv(ConfigDirEnv)); configured != "" {
-		return configured
+	dir, err := configDirPath()
+	if err != nil {
+		t.Fatalf("%v", err)
 	}
-	return filepath.Join(repoRoot(t), "tests", "config")
+	return dir
 }
 
 // ConfigPath 返回指定配置文件在测试配置目录中的绝对路径。
@@ -452,32 +453,44 @@ func (c GitConfig) CredentialMissing() []string {
 // 解析成功后统一展开 ${NAME} 占位符。
 func loadDocument(t *testing.T, name string, target any) bool {
 	t.Helper()
-	path := ConfigPath(t, name)
+	exists, err := decodeDocument(ConfigPath(t, name), target)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	return exists
+}
+
+// decodeDocument 读取并解析指定路径的配置文件，不依赖 *testing.T。
+//
+// 解析使用严格模式：未知字段与多余文档都会被拒绝，避免拼写错误被静默忽略；
+// 解析成功后统一展开 ${NAME} 占位符。文件不存在时返回 exists=false 且不报错，
+// 使统一的测试入口（没有 *testing.T）也能按"缺少配置"处理。
+func decodeDocument(path string, target any) (bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return false
+			return false, nil
 		}
-		t.Fatalf("读取测试配置失败: %s: %v", path, err)
+		return false, fmt.Errorf("读取测试配置失败: %s: %w", path, err)
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(target); err != nil {
 		if errors.Is(err, io.EOF) {
-			t.Fatalf("测试配置为空: %s", path)
+			return false, fmt.Errorf("测试配置为空: %s", path)
 		}
-		t.Fatalf("解析测试配置失败: %s: %v", path, err)
+		return false, fmt.Errorf("解析测试配置失败: %s: %w", path, err)
 	}
 	var trailing yaml.Node
 	switch err := decoder.Decode(&trailing); {
 	case err == nil:
-		t.Fatalf("测试配置只允许一个 YAML 文档: %s", path)
+		return false, fmt.Errorf("测试配置只允许一个 YAML 文档: %s", path)
 	case errors.Is(err, io.EOF):
 	default:
-		t.Fatalf("解析测试配置失败: %s: %v", path, err)
+		return false, fmt.Errorf("解析测试配置失败: %s: %w", path, err)
 	}
 	expandValue(reflect.ValueOf(target))
-	return true
+	return true, nil
 }
 
 // envPlaceholder 匹配 ${NAME} 形式的占位符。
@@ -522,14 +535,34 @@ func expandValue(value reflect.Value) {
 	}
 }
 
-// repoRoot 通过编译期源码路径定位仓库根目录。
-//
-// 该路径与工作目录无关，因此在任意包目录下执行 go test 都能找到 tests/config。
 func repoRoot(t *testing.T) string {
 	t.Helper()
+	root, err := repoRootPath()
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	return root
+}
+
+// repoRootPath 通过编译期源码路径定位仓库根目录，不依赖 *testing.T。
+//
+// 该路径与工作目录无关，因此在任意包目录下执行 go test 都能找到 tests/config。
+func repoRootPath() (string, error) {
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {
-		t.Fatalf("无法定位测试辅助代码路径")
+		return "", errors.New("无法定位测试辅助代码路径")
 	}
-	return filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(currentFile))))
+	return filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(currentFile)))), nil
+}
+
+// configDirPath 返回测试配置目录的绝对路径，不依赖 *testing.T。
+func configDirPath() (string, error) {
+	if configured := strings.TrimSpace(os.Getenv(ConfigDirEnv)); configured != "" {
+		return configured, nil
+	}
+	root, err := repoRootPath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, "tests", "config"), nil
 }

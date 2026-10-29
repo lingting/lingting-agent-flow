@@ -59,7 +59,13 @@ func Main(m *testing.M) int {
 	}
 	forceVerbose()
 	code := m.Run()
+	// 最终核验必须在日志刷新之前执行：核验结论（清理结果、docker ps -a 证据）
+	// 要与测试结论出现在同一份 test.log 中，并且核验失败必须改变进程退出码。
+	finalizeFailed := runRegisteredFinalizers()
 	flushRunLog()
+	if finalizeFailed && code == 0 {
+		code = 1
+	}
 	return code
 }
 

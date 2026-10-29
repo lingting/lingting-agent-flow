@@ -326,8 +326,10 @@ C:\Users\lingting\AppData\Local\Temp\lingting-agent-flow-tests\workflow-<随机>
 `REMOTE_*_SCENE` / `REMOTE_TASK_*` / `REMOTE_FLAKY_SCENE` 行。
 
 远程测试资源位置：每次用例在远程 Home 下使用带随机后缀的独立目录
-（`~/agentflow-tests/docker/<随机后缀>`），容器名带同一后缀，`t.Cleanup` 只删除
-本次创建并已核验所有权的容器；不执行全局 prune。
+（`~/.lingting/agentflow-tests/docker/<随机后缀>`，旧路径 `~/agentflow-tests` 已废弃），
+容器名带同一后缀，清理只删除本次创建并已核验所有权的容器，并在删除后核验容器确实
+已不存在；不执行全局 prune。容器零残留的最终核验机制见
+[`remote-test-resource-cleanup.md`](./remote-test-resource-cleanup.md)。
 
 ## 7. 完成定义核对
 

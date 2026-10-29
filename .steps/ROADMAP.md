@@ -846,6 +846,18 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > 第二轮提示词携带上一轮审查结论，新增 2 个链路级用例（`e2e_review_test.go`）。
 > （6）根 `README.md` 的两处过期清单（"第一版目标（尚未实现）"与"尚未实现的接口"）已按代码事实
 > 重写。**前置条件已满足，前端功能开发冻结解除**；P4 仅剩 `P4-M5` 待推进。
+>
+> **当前下一步（2026-10-29 起）：远程真实测试资源治理，结论 `completed`**，交付物
+> [`remote-test-resource-cleanup.md`](./remote-test-resource-cleanup.md)。该任务把全部远程
+> 真实测试的资源目录统一到 `~/.lingting/agentflow-tests/<测试包>/<用例标识>`（废弃
+> `~/agentflow-tests` 与 `~/.lingting/agentflow-e2e`），把测试容器改为"创建前登记清理
+> 责任 + 删除后按真实状态核验"，并在每个测试包的 `TestMain` 中于日志刷新之前执行基于真实
+> `docker ps -a` 的零残留最终核验（核验失败会改变退出码）。本轮真实执行
+> `go test -count=1 -timeout 50m -p 1 -v ./tests/integration/remote/...` → 13 passed，
+> 4 个包的 `REMOTE_CONTAINER_VERIFY` 全部 `PASS`；测试后远程只剩测试前存在的非测试容器。
+> **该结论收口之后才决定 P4 前端工作的恢复时机**，在此之前不开展前端功能、体验或性能优化。
+> 遗留风险：`TestRemoteE2EFullChain` 在规划阶段步骤上继承任务级文件检查，模型输出不确定时
+> 会出现业务断言抖动（与资源回收无关，详见该文档 §6.4 / §8）。
 
 ## 四阶段总览
 
@@ -945,7 +957,9 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - [P4-G12-project-management.md](./P4-G12-project-management.md)
 - [P4-task-detail-experience-review.md](./P4-task-detail-experience-review.md)
 - [P4-task-detail-panel-organization.md](./P4-task-detail-panel-organization.md)
+- [remote-test-resource-cleanup.md](./remote-test-resource-cleanup.md)
 
 ## 验收记录
 
 - [SERVER-v1-acceptance.md](./SERVER-v1-acceptance.md) —— 服务端第一版验收（结论 `completed`，含真实远程完整链路证据）
+- [remote-test-resource-cleanup.md](./remote-test-resource-cleanup.md) —— 远程真实测试资源治理与容器零残留验收（结论 `completed`，含真实远程 `docker ps -a` 前后对照证据）

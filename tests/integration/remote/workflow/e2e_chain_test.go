@@ -3,7 +3,6 @@ package workflow_remote
 import (
 	"context"
 	"fmt"
-	"path"
 	"strings"
 	"testing"
 	"time"
@@ -56,9 +55,54 @@ func newE2EFixture(t *testing.T) *e2eFixture {
 	})
 	fixture := &e2eFixture{e2eEnv: env, t: t, db: db}
 	fixture.createHost(t)
+	// 清理责任必须在统一启动之前登记：容器一旦创建就受测试追踪，业务链路中途
+	// 失败也不会失去回收能力；登记早于后台服务启动，因此它的清理晚于服务停止执行。
+	fixture.trackTaskContainers(t)
 	fixture.assemble(t)
 	fixture.seedTask(t)
 	return fixture
+}
+
+// trackTaskContainers 在统一启动之前登记本任务容器的清理责任。
+//
+// 生产容器服务会先写入容器登记记录、再创建 Docker 容器，因此清理时可以从数据库
+// 解析出实际容器身份：即使容器创建在返回之前失败，也能找到并回收远程容器。
+func (f *e2eFixture) trackTaskContainers(t *testing.T) {
+	t.Helper()
+	containerRun.Track(t, f.runner, testkit.TrackedContainer{
+		Resolve: f.resolveTaskContainers,
+	})
+}
+
+// trackCreatedContainer 在容器创建成功后立即登记精确身份与所有权证据。
+func (f *e2eFixture) trackCreatedContainer(t *testing.T, record domain.Container) {
+	t.Helper()
+	containerRun.Track(t, f.runner, testkit.TrackedContainer{
+		Name:     record.Name,
+		DockerID: record.DockerID,
+		Record:   &record,
+	})
+}
+
+// resolveTaskContainers 从数据库解析本任务创建的全部容器记录。
+func (f *e2eFixture) resolveTaskContainers(
+	ctx context.Context,
+) ([]testkit.TrackedContainer, error) {
+	taskID := f.task.ID
+	records, err := f.db.ListContainers(ctx, domain.ContainerFilter{TaskID: &taskID})
+	if err != nil {
+		return nil, fmt.Errorf("读取任务容器记录失败: %w", err)
+	}
+	targets := make([]testkit.TrackedContainer, 0, len(records))
+	for index := range records {
+		record := records[index]
+		targets = append(targets, testkit.TrackedContainer{
+			Name:     record.Name,
+			DockerID: record.DockerID,
+			Record:   &record,
+		})
+	}
+	return targets, nil
 }
 
 // createHost 写入一个已通过环境预检的执行节点。
@@ -69,16 +113,24 @@ func (f *e2eFixture) createHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("解析远程 Home 失败: %v", err)
 	}
+	// 每个用例使用带随机后缀的独立远程管理工作区，并统一落在远程测试资源目录
+	// .lingting/agentflow-tests/workflow 下：远端目录是持久状态，与全新测试数据库
+	// 共用固定目录会让"版本目录已存在"变成假失败，也会让不同用例互相污染。
+	workspaceRoot, err := testkit.RemoteTestRoot(
+		home,
+		testkit.RemoteTestPackageWorkflow,
+		f.suffix,
+	)
+	if err != nil {
+		t.Fatalf("拼接远程管理工作区失败: %v", err)
+	}
 	host, err := domain.NewExecutionHost(
 		"",
 		"真实远程端到端节点",
 		sshConfig.Host,
 		sshConfig.Port,
 		sshConfig.User,
-		// 每个用例使用带随机后缀的独立远程管理工作区：远端目录是持久状态，
-		// 与全新测试数据库共用固定目录会让"版本目录已存在"变成假失败，也会
-		// 让不同用例互相污染。
-		path.Join(home, ".lingting", "agentflow-e2e", f.suffix),
+		workspaceRoot,
 		time.Now().UTC(),
 		domain.WithPrivateKey(sshConfig.PrivateKeyPath),
 	)
@@ -784,6 +836,8 @@ func (p *piConfigPort) CreateContainer(
 	if detail.Container.DockerID == "" {
 		return detail, fmt.Errorf("容器 %s 创建后缺少 Docker 容器 ID", detail.Container.ID)
 	}
+	// 容器创建成功后立即按精确身份登记，后续注入步骤失败也能精确回收。
+	p.fixture.trackCreatedContainer(p.t, detail.Container)
 	p.fixture.applyContainerPiConfig(p.t, detail.Container.DockerID)
 	p.fixture.verifySSHClientConfig(p.t, detail.Container.DockerID)
 	p.fixture.applyGitCredentials(p.t, detail.Container.DockerID)

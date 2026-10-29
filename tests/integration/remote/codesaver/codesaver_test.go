@@ -274,30 +274,18 @@ func TestSaveCodeInsideRemoteContainer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), remoteOpTimeout)
 	defer cancel()
 	client := loaded.dial(t, workspace)
-	defer func() {
-		if closeErr := client.Close(); closeErr != nil {
-			t.Errorf("关闭 SSH 连接失败: %v", closeErr)
-		}
-	}()
+	// 连接必须通过 t.Cleanup 关闭，而不是 defer：容器清理同样注册为 t.Cleanup，
+	// 后进先出保证连接在容器清理完成之后才关闭。
+	workspace.Cleanup(client.Close)
 	runner, err := docker.NewRunner(client, docker.RunnerOptions{})
 	if err != nil {
 		t.Fatalf("构造 Docker 执行器失败: %v", err)
 	}
 	suffix := randomSuffix(t)
-	containerID, dockerID := createTestContainer(
-		t,
-		ctx,
-		runner,
-		loaded.image,
-		suffix,
-		testWorkDir,
-	)
-	defer func() {
-		// 只删除本次测试创建并已核验所有权的容器。
-		if _, err := runner.RemoveContainer(context.Background(), dockerID); err != nil {
-			t.Logf("删除测试容器失败（需人工检查）: %v", err)
-		}
-	}()
+	container := createTestContainer(t, ctx, runner, loaded.image, suffix, testWorkDir)
+	dockerID := container.DockerID
+	// 容器清理责任已在创建之前登记：用例结束时会停止并删除它，并按真实远程状态
+	// 核验它确实已不存在。
 	taskID := "task-" + suffix
 	taskBranch, branchErr := domain.TaskBranchName(taskID)
 	if branchErr != nil {
@@ -305,17 +293,6 @@ func TestSaveCodeInsideRemoteContainer(t *testing.T) {
 	}
 	barePath := prepareTestRepository(t, ctx, runner, dockerID, testWorkDir, taskBranch)
 	t.Logf("测试仓库: %s（bare: %s）", testWorkDir, barePath)
-	container := domain.Container{
-		ID:          domain.NewID(),
-		HostID:      domain.NewID(),
-		DockerID:    dockerID,
-		Name:        "agentflow-test-" + suffix,
-		State:       domain.ContainerStateRunning,
-		DockerState: domain.DockerStateRunning,
-	}
-	if containerID != "" && containerID != dockerID {
-		t.Logf("容器登记标识与实际 ID 不同: %s / %s", containerID, dockerID)
-	}
 	recorder := &memoryRecorder{}
 	saver, err := codesaver.New(codesaver.Options{
 		Executor: containerExecutor{runner: runner, dockerID: dockerID},
@@ -368,41 +345,58 @@ func TestSaveCodeInsideRemoteContainer(t *testing.T) {
 	}
 }
 
-// createTestContainer 在远程机器上创建并启动一个测试容器。
+// createTestContainer 在远程机器上创建并启动一个受管理的测试容器。
 //
-// 返回容器登记标识与实际 Docker 容器 ID。容器名称带随机后缀，只操作本次测试
-// 创建的资源。
+// 容器名称带随机后缀并带 AgentFlow 管理标签，因此删除前可以核验所有权；清理责任
+// 在创建之前登记，创建或启动失败都不会留下无法追踪的远程容器。
 func createTestContainer(
 	t *testing.T,
 	ctx context.Context,
 	runner *docker.Runner,
 	image, suffix, workDir string,
-) (string, string) {
+) domain.Container {
 	t.Helper()
-	name := "agentflow-codesaver-" + suffix
-	args := []string{
-		"run", "--detach", "--name", name,
-		"--workdir", workDir,
-		image,
-		"sleep", "infinity",
-	}
-	command, err := sshclient.ShellCommand("docker", args...)
+	imageID, err := runner.InspectImageID(ctx, image)
 	if err != nil {
-		t.Fatalf("构造容器创建命令失败: %v", err)
+		t.Fatalf("查询测试镜像 %s 失败: %v", image, err)
 	}
-	result, runErr := runner.Run(ctx, "docker run", command, remoteOpTimeout)
-	if runErr != nil {
-		t.Fatalf("创建测试容器失败: %v", runErr)
+	record, err := domain.NewContainer(
+		domain.NewID(),
+		domain.ID("remote-codesaver-test-host"),
+		"agentflow-codesaver-"+suffix,
+		domain.EnvironmentRef{Type: domain.EnvironmentTypeLanguage, Name: "node"},
+		"v0001",
+		strings.Repeat("a", 64),
+		imageID,
+		time.Now().UTC(),
+	)
+	if err != nil {
+		t.Fatalf("构造容器记录失败: %v", err)
 	}
-	if !result.Succeeded() {
-		t.Fatalf("创建测试容器失败: %s", result.Stderr)
+	tracked := containerRun.Track(t, runner, testkit.TrackedContainer{
+		Name:   record.Name,
+		Record: &record,
+	})
+	dockerID, err := runner.CreateContainer(ctx, docker.CreateContainerSpec{
+		Container: record,
+		ImageRef:  image,
+		WorkDir:   workDir,
+	})
+	if err != nil {
+		t.Fatalf("创建测试容器失败: %v", err)
 	}
-	dockerID := strings.TrimSpace(result.Stdout)
-	if dockerID == "" {
-		t.Fatalf("创建测试容器没有返回容器 ID")
+	tracked.DockerID = dockerID
+	if markErr := record.MarkCreated(dockerID, domain.DockerStateCreated, time.Now().UTC()); markErr != nil {
+		t.Fatalf("记录容器创建结果失败: %v", markErr)
 	}
-	t.Logf("测试容器: %s（%s）", name, dockerID)
-	return name, dockerID
+	if startErr := runner.StartContainer(ctx, dockerID); startErr != nil {
+		t.Fatalf("启动测试容器失败: %v", startErr)
+	}
+	if markErr := record.MarkRunning(time.Now().UTC()); markErr != nil {
+		t.Fatalf("记录容器运行状态失败: %v", markErr)
+	}
+	t.Logf("测试容器: %s（%s）", record.Name, dockerID)
+	return record
 }
 
 // prepareTestRepository 在容器内创建 bare 仓库、基础分支与任务分支。

@@ -73,13 +73,7 @@ func TestRemoteDockerUnknownAndOrphanScenes(t *testing.T) {
 	// 现场 1：远程真实存在、数据库记录为 unknown。
 	running := newRemoteTestContainer(t, imageRef, imageID, suffix+"-run")
 	runningDockerID := createAndStartTestContainer(t, ctx, runner, running, imageRef)
-	t.Cleanup(func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cleanupCancel()
-		if _, removeErr := runner.RemoveContainer(cleanupCtx, runningDockerID); removeErr != nil {
-			t.Logf("WARN 清理测试容器失败: %v", removeErr)
-		}
-	})
+	// 容器清理责任已在创建前登记，用例结束时会复核远程状态。
 	inspect, err := runner.InspectContainer(ctx, runningDockerID)
 	if err != nil {
 		t.Fatalf("核验真实容器失败: %v", err)
@@ -126,13 +120,7 @@ func TestRemoteDockerUnknownAndOrphanScenes(t *testing.T) {
 	// 现场 3：远程存在但归属标签不匹配的容器不得被自动处置。
 	impostor := newRemoteTestContainer(t, imageRef, imageID, suffix+"-impostor")
 	impostorID := createAndStartTestContainer(t, ctx, runner, impostor, imageRef)
-	t.Cleanup(func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cleanupCancel()
-		if _, removeErr := runner.RemoveContainer(cleanupCtx, impostorID); removeErr != nil {
-			t.Logf("WARN 清理测试容器失败: %v", removeErr)
-		}
-	})
+	// 容器清理责任已在创建前登记，用例结束时会复核远程状态。
 	// 用"另一个容器登记记录"去核验真实容器：标签必然不匹配。
 	mismatched := impostor
 	mismatched.ID = domain.NewID()
@@ -203,16 +191,7 @@ func TestRemoteDockerTwoTasksConcurrentAndReclaim(t *testing.T) {
 	taskB := newRemoteTestContainer(t, imageRef, imageID, suffix+"-b")
 	dockerA := createAndStartTestContainer(t, ctx, runner, taskA, imageRef)
 	dockerB := createAndStartTestContainer(t, ctx, runner, taskB, imageRef)
-	for _, id := range []string{dockerA, dockerB} {
-		id := id
-		t.Cleanup(func() {
-			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer cleanupCancel()
-			if _, removeErr := runner.RemoveContainer(cleanupCtx, id); removeErr != nil {
-				t.Logf("WARN 清理测试容器失败: %v", removeErr)
-			}
-		})
-	}
+	// 两个容器的清理责任已在创建前登记，用例结束时会逐个复核远程状态。
 	if dockerA == dockerB {
 		t.Fatal("两个任务必须使用不同的 Docker 容器")
 	}
@@ -329,13 +308,7 @@ func TestRemoteDockerRecoveryKeepsSceneAfterTransientFailure(t *testing.T) {
 	container := newRemoteTestContainer(t, imageRef, imageID, suffix+"-flaky")
 	container.HostID = host.ID
 	dockerID := createAndStartTestContainer(t, ctx, realRunner, container, imageRef)
-	t.Cleanup(func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cleanupCancel()
-		if _, removeErr := realRunner.RemoveContainer(cleanupCtx, dockerID); removeErr != nil {
-			t.Logf("WARN 清理测试容器失败: %v", removeErr)
-		}
-	})
+	// 容器清理责任已在创建前登记，用例结束时会复核远程状态。
 
 	// 用真实数据库记录容器，并把记录推进为 unknown。
 	record := container
