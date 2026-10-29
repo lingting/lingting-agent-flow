@@ -119,9 +119,11 @@
   里。步骤较多或已展开大量尝试时，点击后的"正在执行 / 失败 / 结果不确定"提示可能落在视口之外。
   这需要真实视口与真实使用证据（当前无法只从代码判断是否真的看不见），本轮不移动面板、不新增
   第二份结论展示（那会造成新的重复展示）。
-- **待验证假设**：步骤详情的三个动作按钮禁用时没有原因提示（`canExecuteStep` 只看任务状态、
-  步骤类型与占用），而重试 / 恢复 / 执行操作的按钮都有 tooltip。这与上一轮登记的"任务列表启动
-  按钮无禁用原因提示"是同一类一致性问题，不是错误信息错误；文案空间有限，未取得反馈前不改。
+- **已闭合（2026-10-30）**：步骤详情的三个动作按钮禁用时没有原因提示（`canExecuteStep` 只看任务状态、
+  步骤类型与占用），而重试 / 恢复 / 执行操作的按钮都有 tooltip。这与上一轮登记的"任务列表启动按钮无
+  禁用原因提示"是同一类一致性问题；两项已在
+  [`P4-disabled-action-reasons.md`](./P4-disabled-action-reasons.md) 一并处理（准入条件未变，只是把已
+  有的判定结果显式说出来）。
 
 ### 4.3 面板顺序是否与操作流程冲突（问题 4）
 
@@ -353,8 +355,10 @@
 
 1. **`verification_results` 遗留模型清理**：生产链路已不再使用该表与 `domain.decideVerdict`，
    需先确认是否还有读取方（`P4-G12-project-management.md` §13 记录）。
-2. **步骤级动作按钮的禁用原因**：`canExecuteStep` / `canExecuteAndValidate` / `canOpenRepairCycle`
-   的前置条件已在注释里写明，缺的只是把它显示出来；与任务列表启动按钮属同一类，可一并处理。
+2. ~~**步骤级动作按钮的禁用原因**~~：**已于 2026-10-30 完成**
+   （[`P4-disabled-action-reasons.md`](./P4-disabled-action-reasons.md)）。`canExecuteStep` /
+   `canExecuteAndValidate` / `canOpenRepairCycle` 的三个前置条件已在注释里写明，本轮把它们改造成同时
+   返回 `allowed` 与 `reason` 的纯函数并显示出来，同时覆盖任务列表的启动按钮。
 3. **私有仓库 Git 凭据支持**：`source.GitCredentialProvider` / `codesaver.GitCredentialProvider`
    仍无实现，成本与安全评审要求明显高于前两项。
 

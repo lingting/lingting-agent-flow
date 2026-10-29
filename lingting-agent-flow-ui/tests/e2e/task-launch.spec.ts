@@ -282,6 +282,33 @@ async function clickStart(page: Page, rowText: string) {
   await row.getByText("启动", { exact: true }).click();
 }
 
+/**
+ * 当前可见的原因提示浮层。
+ *
+ * antd 的 Tooltip 首次打开后会把浮层留在 DOM 里（再次隐藏时只是不可见），因此必须限定
+ * ":visible"，否则同一个用例里连续悬停两个对象会同时命中两份浮层。
+ */
+function visibleTooltip(page: Page) {
+  return page.locator(".ant-tooltip:visible");
+}
+
+/**
+ * 只用 Tab 前进，直到聚焦到某个操作的原因包装层。
+ *
+ * 禁用控件本身不可聚焦（antd Button 的 disabled、LinkButton 的无 href 链接），真实键盘用户
+ * 能到达的正是这层包装；因此这里断言的是键盘路径，而不是调用程序的 focus()。
+ */
+async function tabUntilHintFocused(page: Page, label: string, maxPresses = 30) {
+  for (let index = 0; index < maxPresses; index += 1) {
+    await page.keyboard.press("Tab");
+    const aria = await page.evaluate(
+      () => document.activeElement?.getAttribute("aria-label") ?? "",
+    );
+    if (aria.startsWith(`${label}不可用`)) return;
+  }
+  throw new Error(`按 Tab ${maxPresses} 次仍未聚焦到「${label}」的禁用原因包装层`);
+}
+
 /** 打开环境下拉并选择指定环境 */
 async function selectEnvironment(page: Page, name: string) {
   await page.getByLabel("语言环境").click();
@@ -549,6 +576,175 @@ test.describe("统一任务启动", () => {
     await page.goto("/tasks");
     await expect(page.getByText("失败任务")).toBeVisible();
     await expect(page.getByText("启动", { exact: true })).toHaveClass(/ant-typography-disabled/);
+  });
+
+  test("禁用的启动按钮说明真实原因，且不会发出启动请求", async ({ page }) => {
+    const calls = await stubLaunch(page, () => ({ body: sampleLaunch() }));
+    await stubTaskList(page, () => ({
+      body: {
+        current: 1,
+        records: [
+          sampleTask({
+            id: "task-failed",
+            name: "失败任务",
+            status: "failed",
+            status_finished: true,
+          }),
+        ],
+        size: 20,
+        total: 1,
+      },
+    }));
+
+    await page.goto("/tasks");
+    const row = page.locator(".ant-table-tbody tr.ant-table-row", { hasText: "失败任务" });
+    const hint = row.locator(".disabled-action-hint");
+
+    // 按钮本身仍按原有条件禁用，包装层只是承载原因
+    await expect(row.getByText("启动", { exact: true })).toHaveClass(/ant-typography-disabled/);
+    await expect(hint).toHaveAttribute("tabindex", "0");
+
+    // 鼠标悬停：说明失败任务不能用统一启动隐式重试，并指向详情里的重试资格
+    await hint.hover();
+    const tooltip = visibleTooltip(page);
+    await expect(tooltip).toBeVisible();
+    await expect(tooltip).toContainText("失败");
+    await expect(tooltip).toContainText("重试");
+    await expect(tooltip).toContainText("任务详情");
+
+    // 交互（点击）落地在禁用按钮上时不得发出统一启动请求
+    await hint.click();
+    await page.waitForTimeout(300);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("键盘聚焦同样能获得禁用原因", async ({ page }) => {
+    await stubTaskList(page, () => ({
+      body: {
+        current: 1,
+        records: [
+          sampleTask({
+            id: "task-done",
+            name: "已完成任务",
+            status: "completed",
+            status_finished: true,
+            status_terminal: true,
+          }),
+        ],
+        size: 20,
+        total: 1,
+      },
+    }));
+
+    await page.goto("/tasks");
+    // 真实键盘路径：只用 Tab 前进，直到聚焦到承载原因的包装层
+    await page.locator("body").click();
+    await tabUntilHintFocused(page, "启动");
+
+    const hint = page.locator(".disabled-action-hint");
+    await expect(hint).toBeFocused();
+    await expect(hint).toHaveAttribute("aria-label", /已完成/);
+    await expect(hint).toHaveAttribute("aria-label", /已结束/);
+
+    const tooltip = visibleTooltip(page);
+    await expect(tooltip).toBeVisible();
+    await expect(tooltip).toContainText("已结束");
+  });
+
+  test("允许启动的任务不显示禁用原因，仍调用统一启动接口", async ({ page }) => {
+    const calls = await stubLaunch(page, () => ({ body: sampleLaunch() }));
+    await stubTaskList(page, () => ({
+      body: { current: 1, records: [sampleTask()], size: 20, total: 1 },
+    }));
+    await stubWorkflow(page, () => ({
+      body: { has_run: false, steps: [], task_id: "task-1", task_status: "queued" },
+    }));
+
+    await page.goto("/tasks");
+    // 可用时没有任何禁用包装，因此不可能出现误导性的禁用提示
+    await expect(page.locator(".disabled-action-hint")).toHaveCount(0);
+
+    await clickStart(page, "实现登录接口");
+    await expect(page.getByText("已启动任务执行：实现登录接口")).toBeVisible();
+    expect(calls).toHaveLength(1);
+  });
+
+  test("启动中的状态不被解释为业务准入失败", async ({ page }) => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route("**/api/v1/tasks/*/start", async (route: Route) => {
+      await gate;
+      await route.fulfill({
+        body: JSON.stringify(sampleLaunch()),
+        contentType: "application/json",
+        status: 202,
+      });
+    });
+    await stubTaskList(page, () => ({
+      body: { current: 1, records: [sampleTask()], size: 20, total: 1 },
+    }));
+    await stubWorkflow(page, () => ({
+      body: { has_run: false, steps: [], task_id: "task-1", task_status: "queued" },
+    }));
+
+    await page.goto("/tasks");
+    await clickStart(page, "实现登录接口");
+
+    await expect(page.getByText("启动中", { exact: true })).toBeVisible();
+    // "启动中"属于流程状态：按钮仍然禁用，但不能显示成"该任务不允许启动"
+    await expect(page.locator(".disabled-action-hint")).toHaveCount(0);
+
+    release();
+    await expect(page.getByText("已启动任务执行：实现登录接口")).toBeVisible();
+  });
+
+  test("切换任务后不残留上一个任务的禁用原因", async ({ page }) => {
+    await stubTaskList(page, () => ({
+      body: {
+        current: 1,
+        records: [
+          sampleTask({
+            id: "task-failed",
+            name: "失败任务",
+            status: "failed",
+            status_finished: true,
+          }),
+          sampleTask({
+            id: "task-done",
+            name: "已完成任务",
+            status: "completed",
+            status_finished: true,
+            status_terminal: true,
+          }),
+        ],
+        size: 20,
+        total: 2,
+      },
+    }));
+
+    await page.goto("/tasks");
+    const failedRow = page.locator(".ant-table-tbody tr.ant-table-row", { hasText: "失败任务" });
+    const doneRow = page.locator(".ant-table-tbody tr.ant-table-row", { hasText: "已完成任务" });
+
+    const failedHint = failedRow.locator(".disabled-action-hint");
+    const doneHint = doneRow.locator(".disabled-action-hint");
+
+    await failedHint.hover();
+    await expect(page.locator(".ant-tooltip:visible", { hasText: "重试" })).toBeVisible();
+
+    // 每行只持有自己的原因：两个对象的包装层内容互不影响
+    await expect(failedHint).toHaveAttribute("aria-label", /重试/);
+    await expect(doneHint).toHaveAttribute("aria-label", /已结束/);
+
+    // 移到另一行：显示的是新对象的原因
+    await doneHint.hover();
+    await expect(page.locator(".ant-tooltip:visible", { hasText: "已结束" })).toBeVisible();
+
+    // 鼠标离开后不允许有任何残留的旧原因浮层
+    await page.locator(".ant-table-thead").first().hover();
+    await expect(page.locator(".ant-tooltip:visible", { hasText: "重试" })).toHaveCount(0);
   });
 });
 

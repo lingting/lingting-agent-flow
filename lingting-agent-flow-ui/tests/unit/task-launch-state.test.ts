@@ -4,10 +4,12 @@ import type { StartTaskResponse, Task, TaskStatus } from "../../src/lib/api";
 import {
   canStartTask,
   describeLaunchResult,
+  describeTaskStart,
   launchStageMeta,
   workspaceReady,
   workspaceStatusLabel,
 } from "../../src/pages/tasks/launch";
+import { taskStatusLabel } from "../../src/pages/tasks/status";
 import { printArtifactDir } from "../internal/artifacts";
 
 printArtifactDir();
@@ -69,6 +71,96 @@ describe("统一启动的准入判定", () => {
 
   it("已请求取消的任务不允许启动", () => {
     expect(canStartTask(task({ cancel_requested: true, status: "queued" }))).toBe(false);
+  });
+
+  it("允许启动时不产生任何禁用原因", () => {
+    for (const status of [
+      "queued",
+      "preparing",
+      "planned",
+      "retrying",
+      "paused",
+      "recovery_required",
+    ] as TaskStatus[]) {
+      expect(describeTaskStart(task({ status }))).toEqual({ allowed: true, reason: "" });
+    }
+  });
+
+  it("已请求取消时说明取消请求尚未结束", () => {
+    const blocked = describeTaskStart(task({ cancel_requested: true, status: "queued" }));
+
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.reason).toContain("取消");
+    expect(blocked.reason).toContain("尚未结束");
+  });
+
+  it("失败任务说明统一启动不隐式重试，并指向任务详情", () => {
+    const blocked = describeTaskStart(task({ status: "failed", status_finished: true }));
+
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.reason).toContain("失败");
+    expect(blocked.reason).toContain("重试");
+    expect(blocked.reason).toContain("任务详情");
+    // 失败任务不能按"已结束"一句话草率带过：重试资格是另一件服务端判定的事
+    expect(blocked.reason).not.toContain("已结束");
+  });
+
+  it("已结束的成功或取消任务说明不能通过统一启动重开", () => {
+    for (const status of ["completed", "cancelled"] as TaskStatus[]) {
+      const blocked = describeTaskStart(task({ status, status_finished: true }));
+
+      expect(blocked.allowed).toBe(false);
+      expect(blocked.reason).toContain("已结束");
+      expect(blocked.reason).toContain(taskStatusLabel(status));
+      expect(blocked.reason).not.toContain(status);
+    }
+  });
+
+  it("执行中的状态说明不会重复启动", () => {
+    for (const status of [
+      "planning",
+      "developing",
+      "verifying",
+      "saving",
+      "cancelling",
+    ] as TaskStatus[]) {
+      const blocked = describeTaskStart(task({ status }));
+
+      expect(blocked.allowed).toBe(false);
+      expect(blocked.reason).toContain(taskStatusLabel(status));
+      expect(blocked.reason).toContain("不支持统一启动");
+      expect(blocked.reason).not.toContain(status);
+    }
+  });
+
+  it("未知状态中性说明，并原样保留服务端取值", () => {
+    const blocked = describeTaskStart(task({ status: "future_status" as TaskStatus }));
+
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.reason).toContain("future_status");
+  });
+
+  it("原因与实际可用性结论始终一致，且不允许时必有原因", () => {
+    const samples = [
+      task(),
+      task({ status: "preparing" }),
+      task({ status: "failed", status_finished: true }),
+      task({ status: "completed", status_finished: true }),
+      task({ status: "cancelled", status_finished: true }),
+      task({ status: "developing" }),
+      task({ status: "cancelling", cancel_requested: true }),
+      task({ cancel_requested: true }),
+      task({ status: "future_status" as TaskStatus }),
+    ];
+
+    for (const sample of samples) {
+      const eligibility = describeTaskStart(sample);
+
+      expect(eligibility.allowed).toBe(canStartTask(sample));
+      expect(eligibility.allowed ? eligibility.reason === "" : eligibility.reason.length > 0).toBe(
+        true,
+      );
+    }
   });
 });
 

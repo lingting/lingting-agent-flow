@@ -25,6 +25,9 @@ import {
   canValidateAttempt,
   CHECK_STATUS_LABEL,
   checkStatusLabel,
+  describeExecuteAndValidate,
+  describeRepairCycle,
+  describeStepExecution,
   isKnownStepStatus,
   reviewStatusLabel,
   sessionArchiveStatusLabel,
@@ -39,6 +42,7 @@ import {
   verdictMeta,
   VERDICT_META,
 } from "@/pages/tasks/steps";
+import { DisabledActionHint } from "@/pages/tasks/DisabledActionHint";
 import { RepairCyclePanel } from "@/pages/tasks/RepairCyclePanel";
 import type { ExecutionOperations } from "@/pages/tasks/useExecutionOperations";
 import { OPERATION_LABEL } from "@/pages/tasks/useExecutionOperations";
@@ -335,6 +339,16 @@ export function StepDetailPanel({
   const [showAllValidations, setShowAllValidations] = useState(false);
   const busy = operations.state.running !== undefined;
   /**
+   * 三个动作按钮的禁用原因。
+   *
+   * 原因只来自 `describe*` 中前端确实检查过的条件（任务状态、步骤状态、步骤占用、步骤
+   * 类型）。动作进行中（`busy`）属于流程状态而不是准入失败，此时不展示禁用原因，避免把
+   * "正在执行"误解成"该操作不被允许"。
+   */
+  const executeReason = busy ? "" : describeStepExecution(task, step).reason;
+  const validateReason = busy ? "" : describeExecuteAndValidate(task, step).reason;
+  const repairReason = busy ? "" : describeRepairCycle(task, step).reason;
+  /**
    * 修复周期历史独立加载：它换步骤才重新读取，且只在步骤相关事实真的变化时
    * （`recordsToken`）重新读取，不参与 5 秒任务快照的刷新循环。
    */
@@ -396,37 +410,43 @@ export function StepDetailPanel({
       </Descriptions>
 
       <Space size={8} wrap>
-        <Button
-          disabled={busy || !canExecuteStep(task, step)}
-          loading={
-            operations.state.running?.key === "execute-step" &&
-            operations.state.running.stepID === step.id
-          }
-          onClick={() => void operations.executeStep(step)}
-          size="small"
-          text={OPERATION_LABEL["execute-step"]}
-        />
-        <Button
-          disabled={busy || !canExecuteAndValidate(task, step)}
-          loading={
-            operations.state.running?.key === "execute-and-validate" &&
-            operations.state.running.stepID === step.id
-          }
-          onClick={() => void operations.executeAndValidate(step)}
-          size="small"
-          text={OPERATION_LABEL["execute-and-validate"]}
-          type="primary"
-        />
-        <Button
-          disabled={busy || !canOpenRepairCycle(task, step)}
-          loading={
-            operations.state.running?.key === "open-repair-cycle" &&
-            operations.state.running.stepID === step.id
-          }
-          onClick={() => void operations.openRepairCycle(step)}
-          size="small"
-          text={OPERATION_LABEL["open-repair-cycle"]}
-        />
+        <DisabledActionHint label={OPERATION_LABEL["execute-step"]} reason={executeReason}>
+          <Button
+            disabled={busy || !canExecuteStep(task, step)}
+            loading={
+              operations.state.running?.key === "execute-step" &&
+              operations.state.running.stepID === step.id
+            }
+            onClick={() => void operations.executeStep(step)}
+            size="small"
+            text={OPERATION_LABEL["execute-step"]}
+          />
+        </DisabledActionHint>
+        <DisabledActionHint label={OPERATION_LABEL["execute-and-validate"]} reason={validateReason}>
+          <Button
+            disabled={busy || !canExecuteAndValidate(task, step)}
+            loading={
+              operations.state.running?.key === "execute-and-validate" &&
+              operations.state.running.stepID === step.id
+            }
+            onClick={() => void operations.executeAndValidate(step)}
+            size="small"
+            text={OPERATION_LABEL["execute-and-validate"]}
+            type="primary"
+          />
+        </DisabledActionHint>
+        <DisabledActionHint label={OPERATION_LABEL["open-repair-cycle"]} reason={repairReason}>
+          <Button
+            disabled={busy || !canOpenRepairCycle(task, step)}
+            loading={
+              operations.state.running?.key === "open-repair-cycle" &&
+              operations.state.running.stepID === step.id
+            }
+            onClick={() => void operations.openRepairCycle(step)}
+            size="small"
+            text={OPERATION_LABEL["open-repair-cycle"]}
+          />
+        </DisabledActionHint>
       </Space>
       <Typography.Text type="secondary">
         单步骤执行只调用 Developer，不包含验证；开发—验证闭环在开发通过后立即执行确定性验证，

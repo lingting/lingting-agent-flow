@@ -32,11 +32,12 @@ import {
   taskResultDisplay,
 } from "@/pages/tasks/closeout";
 import { CodeSavePanel } from "@/pages/tasks/CodeSavePanel";
+import { DisabledActionHint } from "@/pages/tasks/DisabledActionHint";
 import { ResumeEligibilityPanel } from "@/pages/tasks/ResumeEligibilityPanel";
 import { RetryTaskPanel } from "@/pages/tasks/RetryTaskPanel";
 import { TaskContainerPanel } from "@/pages/tasks/TaskContainerPanel";
 import { TaskExecutionPanel } from "@/pages/tasks/TaskExecutionPanel";
-import { canStartTask, describeLaunchResult } from "@/pages/tasks/launch";
+import { canStartTask, describeLaunchResult, describeTaskStart } from "@/pages/tasks/launch";
 import {
   canCancelTask,
   canCancelWorkflow,
@@ -457,12 +458,17 @@ export function TasksPage() {
         render: (_dom, record) => (
           <Space>
             <LinkButton onClick={() => openDetail(record.id)} text="详情" />
-            <LinkButton
-              disabled={!canStartTask(record) || startingTaskID === record.id}
-              loading={startingTaskID === record.id}
-              onClick={() => void handleStartTask(record)}
-              text={startingTaskID === record.id ? "启动中" : "启动"}
-            />
+            <DisabledActionHint
+              label="启动"
+              reason={startingTaskID === record.id ? "" : describeTaskStart(record).reason}
+            >
+              <LinkButton
+                disabled={!canStartTask(record) || startingTaskID === record.id}
+                loading={startingTaskID === record.id}
+                onClick={() => void handleStartTask(record)}
+                text={startingTaskID === record.id ? "启动中" : "启动"}
+              />
+            </DisabledActionHint>
             <LinkButton
               disabled={!canCancelTask(record)}
               onClick={() => void handleCancel(record)}

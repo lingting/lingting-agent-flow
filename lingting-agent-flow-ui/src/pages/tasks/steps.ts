@@ -36,6 +36,17 @@ export type OperationOutcome = {
   details: string[];
 };
 
+/**
+ * 一次显式操作的准入结论：是否可用，以及不可用时面向用户的原因。
+ *
+ * `reason` 只允许描述调用方**确实检查过**的条件，不能把服务端的未知判断写成前端结论；
+ * 允许操作时 `reason` 为空字符串，界面据此不展示任何禁用说明。
+ */
+export type ActionEligibility = {
+  allowed: boolean;
+  reason: string;
+};
+
 /** 步骤状态展示信息 */
 export type StepStatusMeta = {
   label: string;
@@ -544,35 +555,100 @@ export function stepAllowsExecution(step: Step): boolean {
   }
 }
 
-/** 步骤是否可被单步骤执行入口启动 */
-export function canExecuteStep(task: Task, step: Step): boolean {
-  if (!taskAllowsStepExecution(task)) return false;
-  if (!stepAllowsExecution(step)) return false;
-  if (step.current_attempt_id) return false;
-  return AGENT_STEP_TYPES.has(step.step_type);
+/** 允许执行：可用且没有禁用原因 */
+const ACTION_ALLOWED: ActionEligibility = { allowed: true, reason: "" };
+
+/** 构造"不可执行"的结论 */
+function blockedAction(reason: string): ActionEligibility {
+  return { allowed: false, reason };
 }
 
 /**
- * 步骤是否可发起开发—验证闭环。
+ * 任务状态层的步骤推进准入结论与原因。
+ *
+ * 只表达 `taskAllowsStepExecution` 已检查的条件：取消请求与任务状态。服务端的容器、
+ * 执行节点预检与步骤归属校验前端拿不到，不在这里编造。
+ */
+function describeStepTaskGate(task: Task): ActionEligibility {
+  if (taskAllowsStepExecution(task)) return ACTION_ALLOWED;
+  if (task.cancel_requested) {
+    return blockedAction("任务已请求取消：取消请求尚未结束，此时不能推进任何步骤。");
+  }
+  return blockedAction(
+    `当前任务状态（${taskStatusLabel(task.status)}）不允许推进步骤：` +
+      "新任务需要先完成环境准备与计划，取消中与已结束的任务不能再执行步骤。",
+  );
+}
+
+/**
+ * 单步骤执行的准入结论与原因。
+ *
+ * 判定条件与原来的 `canExecuteStep` 逐条一致，顺序也一致：任务状态 → 步骤状态 →
+ * 步骤占用 → 步骤类型。原因只描述这四项前端确实检查过的事实。
+ */
+export function describeStepExecution(task: Task, step: Step): ActionEligibility {
+  const taskGate = describeStepTaskGate(task);
+  if (!taskGate.allowed) return taskGate;
+  if (!stepAllowsExecution(step)) {
+    return blockedAction(
+      `步骤状态为「${stepStatusMeta(step.status).label}」，` +
+        "只有待执行、等待重试、失败或待核验的步骤可以开始新的执行。",
+    );
+  }
+  if (step.current_attempt_id) {
+    return blockedAction("该步骤仍被当前执行尝试占用，需要等这次尝试结束后才能重新执行。");
+  }
+  if (!AGENT_STEP_TYPES.has(step.step_type)) {
+    return blockedAction(
+      `步骤类型为「${stepTypeLabel(step.step_type)}」，由服务端直接执行，` +
+        "不通过单步骤执行入口发起。",
+    );
+  }
+  return ACTION_ALLOWED;
+}
+
+/** 步骤是否可被单步骤执行入口启动，条件与 `describeStepExecution` 完全一致 */
+export function canExecuteStep(task: Task, step: Step): boolean {
+  return describeStepExecution(task, step).allowed;
+}
+
+/**
+ * 开发—验证闭环的准入结论与原因。
  *
  * 与服务端 `ExecuteAndValidate` 的准入一致：它复用 `CheckStepExecutionStart`，
  * 但还会在开发之前校验验证配置与修复预算，这两项前端不可见，因此拒绝原因必须
  * 原样展示给用户。
+ *
+ * 前端可见的前置条件与单步骤执行完全相同，因此原因直接复用同一份判定，避免两处漂移。
  */
+export function describeExecuteAndValidate(task: Task, step: Step): ActionEligibility {
+  return describeStepExecution(task, step);
+}
+
+/** 步骤是否可发起开发—验证闭环，条件与 `describeExecuteAndValidate` 完全一致 */
 export function canExecuteAndValidate(task: Task, step: Step): boolean {
-  return canExecuteStep(task, step);
+  return describeExecuteAndValidate(task, step).allowed;
 }
 
 /**
- * 步骤是否可显式开启新的修复周期。
+ * 开启新修复周期的准入结论与原因。
  *
  * 服务端只在上一周期已收敛、且预算用尽或策略不再允许修复时才允许开启；前端无法
  * 判断预算，因此这里只排除"明确不可能成功"的现场（任务不允许推进、步骤被占用）。
  */
+export function describeRepairCycle(task: Task, step?: Step): ActionEligibility {
+  if (!step) return blockedAction("尚未选择步骤，无法开启新的执行周期。");
+  const taskGate = describeStepTaskGate(task);
+  if (!taskGate.allowed) return taskGate;
+  if (step.current_attempt_id) {
+    return blockedAction("该步骤仍被当前执行尝试占用，需要等当前周期收敛后才能开启新的执行周期。");
+  }
+  return ACTION_ALLOWED;
+}
+
+/** 步骤是否可显式开启新的修复周期，条件与 `describeRepairCycle` 完全一致 */
 export function canOpenRepairCycle(task: Task, step?: Step): boolean {
-  if (!step) return false;
-  if (!taskAllowsStepExecution(task)) return false;
-  return !step.current_attempt_id;
+  return describeRepairCycle(task, step).allowed;
 }
 
 /** 是否可以顺序执行：任务允许推进步骤，且存在未结束的步骤 */

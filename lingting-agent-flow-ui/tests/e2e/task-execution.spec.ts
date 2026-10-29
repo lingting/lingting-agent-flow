@@ -1677,6 +1677,214 @@ test.describe("不伪造能力", () => {
   });
 });
 
+/**
+ * 步骤操作被禁用时的原因提示。
+ *
+ * 三类底层控件不同（antd Button 的 disabled / LinkButton 的禁用链接），因此提示由
+ * `DisabledActionHint` 的可聚焦包装层承载，这里用同一份选择器断言：按钮是否禁用、
+ * 原因是否可见、交互是否真的没发出请求。
+ */
+function reasonHint(page: Page, label: string) {
+  return page.locator(`.disabled-action-hint[aria-label^='${label}不可用']`);
+}
+
+/** 当前可见的原因提示浮层（antd 会把隐藏的浮层留在 DOM 中，必须限定可见） */
+function visibleTooltip(page: Page) {
+  return page.locator(".ant-tooltip:visible");
+}
+
+test.describe("步骤操作的禁用原因", () => {
+  test("任务状态不允许推进时说明真实状态，且不会发出执行请求", async ({ page }) => {
+    const executeCalls: string[] = [];
+    await page.route("**/api/v1/tasks/task-1/steps/*/execute", (route: Route) => {
+      executeCalls.push(route.request().url());
+      return route.fulfill({ body: "{}", contentType: "application/json", status: 200 });
+    });
+    await stubTaskList(page, sampleTask({ status: "queued" }));
+    await stubTaskDetail(page, sampleTask({ status: "queued" }));
+    await stubWorkflow(page);
+    await stubSteps(page);
+    await stubAttempts(page, []);
+    await stubValidations(page, []);
+    await stubSessions(page);
+
+    await openDetail(page);
+    await selectStep(page);
+
+    // 按钮仍然按原有条件禁用，原因只描述前端确实检查过的任务状态
+    await expect(page.getByRole("button", { name: "执行步骤" })).toBeDisabled();
+    const hint = reasonHint(page, "执行步骤");
+    await expect(hint).toHaveAttribute("aria-label", /等待执行/);
+    await expect(hint).toHaveAttribute("aria-label", /不允许推进步骤/);
+
+    await hint.hover();
+    await expect(visibleTooltip(page)).toContainText("等待执行");
+
+    // 点击落在禁用按钮上（经包装层）时不得发出单步骤执行请求
+    await hint.click();
+    await page.waitForTimeout(300);
+    expect(executeCalls).toHaveLength(0);
+  });
+
+  test("步骤状态不允许时说明步骤状态，但同一现场仍可开启新执行周期", async ({ page }) => {
+    await stubTaskList(page);
+    await stubTaskDetail(page);
+    await stubWorkflow(page);
+    await stubSteps(page, [sampleStep({ status: "completed" })]);
+    await stubAttempts(page, []);
+    await stubValidations(page, []);
+    await stubSessions(page);
+
+    await openDetail(page);
+    await selectStep(page);
+
+    const hint = reasonHint(page, "执行步骤");
+    await expect(hint).toHaveAttribute("aria-label", /已完成/);
+    await hint.hover();
+    await expect(visibleTooltip(page)).toContainText("只有待执行、等待重试、失败或待核验");
+
+    // 修复周期的前置条件与执行入口不同：已完成的步骤仍可显式开启新周期，因此不得提示禁用
+    await expect(reasonHint(page, "开启新执行周期")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "开启新执行周期" })).toBeEnabled();
+  });
+
+  test("步骤仍被尝试占用时说明占用原因", async ({ page }) => {
+    await stubTaskList(page);
+    await stubTaskDetail(page);
+    await stubWorkflow(page);
+    await stubSteps(page, [sampleStep({ current_attempt_id: "attempt-1" })]);
+    await stubAttempts(page, []);
+    await stubValidations(page, []);
+    await stubSessions(page);
+
+    await openDetail(page);
+    await selectStep(page);
+
+    await expect(reasonHint(page, "执行步骤")).toHaveAttribute(
+      "aria-label",
+      /仍被当前执行尝试占用/,
+    );
+    await expect(reasonHint(page, "开启新执行周期")).toHaveAttribute(
+      "aria-label",
+      /仍被当前执行尝试占用/,
+    );
+  });
+
+  test("非 Agent 步骤说明由服务端直接执行", async ({ page }) => {
+    await stubTaskList(page);
+    await stubTaskDetail(page);
+    await stubWorkflow(page);
+    await stubSteps(page, [sampleStep({ step_type: "verify" })]);
+    await stubAttempts(page, []);
+    await stubValidations(page, []);
+    await stubSessions(page);
+
+    await openDetail(page);
+    await selectStep(page);
+
+    const hint = reasonHint(page, "执行步骤");
+    await expect(hint).toHaveAttribute("aria-label", /确定性验证/);
+    await expect(hint).toHaveAttribute("aria-label", /服务端直接执行/);
+  });
+
+  test("允许执行时不显示任何禁用原因，并按原契约调用接口", async ({ page }) => {
+    const calls: string[] = [];
+    await page.route("**/api/v1/tasks/task-1/steps/step-1/execute", (route: Route) => {
+      calls.push(route.request().url());
+      return route.fulfill({
+        body: JSON.stringify({
+          archive_status: "archived",
+          attempt_id: "attempt-2",
+          attempt_number: 2,
+          attempt_status: "completed",
+          exit_code: 0,
+          export_status: "not_attempted",
+          finalized: true,
+          finished_at: "2026-10-26T08:01:00Z",
+          outcome: "completed",
+          started_at: "2026-10-26T08:00:00Z",
+          step_id: "step-1",
+          step_status: "completed",
+          success: true,
+          task_id: "task-1",
+          task_status: "developing",
+        }),
+        contentType: "application/json",
+        status: 200,
+      });
+    });
+    await stubTaskList(page);
+    await stubTaskDetail(page);
+    await stubWorkflow(page);
+    await stubSteps(page);
+    await stubAttempts(page, []);
+    await stubValidations(page, []);
+    await stubSessions(page);
+
+    await openDetail(page);
+    await selectStep(page);
+
+    // 三个步骤动作都可执行：不得出现任何禁用原因包装层
+    for (const label of ["执行步骤", "开发—验证闭环", "开启新执行周期"]) {
+      await expect(reasonHint(page, label)).toHaveCount(0);
+    }
+    await page.getByRole("button", { name: "执行步骤" }).click();
+
+    await expect(page.getByText(/步骤执行已结束/)).toBeVisible();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("/tasks/task-1/steps/step-1/execute");
+  });
+
+  test("键盘可以沿按钮顺序获得禁用原因", async ({ page }) => {
+    await stubTaskList(page, sampleTask({ status: "queued" }));
+    await stubTaskDetail(page, sampleTask({ status: "queued" }));
+    await stubWorkflow(page);
+    await stubSteps(page);
+    await stubAttempts(page, []);
+    await stubValidations(page, []);
+    await stubSessions(page);
+
+    await openDetail(page);
+    await selectStep(page);
+
+    const executeHint = reasonHint(page, "执行步骤");
+    await executeHint.focus();
+    await expect(executeHint).toBeFocused();
+    // 聚焦即可读到原因（不依赖鼠标）
+    await expect(visibleTooltip(page)).toContainText("等待执行");
+
+    // 继续按 Tab 会进入下一个动作的原因包装层，说明提示不是鼠标专属
+    await page.keyboard.press("Tab");
+    await expect(reasonHint(page, "开发—验证闭环")).toBeFocused();
+  });
+
+  test("切换步骤后不残留上一个步骤的禁用原因", async ({ page }) => {
+    await stubTaskList(page);
+    await stubTaskDetail(page);
+    await stubWorkflow(page);
+    await stubSteps(page, [
+      sampleStep({ status: "completed" }),
+      sampleStep({ id: "step-2", name: "补充单元测试", sequence: 2 }),
+    ]);
+    await stubAttempts(page, []);
+    await stubValidations(page, []);
+    await stubSessions(page);
+
+    await openDetail(page);
+    await selectStep(page);
+
+    const hint = reasonHint(page, "执行步骤");
+    await expect(hint).toHaveAttribute("aria-label", /已完成/);
+    await hint.hover();
+    await expect(visibleTooltip(page)).toContainText("已完成");
+
+    // 切换到待执行的第二步：上一个步骤的原因既不能留在新按钮上，也不能留在浮层里
+    await page.getByText("补充单元测试").click();
+    await expect(reasonHint(page, "执行步骤")).toHaveCount(0);
+    await expect(page.locator(".ant-tooltip:visible")).toHaveCount(0);
+  });
+});
+
 test.describe("切换任务时的状态隔离", () => {
   test("切换任务后不再用上一个任务的步骤标识发起查询", async ({ page }) => {
     const first = sampleTask();

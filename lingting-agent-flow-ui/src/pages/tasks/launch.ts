@@ -6,6 +6,7 @@
  */
 import type { StartTaskResponse, Task, TaskLaunchStage, TaskWorkspaceInitStatus } from "@/lib/api";
 import { taskStatusLabel } from "@/pages/tasks/status";
+import type { ActionEligibility } from "@/pages/tasks/steps";
 
 /** 启动阶段的中文标签与说明 */
 export type TaskLaunchStageMeta = {
@@ -53,7 +54,7 @@ export function workspaceReady(status?: string): boolean {
 }
 
 /**
- * 是否允许对任务发起统一启动。
+ * 统一启动的准入结论：是否允许启动，以及不允许启动时面向用户的原因。
  *
  * 判定与服务端 `domain.TaskStatus.AllowsExplicitLaunch` 一致：它是
  * `CanStart() && status !== "failed"`，即 `queued`、`preparing`、`planned`、`retrying`、
@@ -61,9 +62,24 @@ export function workspaceReady(status?: string): boolean {
  * 统一启动隐式承担；已请求取消的任务也不能启动。
  *
  * 前端禁用只是提示：真正的并发与准入保护仍在服务端任务租约与状态机。
+ *
+ * `reason` 只描述上面这些**前端确实检查过**的条件，不代替服务端结论；允许启动时为空
+ * 字符串，页面据此不展示任何禁用说明。
  */
-export function canStartTask(task: Task): boolean {
-  if (task.cancel_requested || task.status_finished) return false;
+export function describeTaskStart(task: Task): ActionEligibility {
+  if (task.cancel_requested) {
+    return blockedStart("已请求取消：取消请求尚未结束，此时不能通过统一启动重新开始任务。");
+  }
+  if (task.status === "failed") {
+    return blockedStart(
+      "任务已失败：统一启动不会隐式重试失败任务，请在任务详情查看服务端给出的重试资格，并按需显式重试。",
+    );
+  }
+  if (task.status_finished) {
+    return blockedStart(
+      `任务已结束（${taskStatusLabel(task.status)}），统一启动不会重开已停止执行的任务。`,
+    );
+  }
   switch (task.status) {
     case "queued":
     case "preparing":
@@ -71,10 +87,22 @@ export function canStartTask(task: Task): boolean {
     case "retrying":
     case "paused":
     case "recovery_required":
-      return true;
+      return { allowed: true, reason: "" };
     default:
-      return false;
+      return blockedStart(
+        `当前任务状态（${taskStatusLabel(task.status)}）不支持统一启动：正在执行或正在取消的任务不会重复启动。`,
+      );
   }
+}
+
+/** 构造"不允许启动"的结论 */
+function blockedStart(reason: string): ActionEligibility {
+  return { allowed: false, reason };
+}
+
+/** 是否允许对任务发起统一启动，条件与 `describeTaskStart` 完全一致 */
+export function canStartTask(task: Task): boolean {
+  return describeTaskStart(task).allowed;
 }
 
 /** 一次启动的结果分类：只有 workflow_started 为真才算启动成功 */

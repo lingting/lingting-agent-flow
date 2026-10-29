@@ -107,9 +107,11 @@ describe("测试并发策略：项目配置确实接入", () => {
     expect(manifest.scripts.test).toBe("vp test run");
     expect(manifest.scripts.lint).toBe("vp fmt && vp lint --fix && tsc --noEmit");
     expect(manifest.scripts.build).toBe("node scripts/build-webui.mjs");
-    // 新增的安全入口把并发压到 1，并且是顺序执行
-    expect(manifest.scripts["test:unit:safe"]).toContain("--maxWorkers 1");
-    expect(manifest.scripts["test:e2e:safe"]).toContain("--workers=1");
+    // 安全入口显式限制并发，取值与本策略模块的默认值一致（4 是已确认的有意设置）
+    expect(manifest.scripts["test:unit:safe"]).toContain(
+      `--maxWorkers ${DEFAULT_VITEST_MAX_WORKERS}`,
+    );
+    expect(manifest.scripts["test:e2e:safe"]).toContain(`--workers=${DEFAULT_PLAYWRIGHT_WORKERS}`);
     expect(manifest.scripts["test:safe"]).toContain("&&");
     expect(manifest.scripts["test:all:safe"]).toContain("&&");
   });

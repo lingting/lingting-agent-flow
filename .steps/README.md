@@ -43,7 +43,12 @@
   [`P4-task-detail-panel-organization.md`](./P4-task-detail-panel-organization.md)），判定面板职责
   划分与现有顺序合理、无证据支持折叠分组，只修复 4 处"数据归属 / 原始枚举 / 刷新时机"缺陷
   （D7 只读加载器不按归属作废缓存、D8 语义审查原始枚举、D9 步骤失败阶段原始枚举、D10 容器列表
-  刷新令牌未接线），同样未触碰 Go 代码与业务规则。子任务 **M4-1（失败任务
+  刷新令牌未接线），同样未触碰 Go 代码与业务规则；服务端第一版验收（2026-10-29，结论 `completed`）
+  与远程真实测试资源治理（2026-10-29，结论 `completed`）之后恢复前端常规开发，又完成一次**禁用操作的
+  原因提示**（2026-10-30，基线 `d76f656`，见
+  [`P4-disabled-action-reasons.md`](./P4-disabled-action-reasons.md)），把任务列表「启动」与步骤详情三个
+  动作的既有准入判定改造成同时返回 `allowed` / `reason` 的纯函数并显示真实禁用原因，准入条件未变。
+  子任务 **M4-1（失败任务
   [`P4-M4-1-task-retry-web-entry.md`](./P4-M4-1-task-retry-web-entry.md)：前端补齐
   `RetryEligibilityResponse` / `RetryTaskResponse` / `RetryTaskRequest` 类型与
   `fetchTaskRetryEligibility` / `retryTask`（`GET|POST /api/v1/tasks/{taskID}/retry[-eligibility]`），
@@ -600,6 +605,20 @@
   重试 / 续跑资格、容器生命周期与远程操作语义**；新增单元用例 4 个、E2E 用例 3 个，
   `pnpm test:unit:safe` 607 通过、`pnpm test:e2e:safe` 233 通过 / 0 失败、`pnpm check` 与
   `pnpm build` 通过（未执行 Go 测试：未修改 Go 文件）。**P4-M5 仍为 `pending`**。
+- **禁用操作的原因提示已于 2026-10-30 完成**（基线 `origin/master` `d76f656`，"恢复常规功能开发"后的
+  第六个常规工作项），交付物为
+  [`P4-disabled-action-reasons.md`](./P4-disabled-action-reasons.md)：任务列表的「启动」与任务详情的
+  「执行步骤 / 开发—验证闭环 / 开启新执行周期」在禁用时只呈现灰按钮，而重试、续跑与执行操作都各有说明。
+  本轮**不改变任何准入条件**：把 `canStartTask` 与三个 `can*` 判定改为返回 `{ allowed, reason }` 的纯函数
+  （`describeTaskStart` / `describeStepExecution` / `describeExecuteAndValidate` / `describeRepairCycle`），
+  原因只描述代码**确实检查过**的事实（取消请求、任务状态、步骤状态、步骤占用、步骤类型），未知取值原样
+  展示；`can*` 变成同一份结论的布尔投影，因此不存在第二套规则。展示层新增 `DisabledActionHint`：核实出
+  antd `Button` 的 `disabled` 不派发鼠标事件、`LinkButton` 的禁用链接不可聚焦、antd `Tooltip` 默认只响应
+  `hover`，因此禁用时用可聚焦包装层承载提示（显式 `hover` + `focus`，`aria-label` 供读屏软件读取），
+  可用时不渲染任何包装，动作进行中也不显示业务原因。**未修改任何 Go 代码、HTTP 契约、请求/响应 DTO、
+  领域规则或状态机**；新增前端单元用例 18 个、E2E 用例 12 个，`pnpm test:unit:safe` 626 通过、
+  `pnpm test:e2e:safe` 245 通过 / 0 失败、`pnpm check` 与 `pnpm build` 通过（未执行 Go 测试：未修改
+  Go 文件）。**P4-M5 仍为 `pending`**。
 - **下一步**：P3 阶段已全部完成（M1–M5 均 `completed`），P4-M1、M2-1…M2-7、M3、M4、G12 与
   任务详情页体验复核、任务创建配置继承与显式覆盖、创建任务表单的字段收敛、任务详情页面板职责与
   操作可达性复核均已完成（见上方
@@ -608,9 +627,9 @@
   [`P4-M5-measurement-and-optimization-assessment.md`](./P4-M5-measurement-and-optimization-assessment.md) §8）。
   后续入口按 [`ROADMAP.md`](./ROADMAP.md) 的"下一步工作的选择规则"选择**有明确代码证据的常规
   功能缺口**；`P4-M1` 盘点的 P0/P1/P2/P3 缺口已全部闭合，新的候选需要重新盘点而不是照抄旧清单。
-  当前已有代码证据的候选（均未立项）：私有仓库 Git 凭据支持、`verification_results` 遗留模型清理、
-  步骤级动作按钮的禁用原因展示
-  （见 [`P4-task-detail-panel-organization.md`](./P4-task-detail-panel-organization.md) §10）。
+  当前已有代码证据的候选（均未立项）：私有仓库 Git 凭据支持、`verification_results` 遗留模型清理
+  （见 [`P4-task-detail-panel-organization.md`](./P4-task-detail-panel-organization.md) §10；同一份清单
+  里的"步骤级动作按钮的禁用原因"已于 2026-10-30 完成）。
   P4-M2-7 的剩余风险见
   [`P4-M2-7-web-execution-operations.md`](./P4-M2-7-web-execution-operations.md) §6：
   同步长请求没有**流式**进度推送（轮询已由 M3-7 交付，SSE 仍未实现）、闭环未通过验证时
@@ -723,6 +742,7 @@
 | [`P4-task-create-project-inheritance.md`](./P4-task-create-project-inheritance.md) | P4 常规开发：任务创建时的项目配置继承与显式覆盖语义（后端继承规则核实、3 处缺陷的代码证据与修复前失败用例、字段级优先级与来源可见性规则、请求体转换、修改文件与行为变化、判定为合理未修改的 4 项、测试与构建结果、剩余风险、下一项候选、与 P4-M5 的关系） |
 | [`P4-task-create-form-field-convergence.md`](./P4-task-create-form-field-convergence.md) | P4 常规开发：创建任务表单的字段收敛（逐字段继承核查与三分类证据、3 处交互负担的代码证据、只折叠可继承文本字段的依据、收起摘要取自表单有效值与来源、语言环境与版本保持常显的理由、折叠保持挂载与校验失败自动展开、修改文件、测试与构建结果、剩余风险、下一项候选、与 P4-M5 的关系） |
 | [`P4-task-detail-panel-organization.md`](./P4-task-detail-panel-organization.md) | P4 常规开发：任务详情页面板职责与操作可达性复核（12 个面板的数据来源 / 归属 / 刷新触发、上一轮 6 项修复的回归核对、重复展示与折叠分组的逐项判定、4 处缺陷的代码证据与最小修复、修改文件与行为变化、测试与构建结果、用例有效性核对、保留的合理设计与待验证假设、剩余风险、下一项候选、与 P4-M5 的关系） |
+| [`P4-disabled-action-reasons.md`](./P4-disabled-action-reasons.md) | P4 常规开发：禁用操作的原因提示（四类操作的既有准入条件与原因来源、`{ allowed, reason }` 纯函数与布尔投影的关系、antd `Button` / `LinkButton` / `Tooltip` 的真实 DOM 行为核实、可聚焦包装层与键盘可读方案、修改文件与行为变化、测试与构建结果、保留的设计与剩余风险、与 P4-M5 的关系） |
 
 ## 下一步工作的选择规则
 

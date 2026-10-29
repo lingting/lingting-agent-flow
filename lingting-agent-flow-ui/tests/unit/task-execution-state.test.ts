@@ -25,12 +25,15 @@ import {
   canOpenRepairCycle,
   canRunSteps,
   canValidateAttempt,
+  describeExecuteAndValidate,
   describeExecuteAndValidateResult,
   describeExecuteStepResult,
   describeExecuteStepsResult,
   describeInitializeResult,
   describeOpenRepairCycleResult,
   describePlanResult,
+  describeRepairCycle,
+  describeStepExecution,
   describeValidateResult,
   executionOutcomeLabel,
   REVIEW_STATUS_LABEL,
@@ -326,6 +329,150 @@ describe("步骤级操作可用性", () => {
     expect(
       canInitializeAttempt(task({ cancel_requested: true }), attempt({ status: "failed" })),
     ).toBe(false);
+  });
+});
+describe("步骤级操作的禁用原因", () => {
+  it("允许执行时不产生任何禁用原因", () => {
+    expect(describeStepExecution(task(), step())).toEqual({ allowed: true, reason: "" });
+    expect(describeExecuteAndValidate(task(), step())).toEqual({ allowed: true, reason: "" });
+    expect(describeRepairCycle(task(), step())).toEqual({ allowed: true, reason: "" });
+  });
+
+  it("任务状态层的原因是真实状态，不是模糊的不可用", () => {
+    const queued = describeStepExecution(task({ status: "queued" }), step());
+
+    expect(queued.allowed).toBe(false);
+    expect(queued.reason).toContain("等待执行");
+    expect(queued.reason).toContain("环境准备");
+    // 与页面状态标签同源：同一个事实不能一处写"等待执行"、一处写"queued"
+    expect(queued.reason).not.toContain("queued");
+  });
+
+  it("已请求取消时说明取消请求尚未结束", () => {
+    const blocked = describeStepExecution(task({ cancel_requested: true }), step());
+
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.reason).toContain("取消");
+    expect(blocked.reason).toContain("尚未结束");
+  });
+
+  it("未知任务状态原样展示，不映射成已知状态", () => {
+    const blocked = describeStepExecution(task({ status: "future_status" as TaskStatus }), step());
+
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.reason).toContain("future_status");
+  });
+
+  it("步骤状态不允许时说明当前真实步骤状态", () => {
+    for (const status of [
+      "running",
+      "developing",
+      "verifying",
+      "completed",
+      "skipped",
+      "cancelled",
+    ] as StepStatus[]) {
+      const blocked = describeStepExecution(task(), step({ status }));
+
+      expect(blocked.allowed).toBe(false);
+      expect(blocked.reason).toContain(stepStatusMeta(status).label);
+      expect(blocked.reason).not.toContain(status);
+    }
+  });
+
+  it("步骤仍被尝试占用时说明占用而不是状态不允许", () => {
+    const blocked = describeStepExecution(task(), step({ current_attempt_id: "attempt-1" }));
+
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.reason).toContain("当前执行尝试占用");
+    expect(blocked.reason).not.toContain(stepStatusMeta("pending").label);
+  });
+
+  it("非 Agent 步骤说明由服务端直接执行", () => {
+    const blocked = describeStepExecution(task(), step({ step_type: "verify" }));
+
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.reason).toContain(stepTypeLabel("verify"));
+    expect(blocked.reason).toContain("服务端直接执行");
+  });
+
+  it("未知步骤状态与未知步骤类型都原样出现在原因里", () => {
+    const unknownStatus = describeStepExecution(
+      task(),
+      step({ status: "future_status" as StepStatus }),
+    );
+    const unknownType = describeStepExecution(
+      task(),
+      step({ step_type: "future_type" as Step["step_type"] }),
+    );
+
+    expect(unknownStatus.reason).toContain("future_status");
+    expect(unknownType.reason).toContain("future_type");
+  });
+
+  it("闭环入口与执行入口给出同一份原因", () => {
+    for (const blockedTask of [task({ status: "queued" }), task({ cancel_requested: true })]) {
+      expect(describeExecuteAndValidate(blockedTask, step())).toEqual(
+        describeStepExecution(blockedTask, step()),
+      );
+    }
+  });
+
+  it("修复周期的前置条件与执行入口不同：已完成的步骤仍可开启新周期", () => {
+    const completed = step({ status: "completed" });
+
+    expect(describeStepExecution(task(), completed).allowed).toBe(false);
+    expect(describeRepairCycle(task(), completed).allowed).toBe(true);
+    // 步骤类型只约束执行入口，不影响修复周期
+    expect(describeRepairCycle(task(), step({ step_type: "verify" })).allowed).toBe(true);
+    // 占用与任务状态对两者都成立
+    expect(describeRepairCycle(task(), step({ current_attempt_id: "attempt-1" })).allowed).toBe(
+      false,
+    );
+    expect(describeRepairCycle(task({ status: "queued" }), step()).allowed).toBe(false);
+  });
+
+  it("缺少步骤时修复周期给出明确原因而不是静默禁用", () => {
+    const blocked = describeRepairCycle(task(), undefined);
+
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.reason).toContain("尚未选择步骤");
+  });
+
+  it("原因与实际可用性结论始终一致，且不允许时必有原因", () => {
+    const tasks = [
+      task(),
+      task({ status: "queued" }),
+      task({ status: "planned" }),
+      task({ status: "completed" }),
+      task({ status: "failed", status_finished: true }),
+      task({ cancel_requested: true }),
+      task({ status: "future_status" as TaskStatus }),
+    ];
+    const steps = [
+      step(),
+      step({ status: "completed" }),
+      step({ status: "verifying" }),
+      step({ current_attempt_id: "attempt-1" }),
+      step({ step_type: "plan" }),
+      step({ step_type: "cleanup" }),
+    ];
+
+    for (const currentTask of tasks) {
+      for (const currentStep of steps) {
+        const execution = describeStepExecution(currentTask, currentStep);
+        const closure = describeExecuteAndValidate(currentTask, currentStep);
+        const repair = describeRepairCycle(currentTask, currentStep);
+
+        expect(execution.allowed).toBe(canExecuteStep(currentTask, currentStep));
+        expect(closure.allowed).toBe(canExecuteAndValidate(currentTask, currentStep));
+        expect(repair.allowed).toBe(canOpenRepairCycle(currentTask, currentStep));
+        for (const result of [execution, closure, repair]) {
+          expect(result.allowed ? result.reason === "" : result.reason.length > 0).toBe(true);
+        }
+        expect(closure).toEqual(execution);
+      }
+    }
   });
 });
 

@@ -1,0 +1,13 @@
+.disabled-action-hint {
+  cursor: not-allowed;
+  display: inline-flex;
+}
+
+/*
+ * 被禁用的控件本身不派发鼠标事件（antd Button 的 disabled 是真正的 DOM 禁用属性，
+ * LinkButton 的禁用链接也不会成为事件目标），因此把指针事件交给外层可聚焦的包装层，
+ * 让"悬停"和"聚焦"都能打开同一条原因提示。
+ */
+.disabled-action-hint > * {
+  pointer-events: none;
+}

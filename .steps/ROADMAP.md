@@ -859,6 +859,21 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > 遗留风险：`TestRemoteE2EFullChain` 在规划阶段步骤上继承任务级文件检查，模型输出不确定时
 > 会出现业务断言抖动（与资源回收无关，详见该文档 §6.4 / §8）。
 
+> **当前下一步（2026-10-30）：禁用操作的原因提示，结论 `completed`**，交付物
+> [`P4-disabled-action-reasons.md`](./P4-disabled-action-reasons.md)。这是远程真实测试资源治理收口后
+> 恢复的常规前端工作项，不属于 P4-M1 的 G 项，也不属于 P4-M5。核实出的问题是一致性缺陷而非规则缺陷：
+> 任务列表的「启动」与步骤详情的「执行步骤 / 开发—验证闭环 / 开启新执行周期」在禁用时只有灰按钮，
+> 而重试、续跑与执行操作各有说明。本轮**不改变任何准入条件**：把 `canStartTask` 与三个 `can*` 判定
+> 改为返回 `{ allowed, reason }` 的纯函数（`describeTaskStart` / `describeStepExecution` /
+> `describeExecuteAndValidate` / `describeRepairCycle`），原因只描述代码确实检查过的事实（取消请求、
+> 任务状态、步骤状态、步骤占用、步骤类型），未知取值原样保留，`can*` 退化为同一份结论的布尔投影。
+> 展示层新增 `DisabledActionHint`：核实出 antd `Button` 的 `disabled` 不派发鼠标事件、`LinkButton`
+> 渲染的禁用链接不可聚焦、antd `Tooltip` 默认只响应 `hover`，因此禁用时用可聚焦包装层承载提示
+> （显式 `hover` + `focus` + `aria-label`），可用时不渲染任何包装，动作进行中不显示业务原因。
+> **未修改任何 Go 代码、HTTP 契约、请求/响应 DTO、领域规则或状态机**；新增前端单元用例 18 个、
+> E2E 用例 12 个，`pnpm test:unit:safe` 626 通过、`pnpm test:e2e:safe` 245 通过 / 0 失败、
+> `pnpm check` 与 `pnpm build` 通过（未执行 Go 测试）。**P4-M5 仍为 `pending`**。
+
 ## 四阶段总览
 
 | 阶段 | 目标 | 必要性 | 主要依赖 | 退出条件（摘要） |
@@ -957,6 +972,7 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - [P4-G12-project-management.md](./P4-G12-project-management.md)
 - [P4-task-detail-experience-review.md](./P4-task-detail-experience-review.md)
 - [P4-task-detail-panel-organization.md](./P4-task-detail-panel-organization.md)
+- [P4-disabled-action-reasons.md](./P4-disabled-action-reasons.md)
 - [remote-test-resource-cleanup.md](./remote-test-resource-cleanup.md)
 
 ## 验收记录
