@@ -282,7 +282,8 @@ E2E 用 `boundingBox()` 断言步骤详情位于事件时间线上方。
    仍是 [`P4-G12-project-management.md`](./P4-G12-project-management.md) §13 记录的候选。
    其中**创建任务表单字段收敛已于 2026-10-28 完成**（见
    [`P4-task-create-form-field-convergence.md`](./P4-task-create-form-field-convergence.md)），
-   后两项仍未触碰。
+   **`verification_results` 遗留模型清理已于 2026-10-29 完成**，**私有仓库 Git 凭据支持已由用户明确
+   决定不纳入产品范围（2026-10-29）**，因此该候选清单已无剩余项。
 
 > **后续工作项（2026-10-28，基线 `cbaee84`）**：本文件 §8 的第 1、4 条候选已在
 > [`P4-task-detail-panel-organization.md`](./P4-task-detail-panel-organization.md) 中按实际代码逐项

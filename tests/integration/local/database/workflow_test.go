@@ -21,7 +21,7 @@ import (
 const expectedSchemaVersion = 25
 
 // TestPersistentWorkflowLifecycle 覆盖一次完整的持久化链路：
-// 迁移 → 角色初始化 → 需求与任务 → 计划 → 尝试 → 会话 → 验证 → 事件 → 重启恢复。
+// 迁移 → 角色初始化 → 需求与任务 → 计划 → 尝试 → 会话 → 事件 → 重启恢复。
 func TestPersistentWorkflowLifecycle(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -79,7 +79,7 @@ func TestPersistentWorkflowLifecycle(t *testing.T) {
 
 	requirement, err := domain.NewRequirement(
 		"实现存储层",
-		"保存角色、需求、任务、步骤、尝试、会话、验证与事件",
+		"保存角色、需求、任务、步骤、尝试、会话与事件",
 		domain.PriorityHigh,
 		time.Now().UTC(),
 	)
@@ -208,27 +208,6 @@ func TestPersistentWorkflowLifecycle(t *testing.T) {
 	}
 
 	// 验证失败后保留历史，并创建新的尝试与新的会话。
-	result, err := domain.NewVerificationResult(domain.VerificationInput{
-		TaskID:             task.ID,
-		StepID:             step.ID,
-		AttemptID:          attempt.ID,
-		ValidatorSessionID: &validatorSession.ID,
-		Summary:            "构建失败",
-		Checks:             []domain.VerificationCheck{{Name: "构建通过", Passed: false}},
-		CommandResults: []domain.CommandResult{{
-			Name:     "build",
-			Command:  "go build ./...",
-			ExitCode: 1,
-			Stderr:   "undefined: foo",
-		}},
-		FailureSummary: "构建失败",
-	}, time.Now().UTC())
-	if err != nil {
-		t.Fatalf("构造验证结果失败: %v", err)
-	}
-	if err := db.CreateVerificationResult(ctx, result); err != nil {
-		t.Fatalf("写入验证结果失败: %v", err)
-	}
 	if err := attempt.Fail("构建失败", time.Now().UTC()); err != nil {
 		t.Fatalf("标记尝试失败失败: %v", err)
 	}
@@ -350,17 +329,6 @@ func TestPersistentWorkflowLifecycle(t *testing.T) {
 	}
 	if len(secondSessions) != 1 || secondSessions[0].ID != retrySession.ID {
 		t.Fatalf("重试会话未持久化: %+v", secondSessions)
-	}
-
-	results, err := reopened.ListVerificationResultsByAttempt(ctx, attempt.ID)
-	if err != nil {
-		t.Fatalf("读取验证结果失败: %v", err)
-	}
-	if len(results) != 1 || results[0].Passed {
-		t.Fatalf("验证历史未持久化: %+v", results)
-	}
-	if len(results[0].CommandResults) != 1 || results[0].CommandResults[0].ExitCode != 1 {
-		t.Fatalf("命令失败证据未持久化: %+v", results[0].CommandResults)
 	}
 
 	events, err := reopened.ListEventsByTask(ctx, task.ID, storage.EventFilter{})

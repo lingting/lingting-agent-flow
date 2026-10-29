@@ -47,7 +47,11 @@
   与远程真实测试资源治理（2026-10-29，结论 `completed`）之后恢复前端常规开发，又完成一次**禁用操作的
   原因提示**（2026-10-30，基线 `d76f656`，见
   [`P4-disabled-action-reasons.md`](./P4-disabled-action-reasons.md)），把任务列表「启动」与步骤详情三个
-  动作的既有准入判定改造成同时返回 `allowed` / `reason` 的纯函数并显示真实禁用原因，准入条件未变。
+  动作的既有准入判定改造成同时返回 `allowed` / `reason` 的纯函数并显示真实禁用原因，准入条件未变；
+  再后完成**私有仓库认证的产品边界落定与 `verification_results` 遗留模型清理**（2026-10-29，基线
+  `042a33d`）：前者把用户已作出的产品范围决定写进 `AGENTS.md` 与用户文档，后者删除了已证实无生产
+  写入方、唯一读取方也不被展示的旧验证模型，遗留表与历史数据保留（未新增删除迁移）。**P4-M5 仍为
+  `pending`**，本轮没有产生任何真实使用数据。
   子任务 **M4-1（失败任务
   [`P4-M4-1-task-retry-web-entry.md`](./P4-M4-1-task-retry-web-entry.md)：前端补齐
   `RetryEligibilityResponse` / `RetryTaskResponse` / `RetryTaskRequest` 类型与
@@ -619,6 +623,25 @@
   领域规则或状态机**；新增前端单元用例 18 个、E2E 用例 12 个，`pnpm test:unit:safe` 626 通过、
   `pnpm test:e2e:safe` 245 通过 / 0 失败、`pnpm check` 与 `pnpm build` 通过（未执行 Go 测试：未修改
   Go 文件）。**P4-M5 仍为 `pending`**。
+- **私有仓库认证的产品边界与 `verification_results` 遗留模型清理已于 2026-10-29 完成**（基线
+  `origin/master` `042a33d`，`git status -uno` 无输出），交付物为本轮交付说明与
+  [`P4-task-detail-panel-organization.md`](./P4-task-detail-panel-organization.md) §10 的更新：
+  ①把用户已明确作出的**私有仓库认证产品边界**写入 `AGENTS.md`（不建设产品级 Git 凭据存储、注入、
+  轮换与撤销；需要私有仓库的用户自行维护执行镜像里的认证环境；不保证其认证方式与凭据安全性；
+  不补 `source.GitCredentialProvider` / `codesaver.GitCredentialProvider` 的产品级实现）并同步
+  `README.md`、`docs/architecture.md`、`P1`、`P4-G12`、本文件与 `ROADMAP.md` 的表述，消除"等待
+  设计评审的待补缺口"这类暗示；②审计 `verification_results` 旧模型的完整调用链：写入方为零，唯一
+  的生产读取方是 `app.TaskService.Detail` 的 `TaskDetail.Verifications`（CLI 从不打印该字段），
+  结论来源早已是 `domain.DecideValidation`，据此删除 `domain.VerificationResult` /
+  `VerificationInput` / `NewVerificationResult` / `decideVerdict` / `VerificationCheck` /
+  `CommandResult`、`storage.VerificationStore`、`internal/storage/sqlite/verifications.go` 与
+  `TaskDetail.Verifications` 读取路径，并同步删除只证明该旧实现的 `tests/unit/store/verifications_test.go`、
+  改写 `events_test.go` / `workflow_test.go` / `legacy_migration_test.go` 中依赖旧模型的断言。
+  **未新增数据库迁移**：`verification_results` 定义于已发布的 `0001` 并在 `0008` / `0009` 中重建，
+  可能保存真实历史行，而旧模型没有 run status / 逐项检查状态，无法安全转换到 `validation_runs`，
+  因此表与历史数据原样保留，仅清理运行时读写代码（部分清理，不宣称"表已删除"）。
+  验证：`gofmt -l internal cmd tests` 无输出、`go vet ./...` 无输出、`go build ./...` 通过；
+  **未执行任何测试**（未获测试授权）。
 - **下一步**：P3 阶段已全部完成（M1–M5 均 `completed`），P4-M1、M2-1…M2-7、M3、M4、G12 与
   任务详情页体验复核、任务创建配置继承与显式覆盖、创建任务表单的字段收敛、任务详情页面板职责与
   操作可达性复核均已完成（见上方
@@ -627,9 +650,10 @@
   [`P4-M5-measurement-and-optimization-assessment.md`](./P4-M5-measurement-and-optimization-assessment.md) §8）。
   后续入口按 [`ROADMAP.md`](./ROADMAP.md) 的"下一步工作的选择规则"选择**有明确代码证据的常规
   功能缺口**；`P4-M1` 盘点的 P0/P1/P2/P3 缺口已全部闭合，新的候选需要重新盘点而不是照抄旧清单。
-  当前已有代码证据的候选（均未立项）：私有仓库 Git 凭据支持、`verification_results` 遗留模型清理
-  （见 [`P4-task-detail-panel-organization.md`](./P4-task-detail-panel-organization.md) §10；同一份清单
-  里的"步骤级动作按钮的禁用原因"已于 2026-10-30 完成）。
+  私有仓库 Git 凭据支持已由用户明确决定**不纳入产品范围**（2026-10-29），不再作为候选；
+  `verification_results` 遗留模型清理与"步骤级动作按钮的禁用原因"均已于 2026-10-29 / 2026-10-30
+  完成（见 [`P4-task-detail-panel-organization.md`](./P4-task-detail-panel-organization.md) §10），
+  因此**当前没有任何已立项的常规功能候选**，下一项需要先重新盘点并给出代码证据。
   P4-M2-7 的剩余风险见
   [`P4-M2-7-web-execution-operations.md`](./P4-M2-7-web-execution-operations.md) §6：
   同步长请求没有**流式**进度推送（轮询已由 M3-7 交付，SSE 仍未实现）、闭环未通过验证时
@@ -659,9 +683,10 @@
   环境注入 `unknown` / 孤儿现场）；遗留的 `completed` + `recovery_required` 只被报告、
   不被自动修复（`completed` 是终态，若要回退需先审计全部读取方）；`0023` 迁移在已有
   重复活动 `code_fetches` 的库上会失败并有排查说明；孤儿容器不自动补关联。
-  P1 遗留的真实缺口是私有仓库 Git 凭据支持
-  （`source.GitCredentialProvider` / `codesaver.GitCredentialProvider` 无实现），
-  记录在 `ROADMAP.md` 的"尚未实现"。
+  P1 记录过的私有仓库 Git 凭据缺口已由用户明确决定**不纳入产品范围**（2026-10-29）：需要私有仓库
+  的用户自行维护执行镜像里的认证环境，`source.GitCredentialProvider` /
+  `codesaver.GitCredentialProvider` 保持为空接口占位，不再作为待实施能力（见 `AGENTS.md` 的
+  "私有仓库认证的产品边界"）。
 - **服务端第一版验收（2026-10-29，基线 `origin/master` `9c79a2c`）已完成，结论 `completed`**，
   交付物为 [`SERVER-v1-acceptance.md`](./SERVER-v1-acceptance.md)：代码层面的第一版必需链路
   （统一启动 → 开发与验证 → 修复循环 → 代码保存 → 会话归档与收尾 → 恢复与重试 → 并发与隔离）

@@ -353,14 +353,19 @@
 
 ## 10. 下一项建议（仅列有代码证据的方向）
 
-1. **`verification_results` 遗留模型清理**：生产链路已不再使用该表与 `domain.decideVerdict`，
-   需先确认是否还有读取方（`P4-G12-project-management.md` §13 记录）。
+1. ~~**`verification_results` 遗留模型清理**~~：**已于 2026-10-29 完成**。审计确认生产链路上唯一
+   的读取方是 `app.TaskService.Detail` 的 `TaskDetail.Verifications`（CLI 从不打印该字段），
+   写入方为零；领域类型、`storage.VerificationStore` 与其 SQLite 实现、该读取方一并删除，
+   遗留表与历史数据保留（未新增删除迁移）。
 2. ~~**步骤级动作按钮的禁用原因**~~：**已于 2026-10-30 完成**
    （[`P4-disabled-action-reasons.md`](./P4-disabled-action-reasons.md)）。`canExecuteStep` /
    `canExecuteAndValidate` / `canOpenRepairCycle` 的三个前置条件已在注释里写明，本轮把它们改造成同时
    返回 `allowed` 与 `reason` 的纯函数并显示出来，同时覆盖任务列表的启动按钮。
-3. **私有仓库 Git 凭据支持**：`source.GitCredentialProvider` / `codesaver.GitCredentialProvider`
-   仍无实现，成本与安全评审要求明显高于前两项。
+3. ~~**私有仓库 Git 凭据支持**~~：**已由用户明确决定不纳入产品范围（2026-10-29）**，从候选
+   清单中移除；需要私有仓库的用户自行维护执行镜像里的认证环境（见 `AGENTS.md` 的
+   "私有仓库认证的产品边界"）。
+4. **任务详情页剩余的两项待验证假设**（`OperationOutcomePanel` 的位置、9 个区块是否折叠）
+   仍缺少真实使用数据，不构成立项依据。
 
 ---
 

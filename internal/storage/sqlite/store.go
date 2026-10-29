@@ -21,7 +21,6 @@ type dbStore struct {
 	stepStore
 	attemptStore
 	sessionStore
-	verificationStore
 	validationStore
 	eventStore
 	environmentVersionStore
@@ -50,7 +49,6 @@ type txStore struct {
 	stepStore
 	attemptStore
 	sessionStore
-	verificationStore
 	validationStore
 	eventStore
 	environmentVersionStore
@@ -80,7 +78,6 @@ func newDBStore(db *sql.DB) *dbStore {
 		stepStore:               stepStore{q: pool},
 		attemptStore:            attemptStore{q: pool},
 		sessionStore:            sessionStore{q: pool},
-		verificationStore:       verificationStore{q: pool},
 		validationStore:         validationStore{q: pool},
 		eventStore:              eventStore{q: pool},
 		environmentVersionStore: environmentVersionStore{q: pool},
@@ -106,7 +103,6 @@ func newTxStore(tx *sql.Tx) *txStore {
 		stepStore:               stepStore{q: tx},
 		attemptStore:            attemptStore{q: tx},
 		sessionStore:            sessionStore{q: tx},
-		verificationStore:       verificationStore{q: tx},
 		validationStore:         validationStore{q: tx},
 		eventStore:              eventStore{q: tx},
 		environmentVersionStore: environmentVersionStore{q: tx},

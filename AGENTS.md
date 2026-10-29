@@ -23,7 +23,13 @@ cmd → cli / httpapi → app → agent / process / gitworktree / storage / even
 
 ## 领域模型约定
 
-- `Requirement`、`Task`、`Step`、`Attempt`、`Session`、`VerificationResult` 是不同层次的概念，不得合并。
+- `Requirement`、`Task`、`Step`、`Attempt`、`Session`、`ValidationRun` 是不同层次的概念，不得合并。
+- 验证结论只有一套模型：`ValidationRun`（流程状态 + 最终结论）与 `ValidationCheckResult`（逐项检查结果），
+  结论只能由 `domain.DecideValidation` 计算。历史上与它并存的整套 `domain.VerificationResult` /
+  `NewVerificationResult` / `decideVerdict` 模型已删除，不得重新引入第二套判定规则。
+- 表 `verification_results` 是**已冻结的遗留数据**：只由已发布迁移（`0001` / `0008` / `0009`）定义，
+  不再有运行时读写方。禁止在业务代码中重新写入或读取它，禁止为"清理"直接修改已发布迁移，也禁止
+  在没有可靠数据保全方案时通过新迁移删表。
 - Step 是业务对象，Attempt 是一次执行尝试，Session 是一次 Pi 会话；每次重试必须创建新的 Attempt 与新的 Session，并保留历史记录。
 - 状态迁移统一在 `domain` 内通过 `Transition` 方法校验，非法迁移返回 `ErrInvalidTransition`。禁止在业务层直接赋值状态字段绕过校验。
 - 实体字段校验失败返回 `*ValidationError`，可通过 `errors.Is(err, ErrInvalidValue)` 判断。
@@ -653,13 +659,34 @@ cmd → cli / httpapi → app → agent / process / gitworktree / storage / even
 - 代码初始化必须校验任务、步骤、尝试、容器与执行节点归属，并严格要求容器记录的
   `attempt_id` 与本请求一致；容器未登记尝试归属时返回前置条件错误，由环境准备阶段补写。
 - 凭据不得泄露到 Dockerfile、Git URL、普通日志、数据库普通字段或测试产物；仓库地址必须
-  经 `domain.ParseGitRepositoryURL` 脱敏，内嵌凭据的地址直接拒绝。第一版不支持私有仓库
-  认证，需要认证时返回 `repository_auth_required`，不得静默降级为匿名访问。
+  经 `domain.ParseGitRepositoryURL` 脱敏，内嵌凭据的地址直接拒绝。需要认证的仓库返回
+  `repository_auth_required`，不得静默降级为匿名访问；私有仓库认证的产品边界见下一节。
 - 取消与超时必须传播到实际 Git 进程并分别记录为 `cancelled` / `timed_out`；执行结果无法
   确认时记为 `uncertain`，不得判定为成功。
 - 代码获取不负责 Push、Merge、容器生命周期与重试决策；失败不得自动删除容器，也不得自动
   无限重试。
 - 所有 Docker 命令与参数仍必须遵守既定兼容性基线（CLI 29.0.0、Engine 29.0.0、API 1.52）。
+
+### 私有仓库认证的产品边界（长期决定）
+
+这是用户已经明确作出的产品范围决定，不是待评估的问题；后续不得重新开启技术选型、安全架构
+设计或产品认证功能的立项。
+
+- AgentFlow 不实现产品级私有仓库 Git 凭据管理，不建设产品自身的凭据存储、注入、轮换、撤销
+  或管理功能。
+- 需要访问私有 Git 仓库的用户自行编辑和维护执行镜像配置，提供所需的 Git 认证环境。该认证
+  配置由用户负责，**不属于 AgentFlow 管理的项目配置或任务配置**。
+- AgentFlow 不保证用户自定义镜像中的认证方式、凭据安全性或私有仓库访问成功。公开仓库
+  Clone / Push 的既有能力与私有仓库认证是两回事，不得混为一谈，也不得把公开仓库的验证结果
+  表述为私有仓库认证已经可用。
+- 禁止因此把凭据写入 AgentFlow 的项目配置、任务配置、数据库、仓库 URL、日志、命令参数或
+  提交到仓库的文件。
+- 不新增 `source.GitCredentialProvider`、`codesaver.GitCredentialProvider` 的产品级凭据管理
+  实现，也不围绕它们规划后续凭据存储或安全架构项目；这两个接口只是既有的空占位，不得作为
+  "待实现能力"的立项依据。
+- 文档不得建议把长期凭据以明文写入 Dockerfile 或可复用的镜像层。用户自定义镜像是产品责任
+  边界，不等于 AgentFlow 认可任何具体的凭据保存方式。
+
 ### 结果报告
 
 - 修改测试相关基础设施后，必须运行与修改范围相关的测试，并如实报告通过、失败、跳过与

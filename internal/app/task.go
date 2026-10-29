@@ -376,13 +376,12 @@ func (s *TaskService) ListTasks(
 
 // TaskDetail 是任务详情的聚合视图。
 type TaskDetail struct {
-	Task          domain.Task
-	Steps         []domain.Step
-	Attempts      []domain.Attempt
-	Sessions      []domain.Session
-	CodeSaves     []domain.CodeSaveRecord
-	Containers    []domain.Container
-	Verifications []domain.VerificationResult
+	Task       domain.Task
+	Steps      []domain.Step
+	Attempts   []domain.Attempt
+	Sessions   []domain.Session
+	CodeSaves  []domain.CodeSaveRecord
+	Containers []domain.Container
 }
 
 // Detail 读取任务的完整执行历史。
@@ -402,13 +401,6 @@ func (s *TaskService) Detail(ctx context.Context, taskID string) (TaskDetail, er
 			return TaskDetail{}, fmt.Errorf("读取执行尝试失败: %w", attemptErr)
 		}
 		detail.Attempts = append(detail.Attempts, attempts...)
-		for _, attempt := range attempts {
-			results, resultErr := s.store.ListVerificationResultsByAttempt(ctx, attempt.ID)
-			if resultErr != nil {
-				return TaskDetail{}, fmt.Errorf("读取验证结果失败: %w", resultErr)
-			}
-			detail.Verifications = append(detail.Verifications, results...)
-		}
 	}
 	sessions, err := s.store.ListSessionsByTask(ctx, task.ID)
 	if err != nil {

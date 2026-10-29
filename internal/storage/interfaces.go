@@ -491,17 +491,6 @@ type SessionPage struct {
 	Total int
 }
 
-// VerificationStore 保存每次验证的结构化结果，历史记录只追加不覆盖。
-type VerificationStore interface {
-	// CreateVerificationResult 在写入前校验任务、步骤与尝试的归属是否自洽。
-	CreateVerificationResult(ctx context.Context, result domain.VerificationResult) error
-	GetVerificationResult(ctx context.Context, id domain.ID) (*domain.VerificationResult, error)
-	ListVerificationResultsByAttempt(
-		ctx context.Context,
-		attemptID domain.ID,
-	) ([]domain.VerificationResult, error)
-}
-
 // ValidationRunStartRequest 是一次"占用并开始验证"的输入。
 //
 // 只包含调用方已经确认的信息：验证记录本身由存储层在同一事务内创建，
@@ -880,9 +869,6 @@ type Tx interface {
 	StepStore
 	AttemptStore
 	SessionStore
-	VerificationStore
-	// ValidationStore 提供确定性验证的运行记录与检查结果持久化。
-	// ValidationStore 提供确定性验证的运行记录与检查结果持久化。
 	ValidationStore
 	// ValidationFeedbackStore 提供验证失败反馈的追加与查询。
 	ValidationFeedbackStore

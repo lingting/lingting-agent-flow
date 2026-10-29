@@ -42,7 +42,7 @@ API 兼容性、Docker CLI 帮助信息、基础 Dockerfile 的外部 `FROM` 镜
 - YAML 配置加载与校验：拒绝未知字段、校验并发数、重试次数、角色列表、角色 ID 唯一性、角色类型、工具策略模式与必需路径。
 - 基于 `log/slog` 的结构化日志，输出到标准错误流，级别可通过配置切换。
 - Makefile 统一入口：`fmt`、`fmt-check`、`vet`、`test`、`build`、`run`、`check`。
-- SQLite 持久化：`roles`、`requirements`、`tasks`、`steps`、`attempts`、`sessions`、`verification_results`、`events` 八张核心表。
+- SQLite 持久化：`roles`、`requirements`、`tasks`、`steps`、`attempts`、`sessions`、`validation_runs`、`events` 等核心表。
 - 版本化迁移：SQL 脚本通过 `embed` 嵌入程序，启动时按版本顺序自动执行，已应用版本记录在 `schema_migrations`。
 - 存储接口与事务边界：`storage.Store` / `storage.Tx` 提供跨实体原子更新，错误可按类别判断。
 - 执行节点管理：`agentflow host` 命令组支持新增、列出、查看、设置默认与删除执行节点，节点保存在 SQLite 的 `execution_hosts` 表中。
@@ -80,8 +80,9 @@ API 兼容性、Docker CLI 帮助信息、基础 Dockerfile 的外部 `FROM` 镜
   记录实际 HEAD。代码获取抽象为 `source.Fetcher`，第一版只注册 Git Clone 实现；初始化结果
   持久化到 `code_fetches`（来源、脱敏仓库地址、目标目录、基础分支与 commit、任务分支与来源、
   实际 HEAD、状态、失败阶段、错误类别与摘要、起止时间）。目标目录非空时直接失败；同一
-  Attempt 已初始化成功时写入 `skipped` 记录并复用原 commit，不会重新 Clone。私有仓库认证
-  尚未支持，需要认证时返回明确错误，不静默降级为匿名访问。
+  Attempt 已初始化成功时写入 `skipped` 记录并复用原 commit，不会重新 Clone。需要认证的私有
+  仓库返回明确错误，不静默降级为匿名访问；私有仓库认证由用户在自己的执行镜像里提供，
+  AgentFlow 不管理 Git 凭据（见下文"尚未实现"中的产品边界说明）。
 
 - 统一任务启动入口：`POST /api/v1/tasks/{taskID}/start`（CLI：`agentflow task start <task-id>`）
   把「准备容器 → 初始化工作区 → 生成计划 → 启动编排」收敛为一个入口。服务端依据数据库事实
@@ -107,7 +108,12 @@ API 兼容性、Docker CLI 帮助信息、基础 Dockerfile 的外部 `FROM` 镜
 - 无需用户确认的自动重试与退避策略：失败任务必须由用户显式重试，调度器只领取 `queued`。
 - 相互隔离的 Git Worktree：第一版的任务隔离边界是"每任务一个容器 + `agent/<task-id>` 分支"。
 - 容器自动销毁：失败与中断必须保留现场，清理只能由用户显式选择 `delete` 或 `detach`。
-- 私有仓库 Git 凭据存储：需要凭据存储设计与安全评审，第一版按"凭据不落库、不进日志"处理。
+- 私有仓库 Git 凭据管理（**已明确的产品边界，不属于待实现能力**）：AgentFlow 不建设产品自己的
+  凭据存储、注入、轮换、撤销与管理功能。需要访问私有仓库时，由用户自行编辑和维护执行镜像配置，
+  在该镜像内提供所需的 Git 认证环境；该配置由用户负责，不属于 AgentFlow 管理的项目配置或任务配置。
+  AgentFlow 不保证用户自定义镜像中的认证方式、凭据安全性或私有仓库访问是否成功，也不建议把长期
+  凭据以明文写入 Dockerfile 或可复用的镜像层。`source.GitCredentialProvider` /
+  `codesaver.GitCredentialProvider` 只是既有的空接口占位，不会补上产品级实现。
 - 跨数据库的全局并发配额：并发上限的语义是"同一份数据库上的名额上限"。
 - 本机执行环境（`local_linux` / `local_darwin` / `local_windows`）：`internal/execenv` 直接返回
   `ErrUnsupportedKind`，不允许回退到宿主机执行。
@@ -1302,8 +1308,8 @@ go run ./cmd/agentflow --help
 - 任务分支固定为 `agent/<task-id>`；分支已存在时只检出，不强制重置或覆盖。
 - 目标目录非空时直接失败，不会为了重试自动清空目录内容。
 - 同一 Attempt 已初始化成功时不会重新 Clone，只记录 `skipped` 并复用原 commit。
-- 需要认证的私有仓库返回 `repository_auth_required`；第一版不提供凭据存储，凭据需由
-  环境镜像自行注入。
+- 需要认证的私有仓库返回 `repository_auth_required`；AgentFlow 不提供产品级凭据管理，认证环境
+  由用户自行在执行镜像中配置，凭据不进入 AgentFlow 的项目配置、任务配置、数据库与日志。
 - 容器必须由环境准备阶段登记本次 Attempt（`attempt_id`），否则返回前置条件错误。
 
 任务执行的完整链路（需要先启动 `agentflow server`）：
@@ -1720,7 +1726,8 @@ storage:
 | `steps` | Planner 生成的结构化步骤 | `(task_id, sequence)` 唯一；`role_snapshot_json` 保存角色快照；多个 JSON 列需合法 |
 | `attempts` | 步骤的每次完整执行尝试 | `(step_id, attempt_number)` 唯一；失败记录保留，新的修复创建新 Attempt |
 | `sessions` | 每次 Agent 会话的元数据 | 可空 `step_id` / `attempt_id` 支持任务级会话；关联 Attempt 时必须给出 `step_id` |
-| `verification_results` | 每次验证的结构化结果 | `passed` 只能为 0/1；失败必须带失败摘要；只追加，不覆盖历史 |
+| `validation_runs` / `validation_check_results` | 每次确定性验证的运行记录与逐项检查结果（流程状态与最终结论分开保存） | 只追加，不覆盖历史；检查输出只保存落盘路径与摘要 |
+| `verification_results` | **已冻结的遗留表**：历史版本的验证结果 | 仅由已发布迁移定义，运行时不再读写；历史行原样保留，不通过新迁移删除 |
 | `events` | 工作流关键事件 | 自增主键；只追加写入；`(task_id, id)` 联合索引支持任务时间线查询 |
 | `execution_hosts` | 通过 SSH 管理的执行节点 | `port` 限定 1-65535；私钥认证必须给出 `private_key_path`；指纹必须以 `SHA256:` 开头；`last_connect_error` 只保存稳定分类代码；`validation_generation` 必须大于 0；`validation_details_json` 必须为合法 JSON；部分唯一索引保证最多一个默认节点；**不保存任何凭据字段** |
 | `schema_migrations` | 迁移版本记录 | `version` 主键，记录迁移名与应用时间 |
@@ -1817,7 +1824,9 @@ SSH 连接层按三层覆盖：`tests/unit/ssh/`（主机密钥、认证配置�
 - Git Worktree 创建与清理（每个任务目前使用远程容器内的工作区）。
 - Git 之外的代码获取方式（HTTP 下载、wget、curl、SCP）：`source.Fetcher` 抽象已就位，
   但只注册了 Git Clone 实现。
-- 私有仓库认证：仓库地址中的内嵌凭据被拒绝，凭据需由环境镜像自行注入。
+- 私有仓库认证的产品级支持（**已明确的产品边界**）：仓库地址中的内嵌凭据被拒绝，认证环境由用户
+  在自己的执行镜像里配置；AgentFlow 不做凭据存储、注入、轮换与撤销，也不对用户镜像的认证方式与
+  凭据安全性作保证。
 - 项目、环境、容器、角色与调度的 HTTP 接口与对应页面（任务、执行节点、执行记录、
   代码保存核验已提供接口）；Web 上的项目、环境与设置页仍为占位说明。
 - 多 Agent Provider 与分布式执行（当前只支持 Pi）。

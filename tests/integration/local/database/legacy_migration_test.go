@@ -342,12 +342,18 @@ func TestLegacyDatabaseLosesNoRecords(t *testing.T) {
 		t.Fatalf("会话运行状态未保留: %s", sessions[0].RunStatus)
 	}
 
-	results, err := db.ListVerificationResultsByAttempt(ctx, domain.ID(fixture.attempts[0]))
-	if err != nil {
-		t.Fatalf("读取验证结果失败: %v", err)
+	// verification_results 是已冻结的遗留表：运行时不再有读写方，但迁移必须保留历史行。
+	legacyConn := testkit.OpenSQLite(t, db.Path())
+	var legacyVerifications int
+	if err := legacyConn.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM verification_results WHERE id = ?`,
+		fixture.verification,
+	).Scan(&legacyVerifications); err != nil {
+		t.Fatalf("读取遗留验证结果失败: %v", err)
 	}
-	if len(results) != 1 || !results[0].Passed {
-		t.Fatalf("验证结果未保留: %+v", results)
+	if legacyVerifications != 1 {
+		t.Fatalf("遗留验证结果未保留: %d", legacyVerifications)
 	}
 
 	events, err := db.ListEventsByTask(ctx, task.ID, storage.EventFilter{})

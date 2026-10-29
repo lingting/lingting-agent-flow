@@ -169,15 +169,15 @@ cmd/agentflow → cli / httpapi / server → app → config / logging / storage 
 | Step | 计划中的业务步骤 | domain |
 | Attempt | 某个 Step 的一次执行尝试 | domain |
 | Session | 一次具体的 Pi 会话 | domain |
-| VerificationResult | 单步骤执行的一次验证快照（含 Agent 辅助评估） | domain |
 | ValidationRun | 确定性验证引擎的一次运行记录（状态与结论分离） | domain |
 | ValidationCheckResult | 一项确定性检查的真实执行结果 | domain |
 | ExecutionHost | 通过 SSH 管理的远程执行节点（连接目标与工作空间） | domain |
 
 - Step / Attempt / Session 是三个不同层次，不得合并为一个对象。
-- `ValidationRun` 与 `VerificationResult` 是两个不同模型：前者是确定性验证引擎的运行记录
-  （状态、结论、逐项检查结果分别持久化），后者是单步骤执行写入的验证快照（含 Agent 辅助
-  评估，结果整体以 JSON 保存）。两者不得合并，也不得互相替代。
+- 验证结论只有一套模型：`ValidationRun`（流程状态与最终结论分离）与 `ValidationCheckResult`
+  （逐项检查结果），结论只能由 `domain.DecideValidation` 计算。历史版本的 `VerificationResult` /
+  `NewVerificationResult` / `decideVerdict` 判定模型已删除，其遗留表 `verification_results` 只作为
+  已冻结的历史数据保留，运行时不再读写。
 - 重试必须产生新的 Attempt 与新的 Session，历史记录只追加不覆盖。
 - 状态只能通过 `Transition`（或实体自身的结束方法）变更，不允许直接赋值绕过校验。
 - 角色名称由用户自由命名，工作流只依据角色类型识别职责。
@@ -764,9 +764,13 @@ HTTP Handler / CLI
   起止时间。状态（`status`）、失败阶段（`stage`）与错误类别（`error_code`）分别保存。
 - 幂等边界：同一 Attempt 在同一容器上已有成功记录时写入 `skipped` 记录并复用原 commit；
   目标目录非空时直接失败，不会为了重试自动清空目录。
-- 认证范围：第一版不支持私有仓库认证。仓库地址必须通过 `domain.ParseGitRepositoryURL`
-  校验，内嵌凭据（`user:token@host`）直接拒绝；Clone 输出显示需要认证时返回
-  `repository_auth_required`，不静默降级为匿名访问。凭据由环境镜像自行注入。
+- 认证范围：AgentFlow 不实现产品级私有仓库 Git 凭据管理（不做凭据存储、注入、轮换与撤销），
+  这是已明确的产品边界而不是待实现能力。需要访问私有仓库时，由用户自行编辑并维护执行镜像配置，
+  在该镜像内提供 Git 认证环境；该配置不属于 AgentFlow 管理的项目配置或任务配置，AgentFlow 也
+  不对其认证方式、凭据安全性或访问成功作任何保证，更不建议把长期凭据明文写入 Dockerfile 或可
+  复用的镜像层。仓库地址必须通过 `domain.ParseGitRepositoryURL` 校验，内嵌凭据
+  （`user:token@host`）直接拒绝；Clone 输出显示需要认证时返回 `repository_auth_required`，
+  不静默降级为匿名访问。
 - 失败与中断：Clone 失败、基础分支缺失、分支冲突与工作区核验失败分别映射到不同错误类别；
   超时、取消与结果不确定分别记录为 `timed_out`、`cancelled`、`uncertain`，都不得判定为成功。
 - 代码获取不负责 Push、Merge、容器生命周期与重试决策；失败不会删除容器或工作区。

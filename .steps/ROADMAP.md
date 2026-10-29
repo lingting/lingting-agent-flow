@@ -446,9 +446,16 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 >   github.com 的 443 端口映射。后者已作为**基础镜像默认配置**内置到
 >   `internal/docker.DefaultBaseDockerfile`——`ssh.github.com:443` 是 GitHub 官方支持的
 >   等价接入点，22 可达与不可达的环境都成立。
-> - 生产 `source.GitCredentialProvider` 与 `codesaver.GitCredentialProvider` 仍未实现，
->   私有仓库在真实链路必然失败。这是已记录的架构决策（第一版不支持私有仓库认证），
->   补全需要凭据存储设计与安全评审。
+> - 生产 `source.GitCredentialProvider` 与 `codesaver.GitCredentialProvider` 没有实现，私有仓库在
+>   真实链路必然失败。**2026-10-29 起这不再是待补缺口**：用户已明确决定私有仓库认证不纳入产品
+>   范围（见 `AGENTS.md` 的"私有仓库认证的产品边界"），需要私有仓库的用户自行维护执行镜像里的
+>   认证环境，因此不再规划凭据存储设计与安全评审。
+>
+> **本轮（2026-10-29，基线 `origin/master` `042a33d`）**：私有仓库认证的产品边界已写入
+> `AGENTS.md` 与用户文档；`verification_results` 遗留模型（`domain.VerificationResult` /
+> `NewVerificationResult` / `decideVerdict` / `storage.VerificationStore` 及其 SQLite 实现）经
+> 完整调用链审计确认无生产写入方、唯一读取方也不被 CLI 展示后整体删除，遗留表与历史数据保留
+> （未新增删除迁移）。**P4-M5 仍为 `pending`**。
 
 **已实现且有代码证据（可直接复用）**：
 
@@ -674,8 +681,11 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
   `POST /api/v1/tasks/{taskID}/retry` + `agentflow task retry`。调度器仍只领取
   `queued`，不会隐式重试。见
   [`P3-M4-scheduler-recovery.md`](./P3-M4-scheduler-recovery.md) §3。
-- 私有仓库的 Git 凭据支持：`source.GitCredentialProvider` 与 `codesaver.GitCredentialProvider`
-  均无实现，真实链路上私有仓库必然失败（已记录的架构决策，需凭据存储设计与安全评审）。
+- ~~私有仓库的 Git 凭据支持~~：**已由用户明确决定不纳入产品范围（2026-10-29）**，属明确的产品
+  边界而不是待实现能力。`source.GitCredentialProvider` 与 `codesaver.GitCredentialProvider` 保持为
+  空接口占位，不再补产品级实现；需要私有仓库的用户自行编辑并维护执行镜像，在该镜像内提供 Git
+  认证环境，该配置不属于 AgentFlow 管理的项目配置或任务配置，产品也不对其认证方式、凭据安全性或
+  访问成功作保证。见 `AGENTS.md` 的"私有仓库认证的产品边界"。
 - **~~五类执行残留的收敛路径~~**（P2-M1 记录，见 `P2-M1-recovery-boundaries.md` §3.4）：
   `attempts` / `sessions` / `validation_runs` 已在 P2-M2 收敛；Attempt 级 `code_fetches`
   与 `container.state=unknown`、孤儿容器已在 **P2-M5** 收敛。
@@ -778,9 +788,12 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - `Review` 步骤是否仍需要：P1-M2 已确认语义审查作为"某一步验证的一环"动态调用即可满足
   需求，`domain.BuildPlan` 与编排器都不需要新增步骤类型。是否要为其他用途引入独立审查
   阶段，留待真实需求出现。
-- `verification_results` 表与 `domain.NewVerificationResult`（`internal/domain/
-  verification.go` 的 `decideVerdict`）是历史遗留的第二套判定模型，生产链路已不再使用
-  （唯一生产结论来源是 `DecideValidation`）。清理属 P2 范围。
+- ~~`verification_results` 表与 `domain.NewVerificationResult` 的历史遗留第二套判定模型~~：
+  **已于 2026-10-29 清理完成**。审计结论：生产写入方为零，唯一读取方 `app.TaskService.Detail`
+  的 `TaskDetail.Verifications` 从不被 CLI 打印，唯一生产结论来源一直是 `DecideValidation`；
+  领域类型、存储接口与 SQLite 实现、该读取路径一并删除。表 `verification_results` 与历史数据
+  原样保留（旧模型没有 run status / 逐项检查状态，无法安全转换为 `validation_runs`，因此未新增
+  删除迁移），属**部分清理**，不宣称"遗留表已删除"。
 - `validation_feedbacks` 是否应收录 Validator 的 `findings`：P1-M3 调查后的结论是
   **当前不是自动修复的必需信息**。进入修复的前提是必需确定性检查失败，而
   `DecideValidation` 在确定性检查未通过时不会采用审查结论，`reviewSemantics` 也因此不发起

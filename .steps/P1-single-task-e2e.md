@@ -69,19 +69,25 @@
 
 | 能力 | 已有部分 | 缺口 |
 |---|---|---|
-| 真实远程端到端验收 | `tests/integration/remote/workflow/e2e_*_test.go`：真实 SSH + 真实 Docker + 真实镜像构建 + 容器内真实 Git Clone + 容器内真实 Planner/Developer/Validator 模型调用，逐阶段走通到代码保存 | 真实远程推送成功路径已实测通过；生产缺少 Git 凭据提供者，私有仓库在真实链路必然失败（已记录的架构决策） |
+| 真实远程端到端验收 | `tests/integration/remote/workflow/e2e_*_test.go`：真实 SSH + 真实 Docker + 真实镜像构建 + 容器内真实 Git Clone + 容器内真实 Planner/Developer/Validator 模型调用，逐阶段走通到代码保存 | 真实远程推送成功路径已实测通过（公开可读仓库，认证环境由测试侧临时构造）；私有仓库认证不在产品范围内，见下文"已明确的产品边界" |
 
-### 未实现
+### 已明确的产品边界（不属"未实现"）
 
-- 私有仓库的 Git 凭据支持（`source.GitCredentialProvider` / `codesaver.GitCredentialProvider`
-  均无实现，属已记录的架构决策，需凭据存储设计与安全评审）。当前真实远程验收通过
-  "测试侧把私钥写入容器内临时文件 + 配置 `core.sshCommand`"完成认证，产品本身不保存凭据。
+- 私有仓库 Git 凭据管理：**用户已明确决定不纳入产品范围**，不是待补齐的缺口，也不是等待设计
+  与安全评审的立项候选。AgentFlow 不建设凭据存储、注入、轮换、撤销或管理功能；需要访问私有
+  仓库的用户自行编辑并维护执行镜像，在该镜像内提供 Git 认证环境（该配置不属于 AgentFlow 管理的
+  项目配置或任务配置），产品也不对其认证方式、凭据安全性或访问成功作任何保证。
+  `source.GitCredentialProvider` / `codesaver.GitCredentialProvider` 只是既有的空接口占位，不会再
+  补上产品级实现。当前真实远程验收通过"测试侧把私钥写入容器内临时文件 + 配置
+  `core.sshCommand`"完成认证，**这只是测试夹具，不能据此声称产品已支持私有仓库认证**。
+  公开仓库的 Clone / Push 能力与私有仓库认证是两回事。
 
 ### 待调查
 
-- Validator 评估应写入 `validation_runs` 还是 `verification_results`：M2 已确认生产链路
-  只写 `validation_runs`，评估落 `assessment_json`；`verification_results` 与
-  `domain.NewVerificationResult` 只有测试在用，属待清理的历史遗留双判定模型（P2 事项）。
+- ~~Validator 评估应写入 `validation_runs` 还是 `verification_results`~~：M2 已确认生产链路只写
+  `validation_runs`，评估落 `assessment_json`；历史遗留的双判定模型（`domain.VerificationResult` /
+  `NewVerificationResult` / `decideVerdict` 与 `storage.VerificationStore`）已于 2026-10-29 整体删除，
+  遗留表 `verification_results` 仅作为已冻结的历史数据保留（不新增删除迁移），因此不再是待调查项。
 - `validation_feedbacks` 是否应收录 Validator 的 `findings`：M2 未扩大该结构，审查发现完整
   保留在 `assessment_json` 中；是否纳入修复提示词由 M3 决定。
 
@@ -454,8 +460,9 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
   - `validation_feedbacks` 目前只收录失败检查，不收录审查发现（`findings`）。M2 未扩大
     该结构：审查发现通过 `assessment_json` 完整保留，M3 设计修复提示词时再决定是否需要
     把 findings 纳入反馈结构。
-  - `verification_results` 表与 `domain.NewVerificationResult` 仍是历史遗留的双判定模型，
-    生产链路不再使用。本轮按"不扩大范围"的要求未删除，记录为 P2 待清理事项。
+  - `verification_results` 表与 `domain.NewVerificationResult` 曾是历史遗留的双判定模型，生产链路已
+    不再使用；该遗留模型已于 **2026-10-29 清理**（领域类型、存储接口与唯一的生产读取方全部删除，
+    遗留表与历史数据保留），本轮按"不扩大范围"的要求当时未删除。
 
 ---
 
@@ -865,11 +872,12 @@ P1-M4（串联修复闭环与代码保存/归档/收尾） ◄── P1-M3（有
      `codesaver` 在缺少 `user.name`/`user.email` 时返回 `author_missing`）。真实运行时
      由项目环境镜像提供，测试镜像未预置，因此用例显式写入容器内 Git 配置。
 
-  **真实链路的产品缺口（记录，不属 M5 修复范围）**：
+  **真实链路中不属产品范围的部分（当时记录的技术事实，现已定为产品边界）**：
   - 生产 `source.GitCredentialProvider` 与 `codesaver.GitCredentialProvider` 都没有实现，
     `newContainerFetcher` 也不传凭据。因此**私有仓库在真实链路必然失败**，公开可读仓库
-    可以 Clone 但无法 Push。这是已记录的架构决策（第一版不支持私有仓库认证），补全它
-    需要凭据存储设计与安全评审，属后续阶段事项。
+    可以 Clone 但无法 Push。**2026-10-29 起这不再是待补缺口**：用户已明确决定私有仓库认证
+    不纳入产品范围，需要它的用户自行维护执行镜像里的认证环境（见 `AGENTS.md` 的
+    "私有仓库认证的产品边界"），因此不再规划凭据存储设计与安全评审。
 
   **真实远程测试结果**：
   - 通过：`go test -count=1 -timeout 50m -run TestRemoteE2EFullChain ./tests/integration/remote/workflow/`

@@ -394,17 +394,6 @@ func TestFullHistoryChain(t *testing.T) {
 		StepID:    &stepID,
 		AttemptID: &attemptID,
 	}, built.validator)
-	result, err := domain.NewVerificationResult(
-		newVerificationInput(built, &validator.ID, false),
-		time.Now().UTC(),
-	)
-	if err != nil {
-		t.Fatalf("构造验证结果失败: %v", err)
-	}
-	if err := db.CreateVerificationResult(ctx, result); err != nil {
-		t.Fatalf("写入验证结果失败: %v", err)
-	}
-
 	// 验证失败后创建新的 Attempt 与新的 Session，旧记录全部保留。
 	second := mustAttempt(t, db, built.step, 2)
 	secondSession := mustSession(t, db, domain.SessionScope{
@@ -424,7 +413,9 @@ func TestFullHistoryChain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("查询会话失败: %v", err)
 	}
-	if len(firstSessions) != 2 || firstSessions[0].ID != developer.ID {
+	if len(firstSessions) != 2 ||
+		firstSessions[0].ID != developer.ID ||
+		firstSessions[1].ID != validator.ID {
 		t.Fatalf("第一次尝试的会话历史不符: %+v", firstSessions)
 	}
 	secondSessions, err := db.ListSessionsByAttempt(ctx, second.ID)
@@ -433,13 +424,6 @@ func TestFullHistoryChain(t *testing.T) {
 	}
 	if len(secondSessions) != 1 || secondSessions[0].ID != secondSession.ID {
 		t.Fatalf("第二次尝试的会话历史不符: %+v", secondSessions)
-	}
-	results, err := db.ListVerificationResultsByAttempt(ctx, built.attempt.ID)
-	if err != nil {
-		t.Fatalf("查询验证结果失败: %v", err)
-	}
-	if len(results) != 1 || results[0].Passed {
-		t.Fatalf("验证历史不符: %+v", results)
 	}
 }
 
