@@ -270,6 +270,30 @@ export function fetchTaskEvents(
   return apiRequest<EventTimelineResponse>(withEventQuery(taskEventsPath(taskID), query), options);
 }
 
+/** 任务事件实时流（SSE）路径 */
+export function taskEventStreamPath(taskID: string): string {
+  return `${taskEventsPath(taskID)}/stream`;
+}
+
+/**
+ * 构造任务事件实时流的请求地址。
+ *
+ * `afterEventID` 是调用方已经收到的最新事件标识，作为断线恢复游标随连接一起发送
+ * （服务端同时接受标准 `Last-Event-ID` 请求头，本函数只用查询参数，因为新建的
+ * `EventSource` 不会自动带上该请求头）。传 `undefined` 表示不指定游标，此时服务端
+ * 只推送连接建立之后写入的事件。
+ *
+ * 这是唯一一处不以 `apiRequest` 发出请求的 API 调用：SSE 必须保持长连接并逐帧解析，
+ * 无法用一次性 fetch 表达；路径仍然集中在本模块，页面不拼 URL。
+ */
+export function taskEventStreamUrl(taskID: string, afterEventID?: number): string {
+  const path = taskEventStreamPath(taskID);
+  if (afterEventID === undefined) return path;
+  const params = new URLSearchParams();
+  params.set("last_event_id", String(afterEventID));
+  return `${path}?${params.toString()}`;
+}
+
 /**
  * 查询某步骤的修复周期历史。
  *

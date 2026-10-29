@@ -12,7 +12,7 @@
  */
 import { Alert, Flex, Space, Typography } from "antd";
 import { Button, LinkButton } from "lingting-react-ui";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { Step, Task } from "@/lib/api";
 import { OperationOutcomePanel } from "@/pages/tasks/OperationOutcomePanel";
@@ -28,6 +28,15 @@ import {
   useTaskEvents,
   useTaskSteps,
 } from "@/pages/tasks/useExecutionRecords";
+import { useTaskEventStream } from "@/pages/tasks/useTaskEventStream";
+
+/**
+ * 收到实时事件后确认任务状态的延迟（毫秒）。
+ *
+ * 取一个短窗口而不是逐条刷新：一次执行推进常会连续写入多条事件，逐条触发会让同一
+ * 秒内产生多次任务查询。窗口内的事件合并为一次确认，刷新本身仍是串行的一轮。
+ */
+const LIVE_EVENT_REFRESH_DELAY_MS = 800;
 
 /**
  * 任务执行面板。
@@ -79,6 +88,48 @@ export function TaskExecutionPanel({
    * 不参与 5 秒自动刷新——把整份历史放进刷新循环会制造无谓的查询负载。
    */
   const events = useTaskEvents(task.id, stepsToken);
+  /**
+   * 任务事件实时流。
+   *
+   * 起点来自历史读取时刻服务端给出的最新事件标识（`latestEventID`）：从它之后开始
+   * 推送，就覆盖了"历史查询"与"建立连接"之间写入的事件。历史尚未就绪时不建立连接，
+   * 也不去猜一个起点。
+   */
+  const stream = useTaskEventStream({
+    enabled: events.state.status === "ready",
+    initialCursor: events.state.status === "ready" ? events.state.latestEventID : undefined,
+    taskID: task.id,
+  });
+  const liveEventCount = stream.state.events.length;
+  /** 已排定的状态确认：多个事件落在同一窗口内时只确认一次 */
+  const liveRefreshTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const onRefreshTaskRef = useRef(onRefreshTask);
+  onRefreshTaskRef.current = onRefreshTask;
+
+  /**
+   * 收到新事件后确认一次任务状态。
+   *
+   * 事件只证明"某件事已经发生"，不证明任务或步骤此刻处于什么状态，因此这里只触发
+   * 现有的任务详情快照刷新，不根据事件类型推断成功、失败或操作可用性。刷新复用父组件
+   * 的自动刷新链路（同一时刻最多一轮），多个事件在这个窗口内只确认一次。
+   */
+  useEffect(() => {
+    if (liveEventCount === 0) return;
+    if (liveRefreshTimer.current !== undefined) return;
+    liveRefreshTimer.current = setTimeout(() => {
+      liveRefreshTimer.current = undefined;
+      void onRefreshTaskRef.current();
+    }, LIVE_EVENT_REFRESH_DELAY_MS);
+  }, [liveEventCount]);
+
+  useEffect(
+    () => () => {
+      if (liveRefreshTimer.current === undefined) return;
+      clearTimeout(liveRefreshTimer.current);
+      liveRefreshTimer.current = undefined;
+    },
+    [],
+  );
 
   const steps = stepsState.state.status === "ready" ? stepsState.state.data : [];
   const selectedStep = useMemo(
@@ -181,8 +232,10 @@ export function TaskExecutionPanel({
       */}
       <EventTimelinePanel
         onLoadMore={events.loadMore}
+        onReconnect={stream.reconnect}
         onReload={events.reload}
         state={events.state}
+        stream={stream.state}
       />
     </Flex>
   );

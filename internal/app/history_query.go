@@ -37,6 +37,17 @@ const (
 	MaxEventPayloadBytes = 4096
 )
 
+// 实时事件流的增量读取上限。
+const (
+	// DefaultEventStreamBatchSize 是单次增量读取的事件条数。
+	//
+	// 它只影响一次数据库往返取多少行，不影响协议语义：读取方按游标继续读直到
+	// 没有新事件为止，因此积压会被连续取完，而不是被固定周期切成慢速增长。
+	DefaultEventStreamBatchSize = 100
+	// MaxEventStreamBatchSize 是调用方可指定的最大增量条数，与历史分页上限一致。
+	MaxEventStreamBatchSize = MaxTaskPageSize
+)
+
 // EventSummary 是一条事件的对外安全表示。
 //
 // 它只包含经过审查的稳定字段：事件类型、时间、关联标识与该事件可公开的摘要。
@@ -59,6 +70,11 @@ type EventTimelinePage struct {
 	Events []EventSummary
 	// Total 是满足筛选条件的事件总数。
 	Total int
+	// LatestEventID 是本次读取时刻该任务最新的自增事件标识，没有事件时为 0。
+	//
+	// 它是实时推送的起点依据：客户端把历史读取时刻拿到的该值作为游标建立事件流，
+	// 就能覆盖"历史查询与流连接之间"写入的事件，不留下静默丢事件的时间窗口。
+	LatestEventID int64
 	// Limit 与 Offset 是本次生效的分页取值，用于响应回显。
 	Limit  int
 	Offset int
@@ -74,6 +90,27 @@ type EventTimelineRequest struct {
 	Limit int
 	// Offset 是跳过的记录条数，小于 0 视为 0。
 	Offset int
+}
+
+// TaskEventStreamRequest 是实时事件流的增量读取参数。
+type TaskEventStreamRequest struct {
+	// AfterID 是已经推送到的事件标识，只读取严格大于它的记录。
+	//
+	// 0 表示"从该任务最早的事件开始"；负数不是合法游标，返回参数错误而不是被
+	// 静默当成 0——把非法游标当 0 会让客户端收到重复的历史并在错误的方向上漂移。
+	AfterID int64
+	// Limit 是单次读取条数；小于等于 0 使用默认值，超过上限被拒绝。
+	Limit int
+}
+
+// TaskEventStreamBatch 是一次增量读取的结果。
+type TaskEventStreamBatch struct {
+	// Events 按 id 升序排列，与游标所属的单调序列一致。
+	Events []EventSummary
+	// Cursor 是本批最后一条事件的标识；没有新事件时等于请求的 AfterID。
+	//
+	// 调用方只能在确认本批全部写出成功后用它推进游标，否则未写出的事件会被跳过。
+	Cursor int64
 }
 
 // RepairCycleHistory 是某个步骤的全部修复周期登记。
@@ -132,20 +169,92 @@ func (s *HistoryQueryService) ListTaskEvents(
 	if err != nil {
 		return EventTimelinePage{}, fmt.Errorf("统计任务事件失败: %w", err)
 	}
+	// 最新事件标识与分页同批读取：客户端用它作为实时流的起点，两次读取之间的
+	// 时间差正是"切换窗口"，这里不给它额外扩大的机会。
+	latest, err := s.store.LatestEventIDByTask(ctx, id)
+	if err != nil {
+		return EventTimelinePage{}, fmt.Errorf("读取最新事件标识失败: %w", err)
+	}
 	events, err := s.store.ListEventsByTask(ctx, id, filter)
 	if err != nil {
 		return EventTimelinePage{}, fmt.Errorf("查询任务事件失败: %w", err)
 	}
 	page := EventTimelinePage{
-		Events: make([]EventSummary, 0, len(events)),
-		Limit:  limit,
-		Offset: offset,
-		Total:  total,
+		Events:        make([]EventSummary, 0, len(events)),
+		LatestEventID: latest,
+		Limit:         limit,
+		Offset:        offset,
+		Total:         total,
 	}
 	for _, event := range events {
 		page.Events = append(page.Events, describeEvent(event))
 	}
 	return page, nil
+}
+
+// ListTaskEventsAfter 返回指定任务中游标之后写入的事件。
+//
+// 它是实时推送的唯一读取入口：只做一次按 (task_id, id) 索引的范围查询，不统计
+// 总数、不使用偏移量，因此单次成本不随该任务的历史长度增长。返回的事件同样经过
+// `describeEvent` 处理——推送与历史必须共用同一套安全摘要，否则实时通道会成为
+// 绕过脱敏的后门。
+//
+// 任务不存在或已逻辑删除返回 ErrHistoryNotFound，游标非法返回 ErrHistoryInvalidInput。
+func (s *HistoryQueryService) ListTaskEventsAfter(
+	ctx context.Context,
+	taskID string,
+	request TaskEventStreamRequest,
+) (TaskEventStreamBatch, error) {
+	id, err := requireHistoryTask(ctx, s.store, taskID)
+	if err != nil {
+		return TaskEventStreamBatch{}, err
+	}
+	if request.AfterID < 0 {
+		return TaskEventStreamBatch{}, fmt.Errorf(
+			"%w: 事件游标不能为负数",
+			ErrHistoryInvalidInput,
+		)
+	}
+	limit := request.Limit
+	if limit <= 0 {
+		limit = DefaultEventStreamBatchSize
+	}
+	if limit > MaxEventStreamBatchSize {
+		return TaskEventStreamBatch{}, fmt.Errorf(
+			"%w: 增量读取条数不能超过 %d",
+			ErrHistoryInvalidInput,
+			MaxEventStreamBatchSize,
+		)
+	}
+	events, err := s.store.ListEventsByTaskAfterID(ctx, id, request.AfterID, limit)
+	if err != nil {
+		return TaskEventStreamBatch{}, fmt.Errorf("查询增量事件失败: %w", err)
+	}
+	batch := TaskEventStreamBatch{
+		Events: make([]EventSummary, 0, len(events)),
+		Cursor: request.AfterID,
+	}
+	for _, event := range events {
+		batch.Events = append(batch.Events, describeEvent(event))
+		batch.Cursor = event.ID
+	}
+	return batch, nil
+}
+
+// LatestTaskEventID 返回指定任务当前最新的自增事件标识，没有事件时为 0。
+//
+// 除了给出实时流的默认起点，它还是"任务是否存在且未删除"的一次廉价校验：流一旦
+// 开始就无法再写普通 JSON 错误响应，所以归属校验必须发生在写响应头之前。
+func (s *HistoryQueryService) LatestTaskEventID(ctx context.Context, taskID string) (int64, error) {
+	id, err := requireHistoryTask(ctx, s.store, taskID)
+	if err != nil {
+		return 0, err
+	}
+	latest, err := s.store.LatestEventIDByTask(ctx, id)
+	if err != nil {
+		return 0, fmt.Errorf("读取最新事件标识失败: %w", err)
+	}
+	return latest, nil
 }
 
 // ListStepRepairCycles 返回指定步骤的修复周期历史。

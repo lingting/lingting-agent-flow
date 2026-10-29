@@ -669,6 +669,26 @@ type EventStore interface {
 	ListEventsByTask(ctx context.Context, taskID domain.ID, filter EventFilter) ([]domain.Event, error)
 	// CountEventsByTask 返回满足筛选条件的事件总数，供分页响应使用。
 	CountEventsByTask(ctx context.Context, taskID domain.ID, filter EventFilter) (int, error)
+	// ListEventsByTaskAfterID 按 id 升序返回任务中 id 大于 afterID 的事件。
+	//
+	// 排序刻意只用 id 而不复用 `(created_at, id)`：`id` 是自增主键，代表写入先后，
+	// 实时推送的游标语义是"已推送到哪一条"，必须与这个单调序列一致。若按
+	// `(created_at, id)` 排序并同时按 id 截断，一批结果里的最大 id 可能不是游标之后
+	// 的最大 id，推进游标就会静默漏掉已经写入的事件。
+	//
+	// 已存在的 idx_events_task (task_id, id) 索引直接服务该查询：按 id 范围扫描后再按
+	// 任务过滤，不需要统计总数，也不随历史增长退化为全表扫描。
+	ListEventsByTaskAfterID(
+		ctx context.Context,
+		taskID domain.ID,
+		afterID int64,
+		limit int,
+	) ([]domain.Event, error)
+	// LatestEventIDByTask 返回任务当前最新的自增事件标识，任务没有事件时返回 0。
+	//
+	// 实时推送用它在"没有游标"时确定起点，历史分页用它给出读取时刻的最新事件标识，
+	// 两者都只需要一次索引查询，不需要读取事件内容。
+	LatestEventIDByTask(ctx context.Context, taskID domain.ID) (int64, error)
 }
 
 // RoleSeeder 提供角色初始化所需的最低能力。

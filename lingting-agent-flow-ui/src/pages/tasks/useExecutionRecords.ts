@@ -304,6 +304,14 @@ export type EventTimelineState =
       events: TaskEvent[];
       /** 服务端给出的真实总数 */
       total: number;
+      /**
+       * 本次历史读取时刻该任务最新的已持久化事件标识。
+       *
+       * 它是实时事件流的起点：从该标识之后开始推送，历史查询与流建立之间写入的
+       * 事件就不会被静默丢掉。刷新失败时保留上一次取得的值；服务端完全没有提供
+       * 该字段时缺省，此时不建立流连接（不猜一个起点）。
+       */
+      latestEventID?: number;
       /** 是否还有后续记录 */
       hasMore: boolean;
       /** 加载更多进行中 */
@@ -342,6 +350,8 @@ export function useTaskEvents(
   // 累积结果与归属任务：读取回调需要它们的最新值，不能依赖闭包快照。
   const eventsRef = useRef<TaskEvent[]>([]);
   const totalRef = useRef(0);
+  /** 最近一次成功读取时刻的最新事件标识；刷新失败时保留它，不退回 0 */
+  const latestRef = useRef<number | undefined>(undefined);
   const taskRef = useRef("");
   const loadingMoreRef = useRef(false);
 
@@ -363,10 +373,12 @@ export function useTaskEvents(
       eventsRef.current = [];
       totalRef.current = 0;
       loadingMoreRef.current = false;
+      latestRef.current = undefined;
     }
     if (!trimmed) {
       eventsRef.current = [];
       totalRef.current = 0;
+      latestRef.current = undefined;
       setState({ status: "idle" });
       return;
     }
@@ -379,10 +391,12 @@ export function useTaskEvents(
         if (controller.signal.aborted) return;
         eventsRef.current = data.records;
         totalRef.current = data.total;
+        latestRef.current = data.latest_event_id;
         loadingMoreRef.current = false;
         setState({
           events: data.records,
           hasMore: data.records.length < data.total,
+          latestEventID: data.latest_event_id,
           loadingMore: false,
           status: "ready",
           total: data.total,
@@ -402,6 +416,7 @@ export function useTaskEvents(
           error: message,
           events: previous,
           hasMore: previous.length < totalRef.current,
+          latestEventID: latestRef.current,
           loadingMore: false,
           status: "ready",
           total: totalRef.current,
@@ -429,6 +444,7 @@ export function useTaskEvents(
         setState({
           events: merged,
           hasMore: merged.length < data.total,
+          latestEventID: latestRef.current,
           loadingMore: false,
           status: "ready",
           total: data.total,

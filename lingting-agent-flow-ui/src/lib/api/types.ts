@@ -852,6 +852,13 @@ export type EventTimelineResponse = {
   total: number;
   size: number;
   offset: number;
+  /**
+   * 本次读取时刻该任务最新的已持久化事件标识，没有事件时为 0。
+   *
+   * 它只用于事件实时流的起点：把该值作为游标建立流，就覆盖了"历史查询"与
+   * "建立流连接"之间写入的事件，不需要在两者之间插入等待或猜测。
+   */
+  latest_event_id: number;
 };
 
 /**

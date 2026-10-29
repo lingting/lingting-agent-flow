@@ -97,6 +97,8 @@ export {
   stepRepairCycleEligibilityPath,
   stepRepairCyclesPath,
   stepValidationsPath,
+  taskEventStreamPath,
+  taskEventStreamUrl,
   taskEventsPath,
   taskExecuteStepsPath,
   taskPlanPath,

@@ -78,6 +78,11 @@ type Deps struct {
 	// 为空时两个历史接口返回服务不可用，而不是伪造空列表：空历史与"查询服务
 	// 未装配"是两件完全不同的事实。
 	History *app.HistoryQueryService
+	// Shutdown 在 HTTP 服务开始关闭时被关闭，供实时事件流结束推送循环。
+	//
+	// 为空表示没有关闭信号（例如测试直接构造处理器）：此时推送循环只依赖请求上下
+	// 文取消。事件流是长连接，若不主动结束，服务关闭会一直等到连接级超时。
+	Shutdown <-chan struct{}
 	// TaskRetry 是任务显式重试服务，为空时重试接口返回服务不可用。
 	//
 	// 重试入口只在领域规则判定通过后才把 failed 任务重开为新的执行周期；它复用
@@ -125,6 +130,7 @@ func NewHandler(deps Deps) http.Handler {
 		codeSaves:         deps.CodeSaveQueries,
 		resumeEligibility: deps.ResumeEligibility,
 		history:           newHistoryHandler(deps.History, logger),
+		eventStream:       newEventStreamHandler(deps.History, logger, deps.Shutdown),
 		taskRetry:         deps.TaskRetry,
 		taskContainers:    deps.TaskContainers,
 		logger:            logger,
@@ -183,7 +189,9 @@ type router struct {
 	taskContainers *app.TaskContainerDisposalService
 	// history 处理事件时间线与修复周期历史的只读查询。
 	history *historyHandler
-	logger  *slog.Logger
+	// eventStream 提供任务事件的只读实时流，为空时该接口返回服务不可用。
+	eventStream *eventStreamHandler
+	logger      *slog.Logger
 }
 
 // tasksHandler 分发任务集合路径与单任务路径的请求。
@@ -222,8 +230,15 @@ func (rt *router) tasksHandler(w http.ResponseWriter, r *http.Request) {
 	// SSH / Docker 会话，也不读写任何执行状态。因此与其他子资源一样先于任务服务
 	// 可用性判定，依赖缺失时返回"历史查询服务未初始化"。
 	//
-	// 两者都是只读形状（{taskID}/events 与 {taskID}/steps/{stepID}/repair-cycles），
-	// 与下面的写操作路径段不重叠。
+	// 三者都是只读形状（{taskID}/events、{taskID}/events/stream 与
+	// {taskID}/steps/{stepID}/repair-cycles），与下面的写操作路径段不重叠。
+	//
+	// 实时流必须先于历史查询判定：历史形状只匹配两段路径，两者其实不会互相吞掉，
+	// 但按"更具体的形状先判定"的统一习惯放置，避免以后调整形状时出现顺序依赖。
+	if taskID, ok := parseTaskEventStreamPath(r.URL.Path); ok {
+		rt.serveTaskEventStream(w, r, taskID)
+		return
+	}
 	if taskID, ok := parseTaskEventsPath(r.URL.Path); ok {
 		rt.serveTaskEvents(w, r, taskID)
 		return

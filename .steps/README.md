@@ -783,6 +783,24 @@
   过程中发现并修复了 `remote/codesaver` 的 `defer client.Close()` 早于容器清理执行导致的
   真实残留（首次运行即被最终核验判 `FAIL`，不是静默通过）。**下一步先收口该资源治理结论，
   再决定 P4 前端工作的恢复时机。**
+- **任务事件实时推送与 Web 实时展示（2026-10-29，基线 `origin/master` `1550a55`）已完成，
+  结论 `completed`（本轮范围内）**，交付物为
+  [`P4-task-event-stream.md`](./P4-task-event-stream.md)：新增只读 SSE
+  `GET /api/v1/tasks/{taskID}/events/stream`，只推送该任务**已经持久化**的事件，字段与历史
+  查询完全一致（复用 `describeEvent` 的 payload 白名单与脱敏，原始 payload 仍不出网）；
+  游标直接用事件自增标识（`WHERE task_id = ? AND id > ? ORDER BY id`，命中既有
+  `idx_events_task`，不统计总数、不用 `OFFSET`），断线重连带游标补发；历史查询新增
+  `latest_event_id`，前端把它当作流的起点，从而消除"历史读取 ↔ 建立连接"之间静默丢事件的
+  窗口；任务切换按连接代次丢弃旧任务迟到帧，按真实事件 `id` 去重并按 `(created_at, id)`
+  展示；`EventTimelinePanel` 保留既有分页契约，实时事件放入**独立区域**，不混入可能不完整的
+  历史列表；收到事件后在 800ms 窗口内合并触发一次任务状态确认，不从事件类型推断任何业务结论。
+  服务端关闭通过 `http.Server.RegisterOnShutdown` 关闭 `Deps.Shutdown` 通道，避免优雅关闭等待
+  长连接超时。本轮**未改事件写入、未改状态机、未新增事件类型、未引入第三方依赖或消息中间件**；
+  按用户授权只做了非测试检查（`gofmt` / `go build` / `go vet` / `tsc --noEmit` / `vp fmt` /
+  `vp lint` / `git diff --check`），**未运行任何测试**，因此不声称推送链路已被测试覆盖。
+  `P4-M2-7` §6 的"进度可见性"部分因此闭合（仍不含数字百分比、token 流与 stdout/stderr 流），
+  **`P4-M5` 仍为 `pending`**。
+  下一步候选：为推送链路补受控集成用例（需先获得测试授权）；`P4-M5` 继续等待真实使用数据。
 
 > 阶段与里程碑的状态可能随开发推进而变化，以上仅为撰写本路线图时的快照；最新状态
 > 以 `ROADMAP.md` 的"当前实现状态摘要"、`P1-single-task-e2e.md` 的里程碑表与
@@ -837,6 +855,7 @@
 | [`P4-disabled-action-reasons.md`](./P4-disabled-action-reasons.md) | P4 常规开发：禁用操作的原因提示（四类操作的既有准入条件与原因来源、`{ allowed, reason }` 纯函数与布尔投影的关系、antd `Button` / `LinkButton` / `Tooltip` 的真实 DOM 行为核实、可聚焦包装层与键盘可读方案、修改文件与行为变化、测试与构建结果、保留的设计与剩余风险、与 P4-M5 的关系） |
 | [`P4-execute-and-validate-failure-response.md`](./P4-execute-and-validate-failure-response.md) | P4 常规开发：开发—验证闭环失败时保留结构化执行结果（失败路径丢失执行事实的调用链证据、`operation_result` 的放置位置与兼容性依据、附加条件与安全边界、保留 / 省略的事实清单、前端结构守卫与失败面板展示、业务失败与结果不确定的边界、非测试检查结果与剩余风险） |
 | [`P4-repair-cycle-eligibility.md`](./P4-repair-cycle-eligibility.md) | P4 常规开发：修复周期开启资格查询与服务端阻塞原因展示（前端粗判与领域判定的差异证据、只读路由与响应字段来源、稳定阻塞类别与错误语义、与写入口的一致性边界、前端加载 / 刷新 / 归属作废与过期快照处理、非测试检查结果、剩余风险与未执行的测试） |
+| [`P4-task-event-stream.md`](./P4-task-event-stream.md) | P4 常规开发：任务事件实时推送（SSE）与 Web 实时展示（实施前的服务端 / 前端代码证据、`GET /tasks/{taskID}/events/stream` 契约与错误语义、事件自增标识游标与断线补发、`latest_event_id` 消除"查询 ↔ 连接"窗口、服务端长连接关闭信号、前端连接生命周期与重连退避、与历史分页并存的独立实时区域、收到事件后的合并状态确认、文件清单与调用链、实际执行的非测试检查、未执行测试与剩余风险） |
 
 ## 下一步工作的选择规则
 

@@ -176,6 +176,42 @@ export function mergeEventPages(existing: TaskEvent[], next: TaskEvent[]): TaskE
 }
 
 /**
+ * 实时事件的展示顺序：`(created_at, id)` 升序，与历史分页契约一致。
+ *
+ * 实时流按自增 `id`（写入先后）送达，这与 `(created_at, id)` 在正常情况下是同一个
+ * 顺序。事件时间来自业务时钟，理论上仍可能不单调，因此合并后统一按契约排序，而不是
+ * 直接采用到达顺序：同一批事件里出现更早的业务时间时，页面不应把它排到最后。
+ *
+ * 时间非法或缺失时退回按 `id` 比较，避免把不可解析的时间当作有效时刻。
+ */
+function compareEvents(a: TaskEvent, b: TaskEvent): number {
+  const left = parseHistoryTime(a.created_at);
+  const right = parseHistoryTime(b.created_at);
+  if (left !== undefined && right !== undefined && left !== right) {
+    return left - right;
+  }
+  return a.id - b.id;
+}
+
+/**
+ * 把实时事件合并进已有实时列表。
+ *
+ * 去重口径是真实事件 `id`：同一事件可能因重连（游标重叠）或历史与实时两侧竞争而被
+ * 收到多次，重复行会让用户以为发生了两次。返回新数组，不修改入参。
+ */
+export function mergeLiveEvents(existing: TaskEvent[], incoming: TaskEvent[]): TaskEvent[] {
+  if (incoming.length === 0) return existing;
+  const seen = new Set(existing.map((event) => event.id));
+  const merged = [...existing];
+  for (const event of incoming) {
+    if (seen.has(event.id)) continue;
+    merged.push(event);
+    seen.add(event.id);
+  }
+  return merged.sort(compareEvents);
+}
+
+/**
  * 判断是否还有后续事件页。
  *
  * 依据服务端给出的真实总数字段，而不是"本页条数是否等于页大小"：后者在最后一页

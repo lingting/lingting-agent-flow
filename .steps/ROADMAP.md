@@ -944,6 +944,29 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > 会被服务端判为 `execution_active`。上一轮文档中"已完成步骤仍可开启新周期"的结论因此不成立，
 > 本轮按服务端结论展示，未修改领域规则（细节见交付物 §1.3）。
 >
+> **任务事件实时推送（SSE）与 Web 实时展示**（2026-10-29，基线 `origin/master`
+> `1550a55d70dac81ce64c012c0e21c21a01fc66fd`），交付物为
+> [`P4-task-event-stream.md`](./P4-task-event-stream.md)。
+> 这是"恢复常规功能开发"后的第九个常规工作项，不属于 P4-M1 的 G 项，也不属于 P4-M5。
+> 核实出的缺口是**送达**而不是**数据**：事件已经按自增标识追加持久化，历史查询与安全摘要
+> 都成立，但 Web 只能在同步请求结束后靠 5 秒快照刷新间接推断"发生了什么"，执行期间的阶段
+> 事件不可见。本轮新增**只读** `GET /api/v1/tasks/{taskID}/events/stream`（SSE），只推送该
+> 任务已持久化的事件，字段与历史查询共用 `eventResponse`（payload 白名单 + 脱敏，原始
+> payload 仍不出网）；游标直接用事件自增标识，增量读取命中既有 `idx_events_task`
+> （`(task_id, id)`），不统计总数、不用 `OFFSET`，成本不随历史增长；历史查询新增
+> `latest_event_id`，前端以它作为流起点，消除"历史读取 ↔ 建立连接"之间的静默丢事件窗口；
+> 前端新增唯一连接 Hook `useTaskEventStream`（任务归属票据 + 代次丢弃迟到帧、按真实事件
+> `id` 去重、按退避重连而非固定周期轮询），实时事件进入**独立区域**，不混入可能不完整的
+> 历史分页列表。
+> **未改事件写入语义、未改状态机、未新增事件类型、未引入第三方依赖或消息中间件**；服务端
+> 长连接由 `http.Server.RegisterOnShutdown` 关闭 `Deps.Shutdown` 通道收敛，不留不可回收的
+> goroutine。本轮**未实现**数字百分比进度、Agent token 流、原始 stdout/stderr 流与容器日志流。
+> `gofmt -l` / `go vet ./...` 无输出、`go build ./...` 通过、`tsc --noEmit` 通过、
+> `vp fmt` 与 `vp lint` 通过、`git diff --check` 无输出；
+> **未执行任何测试**（未获测试授权），因此不声称推送链路已被测试覆盖。
+> `P4-M2-7` §6 的"进度可见性"部分因此闭合，**P4-M5 仍为 `pending`**：本轮没有任何来自真实
+> 使用数据的测量。
+>
 
 ## 四阶段总览
 
@@ -1046,6 +1069,7 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - [P4-disabled-action-reasons.md](./P4-disabled-action-reasons.md)
 - [P4-execute-and-validate-failure-response.md](./P4-execute-and-validate-failure-response.md)
 - [P4-repair-cycle-eligibility.md](./P4-repair-cycle-eligibility.md)
+- [P4-task-event-stream.md](./P4-task-event-stream.md)
 - [remote-test-resource-cleanup.md](./remote-test-resource-cleanup.md)
 
 ## 验收记录

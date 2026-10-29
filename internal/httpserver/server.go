@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/lingting/agentflow/internal/app"
@@ -119,7 +120,11 @@ func New(options Options) (*Server, error) {
 	if timeout <= 0 {
 		timeout = DefaultShutdownTimeout
 	}
+	// 事件流是长连接：必须有一个由本服务关闭的连接级信号，否则 Shutdown 会一直
+	// 等到连接自身超时。信号在 Shutdown 开始时关闭，推送循环据此立即结束。
+	streamShutdown := make(chan struct{})
 	api := httpapi.NewHandler(httpapi.Deps{
+		Shutdown:          streamShutdown,
 		Roles:             options.Roles,
 		Projects:          options.Projects,
 		Health:            options.Health,
@@ -153,15 +158,23 @@ func New(options Options) (*Server, error) {
 			logger.Info(message)
 		}
 	}
+	server := &http.Server{
+		Addr:              address,
+		Handler:           routes(api, web),
+		ReadHeaderTimeout: defaultReadHeaderTimeout,
+	}
+	// Shutdown 开始时不等待长连接自然结束，而是先通知它们收尾。
+	var closeStreams sync.Once
+	server.RegisterOnShutdown(func() {
+		closeStreams.Do(func() {
+			close(streamShutdown)
+		})
+	})
 	return &Server{
 		address:         address,
 		report:          report,
 		shutdownTimeout: timeout,
-		http: &http.Server{
-			Addr:              address,
-			Handler:           routes(api, web),
-			ReadHeaderTimeout: defaultReadHeaderTimeout,
-		},
+		http:            server,
 	}, nil
 }
 

@@ -50,6 +50,11 @@ type EventTimelineResponse struct {
 	Total   int             `json:"total"`
 	Size    int             `json:"size"`
 	Offset  int             `json:"offset"`
+	// LatestEventID 是本次读取时刻该任务最新的已持久化事件标识，没有事件时为 0。
+	//
+	// 它只在事件实时流上使用：调用方把它当作流的起点，就覆盖了"历史查询"与
+	// "建立流连接"之间写入的事件，不必在两者之间留一个靠猜的等待窗口。
+	LatestEventID int64 `json:"latest_event_id"`
 }
 
 // RepairCycleResponse 是一个修复周期的对外表示。
@@ -112,11 +117,12 @@ func (h *historyHandler) listEvents(w http.ResponseWriter, r *http.Request, task
 		records = append(records, eventResponse(summary))
 	}
 	writeJSON(w, r, h.logger, http.StatusOK, EventTimelineResponse{
-		TaskID:  strings.TrimSpace(taskID),
-		Records: records,
-		Total:   page.Total,
-		Size:    page.Limit,
-		Offset:  page.Offset,
+		TaskID:        strings.TrimSpace(taskID),
+		Records:       records,
+		Total:         page.Total,
+		Size:          page.Limit,
+		Offset:        page.Offset,
+		LatestEventID: page.LatestEventID,
 	})
 }
 
