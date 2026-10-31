@@ -413,3 +413,85 @@ t1: GET .../events/stream?last_event_id=L
   连接状态管理或任务切换清理已经通过测试验证。
 - 未新建测试文件、未创建临时脚本或一次性验证代码；`--maxWorkers 4` / `--workers=4` 未改动。
 - 服务端心跳、多批背压、原生浏览器连接与真实部署环境仍未验收，也不能用本轮 E2E 替代。
+
+## 12. 全量测试与 SSE 专项验收执行记录（2026-10-31）
+
+> 基线：`origin/master` = `488321cad31a18285c2e7340b4653892bfbc4f44`（提交标题
+> `:zap: 补充了浏览器端 E2E 断言`，即 §11 那个提交）。`git fetch origin` 后 `HEAD` 与
+> `origin/master` 一致，工作区干净。
+
+本轮获得用户明确授权执行仓库全部测试。`tests/config/` 未做任何改动：`pi.enable`、`ssh.enable`、
+`docker.remote_enabled` 沿用仓库现有真实配置（三项均为 `true`），因此真实 Pi、真实 SSH 与真实远程
+Docker 用例按配置真实执行，未启用项由测试自身输出 `WARN [SKIP]`。
+
+### 12.1 命令与退出码
+
+| 类别 | 命令 | 退出码 | 结果 |
+|---|---|---|---|
+| Go 全量 | `mingw32-make test`（等价 `go test -count=1 -v -p 8 -parallel 8 ./tests/...`） | 2 | 38 包 ok / 5 包 FAIL，用例 17 FAIL、2 SKIP |
+| Go 竞态 | `mingw32-make test-race` | 0 | 21 个 unit 包 + `integration/local/ssh` 全部 ok |
+| 数据库竞态 | `go test -race -count=1 ./tests/integration/local/database/` | 1 | 1 用例 FAIL |
+| 工作流竞态 | `go test -race -count=1 ./tests/unit/app/ ./tests/unit/httpapi/ ./tests/integration/local/workflow/` | 0 | 3 包全部 ok |
+| 前端单元 | `pnpm test:unit:safe`（`--maxWorkers 4` 未改） | 0 | 28 文件 / 635 用例通过，无跳过 |
+| 浏览器 E2E | `pnpm test:e2e:safe`（`--workers=4` 未改） | 非 0（Playwright `5 failed`，`[ELIFECYCLE] exit code 1`；捕获的 shell 码 126） | 254 用例 / 249 通过 / 5 失败 |
+
+本机 Git Bash 没有 `make`，改用 `mingw32-make` 执行同一份 `Makefile`，`PARALLEL` 仍为 8，未拆分
+并行、未提高并发。真实 Pi 用例 `TestRealPiCheck` 通过（显式模型 `group/free`）。
+
+### 12.2 6 个 SSE 浏览器用例的逐项结果
+
+全部 6 个用例都被 Playwright 实际发现并执行，结果如下：
+
+| # | 用例 | 结果 |
+|---|---|---|
+| 1 | 历史返回真实游标后才建立连接，地址携带该游标 | **FAIL** |
+| 2 | 历史加载中、加载失败或没有游标时都不建立连接 | **FAIL** |
+| 3 | 实时消息显示真实事件、按标识去重，并丢弃畸形与跨任务事件 | **FAIL** |
+| 4 | 实时事件只合并触发一轮任务状态确认 | PASS |
+| 5 | 切换任务关闭旧连接，新连接使用新任务游标且不混入旧事件 | **FAIL** |
+| 6 | 连接中断显示独立状态，重连保留已收到的事件并推进游标 | **FAIL** |
+
+失败原因同一个，且**可稳定复现**（单文件重跑：11 通过 / 5 失败）：这些用例用页面级定位器
+`page.getByText("已连接", { exact: true })` 断言推送状态，而该 spec 文件顶部的
+`test.beforeEach` 会 `stubHealth(page)`，使头部 `ApiConnectionStatus` 也渲染「已连接」，于是
+`getByText` 命中 2 个元素：Playwright 严格模式报 strict mode violation，`toHaveCount(0)`
+断言则因计数为 1 而失败。第 4 个用例不读取该文案，因此通过。
+
+- 性质判断：**测试定位器歧义**（非产品状态机或 SSE 协议缺陷）。同一页面出现两处「已连接」也
+  反映出「API 连接」与「推送连接」的文案不够可区分，属可记录的 UX 歧义，但现有实现满足
+  「连接指示器只表示 HTTP API 可用性、推送状态单独展示」的既有约束。
+- 影响范围：仅 §11.2 新增的 6 个用例；既有 `事件时间线` / `修复周期历史` / `自动刷新与副作用`
+  等 10 个用例在本文件内全部通过。
+- 建议修复点：把推送状态的断言收敛到实时区域作用域（或为该状态加稳定 `data-testid`），
+  不改动任何行为断言。本轮按授权范围**未修改测试与产品代码**。
+
+### 12.3 Go 侧失败与竞态失败
+
+| 失败 | 根因 | 性质 |
+|---|---|---|
+| `integration/ssh`、`integration/remote/{agent,codesaver,docker,workflow}` 共 5 包 / 17 用例 | `tests/config/ssh.yml` 指向的 SSH 目标 `127.0.0.1:22` TCP 连接被拒绝（`connectex: actively refused`），未进入 SSH 握手 | 环境缺失：本机没有监听该端口的 SSH 服务。测试按规范如实失败，未降级为跳过 |
+| `TestLegacyDatabaseConcurrentOpenMigratesOnce`（仅 `-race`） | 4 个并发打开者对历史库执行 25 个迁移，`BeginTx` 取写锁超过 `defaultBusyTimeout`（5s）的 `retryBusy` 窗口后返回 `SQLITE_BUSY` | 产品侧并发鲁棒性缺口：非 race 全量测试下该包通过，`-race` 下整包运行 2/2 复现，单用例隔离运行 5/5 通过 |
+
+远程包的包级 `FINALIZER`（容器零残留核验）同样因同一 SSH 不可达而 `status=FAIL`，已按规则作为
+测试失败记录，未降级为警告。远程资源零残留在本轮**无法核验**。
+
+### 12.4 跳过项
+
+仅 2 个用例 SKIP，均为测试自身机制：`TestRealPiModelRecognition`（本机 Pi 的模型清单不可用，
+不识别 `group/free`）、`TestEmbeddedFSHasNoIndexInSourceCheckout`（源码检出下无嵌入产物，属设计内
+跳过）。无其他跳过。
+
+### 12.5 测试产物
+
+- Go：每个包的 `TEST_ARTIFACT_DIR=<绝对路径>` 与 `test.log` 全部保留在
+  `%TEMP%\lingting-agent-flow-tests\`（43 个包目录），基目录 `latest-run.txt` 指向最近一次运行。
+- 前端：`TEST_ARTIFACT_DIR=%TEMP%\lingting-agent-flow-ui-tests\run-*\`；全量 E2E 的
+  `playwright-report` 与 `playwright-output`（失败截图、`trace.zip`、`error-context.md`）在
+  `run-CLGmsr`，SSE 单文件重跑的在 `run-Wo1Oyz`。均未删除。
+
+### 12.6 仍未覆盖
+
+浏览器侧仍使用受控 `EventSource` 替身（§11.3），因此**真实 SSE 传输层未验收**：帧格式与响应头、
+15 秒 `: ping` 注释帧、`X-Accel-Buffering` 之后的代理缓冲、超过单批 100 条的积压与背压、真实网络
+中断、浏览器原生 `Last-Event-ID` 回传、`shutdown` 下多条在途连接收敛、「已停止 + 手动重新连接」
+的完整浏览器路径仍未执行。本轮结果不得用于声称实时推送链路已通过传输层验收。

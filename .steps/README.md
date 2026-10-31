@@ -838,6 +838,24 @@
   与 `--workers=4` 未改动。**`P4-M5` 仍为 `pending`**，本轮未采集或伪造任何使用数据。
   下一步候选：授权后先执行 `pnpm test:e2e:safe`（`--workers=4`）确认这 6 个用例的真实结果；
   再排期服务端心跳与多批积压的专项验收。
+- **SSE 浏览器 E2E 的全量测试验收（2026-10-31，基线 `origin/master` `488321c`）已完成，结论：
+  6 个用例 1 通过 / 5 失败，失败为测试定位器歧义**，记录见
+  [`P4-task-event-stream.md`](./P4-task-event-stream.md) §12。本轮获授权执行全部测试：Go 全量
+  `-p 8 -parallel 8 ./tests/...` 退出码 2（38 包 ok / 5 包 FAIL，17 用例失败、2 跳过），竞态
+  `make test-race` 与工作流竞态均通过，数据库竞态 1 用例失败，前端单元 635 通过，浏览器 E2E
+  254 个用例 249 通过 / 5 失败。所有 17 个 Go 失败用例与 5 个远程 `FINALIZER` 失败都来自同一个
+  环境原因：`tests/config/ssh.yml` 的 SSH 目标 `127.0.0.1:22` TCP 被拒绝，本机没有在该端口
+  监听的服务，因此真实远程 Docker / Agent / 工作流链路与远程资源零残留在本轮无法核验
+  （未改配置、未降级为跳过）。6 个 SSE 用例都被实际执行：第 4 个（800ms 窗口只合并一轮状态
+  确认）通过；其余 5 个因页面级 `getByText("已连接", { exact: true })` 同时命中头部 API 连接
+  指示器（该 spec 的 `beforeEach` 会 `stubHealth`）而报 strict mode violation / 计数不符，单文件
+  重跑可稳定复现，属测试定位器歧义，建议把断言收敛到实时区域作用域或加稳定 `data-testid`；
+  按授权未修改测试与产品代码。数据库竞态 `TestLegacyDatabaseConcurrentOpenMigratesOnce` 在
+  `-race` 下整包运行 2/2 复现（并发迁移取写锁超过 5s `retryBusy` 窗口后报 `SQLITE_BUSY`），
+  隔离运行 5/5 通过，属真实并发鲁棒性缺口，需单独任务评估。真实 SSE 传输层（帧格式、心跳、
+  多批背压、原生 `Last-Event-ID`、`shutdown` 收敛）仍未验收。**`P4-M5` 仍为 `pending`**。
+  下一步候选：①收敛 SSE 用例定位器后重跑 `pnpm test:e2e:safe`；②修复并发迁移的忙等待窗口并为
+  远程测试准备可用的 SSH 目标，再核验远程容器零残留；③排期服务端心跳与多批积压的专项验收。
 
 > 阶段与里程碑的状态可能随开发推进而变化，以上仅为撰写本路线图时的快照；最新状态
 > 以 `ROADMAP.md` 的"当前实现状态摘要"、`P1-single-task-e2e.md` 的里程碑表与
