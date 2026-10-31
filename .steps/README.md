@@ -802,7 +802,7 @@
   **`P4-M5` 仍为 `pending`**。
   下一步候选：为推送链路补受控用例（服务端 HTTP 契约用例与前端纯函数断言已补，两者均未执行，
   见下文）；浏览器侧 E2E 仍缺；`P4-M5` 继续等待真实使用数据。
-- **SSE 重连失败上限修正与既有契约覆盖（2026-10-30，基线 `origin/master` `cdb1356`）已完成，
+- **SSE 重连失败上限修正与既有契约覆盖（2026-10-29，基线 `origin/master` `cdb1356`）已完成，
   结论：正确性修复（本轮范围内）**，交付物为
   [`P4-task-event-stream.md`](./P4-task-event-stream.md) §10：核实出前端 `useTaskEventStream`
   的停止判定写成 `failures > EVENT_STREAM_MAX_FAILURES`，使"连续失败 5 次即停止自动重连"实际
@@ -817,6 +817,27 @@
   `go build` / `tsc --noEmit` / `vp fmt --check` / `vp lint` / `git diff --check` / 行尾检查），
   **未运行任何测试**，因此不声称这些断言已通过；浏览器侧 `EventSource`、心跳与多批背压仍需
   另行授权专项验收。**`P4-M5` 仍为 `pending`**，本轮未采集或伪造任何使用数据。
+- **浏览器端 SSE 消费路径的 E2E 断言（2026-10-29，基线 `origin/master` `5c72da7`）已完成，结论：
+  只补断言、未运行测试**，交付物为 [`P4-task-event-stream.md`](./P4-task-event-stream.md) §11。
+  修正了既有的历史事件拦截器：`stubEvents` 由 glob `**/api/v1/tasks/task-1/events*` 改为锚定正则
+  `/api/v1/tasks/{taskID}/events(\?.*)?$`，历史查询与 `/events/stream` 从此显式区分，不再依赖
+  Playwright glob 的 `*` 不跨 `/` 这一细节；`stubTaskDetail` / `stubSteps` / `stubEmptyRecords` /
+  `stubRepairCycles` / `stubEvents` 增加可选 `taskID`（`stubTaskDetail` 另加 `overrides`），既有
+  调用点签名与行为不变。在既有文件 `lingting-agent-flow-ui/tests/e2e/task-event-history.spec.ts`
+  内新增 6 个浏览器用例，用只在测试上下文注入的 `EventSource` 替身确定性驱动 `open` / `message` /
+  `error`：①历史 `latest_event_id=7` 才建连且连接地址携带该游标、`open` 前不显示「已连接」；②
+  历史加载中 / 加载失败 / 无游标时连接数为 0、失败不伪装成空历史；③真实 DTO 事件的时间、类型与
+  安全摘要进入独立实时区域，重复 `id` 只有一行，`not-json` / 缺字段 / 跨任务三帧被丢弃且不混入
+  分页历史；④同一 800ms 窗口内三条事件只合并触发一轮任务详情 + 工作流读取，事件中的
+  `task.completed` 不改变接口给出的任务状态，全程零写请求；⑤切到第二个任务时旧连接被关闭、
+  新连接使用新任务游标、旧连接迟到帧不进入新列表、关闭详情后不再建连；⑥连接 `error` 显示独立
+  「正在重连」状态，已收到事件保留，一次退避后新连接带上已收到的最大游标。替身不验证传输层，
+  真实帧格式、15 秒心跳、代理缓冲、多批背压与「已停止 + 手动重新连接」（需真实等待 5 次退避）
+  仍未覆盖，不得用本轮断言替代服务端 SSE 验收。按授权只做非测试检查（`tsc --noEmit` /
+  `vp fmt --check` / `vp lint` / `git diff --check` / 行尾检查），**未运行任何测试**；`--maxWorkers 4`
+  与 `--workers=4` 未改动。**`P4-M5` 仍为 `pending`**，本轮未采集或伪造任何使用数据。
+  下一步候选：授权后先执行 `pnpm test:e2e:safe`（`--workers=4`）确认这 6 个用例的真实结果；
+  再排期服务端心跳与多批积压的专项验收。
 
 > 阶段与里程碑的状态可能随开发推进而变化，以上仅为撰写本路线图时的快照；最新状态
 > 以 `ROADMAP.md` 的"当前实现状态摘要"、`P1-single-task-e2e.md` 的里程碑表与
@@ -871,7 +892,7 @@
 | [`P4-disabled-action-reasons.md`](./P4-disabled-action-reasons.md) | P4 常规开发：禁用操作的原因提示（四类操作的既有准入条件与原因来源、`{ allowed, reason }` 纯函数与布尔投影的关系、antd `Button` / `LinkButton` / `Tooltip` 的真实 DOM 行为核实、可聚焦包装层与键盘可读方案、修改文件与行为变化、测试与构建结果、保留的设计与剩余风险、与 P4-M5 的关系） |
 | [`P4-execute-and-validate-failure-response.md`](./P4-execute-and-validate-failure-response.md) | P4 常规开发：开发—验证闭环失败时保留结构化执行结果（失败路径丢失执行事实的调用链证据、`operation_result` 的放置位置与兼容性依据、附加条件与安全边界、保留 / 省略的事实清单、前端结构守卫与失败面板展示、业务失败与结果不确定的边界、非测试检查结果与剩余风险） |
 | [`P4-repair-cycle-eligibility.md`](./P4-repair-cycle-eligibility.md) | P4 常规开发：修复周期开启资格查询与服务端阻塞原因展示（前端粗判与领域判定的差异证据、只读路由与响应字段来源、稳定阻塞类别与错误语义、与写入口的一致性边界、前端加载 / 刷新 / 归属作废与过期快照处理、非测试检查结果、剩余风险与未执行的测试） |
-| [`P4-task-event-stream.md`](./P4-task-event-stream.md) | P4 常规开发：任务事件实时推送（SSE）与 Web 实时展示（实施前的服务端 / 前端代码证据、`GET /tasks/{taskID}/events/stream` 契约与错误语义、事件自增标识游标与断线补发、`latest_event_id` 消除"查询 ↔ 连接"窗口、服务端长连接关闭信号、前端连接生命周期与重连退避、与历史分页并存的独立实时区域、收到事件后的合并状态确认、文件清单与调用链、实际执行的非测试检查、未执行测试与剩余风险；§10 重连失败上限的原始错误与修复后语义、既有 SSE 契约用例的补充范围、未覆盖的实时推送行为与专项验收条件） |
+| [`P4-task-event-stream.md`](./P4-task-event-stream.md) | P4 常规开发：任务事件实时推送（SSE）与 Web 实时展示（实施前的服务端 / 前端代码证据、`GET /tasks/{taskID}/events/stream` 契约与错误语义、事件自增标识游标与断线补发、`latest_event_id` 消除"查询 ↔ 连接"窗口、服务端长连接关闭信号、前端连接生命周期与重连退避、与历史分页并存的独立实时区域、收到事件后的合并状态确认、文件清单与调用链、实际执行的非测试检查、未执行测试与剩余风险；§10 重连失败上限的原始错误与修复后语义、既有 SSE 契约用例的补充范围、未覆盖的实时推送行为与专项验收条件；§11 浏览器端 SSE 消费路径的 E2E 断言：历史拦截器与 `/events/stream` 的显式区分、受控 `EventSource` 替身与 6 个浏览器用例、替身限制与仍未覆盖的传输层行为、实际执行的非测试检查与未运行的测试） |
 
 ## 下一步工作的选择规则
 

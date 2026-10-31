@@ -269,12 +269,16 @@ t1: GET .../events/stream?last_event_id=L
 
 ---
 
-## 10. 重连失败上限修复与既有契约覆盖（2026-10-30）
+## 10. 重连失败上限修复与既有契约覆盖（2026-10-29）
 
 > 基线：`origin/master` = `cdb1356e4032cef28bae6ffd9ed8445338dc7463`（即本文件 §1–§9 那个
 > 提交）。开工前执行了 `git fetch origin`：远端未前进，当前分支 `master`、`HEAD` 与
 > `origin/master` 一致，工作区干净（`git status` 无输出）。本轮是范围受限的正确性修复，
 > **不是** `P4-M5` 性能优化，`P4-M5` 仍为 `pending`。
+
+> 日期更正（§11 实施时核对）：本小节对应提交 `5c72da75fa4ffe340759c36909eed18d1c56a9bb`
+> 的实际提交时间为 `2026-10-29T22:49:06+08:00`（`2026-10-29T14:49:06Z`），此前把该工作记为
+> `2026-10-30`，已按提交时间改为 `2026-10-29`。其余历史日期缺少同等证据，未一并改动。
 
 ### 10.1 缺陷证据（修复前 → 修复后）
 
@@ -335,3 +339,77 @@ t1: GET .../events/stream?last_event_id=L
   **未执行**：本轮未获测试授权。
 - 未创建任何测试文件、临时脚本或一次性验证代码；未改动 `--maxWorkers 4` / `--workers=4` 设置。
 - 因此本轮结论只包含"缺陷证据 + 修复方式 + 已补断言"，**不包含测试通过结论**。
+
+---
+
+## 11. 浏览器端 SSE 消费路径的 E2E 断言（2026-10-29）
+
+> 基线：`origin/master` = `5c72da75fa4ffe340759c36909eed18d1c56a9bb`（即 §10 那个提交）。
+> 开工前执行了 `git fetch origin`：远端未前进，当前分支 `master`、`HEAD` 与 `origin/master`
+> 一致，工作区干净（`git status` 无输出）。本轮只补浏览器端 E2E 断言，**未运行任何测试**，
+> 未改动 SSE 服务端协议、事件写入、游标设计、事件持久化与任务状态机。`P4-M5` 仍为 `pending`。
+
+### 11.1 实施前的证据与拦截器缺陷
+
+| 项目 | 核实结果 |
+|---|---|
+| 历史查询路径 | `/api/v1/tasks/{taskID}/events`（`size` / `offset` / `type`） |
+| 实时流路径 | `/api/v1/tasks/{taskID}/events/stream` |
+| 既有 E2E 拦截器 | `stubEvents` 用 glob `**/api/v1/tasks/task-1/events*`；Playwright 的 `*` 不跨 `/`，实际不会命中 `/events/stream`，但区分靠的是 glob 细节，而不是显式规则 |
+| 历史响应游标字段 | `httpapi.EventTimelineResponse.latest_event_id`（`src/lib/api/types.ts`） |
+| 前端接线 | `TaskExecutionPanel` 把 `events.state.latestEventID` 传给 `useTaskEventStream.initialCursor`，且只在历史 `status === "ready"` 时 `enabled: true` |
+| 既有 E2E 桩 | 不含 `latest_event_id`，因此既有用例不会建立流连接（"不猜起点"） |
+| 既有覆盖 | 服务端 HTTP 契约（`tests/unit/httpapi/history_test.go`）与重连纯函数（`tests/unit/task-event-history.test.ts`）已补断言但未执行；浏览器侧完全没有推送链路覆盖 |
+
+拦截器改为锚定正则 `historyEventsPattern(taskID)` = `/api/v1/tasks/{taskID}/events(\?.*)?$`：
+历史桩只处理历史查询，实时流由浏览器内受控的 `EventSource` 替身单独驱动，两者不再依赖路由
+注册顺序或 glob 细节。为使任务切换场景可用，`stubTaskDetail`（新增 `overrides`）、`stubSteps`、
+`stubEmptyRecords`、`stubRepairCycles`、`stubEvents` 增加可选的 `taskID` 参数；**既有调用点
+签名不变**，所有旧用例行为未被改动。
+
+### 11.2 新增的浏览器用例（只在既有文件内）
+
+文件：`lingting-agent-flow-ui/tests/e2e/task-event-history.spec.ts`（未新建测试文件）。
+
+| 用例 | 真正验证的行为 |
+|---|---|
+| 历史返回真实游标后才建立连接，地址携带该游标 | 历史 `latest_event_id = 7` → 建立第一条连接且 URL 为 `.../events/stream?last_event_id=7`；`open` 之前只显示「正在连接」，`open` 之后才是「已连接」，历史条数不受连接状态影响 |
+| 历史加载中、加载失败或没有游标时都不建立连接 | 加载中与加载失败时连接数为 0、不渲染实时区域，失败不写成「暂无事件记录」；重试成功但响应没有 `latest_event_id` 时仍不连接，面板如实显示「未连接」 |
+| 实时消息显示真实事件、按标识去重，并丢弃畸形与跨任务事件 | 真实 DTO 事件的时间（按浏览器本地时区格式化）、类型与服务端安全摘要展示在独立实时区域；同一 `id` 重复送达只有一行；`not-json`、缺 `created_at`、`task_id` 属于其他任务的三帧都被丢弃（之后送一条有效事件作为"分界"，计数到 3 说明前三帧确实被处理且没有新增行）；分页历史仍是 `1 / 1` |
+| 实时事件只合并触发一轮任务状态确认 | 三条事件落在同一个 800ms 窗口内时，任务详情与工作流进度各只多读一次（既有串行刷新链路），随后 600ms 内不再增加；事件中即使出现 `task.completed`，任务状态仍来自接口（「开发中」不变、「已完成」不出现）；全过程零写请求 |
+| 切换任务关闭旧连接，新连接使用新任务游标且不混入旧事件 | 切到第二个任务后旧连接被 `close()`；新连接地址使用第二个任务自己的 `latest_event_id=11`；旧连接迟到的帧不进入新任务实时列表，实时计数只统计新连接收到的那一条；关闭详情后连接被关闭且不再建立新连接 |
+| 连接中断显示独立状态，重连保留已收到的事件并推进游标 | `error` 后显示「正在重连」与独立提示，历史仍为 ready（既不是加载失败，也不是空历史）；旧连接被关闭且已收到的事件保留；一次退避后新连接 URL 带上已收到的最大事件标识（`last_event_id=6`） |
+
+### 11.3 替身的限制（不得当作服务端 SSE 验收）
+
+- 替身只在测试的浏览器上下文里注入（`page.addInitScript`），生产代码仍使用原生 `EventSource`。
+- 它只实现生产 Hook 实际使用的部分：属性回调 `onopen` / `onmessage` / `onerror`、`close()`、
+  `readyState` 与静态常量；不实现 `addEventListener`、CORS 语义与浏览器自带重连。
+- 因此下列行为**仍未验证**：真实传输层的响应头与帧格式、15 秒 `: ping` 注释帧、
+  `X-Accel-Buffering` 之后的代理行为、超过单批 100 条的积压与背压、真实网络中断、浏览器原生
+  `Last-Event-ID` 回传、服务端 `shutdown` 下多条在途连接的收敛。
+- 自动重连只验证"一次失败 → 一次重建"；`EVENT_STREAM_MAX_FAILURES` 的"达到即停止"与退避封顶
+  仍只由 `tests/unit/task-event-history.test.ts` 的纯函数断言覆盖（该断言同样未执行）。
+  **「已停止」状态与手动「重新连接」按钮的浏览器路径仍未覆盖**：走完 5 次退避需要真实等待
+  1s + 2s + 4s + 8s，本轮按要求不复制阈值逻辑、也不替换全局计时器（会影响 5 秒自动刷新等
+  其他组件）。
+- 每个用例使用独立浏览器上下文，页面销毁时挂起的重连定时器与长连接一并结束；用例内不替换
+  全局计时器，也不留下跨用例的后台任务。
+
+### 11.4 本轮实际执行的非测试检查
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| 前端类型检查 | `pnpm exec tsc --noEmit` | 退出码 0（含 `tests/**/*.ts`） |
+| 前端格式 | `pnpm exec vp fmt --check lingting-agent-flow-ui/tests/e2e/task-event-history.spec.ts` | 通过（`vp fmt` 只作用于该文件） |
+| 前端 lint | `pnpm exec vp lint` | 退出码 0，无输出 |
+| 空白与行尾 | `git diff --check`、逐文件统计 CR | 无空白错误；改动文件 CR 计数为 0（LF） |
+| 完整 diff 审阅 | `git diff` | 已逐文件审阅，仅一个既有 E2E 文件与两份 `.steps` 文档 |
+
+### 11.5 未执行的测试
+
+- `go test ./...`、`pnpm test:unit:safe`、`pnpm test:e2e:safe` 全部**未执行**（本轮未获测试
+  授权）。因此本轮结论是"补充了浏览器端 E2E 断言，尚未运行测试"，**不能声称**实时推送链路、
+  连接状态管理或任务切换清理已经通过测试验证。
+- 未新建测试文件、未创建临时脚本或一次性验证代码；`--maxWorkers 4` / `--workers=4` 未改动。
+- 服务端心跳、多批背压、原生浏览器连接与真实部署环境仍未验收，也不能用本轮 E2E 替代。
