@@ -322,3 +322,43 @@ func configValue(t *testing.T, content, key string) string {
 	t.Fatalf("配置中缺少 %s: %s", key, content)
 	return ""
 }
+
+// TestVersionCommandOutputFormat 校验 version 输出包含完整版本元数据字段。
+//
+// 发布制品的可核对性依赖这几个字段：版本号对应 Git 标签，提交对应实际参与构建的源码，
+// 构建时间是 UTC 时间，Go 与平台来自真实工具链与编译目标。缺任何一项用户都无法判断
+// 手上的二进制由哪份代码产出。
+func TestVersionCommandOutputFormat(t *testing.T) {
+	t.Parallel()
+	code, stdout, stderr := run(t, "version")
+	if code != 0 {
+		t.Fatalf("version 应成功退出，实际退出码 %d，错误: %s", code, stderr)
+	}
+	for _, expected := range []string{"agentflow 1.2.3", "提交: abc1234", "构建时间: 2025-01-01T00:00:00Z", "Go: go", "平台: "} {
+		if !strings.Contains(stdout, expected) {
+			t.Fatalf("version 输出缺少 %q，实际: %s", expected, stdout)
+		}
+	}
+	// 本地开发构建注入 1.2.3，输出不得出现 dev 之类的默认值覆盖注入值。
+	if strings.Contains(stdout, "agentflow dev") {
+		t.Fatalf("version 输出不应回落到默认版本: %s", stdout)
+	}
+}
+
+// TestVersionFlagMatchesVersionCommand 校验 --version 与 version 子命令输出一致。
+//
+// 两个入口共用同一份格式化实现，任何一处单独拼装都会让"版本信息"出现两套口径。
+func TestVersionFlagMatchesVersionCommand(t *testing.T) {
+	t.Parallel()
+	code, fromCommand, stderr := run(t, "version")
+	if code != 0 {
+		t.Fatalf("version 应成功退出，实际退出码 %d，错误: %s", code, stderr)
+	}
+	code, fromFlag, stderr := run(t, "--version")
+	if code != 0 {
+		t.Fatalf("--version 应成功退出，实际退出码 %d，错误: %s", code, stderr)
+	}
+	if fromCommand != fromFlag {
+		t.Fatalf("--version 与 version 输出必须一致:\n--version:%s\nversion:%s", fromFlag, fromCommand)
+	}
+}

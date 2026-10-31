@@ -3,6 +3,8 @@
 .plan/
 # 构建产物
 /bin/
+# 发布制品输出目录（由仓库根目录 Makefile 的 release-dist 生成）
+/dist/release/
 
 
 # CI 测试产物目录（仅 CI 把 TMPDIR 指向这里，本地不会产生）

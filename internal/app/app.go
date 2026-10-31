@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"runtime"
 
 	"github.com/lingting/agentflow/internal/config"
 	"github.com/lingting/agentflow/internal/logging"
@@ -24,10 +25,12 @@ type BuildInfo struct {
 // String 返回多行版本信息，供 --version 与 version 子命令共用。
 func (b BuildInfo) String() string {
 	return fmt.Sprintf(
-		"agentflow %s\n提交: %s\n构建时间: %s\n",
+		"agentflow %s\n提交: %s\n构建时间: %s\nGo: %s\n平台: %s\n",
 		b.Version,
 		b.Commit,
 		b.BuildDate,
+		runtime.Version(),
+		runtime.GOOS+"/"+runtime.GOARCH,
 	)
 }
 

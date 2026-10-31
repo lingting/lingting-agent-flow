@@ -968,6 +968,20 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 > 使用数据的测量。
 >
 
+> **当前下一步（2026-10-31）：正式发布与构建制品流水线，结论 `completed`**，交付物
+> [`P4-release-pipeline.md`](./P4-release-pipeline.md)。本轮在已完成的 CI 测试门禁之上把
+> "能编译"推进到"能交付"：新增 `internal/release` 作为发布规则唯一来源（版本元数据校验、
+> 五项发布矩阵、制品命名、压缩包读写与布局校验、`SHA256SUMS` 排序、清单一致性、前端产物
+> 完整性）与 `cmd/agentflow-release` + `make release-dist` 作为唯一发布入口；`.github/workflows/release.yml`
+> 由版本标签或手动触发，权限固定 `contents: read`，不创建 GitHub Release、不推送镜像、不部署
+> 环境。`goVersion` 改为只读 `runtime.Version()`（单一来源），提交号缺省时读真实 `git HEAD`，
+> 取不到即失败，拒绝 CI 运行编号与占位值。本机真实生成 `v0.0.0` 五个平台制品并逐项校验
+> （布局、`version.json`、`SHA256SUMS`、`release-manifest.json` 与 SHA-256）。**平台结论按三态
+> 严格区分**：五个平台交叉编译已完成；只有 windows/amd64 完成运行验收；linux/amd64、
+> linux/arm64、darwin/amd64、darwin/arm64 尚未获得真实运行验证（等待 `release.yml` 在原生
+> Runner 上执行），交叉编译成功不代表这些平台已验证可用。**P4-M5 仍为 `pending`**，本轮未
+> 采集任何真实使用数据。
+
 ## 四阶段总览
 
 | 阶段 | 目标 | 必要性 | 主要依赖 | 退出条件（摘要） |
@@ -1070,6 +1084,8 @@ AgentFlow 是一个**本地优先的 AI Coding Workflow Orchestrator**：把一�
 - [P4-execute-and-validate-failure-response.md](./P4-execute-and-validate-failure-response.md)
 - [P4-repair-cycle-eligibility.md](./P4-repair-cycle-eligibility.md)
 - [P4-task-event-stream.md](./P4-task-event-stream.md)
+- [P4-ci-gate.md](./P4-ci-gate.md)
+- [P4-release-pipeline.md](./P4-release-pipeline.md)
 - [remote-test-resource-cleanup.md](./remote-test-resource-cleanup.md)
 
 ## 验收记录

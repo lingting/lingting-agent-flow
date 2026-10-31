@@ -123,6 +123,9 @@ func (s *HealthService) checkDatabase(ctx context.Context) HealthCheck {
 }
 
 // SystemInfo 返回当前构建与运行环境信息。
+//
+// Go 版本与平台取自运行期，与 BuildInfo.String 使用的是同一份来源；HTTP 入口
+// 与 CLI version 因此不会各自维护一套版本字段。
 func (a *App) SystemInfo() SystemInfo {
 	return SystemInfo{
 		Version:   a.build.Version,

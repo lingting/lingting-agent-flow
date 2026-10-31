@@ -1,10 +1,14 @@
-.PHONY: fmt fmt-check vet test test-unit test-local test-pi test-ssh test-e2e test-packaging test-race build release run web-install web-build web-dev web-verify serve clean check
+.PHONY: fmt fmt-check vet test test-unit test-local test-pi test-ssh test-e2e test-packaging test-release-verify test-race build release release-dist run web-install web-build web-dev web-verify serve clean check
 
 VERSION ?= dev
+# 开发构建使用短提交便于阅读；正式发布制品中的提交由 cmd/agentflow-release 写入完整 SHA。
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildDate=$(BUILD_DATE)
 BINARY := bin/agentflow
+# 发布制品输出目录与目标平台列表：留空表示使用 internal/release 中的发布矩阵。
+RELEASE_DIR ?= dist/release
+RELEASE_PLATFORMS ?=
 PARALLEL ?= 8
 
 fmt:
@@ -75,9 +79,19 @@ build:
 release: web-build web-verify
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/agentflow
 
+# release-dist 生成跨平台发布制品：先构建并校验前端产物，再交叉编译各目标平台，
+# 最后写出压缩包、SHA256SUMS 与 release-manifest.json 并自检。
+# 正式版本必须通过 VERSION=vMAJOR.MINOR.PATCH 传入；缺省值 dev 只用于本地核对打包流程。
+release-dist: web-build web-verify
+	go run ./cmd/agentflow-release -version "$(VERSION)" -output "$(RELEASE_DIR)" -platforms "$(RELEASE_PLATFORMS)"
+
+# test-release-verify 执行发布制品的端到端打包验收：真实生成全部目标平台制品并校验
+# 压缩包布局、版本元数据与 SHA-256。需要 pnpm 与已安装的前端依赖，否则用例自行跳过。
+test-release-verify:
+	go test -count=1 -v -run 'TestReleaseArtifacts|TestSingleBinaryPackaging' ./tests/e2e/packaging/...
 run: serve
 
 clean:
-	rm -rf bin
+	rm -rf bin $(RELEASE_DIR)
 
 check: fmt-check vet build

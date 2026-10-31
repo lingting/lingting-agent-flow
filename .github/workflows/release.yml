@@ -1,0 +1,281 @@
+# AgentFlow 正式发布制品构建。
+#
+# 本工作流只负责"构建与制品准备"：
+#   - 只在版本标签（vMAJOR.MINOR.PATCH）推送或手动触发时运行；
+#   - 生成经过校验的跨平台压缩包、SHA256SUMS 与 release-manifest.json；
+#   - 把制品上传到本次 Actions 运行的制品区；
+#   - 不创建 GitHub Release、不推送镜像、不部署环境、不写入仓库。
+#
+# 制品构建本身复用仓库唯一年度发布入口 `make release-dist`（内部调用
+# cmd/agentflow-release），不在工作流里复制一套可能不一致的编译命令。
+#
+# 运行冒烟在目标平台的原生 Runner 上执行。若某个平台的 Runner 标签在目标仓库不可用，
+# 对应的冒烟 Job 会明确失败，而不是静默跳过：平台要么被真实验证，要么在 docs/release.md
+# 中标注为"仅交叉编译成功、运行验证未执行"。
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号 vMAJOR.MINOR.PATCH；留空时要求当前 ref 是版本标签"
+        required: false
+        default: ""
+        type: string
+
+# 最小权限：只读取仓库内容，不使用 Secret，也不写入仓库。
+permissions:
+  contents: read
+
+# 发布构建不能被取消：中途取消会留下半套制品，容易与旧版本的制品混淆。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_DIR: dist/release
+  # 前端与发布构建所需的固定版本（与 ci.yml 保持一致）。
+  PNPM_VERSION: "11.24.0"
+
+jobs:
+  resolve:
+    name: 解析版本元数据
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      commit: ${{ steps.resolve.outputs.commit }}
+    steps:
+      # 版本与提交都来自事件上下文，不需要检出代码即可解析。
+      - name: 解析版本号与提交号
+        id: resolve
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          version=""
+          if [ "$REF_TYPE" = "tag" ]; then
+            # 标签推送：版本号必须与标签完全一致，不接受任何改写。
+            case "$REF_NAME" in
+              v[0-9]*.[0-9]*.[0-9]*) version="$REF_NAME" ;;
+              *)
+                echo "::error::标签 $REF_NAME 不是 vMAJOR.MINOR.PATCH 形式"
+                exit 1
+                ;;
+            esac
+          fi
+          if [ -n "$INPUT_VERSION" ]; then
+            if [ -n "$version" ] && [ "$INPUT_VERSION" != "$version" ]; then
+              echo "::error::手动输入的版本 $INPUT_VERSION 与标签 $version 不一致"
+              exit 1
+            fi
+            version="$INPUT_VERSION"
+          fi
+          if [ -z "$version" ]; then
+            echo "::error::无法确定版本号：请推送 vMAJOR.MINOR.PATCH 标签，或手动指定 version"
+            exit 1
+          fi
+          # 与 internal/release.ValidateVersion 保持同一格式；这里再校验一次是为了在
+          # 构建开始前失败，避免把无效版本写进制品文件名。
+          if ! printf '%s' "$version" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "::error::版本号 $version 不是 vMAJOR.MINOR.PATCH 形式"
+            exit 1
+          fi
+          if ! printf '%s' "$COMMIT_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::提交号 $COMMIT_SHA 不是完整的 Git SHA"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
+          {
+            echo "### 发布版本"
+            echo
+            echo "| 字段 | 取值 |"
+            echo "| --- | --- |"
+            echo "| 版本 | \`$version\` |"
+            echo "| 提交 | \`$COMMIT_SHA\` |"
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+  build:
+    name: 构建发布制品
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # 标签推送时检出标签指向的提交；手动触发时检出当前 ref。
+          persist-credentials: false
+      - name: 安装 Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - name: 安装 Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: lingting-agent-flow-ui/package.json
+          cache: pnpm
+          cache-dependency-path: lingting-agent-flow-ui/pnpm-lock.yaml
+      - name: 按锁文件安装前端依赖
+        working-directory: lingting-agent-flow-ui
+        run: pnpm install --frozen-lockfile
+      # make release-dist 的顺序是：前端生产构建 → 校验入口 HTML/JS/CSS → 逐平台交叉编译
+      # → 打包 → 写 SHA256SUMS 与 release-manifest.json → 回读自检。顺序由 Makefile 保证，
+      # 不允许先编译 Go 再构建前端。
+      - name: 构建并打包发布制品
+        run: make release-dist VERSION="${{ needs.resolve.outputs.version }}" RELEASE_DIR="${{ env.RELEASE_DIR }}"
+      # 独立复核：用 sha256sum 校验制品与校验文件一致，而不是只看构建工具的退出码。
+      - name: 校验制品与校验文件一致
+        working-directory: ${{ env.RELEASE_DIR }}
+        run: |
+          set -euo pipefail
+          sha256sum -c SHA256SUMS
+          ls -l
+      - name: 输出发布清单摘要
+        working-directory: ${{ env.RELEASE_DIR }}
+        run: |
+          set -euo pipefail
+          summary="$RUNNER_TEMP/release-artifacts.md"
+          # 只列出清单里的制品名称、大小与摘要；不打印仓库路径、环境变量或凭据。
+          python3 - "$summary" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          manifest = json.loads(pathlib.Path("release-manifest.json").read_text(encoding="utf-8"))
+          lines = ["### 发布制品", "", "| 制品 | 大小（字节） | SHA-256 |", "| --- | --- | --- |"]
+          for artifact in manifest["artifacts"]:
+              lines.append(f"| `artifact['file']}` | {artifact['size']} | `artifact['sha256']}` |")
+          pathlib.Path(sys.argv[1]).write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+          cat "$summary" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+      # 上传失败必须让 Job 失败，不能"显示成功后遗漏制品"。
+      - name: 上传发布制品
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: agentflow-release-${{ needs.resolve.outputs.version }}
+          path: |
+            ${{ env.RELEASE_DIR }}/*.tar.gz
+            ${{ env.RELEASE_DIR }}/*.zip
+            ${{ env.RELEASE_DIR }}/SHA256SUMS
+            ${{ env.RELEASE_DIR }}/release-manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
+  smoke:
+    name: 运行冒烟（${{ matrix.os }}/${{ matrix.arch }}）
+    needs: [resolve, build]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      # 一个平台的冒烟失败不应该掩盖其他平台的结论，全部跑完再汇总。
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            archive_suffix: tar.gz
+            runner: ubuntu-latest
+          - os: linux
+            arch: arm64
+            archive_suffix: tar.gz
+            runner: ubuntu-24.04-arm
+          - os: darwin
+            arch: amd64
+            archive_suffix: tar.gz
+            runner: macos-13
+          - os: darwin
+            arch: arm64
+            archive_suffix: tar.gz
+            runner: macos-14
+          - os: windows
+            arch: amd64
+            archive_suffix: zip
+            runner: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 安装 Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - name: 下载发布制品
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: agentflow-release-${{ needs.resolve.outputs.version }}
+          path: ${{ github.workspace }}/.release-artifacts
+      # 冒烟测试本体是仓库内的 Go 用例：它独立解压制品、校验布局与 version.json、
+      # 执行版本查询，再从解压目录启动程序核验 HTTP API 与前端静态资源。
+      - name: 运行制品冒烟
+        env:
+          AGENTFLOW_RELEASE_ARCHIVE: ${{ github.workspace }}/.release-artifacts/agentflow_${{ needs.resolve.outputs.version }}_${{ matrix.os }}_${{ matrix.arch }}.${{ matrix.archive_suffix }}
+          AGENTFLOW_RELEASE_PLATFORM: ${{ matrix.os }}/${{ matrix.arch }}
+          AGENTFLOW_RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+          AGENTFLOW_RELEASE_COMMIT: ${{ needs.resolve.outputs.commit }}
+        run: |
+          go test -count=1 -v -run TestReleaseArchiveSmoke ./tests/e2e/packaging/...
+
+  release-summary:
+    name: 发布汇总
+    needs: [resolve, build, smoke]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # 结论只来自结构化结果，不对日志做字符串搜索冒充判定。
+      - name: 汇总发布构建结论
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          COMMIT: ${{ needs.resolve.outputs.commit }}
+          RESOLVE_RESULT: ${{ needs.resolve.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          SMOKE_RESULT: ${{ needs.smoke.result }}
+        run: |
+          set -uo pipefail
+          report="$RUNNER_TEMP/release-summary.md"
+          {
+            echo "## 发布构建结论"
+            echo
+            echo "| 阶段 | 结论 |"
+            echo "| --- | --- |"
+            echo "| 版本解析 | ${RESOLVE_RESULT:-（空）} |"
+            echo "| 制品构建与上传 | ${BUILD_RESULT:-（空）} |"
+            echo "| 目标平台运行冒烟 | ${SMOKE_RESULT:-（空）} |"
+            echo
+            echo "版本：\`${VERSION:-（未解析）}\`　提交：\`${COMMIT:-（未解析）}\`"
+            echo
+            echo "本工作流只上传 Actions 运行制品，不创建 GitHub Release、不推送镜像、不部署环境。"
+          } > "$report"
+          cat "$report"
+          cat "$report" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          failed=0
+          for result in "${RESOLVE_RESULT:-}" "${BUILD_RESULT:-}" "${SMOKE_RESULT:-}"; do
+            case "$result" in
+              success) ;;
+              *)
+                failed=1
+                ;;
+            esac
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::发布构建未全部成功：请按上表核对失败阶段"
+            exit 1
+          fi
+          echo "发布制品构建、上传与冒烟全部完成。"

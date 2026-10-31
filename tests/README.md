@@ -11,6 +11,7 @@ tests/
 │   ├── testkit/        # 统一测试入口（testkit.Main）、日志落盘、工作空间、known_hosts 快照与测试数据构造
 │   └── fakepi/         # 以测试二进制充当 Pi CLI 的可控替身
 ├── unit/               # 快速单元测试，不依赖真实 Pi、SSH 或网络
+│   ├── release/        # 发布制品元数据、命名规范、清单与校验文件规则、工作流结构检查
 │   ├── agent/          # Agent 事件、结果类型与容器内 Pi Runner（使用替身）
 │   │   └── pi/         # Pi Runner 单元测试（使用 fakepi 替身）
 │   ├── app/            # 应用服务层
@@ -50,7 +51,7 @@ tests/
 │   └── ssh/            # 需要真实远程 Linux 机器
 └── e2e/
     ├── cli/            # CLI 完整用户操作路径
-    └── packaging/      # 单文件打包冒烟测试（前端构建 + Go 编译 + 独立目录启动）
+    └── packaging/      # 打包验收：单文件程序独立目录启动 + 发布制品布局、元数据与 SHA-256
 ```
 
 ## 测试入口
@@ -84,8 +85,20 @@ go test -count=1 -v ./tests/integration/remote/workflow/...
 # CLI 端到端测试
 go test -count=1 -v ./tests/e2e/...
 
+# 发布制品规则（版本元数据、命名规范、清单、校验文件与工作流结构）
+go test -count=1 -v ./tests/unit/release/...
+
 # 单文件打包冒烟测试（需要 pnpm 与已安装的前端依赖，否则自行跳过）
 go test -count=1 -v -run TestSingleBinaryPackaging ./tests/e2e/packaging/...
+
+# 发布制品打包验收：真实生成跨平台制品并校验布局、元数据与 SHA-256（同样需要前端依赖）
+go test -count=1 -v -run TestReleaseArtifacts ./tests/e2e/packaging/...
+# 等价入口
+make test-release-verify
+
+# 发布流水线下载到本机后的运行冒烟（由 .github/workflows/release.yml 在目标平台执行）
+# 需要 AGENTFLOW_RELEASE_ARCHIVE 指向制品文件，未设置时输出 WARN [SKIP] 并跳过
+AGENTFLOW_RELEASE_ARCHIVE=/路径/agentflow_v1.2.3_linux_amd64.tar.gz AGENTFLOW_RELEASE_PLATFORM=linux/amd64 go test -count=1 -v -run TestReleaseArchiveSmoke ./tests/e2e/packaging/...
 
 # 完整测试
 go test -count=1 -v -p 8 -parallel 8 ./tests/...
@@ -120,6 +133,19 @@ go test -race -count=1 ./tests/integration/local/ssh/...
 | `go-race` | `make test-race` 的全部范围 + 数据库迁移 + 任务级工作流编排 | `make test-race`，再执行下文两条补充命令 |
 | `ui-test` | 前端单元（`--maxWorkers 4`）、Playwright E2E（`--workers=4`）、格式、lint、类型检查、生产构建 | `cd lingting-agent-flow-ui && pnpm test:all:safe` |
 | `ci-summary` | 必需 Job 全部成功才通过，并区分成功 / 失败 / 跳过 / 未执行 / 环境准备失败 | 无（仅 CI） |
+
+`.github/workflows/release.yml` 是发布制品流水线，不由 CI 门禁触发：它在版本标签
+（`vMAJOR.MINOR.PATCH`）推送或手动触发时运行，调用 `make release-dist` 构建制品，并用
+`TestReleaseArchiveSmoke` 在目标平台的原生 Runner 上执行运行冒烟。它只上传 Actions 运行
+制品，不创建 GitHub Release、不推送镜像、不部署环境。制品布局与平台支持边界见
+[`../docs/release.md`](../docs/release.md)。
+
+| 发布阶段 | 覆盖范围 | 本地等价入口 |
+|---|---|---|
+| 版本解析 | 标签/输入版本号与提交号格式校验 | `go test -count=1 ./tests/unit/release/` |
+| 制品构建 | 前端产物校验 → 交叉编译 → 打包 → `SHA256SUMS` 与清单自检 | `make release-dist VERSION=v1.2.3` |
+| 制品校验 | 用 `sha256sum -c` 独立复核制品与校验文件一致 | `cd dist/release && sha256sum -c SHA256SUMS` |
+| 运行冒烟 | 解压、版本查询、启动服务、HTTP API 与前端静态资源 | `TestReleaseArchiveSmoke`（见上文环境变量） |
 
 `go-race` 的补充范围（`make test-race` 未包含）：
 
@@ -232,6 +258,25 @@ Unix 套接字时该用例输出 `WARN [SKIP]` 并跳过，其余用例仍会执
   `@cert-authority` 行的忽略规则。
 - `tests/integration/local/ssh/hostkey_retry_test.go`：进程内多主机密钥服务端，验证旧记录
   失效时回落到下一条记录、记录顺序决定优先类型、全部类型失败时返回首个结论。
+
+## 发布制品测试
+
+发布流水线的规则与验收分成两层：规则层是纯函数与静态检查，制品层真实生成并解压制品。
+
+| 目录 | 内容 | 外部依赖 |
+|---|---|---|
+| `tests/unit/release/` | 版本元数据校验、发布矩阵、制品命名、压缩包布局与权限、`SHA256SUMS` 排序、清单一致性、前端产物完整性、工作流触发条件/权限/阶段顺序/矩阵/Action 固定 | 无（构建制品时使用当前平台与占位前端产物） |
+| `tests/e2e/packaging/` | 真实执行一次发布构建并逐平台校验压缩包内容、`version.json`、清单与 SHA-256；当前平台制品解压后执行 `version` | pnpm 与已安装的前端依赖，否则 `WARN [SKIP]` |
+| `tests/e2e/packaging/`（`TestReleaseArchiveSmoke`） | 校验并启动流水线下载到本机的单个制品：布局、元数据、版本查询、HTTP API、前端静态资源、停止后端口释放 | `AGENTFLOW_RELEASE_ARCHIVE` 等环境变量，未设置时 `WARN [SKIP]` |
+
+平台支持边界的判定依据是构建矩阵与真实运行验证两件事，二者不互相替代：
+
+- 五个目标平台都用本仓库工具链真实交叉编译成功（`CGO_ENABLED=0`，纯 Go 依赖）。
+- 运行冒烟只在目标平台的原生 Runner 上执行；当前运行平台与制品平台不一致时，
+  `TestReleaseArchiveSmoke` 输出 `WARN [SKIP]` 并跳过，不会把"交叉编译成功"报告成
+  "该平台已完成运行验收"。
+- `internal/release.SupportedPlatforms` 是发布矩阵的唯一来源；不在矩阵内的平台会在
+  构建时被拒绝，也不会进入工作流的冒烟矩阵。
 
 ## Docker 测试分层
 

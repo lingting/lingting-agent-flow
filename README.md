@@ -207,6 +207,65 @@ make release
 # AgentFlow 服务已启动: http://127.0.0.1:26380
 ```
 
+### 跨平台发布制品
+
+正式发布制品由同一个入口生成：
+
+```bash
+make release-dist VERSION=v1.2.3
+```
+
+该目标先构建并校验前端产物，再按发布矩阵交叉编译（`CGO_ENABLED=0`），最后在
+`dist/release/` 生成压缩包、`SHA256SUMS` 与 `release-manifest.json`，并回读自检
+（压缩包布局、版本元数据与 SHA-256 一致性）。版本号缺省为 `dev`，只用于本地核对打包流程；
+正式版本必须是 `vMAJOR.MINOR.PATCH`，否则构建立即失败。CI 中由
+`.github/workflows/release.yml` 在版本标签推送或手动触发时执行同一入口。
+
+发布矩阵（只包含经过核实的平台）：
+
+| 目标平台 | 制品名 | 交叉编译 | 运行验证 |
+| --- | --- | --- | --- |
+| Linux amd64 | `agentflow_<version>_linux_amd64.tar.gz` | 已完成 | 未执行（等待 CI 原生 Runner） |
+| Linux arm64 | `agentflow_<version>_linux_arm64.tar.gz` | 已完成 | 未执行（等待 CI 原生 Runner） |
+| macOS amd64 | `agentflow_<version>_darwin_amd64.tar.gz` | 已完成 | 未执行（本机无 macOS 环境） |
+| macOS arm64 | `agentflow_<version>_darwin_arm64.tar.gz` | 已完成 | 未执行（本机无 macOS 环境） |
+| Windows amd64 | `agentflow_<version>_windows_amd64.zip` | 已完成 | 已完成（本机解压启动并核验页面与 API） |
+
+其他平台（例如 Linux 386、Windows arm64）不在发布矩阵内：能交叉编译不等于产品支持。
+Linux 与 macOS 的待验证项需要对应平台的原生 Runner 才能补齐，交叉编译成功不能替代运行验收。
+
+每个压缩包包含可执行文件、`QUICKSTART.md`、`THIRD-PARTY-NOTICES.md` 与 `version.json`。
+`version.json` 与 `release-manifest.json` 记录版本、提交 SHA、构建时间、Go 工具链版本与目标
+平台。构建环境、制品布局与平台支持边界的完整说明见 [`docs/release.md`](./docs/release.md)。
+
+下载后核对制品：
+
+```bash
+sha256sum -c SHA256SUMS          # Linux
+shasum -a 256 -c SHA256SUMS      # macOS
+Get-FileHash <文件名> -Algorithm SHA256   # Windows
+```
+
+### 版本查询
+
+```bash
+agentflow version       # 或 agentflow --version，两者输出一致
+```
+
+输出包含版本号、提交 SHA、构建时间、Go 工具链版本与编译平台：
+
+```text
+agentflow v1.2.3
+提交: 3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a
+构建时间: 2026-01-02T03:04:05Z
+Go: go1.24.5
+平台: linux/amd64
+```
+
+本地 `make build` 与 `make release` 未注入版本号时显示 `dev`，提交为当前 HEAD 的短 SHA，
+构建时间为 `unknown`；正式制品中的提交是完整 SHA，且与构建该制品的源码提交一致。
+同样的信息也通过 `GET /api/v1/system/info` 提供。
+
 ### 开发模式
 
 开发模式保留两个进程：
