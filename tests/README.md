@@ -108,6 +108,58 @@ go test -race -count=1 ./tests/integration/local/ssh/...
 并发由 Go 测试工具负责：`-p` 控制同时运行的测试包数量，`-parallel` 控制单个包内
 并行用例数量。用例内部通过 `t.Parallel()` 声明可并行，不依赖固定执行顺序。
 
+## CI 门禁与本地入口的对应关系
+
+`.github/workflows/ci.yml` 在 Pull Request、`master` push 与手动触发时执行。它不新增测试
+逻辑，只调用本文件里的入口，因此本地复现失败的顺序与 CI 一致：
+
+| CI Job | 覆盖范围 | 本地等价入口 |
+|---|---|---|
+| `go-static` | `gofmt -l cmd internal tests` 无输出、`go vet ./...`、`go build ./...` | `make fmt-check`、`make vet`、`make build` |
+| `go-test` | 全部 Go 测试包（`tests/...`，含 CLI E2E 与单文件打包冒烟） | `make test` |
+| `go-race` | `make test-race` 的全部范围 + 数据库迁移 + 任务级工作流编排 | `make test-race`，再执行下文两条补充命令 |
+| `ui-test` | 前端单元（`--maxWorkers 4`）、Playwright E2E（`--workers=4`）、格式、lint、类型检查、生产构建 | `cd lingting-agent-flow-ui && pnpm test:all:safe` |
+| `ci-summary` | 必需 Job 全部成功才通过，并区分成功 / 失败 / 跳过 / 未执行 / 环境准备失败 | 无（仅 CI） |
+
+`go-race` 的补充范围（`make test-race` 未包含）：
+
+```bash
+go test -race -count=1 ./tests/integration/local/database/
+go test -race -count=1 ./tests/integration/local/workflow/
+```
+
+`make test-race` 本身已覆盖 `./tests/unit/...`（含 `unit/store`、`unit/app`、`unit/httpapi`、
+`unit/source/codesaver`）与 `./tests/integration/local/ssh/...`，因此 CI 不再重复执行这些范围，
+实际覆盖是上表所列范围的超集而不是子集。
+
+### 跳过规则在 CI 中的表现
+
+真实 Pi、SSH 与远程 Docker 用例由 `tests/config/*.yml` 显式开启。CI 不提供这些配置，
+也不注入任何凭据，因此相应用例输出 `WARN [SKIP]` 并跳过：
+
+- 跳过不计为通过，`ci-summary` 单独标注这一点；
+- 跳过原因（例如"配置文件不存在""未把 `ssh.enable` 设为 true"）由 `go-test` 的
+  "汇总外部依赖跳过原因"步骤写进 Job 摘要，同时也保留在 `test.log` 里；
+- 启用但目标配置完整、只是连接 / 认证 / 主机密钥校验失败时必须让测试失败，这一点在 CI 中
+  同样成立——CI 的跳过只来自"未提供配置"，不来自"配置存在但连不上"。
+
+### CI 产物留存
+
+| Job | 产物 | 触发条件 | 保留 |
+|---|---|---|---|
+| `go-test` | `make test` 完整控制台输出、各测试包 `test.log`、`latest-run.txt` | 仅失败 | 7 天 |
+| `go-race` | 竞态检测控制台输出、各测试包 `test.log`、`latest-run.txt` | 仅失败 | 7 天 |
+| `ui-test` | Vitest 输出、Playwright HTML 报告、失败截图与 trace、完整控制台日志 | 仅失败 | 7 天 |
+
+产物名包含 `github.run_id` 与 `github.run_attempt`，同一提交的多次重跑不会互相覆盖。
+**不整体上传测试工作空间**：其中含用例生成的临时私钥、SQLite 数据库与 Session 文件，
+这些不是诊断必需，也不该离开 Runner。Artifact 上传步骤显式 `continue-on-error`，上传失败
+不会改写原本的测试失败结论。
+
+CI 中测试工作空间仍然落在 `os.TempDir()/lingting-agent-flow-tests/` 之下；Job 只把
+`TMPDIR` 指向工作区内的 `.test-artifacts/` 目录，使失败产物可被 `upload-artifact` 取到。
+本地运行时 `TMPDIR` 不变，产物位置与下文「测试产物」一致。
+
 ## 测试产物
 
 每个测试包启动时在系统临时目录下创建随机根目录，并把绝对路径输出为：

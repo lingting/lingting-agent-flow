@@ -1812,6 +1812,33 @@ SSH 连接层按三层覆盖：`tests/unit/ssh/`（主机密钥、认证配置�
 
 测试分类、配置文件与编写约定见 [tests/README.md](tests/README.md)。
 
+### 持续集成（CI）
+
+仓库通过 `.github/workflows/ci.yml` 在 Pull Request、`master` 分支 push 与手动触发时执行门禁。
+每个必需 Job 都在本地有对应入口，CI 只是把它们串起来，不引入额外的测试逻辑：
+
+| CI Job | 覆盖范围 | 本地等价入口 |
+|---|---|---|
+| `go-static` | `gofmt -l cmd internal tests` 无输出、`go vet ./...`、`go build ./...` | `make fmt-check`、`make vet`、`make build` |
+| `go-test` | `tests/...` 全量（单元、本机集成、真实 Pi / SSH / 远程 Docker、CLI E2E、单文件打包冒烟） | `make test` |
+| `go-race` | `make test-race` 的全部范围，另加数据库迁移与任务级工作流编排的竞态检测 | `make test-race` + `go test -race -count=1 ./tests/integration/local/database/` + `go test -race -count=1 ./tests/integration/local/workflow/` |
+| `ui-test` | 前端单元测试（`--maxWorkers 4`）、Playwright E2E（`--workers=4`）、格式、lint、类型检查与生产构建 | `cd lingting-agent-flow-ui && pnpm test:all:safe` |
+| `ci-summary` | 只有上面四个 Job 全部成功才报告通过，并区分成功 / 失败 / 跳过 / 未执行 / 环境准备失败 | 无（仅在 CI 中运行） |
+
+几点边界必须明确：
+
+- 真实 Pi、SSH 与远程 Docker 用例由 `tests/config/*.yml` 显式开启，CI 不提供这些配置，
+  相应用例输出 `WARN [SKIP]` 并跳过。**跳过与未执行都不算通过**，跳过原因写在
+  `test.log` 与 `go-test` 的 Job 摘要里。
+- CI 不关闭 SSH 主机密钥校验，不注入任何真实凭据，也不使用 Secret。
+- 工作流权限固定为 `permissions: contents: read`；所有 Action 用提交 SHA 固定。
+- 前端 `vp fmt` / `vp lint --fix` 会自动修改文件且不返回失败，因此 `ui-test` 另有一个步骤
+  核验工作区没有待修复改动，格式与 lint 才算真正的门禁。
+- 失败产物只上传 `test.log`、`latest-run.txt`、Playwright HTML 报告、失败截图与 trace，
+  以及完整控制台日志；不上传整个测试工作空间（其中含用例生成的临时私钥与数据库）。
+- 尚未取得 GitHub Actions 远端 Workflow Run 证据：本轮只完成工作流配置与本地等价测试，
+  **不能据此声称"GitHub Actions 已经通过"**。
+
 开发环境、代码风格与提交约定见 [docs/development.md](docs/development.md)，分层与依赖方向见 [docs/architecture.md](docs/architecture.md)。
 
 ## 当前未实现的功能

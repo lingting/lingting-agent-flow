@@ -4,6 +4,9 @@
 # 构建产物
 /bin/
 
+
+# CI 测试产物目录（仅 CI 把 TMPDIR 指向这里，本地不会产生）
+/.test-artifacts/
 # 前端生产构建产物写入 Go 的嵌入包目录，只保留占位文件
 /internal/webui/dist/*
 !/internal/webui/dist/.gitkeep

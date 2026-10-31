@@ -1,0 +1,348 @@
+# AgentFlow 持续集成门禁。
+#
+# 必需 Job（任一非成功，ci-summary 一律失败，不会把门禁报告为通过）：
+# - go-static：Go 格式、静态检查与编译，最先失败以获得最快反馈
+# - go-test  ：`make test` 全量测试（单元 / 本机集成 / 真实外部依赖 / CLI E2E / 打包冒烟）
+# - go-race  ：竞态检测（`make test-race` 覆盖范围 + 数据库迁移 + 任务级工作流编排）
+# - ui-test  ：前端单元测试、Playwright 浏览器 E2E、格式、lint、类型检查与生产构建
+#
+# 真实 Pi / SSH / 远程 Docker 用例由项目自身的显式配置（tests/config/*.yml）驱动：
+# CI 不提供这些配置，相应用例输出 WARN [SKIP] 并跳过。跳过不计为通过，也不伪造成功结果；
+# 汇总步骤单独标注这一点，跳过原因保留在 test.log 产物里。
+#
+# 所有 Action 都用提交 SHA 固定（不用可移动的 tag），避免上游重新指向标签时 CI 行为变化。
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+# 最小权限：所有 Job 只读取仓库内容，不使用 Secret、不写入仓库、不需要额外作用域。
+permissions:
+  contents: read
+
+# 同一 PR 的旧运行在新提交到达后取消；push 与手动触发不取消，避免丢失主分支门禁证据。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # 测试产物根目录固定在工作区内。测试代码仍按 os.TempDir() / os.tmpdir() 生成随机工作
+  # 空间，只在测试步骤里把系统临时目录指向这里，使 upload-artifact 能取到产物；
+  # 依赖安装等步骤不使用该目录，避免临时目录不存在时打断安装。
+  TEST_ARTIFACT_ROOT: ${{ github.workspace }}/.test-artifacts
+
+jobs:
+  go-static:
+    name: Go 格式与静态检查
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      static: ${{ steps.static.outcome }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 安装 Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - name: 格式、静态检查与编译
+        id: static
+        run: |
+          set -euo pipefail
+          # make fmt-check 只打印未格式化文件且退出码为 0，这里必须以非零退出码作为门禁。
+          unformatted="$(gofmt -l cmd internal tests)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::以下文件未按 gofmt 格式化，请执行 make fmt 后重新提交"
+            echo "$unformatted"
+            exit 1
+          fi
+          go vet ./...
+          go build ./...
+
+  go-test:
+    name: Go 全量测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      prepare: ${{ steps.prepare.outcome }}
+      tests: ${{ steps.tests.outcome }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 安装 Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      # 单文件打包冒烟测试（tests/e2e/packaging）会调用 `pnpm build`，缺少 pnpm 或前端
+      # 依赖时该用例自行跳过。为了让 make test 真正覆盖打包冒烟，这里安装前端依赖。
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: "11.24.0"
+      - name: 安装 Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: lingting-agent-flow-ui/package.json
+          cache: pnpm
+          cache-dependency-path: lingting-agent-flow-ui/pnpm-lock.yaml
+      - name: 安装前端依赖
+        id: prepare
+        working-directory: lingting-agent-flow-ui
+        run: pnpm install --frozen-lockfile
+      - name: 全量 Go 测试
+        id: tests
+        run: |
+          set -euo pipefail
+          # 测试工作空间落在 TMPDIR 之下，指向工作区内固定目录以便上传失败产物。
+          mkdir -p "$TEST_ARTIFACT_ROOT/go"
+          export TMPDIR="$TEST_ARTIFACT_ROOT/go"
+          make test 2>&1 | tee "$TEST_ARTIFACT_ROOT/go/make-test-output.log"
+      - name: 汇总外部依赖跳过原因
+        if: always()
+        run: |
+          set -uo pipefail
+          base="$TEST_ARTIFACT_ROOT/go/lingting-agent-flow-tests"
+          skipped=""
+          if [ -d "$base" ]; then
+            skipped="$(grep -rh 'WARN \[SKIP\]' --include=test.log "$base" 2>/dev/null | sort -u || true)"
+          fi
+          {
+            echo "### 外部依赖测试跳过情况"
+            echo
+            if [ -n "$skipped" ]; then
+              echo '```text'
+              echo "$skipped"
+              echo '```'
+              echo
+              echo "以上用例因 CI 未提供真实 Pi / SSH / 远程 Docker 配置而跳过，不计为通过。"
+            else
+              echo "本次运行没有产生跳过记录。"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+      # 只上传 test.log 与 latest-run.txt：逐用例结论、跳过原因与应用日志都在其中。
+      # 不上传整个测试工作空间，避免把用例生成的临时私钥、数据库与 Session 一并带走。
+      # 上传失败不得覆盖原本的测试失败结论，因此显式 continue-on-error。
+      - name: 上传 Go 测试日志
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: go-test-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ github.workspace }}/.test-artifacts/go/make-test-output.log
+            ${{ github.workspace }}/.test-artifacts/go/lingting-agent-flow-tests/**/test.log
+            ${{ github.workspace }}/.test-artifacts/go/lingting-agent-flow-tests/latest-run.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+  go-race:
+    name: Go 竞态检测
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      tests: ${{ steps.tests.outcome }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 安装 Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - name: 竞态检测
+        id: tests
+        run: |
+          set -o pipefail
+          mkdir -p "$TEST_ARTIFACT_ROOT/go-race"
+          export TMPDIR="$TEST_ARTIFACT_ROOT/go-race"
+          log="$TEST_ARTIFACT_ROOT/go-race/race-output.log"
+          {
+            # make test-race 已经覆盖 ./tests/unit/...（含 unit/store、unit/app、unit/httpapi、
+            # unit/source/codesaver）与 ./tests/integration/local/ssh/...，因此这些范围不再
+            # 重复执行；下面只补充 test-race 未包含的两个范围，实际覆盖是要求的超集。
+            make test-race
+            # 数据库迁移与并发访问
+            go test -race -count=1 ./tests/integration/local/database/
+            # 任务级工作流编排与并发隔离
+            go test -race -count=1 ./tests/integration/local/workflow/
+          } 2>&1 | tee "$log"
+          # 管道会吃掉退出码，这里显式核对三组命令的结论。
+          if grep -q '^FAIL' "$log"; then
+            echo "::error::竞态检测存在失败的测试包"
+            exit 1
+          fi
+      - name: 上传竞态检测日志
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: go-race-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ github.workspace }}/.test-artifacts/go-race/race-output.log
+            ${{ github.workspace }}/.test-artifacts/go-race/lingting-agent-flow-tests/**/test.log
+            ${{ github.workspace }}/.test-artifacts/go-race/lingting-agent-flow-tests/latest-run.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+  ui-test:
+    name: 前端单元与浏览器测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: lingting-agent-flow-ui
+    outputs:
+      prepare: ${{ steps.prepare.outcome }}
+      tests: ${{ steps.tests.outcome }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: "11.24.0"
+      - name: 安装 Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: lingting-agent-flow-ui/package.json
+          cache: pnpm
+          cache-dependency-path: lingting-agent-flow-ui/pnpm-lock.yaml
+      - name: 安装前端依赖
+        id: prepare
+        run: pnpm install --frozen-lockfile
+      - name: 安装 Chromium 与系统依赖
+        run: pnpm exec playwright install --with-deps chromium
+      # test:all:safe 内部固定顺序为：vitest（--maxWorkers 4）→ Playwright（--workers=4）→
+      # vp fmt / vp lint --fix / tsc --noEmit → 生产构建。并发度保持项目既有设置，不提高。
+      - name: 前端单元、E2E、格式、lint、类型检查与构建
+        id: tests
+        run: |
+          set -o pipefail
+          # 测试工作空间落在 TMPDIR 之下，指向工作区内固定目录以便上传失败产物。
+          mkdir -p "$TEST_ARTIFACT_ROOT/ui"
+          export TMPDIR="$TEST_ARTIFACT_ROOT/ui"
+          pnpm test:all:safe 2>&1 | tee "$TEST_ARTIFACT_ROOT/ui/ui-test-output.log"
+      # vp fmt 与 vp lint --fix 会自动修改文件且不返回失败，因此单独核验工作区是否仍有待修复
+      # 改动：有改动说明提交前没跑格式化，格式检查才算真正的门禁。
+      - name: 核验格式与 lint 无待修复改动
+        working-directory: .
+        run: |
+          set -euo pipefail
+          dirty="$(git -C "$GITHUB_WORKSPACE" status --porcelain -- lingting-agent-flow-ui)"
+          if [ -n "$dirty" ]; then
+            echo "::error::前端仍有 vp fmt / vp lint --fix 会自动修改的文件"
+            echo "$dirty"
+            git -C "$GITHUB_WORKSPACE" --no-pager diff -- lingting-agent-flow-ui
+            exit 1
+          fi
+      # 前端产物只包含测试输出、Playwright HTML 报告、失败截图与 trace，不含依赖目录。
+      # 上传失败不得覆盖原本的测试失败结论，因此显式 continue-on-error。
+      - name: 上传前端测试产物
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ui-test-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/.test-artifacts/ui
+          if-no-files-found: warn
+          retention-days: 7
+
+  ci-summary:
+    name: CI 汇总
+    needs: [go-static, go-test, go-race, ui-test]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # 结论只来自 Job 与步骤的结构化结果（needs.*.result 与 steps.*.outcome），
+      # 不对测试日志做字符串搜索冒充判定。
+      - name: 汇总必需 Job 结论
+        env:
+          GO_STATIC_RESULT: ${{ needs.go-static.result }}
+          GO_STATIC_STEP: ${{ needs.go-static.outputs.static }}
+          GO_TEST_RESULT: ${{ needs.go-test.result }}
+          GO_TEST_PREPARE: ${{ needs.go-test.outputs.prepare }}
+          GO_TEST_STEP: ${{ needs.go-test.outputs.tests }}
+          GO_RACE_RESULT: ${{ needs.go-race.result }}
+          GO_RACE_STEP: ${{ needs.go-race.outputs.tests }}
+          UI_TEST_RESULT: ${{ needs.ui-test.result }}
+          UI_TEST_PREPARE: ${{ needs.ui-test.outputs.prepare }}
+          UI_TEST_STEP: ${{ needs.ui-test.outputs.tests }}
+        run: |
+          set -uo pipefail
+          report="$RUNNER_TEMP/ci-summary.md"
+          {
+            echo "## CI 门禁结论"
+            echo
+            echo "| 必需 Job | Job 结论 | 汇总判定 |"
+            echo "| --- | --- | --- |"
+          } > "$report"
+          failed=0
+          # 每行：Job 名|Job 结论|测试步骤结论|环境准备步骤结论
+          while IFS='|' read -r job result tests prepare; do
+            [ -z "$job" ] && continue
+            case "$result" in
+              success)
+                verdict="成功"
+                ;;
+              failure)
+                if [ "$tests" = "failure" ]; then
+                  verdict="失败：测试步骤失败"
+                elif [ "$prepare" = "failure" ]; then
+                  verdict="失败：环境准备失败，测试未执行"
+                elif [ "$tests" = "skipped" ] || [ -z "$tests" ]; then
+                  verdict="失败：测试步骤未执行"
+                else
+                  verdict="失败：测试之外的步骤失败"
+                fi
+                failed=1
+                ;;
+              cancelled)
+                verdict="未完成：运行被取消"
+                failed=1
+                ;;
+              skipped)
+                verdict="未执行：Job 被跳过，不计为通过"
+                failed=1
+                ;;
+              *)
+                verdict="未执行：缺少 Job 结论，不计为通过"
+                failed=1
+                ;;
+            esac
+            echo "| ${job} | ${result:-（空）} | ${verdict} |" >> "$report"
+          done <<ROWS
+          go-static|${GO_STATIC_RESULT}|${GO_STATIC_STEP}|-
+          go-test|${GO_TEST_RESULT}|${GO_TEST_STEP}|${GO_TEST_PREPARE}
+          go-race|${GO_RACE_RESULT}|${GO_RACE_STEP}|-
+          ui-test|${UI_TEST_RESULT}|${UI_TEST_STEP}|${UI_TEST_PREPARE}
+          ROWS
+          {
+            echo
+            echo "外部依赖用例（真实 Pi / SSH / 远程 Docker）在 CI 中输出 WARN \[SKIP\] 并跳过；"
+            echo "跳过与未执行都不计为通过，跳过原因见 go-test 产物中的 test.log。"
+          } >> "$report"
+          cat "$report"
+          cat "$report" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::CI 门禁未通过：存在非成功的必需 Job"
+            exit 1
+          fi
+          echo "全部必需 Job 通过。"
