@@ -93,7 +93,9 @@ function LiveEventsSection({
   stream: TaskEventStreamState;
 }) {
   return (
-    <Flex gap={4} vertical>
+    // `data-testid` 只用于把"推送状态"的断言收敛到实时区域作用域：页面头部的 API 连接
+    // 指示器同样显示「已连接」，两处文案重复会让页面级定位器同时命中两个元素。
+    <Flex data-testid="task-event-live" gap={4} vertical>
       <Space align="center" size={8} wrap>
         <Typography.Text strong>实时事件</Typography.Text>
         <Typography.Text type={stream.status === "live" ? "success" : "secondary"}>

@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -668,6 +670,548 @@ func TestTaskEventStreamPushesPersistedEvents(t *testing.T) {
 	if err := <-resumeDone; !errors.Is(err, io.EOF) {
 		t.Fatalf("重连事件流应以 EOF 结束，实际 %v", err)
 	}
+}
+
+// streamBlock 是读到的一段 SSE 帧（以空行分隔），并记录它到达的相对时间。
+//
+// 心跳与业务事件用同一套读取器解析：只有把两者放在同一条真实连接上按到达顺序读取，才能断言
+// 心跳是纯注释帧（不含 `id:` / `data:`）、不与业务事件混淆，也不会推进 Last-Event-ID 游标。
+type streamBlock struct {
+	at    time.Duration
+	lines []string
+}
+
+// isHeartbeat 判断该块是否就是既定的心跳注释帧。
+func (b streamBlock) isHeartbeat() bool {
+	return len(b.lines) == 1 && b.lines[0] == ": ping"
+}
+
+// eventID 返回消息块里的真实事件标识；注释块或缺少 `id:` 的块返回 ok=false。
+func (b streamBlock) eventID() (int64, bool) {
+	for _, line := range b.lines {
+		if !strings.HasPrefix(line, "id: ") {
+			continue
+		}
+		parsed, err := strconv.ParseInt(strings.TrimPrefix(line, "id: "), 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		return parsed, true
+	}
+	return 0, false
+}
+
+// readStreamBlocks 按到达顺序输出 SSE 块，结束时关闭 blocks 并写出终止原因。
+func readStreamBlocks(
+	body io.Reader,
+	started time.Time,
+	blocks chan<- streamBlock,
+	done chan<- error,
+) {
+	defer close(blocks)
+	reader := bufio.NewReader(body)
+	pending := make([]string, 0, 2)
+	for {
+		line, err := reader.ReadString('\n')
+		trimmed := strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+		if trimmed == "" {
+			if len(pending) > 0 {
+				blocks <- streamBlock{at: time.Since(started), lines: pending}
+				pending = make([]string, 0, 2)
+			}
+		} else {
+			pending = append(pending, trimmed)
+		}
+		if err != nil {
+			done <- err
+			return
+		}
+	}
+}
+
+// nextStreamBlock 等待下一块；流提前结束或超时都会让用例失败。
+//
+// 超时留足一个完整心跳周期：最长等待的正是"空闲连接上的下一个心跳注释帧"。
+func nextStreamBlock(t *testing.T, blocks <-chan streamBlock, done <-chan error) streamBlock {
+	t.Helper()
+	select {
+	case block, ok := <-blocks:
+		if !ok {
+			t.Fatal("事件流在推送预期帧之前就结束了")
+		}
+		return block
+	case err := <-done:
+		t.Fatalf("读取事件流失败，未收到预期帧: %v", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("等待事件流推送超时")
+	}
+	return streamBlock{}
+}
+
+// collectStreamEventIDs 按到达顺序收集 want 条业务事件帧的事件标识，注释帧被跳过。
+func collectStreamEventIDs(
+	t *testing.T,
+	blocks <-chan streamBlock,
+	done <-chan error,
+	want int,
+) []int64 {
+	t.Helper()
+	ids := make([]int64, 0, want)
+	for len(ids) < want {
+		block := nextStreamBlock(t, blocks, done)
+		if block.isHeartbeat() {
+			continue
+		}
+		id, ok := block.eventID()
+		if !ok {
+			t.Fatalf("业务事件帧缺少 id 字段: %v", block.lines)
+		}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// requireStreamEventIDs 断言收到的标识与持久化顺序完全一致：不漏发、不重复、不乱序。
+func requireStreamEventIDs(t *testing.T, received []int64, expected []domain.Event) {
+	t.Helper()
+	if len(received) != len(expected) {
+		t.Fatalf("收到的事件数量不符: 期望 %d，实际 %d", len(expected), len(received))
+	}
+	for index, event := range expected {
+		if received[index] != event.ID {
+			t.Fatalf("第 %d 个事件标识不符: 期望 %d，实际 %d", index, event.ID, received[index])
+		}
+	}
+}
+
+// openEventStream 建立一条真实的 SSE 连接，并校验流式响应头。
+func openEventStream(t *testing.T, ctx context.Context, target string) *http.Response {
+	t.Helper()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		t.Fatalf("构造事件流请求失败: %v", err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("建立事件流失败: %v", err)
+	}
+	t.Cleanup(func() { _ = response.Body.Close() })
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("事件流应返回 200，实际 %d", response.StatusCode)
+	}
+	if got := response.Header.Get("Content-Type"); got != "text/event-stream; charset=utf-8" {
+		t.Fatalf("响应类型不符: %q", got)
+	}
+	return response
+}
+
+// trackStreamHandlers 包装处理器并记录仍在处理中的请求数，用于断言连接处理确实退出。
+//
+// "推送循环停下来"只能通过处理器返回观察到：循环里没有可读的共享状态，goroutine 泄漏也不会
+// 自己报错，因此这里按真实请求计数，而不是依赖超时。
+func trackStreamHandlers(base http.Handler) (http.Handler, func(t *testing.T)) {
+	var active atomic.Int32
+	wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		active.Add(1)
+		defer active.Add(-1)
+		base.ServeHTTP(w, r)
+	})
+	waitExit := func(t *testing.T) {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for active.Load() > 0 {
+			if time.Now().After(deadline) {
+				t.Fatalf("事件流处理器没有退出，仍有 %d 条连接在处理中", active.Load())
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	return wrapped, waitExit
+}
+
+// TestTaskEventStreamSendsHeartbeatComments 校验空闲连接按既定 15 秒周期收到心跳注释帧。
+//
+// 断言基于真实 HTTP 响应字节与到达时间，不依赖任何内部定时器：心跳必须是唯一的注释行
+// `: ping`，不带 `id:` / `data:`（因此不会被解析成业务事件，也不会推进游标），并且能与业务事件
+// 在同一条连接上交替出现；连接结束时心跳循环必须一起停止。
+func TestTaskEventStreamSendsHeartbeatComments(t *testing.T) {
+	t.Parallel()
+	fixture := newHistoryAPIFixture(t)
+	server := httptest.NewServer(fixture.handler)
+	t.Cleanup(server.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	t.Cleanup(cancel)
+
+	response := openEventStream(
+		t,
+		ctx,
+		server.URL+fixture.streamPath(fixture.task.ID.String())+"?last_event_id=0",
+	)
+	started := time.Now()
+	blocks := make(chan streamBlock, 8)
+	done := make(chan error, 1)
+	go readStreamBlocks(response.Body, started, blocks, done)
+
+	first := nextStreamBlock(t, blocks, done)
+	if !first.isHeartbeat() {
+		t.Fatalf("空闲连接的首帧必须是心跳注释帧，实际 %v", first.lines)
+	}
+	// 既定周期是 15 秒：明显更早说明心跳节奏被改动，明显更晚说明连接在读侧被缓冲。
+	if first.at < 14*time.Second || first.at > 25*time.Second {
+		t.Fatalf("首个心跳的到达时间不符既定 15 秒周期: %v", first.at)
+	}
+
+	// 心跳与业务事件交替出现：心跳之后的真实事件必须照常作为消息帧送达。
+	event := fixture.appendEvent(
+		t,
+		fixture.task.ID,
+		nil,
+		domain.EventTypeTaskCreated,
+		`{"summary":"心跳期间写入的事件"}`,
+		time.Now().UTC(),
+	)
+	second := nextStreamBlock(t, blocks, done)
+	eventID, ok := second.eventID()
+	if !ok || eventID != event.ID {
+		t.Fatalf("心跳之后的业务事件帧不符: id=%d ok=%v lines=%v", eventID, ok, second.lines)
+	}
+	// 消息帧里只有 `id:` 与 `data:` 行：任何以冒号开头的注释行都不该出现在这一帧里。
+	for _, line := range second.lines {
+		if strings.HasPrefix(line, ":") {
+			t.Fatalf("业务事件帧不得混入注释行: %v", second.lines)
+		}
+	}
+
+	third := nextStreamBlock(t, blocks, done)
+	if !third.isHeartbeat() {
+		t.Fatalf("第二个心跳帧不符: %v", third.lines)
+	}
+	if gap := third.at - first.at; gap < 14*time.Second || gap > 25*time.Second {
+		t.Fatalf("两次心跳的间隔不符既定 15 秒周期: %v", gap)
+	}
+
+	// 关闭信号必须能结束心跳循环：流以 EOF 收尾，且收尾前不得再出现业务事件帧。
+	close(fixture.shutdown)
+	for block := range blocks {
+		if !block.isHeartbeat() {
+			t.Fatalf("关闭后不应再出现业务事件帧: %v", block.lines)
+		}
+	}
+	if err := <-done; !errors.Is(err, io.EOF) {
+		t.Fatalf("关闭后事件流应以 EOF 结束，实际 %v", err)
+	}
+}
+
+// TestTaskEventStreamDeliversEventsAcrossBatches 校验积压超过单批上限时的多批连续推送与重连游标。
+//
+// 单次增量读取上限是 100 条（`app.DefaultEventStreamBatchSize`）：205 条积压必须由同一轮推送
+// 连续取完（3 批各等一个 1 秒轮询周期的话，光等待就至少 2 秒），并且游标只能按已确认写出的事件
+// 标识推进——连接中断后用最后收到的事件标识重连，既不能漏发，也不能重发。
+func TestTaskEventStreamDeliversEventsAcrossBatches(t *testing.T) {
+	t.Parallel()
+	fixture := newHistoryAPIFixture(t)
+	const total = 205
+	base := time.Now().UTC()
+	persisted := make([]domain.Event, 0, total)
+	for index := 0; index < total; index++ {
+		at := base.Add(time.Duration(index) * time.Millisecond)
+		persisted = append(persisted, fixture.appendEvent(
+			t,
+			fixture.task.ID,
+			nil,
+			domain.EventTypeStepStarted,
+			fmt.Sprintf(`{"summary":"积压事件 %d"}`, index),
+			at,
+		))
+		// 另一个任务的事件穿插在同一个自增序列里：按任务隔离的增量查询不能因为标识连续
+		// 就把别的任务的事件也推过来。
+		if index%40 == 0 {
+			fixture.appendEvent(
+				t, fixture.otherTask.ID, nil, domain.EventTypeTaskCreated, `{}`, at,
+			)
+		}
+	}
+
+	handler, waitStreamExit := trackStreamHandlers(fixture.handler)
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	t.Cleanup(cancel)
+
+	// 第一阶段：同一条连接上读取前 120 条（跨过单批上限），然后由客户端断开。
+	phaseCtx, phaseCancel := context.WithCancel(ctx)
+	response := openEventStream(
+		t, phaseCtx, server.URL+fixture.streamPath(fixture.task.ID.String())+"?last_event_id=0",
+	)
+	started := time.Now()
+	blocks := make(chan streamBlock, 16)
+	done := make(chan error, 1)
+	go readStreamBlocks(response.Body, started, blocks, done)
+	first120 := collectStreamEventIDs(t, blocks, done, 120)
+	requireStreamEventIDs(t, first120, persisted[:120])
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("120 条积压没有在同一轮推送内跨批取完，实际耗时 %v", elapsed)
+	}
+
+	// 客户端断开：处理器必须随之退出，不能留下只在写失败后才结束的循环。
+	phaseCancel()
+	waitStreamExit(t)
+
+	// 第二阶段：用最后确认的事件标识重连，剩余事件补齐且不重放已送达的部分。
+	resumedCtx, resumedCancel := context.WithTimeout(ctx, 120*time.Second)
+	t.Cleanup(resumedCancel)
+	last := first120[len(first120)-1]
+	resumed := openEventStream(
+		t,
+		resumedCtx,
+		server.URL+fixture.streamPath(fixture.task.ID.String())+"?last_event_id="+
+			strconv.FormatInt(last, 10),
+	)
+	resumedStarted := time.Now()
+	resumedBlocks := make(chan streamBlock, 16)
+	resumedDone := make(chan error, 1)
+	go readStreamBlocks(resumed.Body, resumedStarted, resumedBlocks, resumedDone)
+	remaining := collectStreamEventIDs(t, resumedBlocks, resumedDone, total-120)
+	requireStreamEventIDs(t, remaining, persisted[120:])
+
+	// 关闭信号收尾：已送达的 205 条不得因为多批推进而重复推送。
+	close(fixture.shutdown)
+	for block := range resumedBlocks {
+		if block.isHeartbeat() {
+			continue
+		}
+		t.Fatalf("多批推送完成后不应再出现业务事件帧: %v", block.lines)
+	}
+	if err := <-resumedDone; !errors.Is(err, io.EOF) {
+		t.Fatalf("关闭后事件流应以 EOF 结束，实际 %v", err)
+	}
+	waitStreamExit(t)
+}
+
+// failingStreamWriter 模拟"客户端已经断开"的连接：写出指定字节数后返回错误。
+//
+// 它实现 http.Flusher，因此仍然走真实的流式响应路径，只在"连接不可写"这一点上替代真实 socket。
+type failingStreamWriter struct {
+	header  http.Header
+	status  int
+	flushes int
+	written []byte
+	limit   int
+	err     error
+}
+
+// newFailingStreamWriter 构造一个在写出 limit 字节后开始报错的响应写入器。
+func newFailingStreamWriter(limit int) *failingStreamWriter {
+	return &failingStreamWriter{
+		header: make(http.Header),
+		err:    errors.New("模拟写入失败：连接已断开"),
+		limit:  limit,
+	}
+}
+
+// Header 返回响应头集合。
+func (w *failingStreamWriter) Header() http.Header { return w.header }
+
+// WriteHeader 记录状态码。
+func (w *failingStreamWriter) WriteHeader(status int) { w.status = status }
+
+// Write 在超过上限后返回错误，模拟客户端断开后的写失败。
+func (w *failingStreamWriter) Write(data []byte) (int, error) {
+	if len(w.written) >= w.limit {
+		return 0, w.err
+	}
+	remaining := w.limit - len(w.written)
+	if len(data) <= remaining {
+		w.written = append(w.written, data...)
+		return len(data), nil
+	}
+	w.written = append(w.written, data[:remaining]...)
+	return remaining, w.err
+}
+
+// Flush 记录刷新次数，使处理器保持与真实连接一致的"先写后刷"顺序。
+func (w *failingStreamWriter) Flush() { w.flushes++ }
+
+// streamEventIDsFromBytes 解析已写出的完整 SSE 帧标识，末尾被截断的半帧被忽略。
+func streamEventIDsFromBytes(written []byte) []int64 {
+	content := string(written)
+	complete := strings.HasSuffix(content, "\n\n")
+	segments := strings.Split(content, "\n\n")
+	ids := make([]int64, 0, len(segments))
+	for index, segment := range segments {
+		// 只有最后一个片段可能是半帧：连接在帧中间被断开时不能把它算作已送达。
+		if index == len(segments)-1 && !complete {
+			break
+		}
+		for _, line := range strings.Split(segment, "\n") {
+			if !strings.HasPrefix(line, "id: ") {
+				continue
+			}
+			parsed, err := strconv.ParseInt(strings.TrimPrefix(line, "id: "), 10, 64)
+			if err != nil {
+				continue
+			}
+			ids = append(ids, parsed)
+		}
+	}
+	return ids
+}
+
+// TestTaskEventStreamStopsOnWriteFailure 校验写入失败会让连接处理立即退出，并按游标区分未送达事件。
+func TestTaskEventStreamStopsOnWriteFailure(t *testing.T) {
+	t.Parallel()
+	fixture := newHistoryAPIFixture(t)
+	const total = 20
+	base := time.Now().UTC()
+	persisted := make([]domain.Event, 0, total)
+	for index := 0; index < total; index++ {
+		persisted = append(persisted, fixture.appendEvent(
+			t,
+			fixture.task.ID,
+			nil,
+			domain.EventTypeStepStarted,
+			fmt.Sprintf(`{"summary":"写入失败前的事件 %d"}`, index),
+			base.Add(time.Duration(index)*time.Millisecond),
+		))
+	}
+
+	// 上限设得很小：写出第一帧后就会在第二帧中间失败。
+	writer := newFailingStreamWriter(360)
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		fixture.handler.ServeHTTP(
+			writer,
+			httptest.NewRequest(
+				http.MethodGet,
+				fixture.streamPath(fixture.task.ID.String())+"?last_event_id=0",
+				nil,
+			),
+		)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(20 * time.Second):
+		t.Fatal("写入失败后事件流的处理没有退出")
+	}
+	if writer.status != http.StatusOK {
+		t.Fatalf("写响应头应在失败之前完成，实际状态 %d", writer.status)
+	}
+	if writer.flushes == 0 {
+		t.Fatal("推送必须先写出帧再刷新，实际没有发生刷新")
+	}
+	delivered := streamEventIDsFromBytes(writer.written)
+	if len(delivered) == 0 {
+		t.Fatalf("写入失败前应有完整送达的帧，实际写出内容: %q", string(writer.written))
+	}
+	if len(delivered) >= total {
+		t.Fatalf("写入失败应中断推送，实际送达了全部 %d 条", len(delivered))
+	}
+	requireStreamEventIDs(t, delivered, persisted[:len(delivered)])
+
+	// 用最后确认送达的游标重连：剩余事件补齐，已送达的不重发。
+	server := httptest.NewServer(fixture.handler)
+	t.Cleanup(server.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	t.Cleanup(cancel)
+	last := delivered[len(delivered)-1]
+	response := openEventStream(
+		t,
+		ctx,
+		server.URL+fixture.streamPath(fixture.task.ID.String())+"?last_event_id="+
+			strconv.FormatInt(last, 10),
+	)
+	started := time.Now()
+	blocks := make(chan streamBlock, 16)
+	done := make(chan error, 1)
+	go readStreamBlocks(response.Body, started, blocks, done)
+	rest := collectStreamEventIDs(t, blocks, done, total-len(delivered))
+	requireStreamEventIDs(t, rest, persisted[len(delivered):])
+}
+
+// TestTaskEventStreamStopsOnRequestCancel 校验请求取消后推送循环退出，不留下后台循环。
+func TestTaskEventStreamStopsOnRequestCancel(t *testing.T) {
+	t.Parallel()
+	fixture := newHistoryAPIFixture(t)
+	fixture.appendEvent(
+		t, fixture.task.ID, nil, domain.EventTypeTaskCreated, `{"summary":"取消前的事件"}`,
+		time.Now().UTC(),
+	)
+	handler, waitStreamExit := trackStreamHandlers(fixture.handler)
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	response := openEventStream(
+		t, ctx, server.URL+fixture.streamPath(fixture.task.ID.String())+"?last_event_id=0",
+	)
+	started := time.Now()
+	blocks := make(chan streamBlock, 8)
+	done := make(chan error, 1)
+	go readStreamBlocks(response.Body, started, blocks, done)
+	// 先拿到首帧，确认推送循环确实在运行，再取消请求。
+	collectStreamEventIDs(t, blocks, done, 1)
+
+	cancel()
+	waitStreamExit(t)
+}
+
+// TestTaskEventStreamSlowClientDoesNotBlockOtherTasks 校验一个不读响应体的慢客户端不阻塞其他任务。
+//
+// 慢客户端故意不读响应体：积压字节远大于本机 socket 缓冲区，服务端写入会阻塞在该连接上。
+// 另一个任务的事件仍必须及时送达，说明慢客户端只占用自己的连接处理，不占用公共推送资源。
+func TestTaskEventStreamSlowClientDoesNotBlockOtherTasks(t *testing.T) {
+	t.Parallel()
+	fixture := newHistoryAPIFixture(t)
+	base := time.Now().UTC()
+	// 单条摘要接近上限，205 条的总字节数远超本机 socket 缓冲区，足以让慢客户端把写入堵住。
+	payload := fmt.Sprintf(`{"summary":%q}`, strings.Repeat("慢客户端积压", 90))
+	for index := 0; index < 205; index++ {
+		fixture.appendEvent(
+			t,
+			fixture.task.ID,
+			nil,
+			domain.EventTypeStepStarted,
+			payload,
+			base.Add(time.Duration(index)*time.Millisecond),
+		)
+	}
+	fixture.appendEvent(
+		t, fixture.otherTask.ID, nil, domain.EventTypeTaskCreated, `{"summary":"其他任务的事件"}`,
+		base,
+	)
+
+	handler, waitStreamExit := trackStreamHandlers(fixture.handler)
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	t.Cleanup(cancel)
+
+	slowCtx, slowCancel := context.WithCancel(ctx)
+	t.Cleanup(slowCancel)
+	// 故意不读取该响应体：服务端只能把数据写进这条连接的内核缓冲区。
+	openEventStream(
+		t, slowCtx, server.URL+fixture.streamPath(fixture.task.ID.String())+"?last_event_id=0",
+	)
+
+	fastCtx, fastCancel := context.WithTimeout(ctx, 60*time.Second)
+	t.Cleanup(fastCancel)
+	response := openEventStream(
+		t, fastCtx, server.URL+fixture.streamPath(fixture.otherTask.ID.String())+"?last_event_id=0",
+	)
+	started := time.Now()
+	blocks := make(chan streamBlock, 8)
+	done := make(chan error, 1)
+	go readStreamBlocks(response.Body, started, blocks, done)
+	collectStreamEventIDs(t, blocks, done, 1)
+	if elapsed := time.Since(started); elapsed > 10*time.Second {
+		t.Fatalf("慢客户端阻塞了其他任务的事件推送，实际耗时 %v", elapsed)
+	}
+
+	// 取消慢客户端：两条连接的处理都必须释放。
+	slowCancel()
+	fastCancel()
+	waitStreamExit(t)
 }
 
 // TestListRepairCyclesReturnsHistory 校验成功响应与 JSON 契约。

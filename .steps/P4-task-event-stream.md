@@ -495,3 +495,154 @@ Docker 用例按配置真实执行，未启用项由测试自身输出 `WARN [SK
 15 秒 `: ping` 注释帧、`X-Accel-Buffering` 之后的代理缓冲、超过单批 100 条的积压与背压、真实网络
 中断、浏览器原生 `Last-Event-ID` 回传、`shutdown` 下多条在途连接收敛、「已停止 + 手动重新连接」
 的完整浏览器路径仍未执行。本轮结果不得用于声称实时推送链路已通过传输层验收。
+
+---
+
+## 13. SSE 全链路验收闭环（2026-10-31）
+
+> 基线：当前本地 checkout `d74a504`（`:memo:  测试验收文档`）。按任务要求**未执行 `git fetch`**，
+> 也不与远端比较 SHA；开工前 `git status --short` 无输出，收工时只有 3 个文件被修改。本轮获授权
+> 执行全部必要测试，因此本节的结论均来自实际运行结果。
+
+### 13.1 修复：推送状态定位器歧义（§12.2 的 5 个失败）
+
+| 项目 | 内容 |
+|---|---|
+| 缺陷性质 | 测试定位器歧义（非产品状态机、非 SSE 协议缺陷） |
+| 证据 | 页面头部 `ApiConnectionStatus` 与实时区域都渲染「已连接」；该 spec 的 `beforeEach` 会 `stubHealth`，因此页面级 `page.getByText("已连接", { exact: true })` 命中 2 个元素 → strict mode violation，`toHaveCount(0)` 断言也因计数不符失败 |
+| 修复方式 | 产品侧给实时区域根节点加 `data-testid="task-event-live"`（`EventTimelinePanel.tsx`，纯测试钩子，不改变渲染内容与状态语义）；测试侧新增 `liveRegion(page)` / `liveStatus(page)` 两个作用域定位器，把 8 处推送状态断言（「正在连接」1 处、「已连接」4 处、「未连接」2 处、「正在重连」1 处）全部收敛到实时区域 |
+| 结果 | `tests/e2e/task-event-history.spec.ts` 全文件 19 个用例全部通过（此前 16 个用例中 5 个失败） |
+
+### 13.2 服务端真实 SSE 传输测试
+
+全部补在既有文件 `tests/unit/httpapi/history_test.go`（未新建测试文件），断言基于真实
+`httptest.Server` 连接、真实响应字节与真实持久化事件：
+
+| 新增用例 | 真正验证的行为 |
+|---|---|
+| `TestTaskEventStreamSendsHeartbeatComments` | 空闲连接按既定 15 秒周期收到心跳注释帧，首帧到达时间落在 14–25 秒（吸收调度抖动），两次心跳间隔同样落在该区间；心跳块必须**恰好**是 `: ping` 一行，不含 `id:` / `data:`，因此不会被当成业务事件、也不会推进 `Last-Event-ID` 游标；心跳之后的真实事件照常作为消息帧送达（两者在同一条连接上交替出现），且消息帧内不含注释行；`shutdown` 关闭后心跳循环立即停止，流以 EOF 收尾，收尾前不再出现业务事件帧 |
+| `TestTaskEventStreamDeliversEventsAcrossBatches` | 持久化 205 条事件（单批上限 100）后，从游标 0 建立连接，前 120 条在**同一轮推送**内跨批取完（耗时 < 2 秒；若按"每轮询周期只推一批"则光等待就 ≥ 2 秒）；事件标识与持久化顺序逐条一致（不漏发、不重复、不乱序）；穿插写入另一个任务的 5 条事件全部未出现，证明按任务隔离而不是按自增序列连续推送；客户端断开后处理器立即退出（按真实请求计数断言，不依赖超时）；用最后确认的事件标识重连补齐剩余 85 条，不重放已送达部分；`shutdown` 收尾时不再出现任何业务事件帧 —— 说明历史查询的 `offset` 分页语义没有被误用到实时游标查询 |
+| `TestTaskEventStreamStopsOnWriteFailure` | 用实现 `http.Flusher` 的写失败响应器模拟"客户端已断开"：写出 360 字节后报错，处理器立即返回（不进入下一轮轮询）；失败前已完整写出的帧按持久化顺序构成前缀，末尾被截断的半帧不计为已送达；写响应头先于失败完成且确实发生过 flush；用最后确认的游标重连，剩余事件补齐、已送达的 20 条中已确认部分不重发 |
+| `TestTaskEventStreamStopsOnRequestCancel` | 请求取消后处理器返回（连接处理的 goroutine 收敛），不留下只在写失败后才结束的循环 |
+| `TestTaskEventStreamSlowClientDoesNotBlockOtherTasks` | 慢客户端故意不读响应体：一个任务积压 205 条大摘要事件（总量远超本机 socket 缓冲区，服务端写入会阻塞在该连接上），另一个任务的事件仍在 10 秒内送达，说明慢客户端只占用自己的连接处理；取消两条连接后处理全部释放 |
+
+同时新增了若干测试辅助（`readStreamBlocks` / `streamBlock` / `collectStreamEventIDs` /
+`requireStreamEventIDs` / `openEventStream` / `trackStreamHandlers` / `failingStreamWriter` /
+`streamEventIDsFromBytes`）。心跳用例是唯一耗时显著的一个（约 30 秒），因为它是**真实等待**两个
+15 秒心跳周期；生产路径的周期常量未改动，也没有引入可配置间隔或第三方时钟依赖。
+
+### 13.3 浏览器端重连耗尽与手动重连
+
+补在既有文件 `lingting-agent-flow-ui/tests/e2e/task-event-history.spec.ts`（未新建测试文件），
+复用既有受控 `EventSource` 替身与生产 Hook 的纯函数边界，退避时长由 Playwright 页面时钟
+（`page.clock`）在**建立连接与收首帧之后**才接管，因此不替换全局计时器实现、也不影响既有自动
+刷新逻辑。
+
+| 新增用例 | 真正验证的行为 |
+|---|---|
+| 自动重连连续失败达到上限后停止，不再安排新的连接 | 第 1 次失败后 1 秒、第 2 次后 2 秒、第 3 次后 4 秒、第 4 次后 8 秒各重建一次（每一步都先推进到"还差 100ms"断言此刻**没有**新连接，再推进到该到的时间点断言连接已建立，因此同时验证间隔与"不提前重连"）；第 5 次连续失败后进入「已停止」，显示「事件推送已停止」与"已停止自动重连"提示，随后把时钟推进 60 秒，连接总数仍为 5 —— 不安排第 6 条连接，与 `EVENT_STREAM_MAX_FAILURES = 5` 一致；反复失败不清空已收到的实时事件、不伪造事件、零写请求 |
+| 停止后手动重新连接使用已收到的最大游标，并保留已收到的事件 | 达到停止条件后实时区域出现「重新连接」入口；点击后立即创建新连接，地址为 `.../events/stream?last_event_id=6`（已收到的最大事件标识），已收到的事件仍在；新连接 `open` 后状态回到「已连接」；手动重连后再次连续失败仍按同一上限收敛（再从 1s/2s/4s/8s 走到「已停止」，连接总数停在 10，不进入无限重连）；全程零写请求，未触发任何执行、验证、重试、恢复、取消或代码保存 |
+
+### 13.4 原生 `EventSource` 验证与实测发现
+
+新增一个用例（同一 spec 文件内），不注入替身，由测试自己在进程内启动受控 SSE 服务端
+（`node:http`，随机端口，逐帧写出并保持连接打开），再用 `page.route` + `route.continue` 把页面
+自己的同源请求改写到该服务端：
+
+| 覆盖点 | 结果 |
+|---|---|
+| `text/event-stream` 被浏览器识别 | 页面里 `String(window.EventSource)` 含 `[native code]`（确认没有替身），且原生连接确实收到了消息 |
+| 标准 `data:` 帧解析并触发 `message` 回调 | 响应体由 1 条注释心跳 + 2 帧真实 DTO 事件 + 1 条畸形帧组成：两帧真实事件都进入既有实时事件列表，计数为「连接后新增 2 条」 |
+| 畸形数据不污染页面 | 中间的 `data: not-json` 帧被丢弃：不显示、不影响后续帧、不改变计数 |
+| 连接地址来自真实游标 | 服务端收到的首个请求为 `/stream?last_event_id=5`（由页面按历史 `latest_event_id` 拼出） |
+| 页面卸载后连接终止 | 关闭详情后服务端观察到连接被关闭（`response` 的 `close` 事件），随后 500ms 内没有新的流请求 |
+
+实测发现（测试基础设施限制，不是产品缺陷）：`route.fulfill` 会一次性写完响应体并立刻结束连接，
+浏览器按任务队列派发消息时会与连接关闭竞争——一段含 3 帧的响应体只能稳定收到**前 2 帧**（用 3 帧
+全合法的事件体实测复现：请求发生了 4 次、页面只渲染 2 条）。因此原生验证改用真实本地 SSE 服务端。
+这也说明：**不能用 `route.fulfill` 验证"多帧连续推送"这类传输层行为**。
+
+**边界（不得扩大解读）**：本轮原生验证只证明"浏览器原生 SSE 解析 + 页面消费 + 卸载时断开"这条
+链路可用，**不等于**真实反向代理/代理缓冲、TLS、负载均衡、移动网络或生产部署环境的验收。
+
+### 13.5 本轮发现但未修复的问题（范围外，附证据）
+
+本轮**没有发现 SSE 相关的生产缺陷**：心跳周期、多批推进、写失败退出、请求取消退出、慢客户端隔离、
+重连上限、手动重连游标与事件保留、任务切换关闭旧连接，全部按既有设计工作。以下两项与 SSE 无关，
+按"范围外且需单独决策"记录，未做任何重构：
+
+| 问题 | 证据 | 性质 |
+|---|---|---|
+| `integration/remote/{agent,codesaver}` 的包级 `FINALIZER`（容器零残留核验）在全量并行运行时 FAIL | 日志显示 `remote/agent` 只看见 `agentflow-test-73468784b5ac8343-run`（属 `remote/docker`，该包随后 `REMOTE_CONTAINER_CLEANUP ... result=absent` 已删除）；`remote/codesaver` 自己只创建并删除了 `agentflow-codesaver-369e3c85ede6`，却把 `remote/docker`/`remote/agent` 当时正在使用的容器记为"未登记残留"。两个包单独串行复跑（`go test -count=1 -p 1 ./tests/integration/remote/agent/ ./tests/integration/remote/codesaver/`）退出码 0 | 测试基础设施缺陷：零残留核验**全局列举** `agentflow-test-*`，与并行跑的其他远程包在途容器冲突（跨包误判）。修复需要按"包归属/运行标识"过滤，属远程资源治理范围 |
+| `go test -race` 全量单元运行时两个用例超时失败 | `tests/unit/httpapi` 的 `TestExecuteStepAPINotFound/步骤不属于任务` 报 409（同一 fixture 的三个 `t.Parallel()` 子用例共享同一个任务，租约互斥导致 409 先于 404）；`tests/unit/store` 的 `TestMigrateUpgradesExistingDatabase` 报 `context deadline exceeded`；`tests/integration/local/database` 的 `TestLegacyDatabaseConcurrentOpenMigratesOnce` 报 `SQLITE_BUSY`（§12.3 已记录）。三者单独运行均通过 | 高负载下的超时/隔离缺陷：前两个是测试自身隔离问题（并行子用例共享任务、超时预算偏紧），第三个是并发迁移的忙等待窗口，均与 SSE 无关 |
+
+另有一个真实外部依赖的随机失败：`integration/remote/workflow` 的 `TestRemoteE2EFullChain` 在第二轮
+全量中失败（`停在交付阶段时必须留下代码保存记录，实际分类 verification_inconclusive`）。原因是
+容器内真实 Pi（`group/free`）本轮返回的语义审查输出无法解析为结构化评估，产品按设计收敛为
+`recovery_required` / `verification_inconclusive`（没有伪造通过），而该用例的"未完成"分支只接受
+"停在交付阶段"这一种终局。同一份被测代码下该用例第一轮全量通过、随后单独复跑（
+`go test -count=1 -run TestRemoteE2EFullChain ./tests/integration/remote/workflow/`）退出码 0
+（耗时 168s）。属外部模型输出随机性 + 用例断言过窄，需单独任务决定断言策略，本轮未改动。
+
+### 13.6 命令与退出码（最终代码）
+
+| 类别 | 命令 | 退出码 | 结果 |
+|---|---|---|---|
+| Go 全量 | `mingw32-make test`（= `go test -count=1 -v -p 8 -parallel 8 ./tests/...`；本机 Git Bash 无 `make`，用 `mingw32-make` 执行同一份 `Makefile`） | 2 | 40 包 ok / 3 包 FAIL / 3 包 no test files；用例 1916 PASS / 1 FAIL / 2 SKIP（详见 §13.5） |
+| Go 竞态 | `mingw32-make test-race` | 2 | 19 包 ok，2 包 FAIL（`tests/unit/httpapi`、`tests/unit/store`，见 §13.5）；因 make 在该步失败后停止，`integration/local/ssh` 未在该次执行 |
+| Go 竞态（SSH 部分） | `go test -race -count=1 ./tests/integration/local/ssh/` | 0 | ok |
+| Go 竞态 A | `go test -race -count=1 ./tests/unit/source/codesaver/ ./tests/unit/store/` | 0 | 2 包 ok |
+| Go 竞态 B | `go test -race -count=1 ./tests/integration/local/database/` | 1 | `TestLegacyDatabaseConcurrentOpenMigratesOnce` FAIL（`SQLITE_BUSY`） |
+| Go 竞态 C | `go test -race -count=1 ./tests/unit/app/ ./tests/unit/httpapi/ ./tests/integration/local/workflow/` | 0 | 3 包 ok（含本轮新增的 5 个 SSE 用例） |
+| 失败用例隔离复跑 | `go test -race -count=1 -run <单个用例> <包>` | 0 | 三个失败用例单独运行均通过 |
+| SSE 包单独复跑 | `go test -count=1 -run 'TestTaskEventStream' ./tests/unit/httpapi/` | 0 | 9 个用例全部通过（4 个既有 + 5 个新增） |
+| 前端全量 | `pnpm test:all:safe`（`--maxWorkers 4` / `--workers=4` 未改动） | 0 | 单元 28 文件 / 635 用例通过；浏览器 257 用例通过；`vp fmt` + `vp lint --fix` + `tsc --noEmit` 通过；生产构建成功 |
+| SSE 浏览器用例单文件 | `pnpm exec playwright test tests/e2e/task-event-history.spec.ts --workers=4` | 0 | 19 用例全部通过（16 既有 + 3 新增） |
+
+### 13.7 用例统计
+
+- Go：1916 PASS / 1 FAIL / 2 SKIP。两个 SKIP 均为测试自身机制：`TestRealPiModelRecognition`
+  （本机 Pi 的模型清单不可用，不识别 `group/free`）、`TestEmbeddedFSHasNoIndexInSourceCheckout`
+  （源码检出下无嵌入产物）。真实 Pi、SSH、远程 Docker 用例按 `tests/config/` 的显式启用状态
+  真实执行，未为了增加数量启用任何外部服务，也未修改任何配置。
+- 前端：单元 635 PASS / 0 FAIL / 0 SKIP；浏览器 257 PASS / 0 FAIL / 0 SKIP。
+- SSE 专项：服务端 9 个实时流用例全部通过；浏览器 8 个实时推送用例（6 既有 + 2 重连）+ 1 个原生
+  `EventSource` 用例全部通过。
+
+### 13.8 测试产物
+
+- Go：每个包的 `TEST_ARTIFACT_DIR=<绝对路径>` 与 `test.log` 保留在
+  `C:\Users\lingting\AppData\Local\Temp\lingting-agent-flow-tests\`，基目录 `latest-run.txt` 指向
+  最近一次运行的 `test.log`；未删除任何工作空间。
+- 前端：`C:\Users\lingting\AppData\Local\Temp\lingting-agent-flow-ui-tests\run-imm1Jz\`
+  （本轮最终 `pnpm test:all:safe` 的 `playwright-report` 与 `playwright-output`）；
+  单文件重跑与诊断的运行目录同样保留，未删除。
+
+### 13.9 仍未覆盖
+
+1. 真实反向代理（nginx 等）与代理缓冲、CDN、TLS 终止、负载均衡下的长连接行为：`X-Accel-Buffering: no`
+   只是声明，未经真实代理验证。
+2. 真实网络中断（拔网线、NAT 超时、中间层 RST）下的重连行为；本轮的重连由替身与本地服务端驱动。
+3. 浏览器原生 `Last-Event-ID` 请求头回传：`parseEventStreamCursor` 的头优先逻辑仍只有代码证据，
+   没有端到端用例（前端始终使用 `last_event_id` 查询参数，见 §3.2）。
+4. 服务端 `shutdown` 下多条在途连接的**同时**收敛：单连接收敛已被覆盖，多连接并发收敛未单独断言。
+5. 生产部署下的慢客户端背压策略：当前实现按连接独立、逐批写并阻塞在该连接上（有 socket 缓冲区
+   作为事实上限），没有跨连接的队列、限流或丢弃策略；本轮只验证"互不阻塞"。
+6. `integration/remote/workflow` 的真实模型输出稳定性（见 §13.5），与远程容器零残留核验的跨包
+   并行误判。
+
+### 13.10 P4-M5
+
+`P4-M5` 仍为 `pending`。本轮只补齐验收覆盖与测试证据，没有采集任何真实使用数据，也没有据此做任何
+性能优化；本轮结果不得用于替代真实使用数据。
+
+### 13.11 收工检查
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| 完整 diff 审阅 | `git diff`（逐文件） | 仅 `EventTimelinePanel.tsx`（1 处测试钩子）、`task-event-history.spec.ts`（定位器收敛 + 3 个新用例 + 辅助）、`history_test.go`（5 个新用例 + 辅助） |
+| 空白错误 | `git diff --check` | 无输出 |
+| 行尾 | 三个改动文件逐行统计 CR | 均为 0（全部 LF） |
+| Go 格式 | `gofmt -l tests/unit/httpapi` | 无输出 |
+| 前端格式/lint/类型 | `pnpm check`（`vp fmt` + `vp lint --fix` + `tsc --noEmit`） | 退出码 0 |
+| 工作区 | `git status --short` | 只有上述 3 个文件被修改，未纳入测试产物、真实配置或用户原有文件 |

@@ -1,3 +1,6 @@
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 /**
@@ -289,6 +292,26 @@ async function openDetail(page: Page) {
 }
 
 /**
+ * 事件面板依赖的只读接口：任务详情、工作流进度、步骤、执行记录、修复周期与历史事件。
+ *
+ * `latestEventID` 是历史响应里的实时流起点；没有它前端不会建立连接（"不猜起点"）。
+ */
+async function stubEventPanel(page: Page, latestEventID = 5) {
+  await stubTaskList(page);
+  await stubTaskDetail(page);
+  await stubWorkflow(page);
+  await stubSteps(page);
+  await stubEmptyRecords(page);
+  await stubRepairCycles(page, () => ({
+    records: [],
+    step_id: "step-1",
+    task_id: "task-1",
+    total: 0,
+  }));
+  await stubEvents(page, () => historyBody(latestEventID));
+}
+
+/**
  * 记录全部写请求。
  *
  * 历史查询必须是只读的：任何 POST / PUT / PATCH / DELETE 都说明浏览行为触发了
@@ -437,6 +460,57 @@ function liveStream(page: Page) {
     /** 触发第 index 条连接的 `error` */
     fail: (index: number) => callEventSource<boolean>(page, "error", { index }),
   };
+}
+
+/**
+ * 实时事件区域的作用域定位器。
+ *
+ * 页面头部的 API 连接指示器同样显示「已连接」/「未连接」，用页面级 `getByText` 断言推送状态会
+ * 同时命中两个元素（Playwright 严格模式直接报错，`toHaveCount(0)` 也会因计数不符失败）。因此
+ * 推送状态一律在这个作用域内断言，语义也更准确：它描述的是推送通道，不是 HTTP API 可用性。
+ */
+function liveRegion(page: Page) {
+  return page.getByTestId("task-event-live");
+}
+
+/** 实时区域的连接状态文案：只可能是这五种可读状态之一 */
+function liveStatus(page: Page) {
+  return liveRegion(page).getByText(/^(未连接|正在连接|已连接|正在重连|已停止)$/);
+}
+
+/**
+ * 按生产退避节奏连续驱动失败，直到自动重连停止，返回停止时的连接数量。
+ *
+ * 退避间隔直接来自生产行为（1s / 2s / 4s / 8s）：每一步都先把页面时钟推进到"还差一点"，
+ * 断言此时没有新连接，再推进到该到的时间点断言连接已经建立——因此既验证了间隔，也验证了不会
+ * 提前重连。阈值不在这里复制：`EVENT_STREAM_MAX_FAILURES` 的语义由"第 5 次失败后连接数不再
+ * 增长"来体现，纯函数边界另由 `tests/unit/task-event-history.test.ts` 断言。
+ *
+ * `start` 是第一条待失败的连接索引（当前处于 live 的那一条）。
+ */
+async function driveReconnectExhaustion(
+  page: Page,
+  stream: ReturnType<typeof liveStream>,
+  start: number,
+): Promise<number> {
+  const delays = [1_000, 2_000, 4_000, 8_000];
+  let index = start;
+  for (const delay of delays) {
+    await stream.fail(index);
+    await expect(liveStatus(page)).toHaveText("正在重连");
+    await page.clock.runFor(delay - 100);
+    expect(await stream.count()).toBe(index + 1);
+    await page.clock.runFor(200);
+    await expect.poll(() => stream.count()).toBe(index + 2);
+    index += 1;
+  }
+  // 第 5 次连续失败：达到上限即停止，不再安排新的连接。
+  await stream.fail(index);
+  await expect(liveStatus(page)).toHaveText("已停止");
+  await page.clock.runFor(60_000);
+  const count = await stream.count();
+  expect(count).toBe(index + 1);
+  return count;
 }
 
 /**
@@ -869,11 +943,11 @@ test.describe("实时事件推送", () => {
     expect(await stream.url(0)).toBe("/api/v1/tasks/task-1/events/stream?last_event_id=7");
     expect(await stream.closed(0)).toBe(false);
     // 连接尚未建立时只能显示"正在连接"，不能提前显示"已连接"。
-    await expect(page.getByText("正在连接", { exact: true })).toBeVisible();
+    await expect(liveStatus(page)).toHaveText("正在连接");
 
     await stream.open(0);
 
-    await expect(page.getByText("已连接", { exact: true })).toBeVisible();
+    await expect(liveStatus(page)).toHaveText("已连接");
     await expect(
       page.getByText("已连接，暂无新增事件。服务端只推送这条连接建立之后写入的事件。"),
     ).toBeVisible();
@@ -922,9 +996,9 @@ test.describe("实时事件推送", () => {
     phase = "no-cursor";
     await page.getByText("重试", { exact: true }).click();
     await expect(page.getByText("已显示 1 / 1 条")).toBeVisible();
-    await expect(page.getByText("未连接", { exact: true })).toBeVisible();
+    await expect(liveStatus(page)).toHaveText("未连接");
     expect(await stream.count()).toBe(0);
-    await expect(page.getByText("已连接", { exact: true })).toHaveCount(0);
+    await expect(liveStatus(page)).toHaveText("未连接");
   });
 
   test("实时消息显示真实事件、按标识去重，并丢弃畸形与跨任务事件", async ({ page }) => {
@@ -947,7 +1021,7 @@ test.describe("实时事件推送", () => {
     await expect(page.getByText("已显示 1 / 1 条")).toBeVisible();
     await expect.poll(() => stream.count()).toBe(1);
     await stream.open(0);
-    await expect(page.getByText("已连接", { exact: true })).toBeVisible();
+    await expect(liveStatus(page)).toHaveText("已连接");
 
     await stream.message(0, liveEventFrame(4));
     // 同一事件重复送达只有一行：编号 4 再送一次
@@ -1118,7 +1192,7 @@ test.describe("实时事件推送", () => {
     expect(await stream.url(1)).toBe("/api/v1/tasks/task-2/events/stream?last_event_id=11");
 
     await stream.open(1);
-    await expect(page.getByText("已连接", { exact: true })).toBeVisible();
+    await expect(liveStatus(page)).toHaveText("已连接");
     // 旧连接迟到的帧不得进入新任务的实时列表（替身故意在已关闭的连接上继续投递，
     // 模拟网络层迟到；页面必须靠任务归属与连接代次把它丢掉，而不是靠浏览器停止投递）
     await stream.message(0, liveEventFrame(5));
@@ -1170,7 +1244,7 @@ test.describe("实时事件推送", () => {
     await stream.fail(0);
 
     // 连接故障是独立事实：历史仍是 ready，既不是"加载失败"也不是"没有事件"
-    await expect(page.getByText("正在重连", { exact: true })).toBeVisible();
+    await expect(liveStatus(page)).toHaveText("正在重连");
     await expect(page.getByText("事件推送连接中断")).toBeVisible();
     await expect(page.getByText(/事件推送连接已断开，正在重新连接/)).toBeVisible();
     await expect(page.getByText("已显示 1 / 1 条")).toBeVisible();
@@ -1184,7 +1258,156 @@ test.describe("实时事件推送", () => {
     await expect.poll(() => stream.count(), { timeout: 5_000 }).toBe(2);
     expect(await stream.url(1)).toBe("/api/v1/tasks/task-1/events/stream?last_event_id=6");
     await stream.open(1);
-    await expect(page.getByText("已连接", { exact: true })).toBeVisible();
+    await expect(liveStatus(page)).toHaveText("已连接");
     await expect(page.getByText("连接后新增 1 条")).toBeVisible();
+  });
+  test("自动重连连续失败达到上限后停止，不再安排新的连接", async ({ page }) => {
+    await installEventSourceStub(page);
+    const stream = liveStream(page);
+    const writes = recordWriteRequests(page);
+    await stubEventPanel(page);
+
+    await openDetail(page);
+    await expect(page.getByText("已显示 1 / 1 条")).toBeVisible();
+    await expect.poll(() => stream.count()).toBe(1);
+    await stream.open(0);
+    await stream.message(0, liveEventFrame(6));
+    await expect(liveStatus(page)).toHaveText("已连接");
+
+    // 只在驱动退避之前接管页面时钟：连接建立与首帧仍走真实计时，退避定时器由用例精确推进，
+    // 从而不必真实等待 1s + 2s + 4s + 8s，也不必替换全局 `setTimeout` 的实现细节。
+    await page.clock.install();
+
+    // 五次连续失败：1s / 2s / 4s / 8s 各重建一次，第 5 次失败后停止。
+    const count = await driveReconnectExhaustion(page, stream, 0);
+    expect(count).toBe(5);
+    await expect(liveStatus(page)).toHaveText("已停止");
+    await expect(page.getByText("事件推送已停止")).toBeVisible();
+    await expect(page.getByText(/已停止自动重连/)).toBeVisible();
+    // 反复失败不会清空已经收到的实时事件，也不会伪造新事件
+    await expect(page.getByText("连接后新增 1 条")).toBeVisible();
+    await expect(page.getByText("步骤完成（事件 6）")).toHaveCount(1);
+    // 推送通道的重连与停止都不触发任何写操作
+    expect(writes).toEqual([]);
+  });
+
+  test("停止后手动重新连接使用已收到的最大游标，并保留已收到的事件", async ({ page }) => {
+    await installEventSourceStub(page);
+    const stream = liveStream(page);
+    const writes = recordWriteRequests(page);
+    await stubEventPanel(page);
+
+    await openDetail(page);
+    await expect.poll(() => stream.count()).toBe(1);
+    await stream.open(0);
+    await stream.message(0, liveEventFrame(6));
+    await expect(liveStatus(page)).toHaveText("已连接");
+    await page.clock.install();
+
+    const count = await driveReconnectExhaustion(page, stream, 0);
+    expect(count).toBe(5);
+    await expect(liveStatus(page)).toHaveText("已停止");
+
+    // 「重新连接」是停止后的唯一入口，它复用已收到事件的最大标识作为新连接游标。
+    const reconnect = liveRegion(page).getByText("重新连接", { exact: true });
+    await expect(reconnect).toBeVisible();
+    await reconnect.click();
+    await expect.poll(() => stream.count()).toBe(6);
+    expect(await stream.url(5)).toBe("/api/v1/tasks/task-1/events/stream?last_event_id=6");
+    // 手动重连不清空已收到的实时事件，也不重新拉取历史
+    await expect(page.getByText("连接后新增 1 条")).toBeVisible();
+    await expect(page.getByText("步骤完成（事件 6）")).toHaveCount(1);
+
+    await stream.open(5);
+    await expect(liveStatus(page)).toHaveText("已连接");
+
+    // 手动重连后再次连续失败：仍然按同一上限收敛，不会退化成无限重连。
+    const afterManual = await driveReconnectExhaustion(page, stream, 5);
+    expect(afterManual).toBe(10);
+    await expect(liveStatus(page)).toHaveText("已停止");
+    await expect(page.getByText("连接后新增 1 条")).toBeVisible();
+    expect(writes).toEqual([]);
+  });
+});
+
+/**
+ * 浏览器原生 `EventSource` 的传输层验证。
+ *
+ * 前面所有实时推送用例都注入受控替身，因此只验证消费逻辑，不验证浏览器的 SSE 实现本身。这里
+ * 不注入任何替身，由 Playwright 的路由返回一段受控的 `text/event-stream` 响应体，让浏览器自己
+ * 解析标准帧。
+ *
+ * 边界：这只证明"浏览器原生 SSE 解析 + 页面消费"这条链路可用，**不等于**真实反向代理、代理
+ * 缓冲、TLS、负载均衡或生产网络环境下的验收。
+ */
+test.describe("原生 EventSource 传输层", () => {
+  test("浏览器原生解析 text/event-stream 帧，畸形数据不进入实时列表", async ({ page }) => {
+    // `route.fulfill` 会一次性写完响应体并立即结束连接，浏览器按任务队列派发消息时会与连接
+    // 关闭竞争（实测一段含 3 帧的响应体只能稳定收到前 2 帧）。这里改用真实的本地 SSE 服务端：
+    // 逐帧写出并保持连接打开，验证的才是浏览器原生解析，而不是关闭时机。
+    const frames = [
+      ": ping\n\n",
+      `id: 9\ndata: ${liveEventFrame(9, { summary: "原生帧（事件 9）" })}\n\n`,
+      "id: 10\ndata: not-json\n\n",
+      `id: 11\ndata: ${liveEventFrame(11, { summary: "原生帧（事件 11）" })}\n\n`,
+    ];
+    const served: string[] = [];
+    let resolveClosed = () => {};
+    const closed = new Promise<void>((resolve) => {
+      resolveClosed = resolve;
+    });
+    const server = createServer((request, response) => {
+      served.push(request.url ?? "");
+      // 跨源（route.continue 改写后的目标）也需要显式的 CORS 头
+      response.writeHead(200, {
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "no-cache, no-transform",
+        "Content-Type": "text/event-stream; charset=utf-8",
+      });
+      for (const frame of frames) response.write(frame);
+      // 连接保持打开：由页面在卸载时关闭
+      response.on("close", () => resolveClosed());
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+
+    try {
+      await stubEventPanel(page);
+      await page.route(/\/api\/v1\/tasks\/task-1\/events\/stream(\?.*)?$/, (route) => {
+        const { search } = new URL(route.request().url());
+        return route.continue({ url: `http://127.0.0.1:${port}/stream${search}` });
+      });
+
+      // 没有安装替身：页面里必须是浏览器原生的 EventSource 实现。
+      expect(await page.evaluate(() => String(window.EventSource))).toContain("[native code]");
+
+      await openDetail(page);
+      await expect(page.getByText("已显示 1 / 1 条")).toBeVisible();
+
+      // 两帧真实事件都由浏览器原生解析并进入实时列表；畸形帧既不显示也不影响后续帧。
+      await expect(page.getByText("原生帧（事件 9）")).toBeVisible();
+      await expect(page.getByText("原生帧（事件 11）")).toBeVisible();
+      await expect(page.getByText("连接后新增 2 条")).toBeVisible();
+      await expect(page.getByText("not-json")).toHaveCount(0);
+      // 连接地址是页面用真实游标拼出来的，不是硬编码
+      expect(served).toContain("/stream?last_event_id=5");
+
+      // 关闭详情后连接必须终止：服务端要观察到连接被关闭，且不再收到新的流请求。
+      await page.getByText("关闭", { exact: true }).click();
+      await expect(page.getByText("任务详情")).toHaveCount(0);
+      const afterClose = served.length;
+      await Promise.race([
+        closed,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("关闭详情后事件流连接没有终止")), 5_000),
+        ),
+      ]);
+      await page.waitForTimeout(500);
+      expect(served.length).toBe(afterClose);
+    } finally {
+      // 断言失败时页面可能仍然占用连接：先断开全部连接，避免清理阶段挂住。
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
