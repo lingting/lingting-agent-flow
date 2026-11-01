@@ -24,6 +24,10 @@ type Metadata struct {
 	BuildDate string `json:"build_date"`
 	// GoVersion 是实际使用的 Go 工具链版本。
 	GoVersion string `json:"go_version"`
+	// NodeVersion 是实际用于构建前端产物的 Node.js 版本（形如 22.22.3）。
+	NodeVersion string `json:"node_version"`
+	// PnpmVersion 是实际用于构建前端产物的 pnpm 版本（形如 11.24.0）。
+	PnpmVersion string `json:"pnpm_version"`
 	// OS 是制品目标操作系统。
 	OS string `json:"os"`
 	// Arch 是制品目标架构。
@@ -46,6 +50,15 @@ func (m Metadata) Validate() error {
 	}
 	if !strings.HasPrefix(m.GoVersion, "go") || len(m.GoVersion) <= len("go") {
 		return fmt.Errorf("Go 工具链版本 %q 无效", m.GoVersion)
+	}
+	// 前端工具链版本同样是制品溯源的一部分：只有记录的版本与真正构建前端产物的
+	// 工具链一致，制品才能被独立复现。dev 构建允许留空。
+	releaseVersion := IsReleaseVersion(m.Version)
+	if err := requireToolVersion("Node.js", m.NodeVersion, releaseVersion); err != nil {
+		return err
+	}
+	if err := requireToolVersion("pnpm", m.PnpmVersion, releaseVersion); err != nil {
+		return err
 	}
 	return nil
 }

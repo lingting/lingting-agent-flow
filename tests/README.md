@@ -85,13 +85,16 @@ go test -count=1 -v ./tests/integration/remote/workflow/...
 # CLI 端到端测试
 go test -count=1 -v ./tests/e2e/...
 
-# 发布制品规则（版本元数据、命名规范、清单、校验文件与工作流结构）
+# 发布制品与发布流程规则（版本元数据、命名规范、清单、校验文件、来源证明声明、
+# 发布目录与远端资产核验、三个工作流的触发 / 权限 / 依赖 / 步骤顺序）
 go test -count=1 -v ./tests/unit/release/...
 
 # 单文件打包冒烟测试（需要 pnpm 与已安装的前端依赖，否则自行跳过）
 go test -count=1 -v -run TestSingleBinaryPackaging ./tests/e2e/packaging/...
 
-# 发布制品打包验收：真实生成跨平台制品并校验布局、元数据与 SHA-256（同样需要前端依赖）
+# 发布制品打包验收：真实生成跨平台制品并校验布局、元数据与 SHA-256，
+# 再用 cmd/agentflow-release 的 verify-release / verify-assets 复核目录与资产列表
+# （同样需要 pnpm、node 与已安装的前端依赖，否则自行跳过），失败路径也逐条断言
 go test -count=1 -v -run TestReleaseArtifacts ./tests/e2e/packaging/...
 # 等价入口
 make test-release-verify
@@ -134,18 +137,34 @@ go test -race -count=1 ./tests/integration/local/ssh/...
 | `ui-test` | 前端单元（`--maxWorkers 4`）、Playwright E2E（`--workers=4`）、格式、lint、类型检查、生产构建 | `cd lingting-agent-flow-ui && pnpm test:all:safe` |
 | `ci-summary` | 必需 Job 全部成功才通过，并区分成功 / 失败 / 跳过 / 未执行 / 环境准备失败 | 无（仅 CI） |
 
-`.github/workflows/release.yml` 是发布制品流水线，不由 CI 门禁触发：它在版本标签
-（`vMAJOR.MINOR.PATCH`）推送或手动触发时运行，调用 `make release-dist` 构建制品，并用
+`.github/workflows/release.yml` 是制品构建流水线，只做"构建与制品准备"：它由
+`publish.yml` 复用（`workflow_call`）或手动触发（`workflow_dispatch`）运行，调用
+`make release-dist` 构建五个平台制品，用 `verify-release` 复核目录，再用
 `TestReleaseArchiveSmoke` 在目标平台的原生 Runner 上执行运行冒烟。它只上传 Actions 运行
-制品，不创建 GitHub Release、不推送镜像、不部署环境。制品布局与平台支持边界见
-[`../docs/release.md`](../docs/release.md)。
+制品，不创建 GitHub Release、不推送镜像、不部署环境。**版本标签不再直接触发它**：标签发布
+统一走 `publish.yml`，避免同一个标签被构建两次、产出两份不同的字节。
+
+`.github/workflows/publish.yml` 是正式发布流水线，由版本标签推送或手动触发运行。它依次复用
+`ci.yml`（全量门禁）与 `release.yml`（制品 + 冒烟），然后在 `publish` Job 里做发布前核验、
+生成来源证明、创建草稿 Release、上传、重新下载核验、核验来源证明，全部通过后才把草稿转为
+公开 Release。发布权限（`contents: write`、`id-token: write`、`attestations: write`）只授予
+该 Job。
 
 | 发布阶段 | 覆盖范围 | 本地等价入口 |
 |---|---|---|
-| 版本解析 | 标签/输入版本号与提交号格式校验 | `go test -count=1 ./tests/unit/release/` |
+| 版本解析 | 标签格式、ref 必须是标签、提交必须是完整 SHA | `go test -count=1 ./tests/unit/release/` |
+| CI 门禁 | 复用 `ci.yml` 的四个必需 Job | 见上表 |
 | 制品构建 | 前端产物校验 → 交叉编译 → 打包 → `SHA256SUMS` 与清单自检 | `make release-dist VERSION=v1.2.3` |
-| 制品校验 | 用 `sha256sum -c` 独立复核制品与校验文件一致 | `cd dist/release && sha256sum -c SHA256SUMS` |
+| 制品校验 | 用 `sha256sum -c` 与 `verify-release` 独立复核目录 | `cd dist/release && sha256sum -c SHA256SUMS`，`make release-verify VERSION=v1.2.3` |
 | 运行冒烟 | 解压、版本查询、启动服务、HTTP API 与前端静态资源 | `TestReleaseArchiveSmoke`（见上文环境变量） |
+| 发布前核验 | 版本 / 提交 / 平台覆盖 / 摘要 / 目录无多余文件 / 来源信息声明 | `go run ./cmd/agentflow-release verify-release -dir dist/release -version v1.2.3 -commit <sha> -require-provenance` |
+| 来源证明 | 生成与核验只能由 GitHub Actions 完成 | 无本地等价入口（`gh attestation verify` 只能核验已生成的证明） |
+| 上传后核验 | 远端资产列表 + 重新下载 + 摘要 + 来源信息 | `go run ./cmd/agentflow-release verify-assets -dir <下载目录> -version v1.2.3 -assets-file <资产名列表>` |
+| 重复发布 | 已存在 Release（含草稿）时直接失败，不覆盖 | 无本地等价入口 |
+
+**这些工作流尚未在 GitHub Actions 上真实运行**：本轮没有推送版本标签，也没有创建公开
+Release。上表"本地等价入口"一列是可以在本地真实执行并已执行过的部分；远端上传、来源证明
+签发与草稿转公开只经过 YAML 静态核验（`TestPublishWorkflow*`）。
 
 `go-race` 的补充范围（`make test-race` 未包含）：
 

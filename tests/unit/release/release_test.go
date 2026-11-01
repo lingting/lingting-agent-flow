@@ -16,10 +16,16 @@ import (
 
 // 测试用固定版本元数据；提交号是合法 Git SHA，避免依赖具体仓库状态。
 const (
-	testVersion   = "v1.2.3"
-	testCommit    = "cd983e4c8e85d5f38d73e7f094d661defa6da623"
-	testBuildDate = "2026-01-02T03:04:05Z"
-	testGoVersion = "go1.24.5"
+	testVersion     = "v1.2.3"
+	testCommit      = "cd983e4c8e85d5f38d73e7f094d661defa6da623"
+	testBuildDate   = "2026-01-02T03:04:05Z"
+	testGoVersion   = "go1.24.5"
+	testNodeVersion = "22.22.3"
+	testPnpmVersion = "11.24.0"
+	// 测试用来源信息：正式发布必须能关联到仓库、工作流与运行。
+	testRepository = "lingting/lingting-agent-flow"
+	testWorkflow   = ".github/workflows/publish.yml"
+	testRunID      = "1234567890"
 )
 
 // testPlatforms 是发布矩阵的预期字符串形式，顺序与 release.SupportedPlatforms 一致。
@@ -38,10 +44,12 @@ func parsePlatform(t *testing.T, value string) release.Platform {
 // sampleMetadata 返回一份合法的版本元数据。
 func sampleMetadata() release.Metadata {
 	return release.Metadata{
-		Version:   testVersion,
-		Commit:    testCommit,
-		BuildDate: testBuildDate,
-		GoVersion: testGoVersion,
+		Version:     testVersion,
+		Commit:      testCommit,
+		BuildDate:   testBuildDate,
+		GoVersion:   testGoVersion,
+		NodeVersion: testNodeVersion,
+		PnpmVersion: testPnpmVersion,
 	}
 }
 
@@ -65,11 +73,17 @@ func sampleManifest(t *testing.T) release.Manifest {
 	t.Helper()
 	checksum := release.SHA256Hex([]byte("artifact"))
 	return release.Manifest{
-		Version:   testVersion,
-		Commit:    testCommit,
-		BuildDate: testBuildDate,
-		GoVersion: testGoVersion,
-		Artifacts: []release.Artifact{sampleArtifact(t, "linux/amd64", checksum), sampleArtifact(t, "windows/amd64", checksum)},
+		Version:             testVersion,
+		Commit:              testCommit,
+		BuildDate:           testBuildDate,
+		GoVersion:           testGoVersion,
+		NodeVersion:         testNodeVersion,
+		PnpmVersion:         testPnpmVersion,
+		SourceRepository:    testRepository,
+		SourceWorkflow:      testWorkflow,
+		SourceRunID:         testRunID,
+		AttestationProvider: release.AttestationProviderGitHub,
+		Artifacts:           []release.Artifact{sampleArtifact(t, "linux/amd64", checksum), sampleArtifact(t, "windows/amd64", checksum)},
 	}
 }
 
@@ -134,6 +148,19 @@ func TestMetadataValidate(t *testing.T) {
 		{"提交号不是完整SHA", func(m *release.Metadata) { m.Commit = "abc" }},
 		{"构建时间非法", func(m *release.Metadata) { m.BuildDate = "2026-01-02" }},
 		{"Go 版本缺失", func(m *release.Metadata) { m.GoVersion = "" }},
+		{"Node 版本缺失", func(m *release.Metadata) { m.NodeVersion = "" }},
+		{"Node 版本非法", func(m *release.Metadata) { m.NodeVersion = "latest" }},
+		{"pnpm 版本缺失", func(m *release.Metadata) { m.PnpmVersion = "" }},
+		{"pnpm 版本非法", func(m *release.Metadata) { m.PnpmVersion = "11.24" }},
+	}
+	// 正式版本必须记录真实的前端工具链版本；dev 构建允许留空（本地核对打包流程时
+	// 可能没有安装前端工具链），但这不是"可以省略证据"的借口。
+	dev := sampleMetadata()
+	dev.Version = release.DevVersion
+	dev.NodeVersion = ""
+	dev.PnpmVersion = ""
+	if err := dev.Validate(); err != nil {
+		t.Fatalf("dev 版本允许不记录前端工具链版本，实际错误: %v", err)
 	}
 	for _, testCase := range cases {
 		metadata := sampleMetadata()
@@ -303,6 +330,12 @@ func TestManifestValidate(t *testing.T) {
 		{"大小非正", func(m *release.Manifest) { m.Artifacts[0].Size = 0 }},
 		{"提交号非法", func(m *release.Manifest) { m.Commit = "abc1234" }},
 		{"构建时间非法", func(m *release.Manifest) { m.BuildDate = "yesterday" }},
+		{"Node 版本缺失", func(m *release.Manifest) { m.NodeVersion = "" }},
+		{"pnpm 版本非法", func(m *release.Manifest) { m.PnpmVersion = "latest" }},
+		{"来源仓库非法", func(m *release.Manifest) { m.SourceRepository = "lingting" }},
+		{"来源工作流非法", func(m *release.Manifest) { m.SourceWorkflow = "publish.yml" }},
+		{"来源运行标识非法", func(m *release.Manifest) { m.SourceRunID = "run-1" }},
+		{"来源证明提供方不受支持", func(m *release.Manifest) { m.AttestationProvider = "self-signed" }},
 	}
 	for _, testCase := range cases {
 		manifest := sampleManifest(t)
@@ -357,6 +390,12 @@ func TestManifestJSON(t *testing.T) {
 		`"commit": "` + testCommit + `"`,
 		`"build_date": "` + testBuildDate + `"`,
 		`"go_version": "go1.24.5"`,
+		`"node_version": "` + testNodeVersion + `"`,
+		`"pnpm_version": "` + testPnpmVersion + `"`,
+		`"source_repository": "` + testRepository + `"`,
+		`"source_workflow": "` + testWorkflow + `"`,
+		`"source_run_id": "` + testRunID + `"`,
+		`"attestation_provider": "` + release.AttestationProviderGitHub + `"`,
 		`"sha256"`,
 		`"size"`,
 	}
@@ -377,10 +416,12 @@ func TestManifestJSON(t *testing.T) {
 func TestMetadataFromManifest(t *testing.T) {
 	t.Parallel()
 	manifest := release.Manifest{
-		Version:   testVersion,
-		Commit:    testCommit,
-		BuildDate: testBuildDate,
-		GoVersion: testGoVersion,
+		Version:     testVersion,
+		Commit:      testCommit,
+		BuildDate:   testBuildDate,
+		GoVersion:   testGoVersion,
+		NodeVersion: testNodeVersion,
+		PnpmVersion: testPnpmVersion,
 	}
 	metadata := manifest.Metadata(parsePlatform(t, "darwin/arm64"))
 	if metadata.Version != testVersion || metadata.Commit != testCommit {

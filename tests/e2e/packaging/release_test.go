@@ -8,6 +8,7 @@ package packaging_test
 import (
 	"archive/tar"
 	"archive/zip"
+	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
@@ -37,11 +38,17 @@ const testReleaseVersion = "v0.0.0"
 
 // artifactManifest 是发布清单的解析结果（schema 见 internal/release.Manifest）。
 type artifactManifest struct {
-	Version   string `json:"version"`
-	Commit    string `json:"commit"`
-	BuildDate string `json:"build_date"`
-	GoVersion string `json:"go_version"`
-	Artifacts []struct {
+	Version             string `json:"version"`
+	Commit              string `json:"commit"`
+	BuildDate           string `json:"build_date"`
+	GoVersion           string `json:"go_version"`
+	NodeVersion         string `json:"node_version"`
+	PnpmVersion         string `json:"pnpm_version"`
+	SourceRepository    string `json:"source_repository"`
+	SourceWorkflow      string `json:"source_workflow"`
+	SourceRunID         string `json:"source_run_id"`
+	AttestationProvider string `json:"attestation_provider"`
+	Artifacts           []struct {
 		File   string `json:"file"`
 		OS     string `json:"os"`
 		Arch   string `json:"arch"`
@@ -54,12 +61,14 @@ type artifactManifest struct {
 
 // versionMetadata 是压缩包内 version.json 的解析结果。
 type versionMetadata struct {
-	Version   string `json:"version"`
-	Commit    string `json:"commit"`
-	BuildDate string `json:"build_date"`
-	GoVersion string `json:"go_version"`
-	OS        string `json:"os"`
-	Arch      string `json:"arch"`
+	Version     string `json:"version"`
+	Commit      string `json:"commit"`
+	BuildDate   string `json:"build_date"`
+	GoVersion   string `json:"go_version"`
+	NodeVersion string `json:"node_version"`
+	PnpmVersion string `json:"pnpm_version"`
+	OS          string `json:"os"`
+	Arch        string `json:"arch"`
 }
 
 // countArtifactBinaries 统计不含调试信息的可执行文件数量，用于确认制品真的是编译产物。
@@ -197,9 +206,16 @@ func TestReleaseArtifacts(t *testing.T) {
 	runCommand(t, uiDir, "pnpm", "build")
 
 	// 2. 真实执行发布构建（与 CI 使用同一个入口）。
+	// 前端工具链版本必须由调用方给出真实取值：正式版本没有记录工具链时构建立即失败。
+	nodeOutput, _ := runCommand(t, root, "node", "--version")
+	nodeVersion := strings.TrimSpace(strings.TrimPrefix(nodeOutput, "v"))
+	pnpmOutput, _ := runCommand(t, root, "pnpm", "--version")
+	pnpmVersion := strings.TrimSpace(pnpmOutput)
 	runCommand(t, root, "go", "run", "./cmd/agentflow-release",
 		"-version", testReleaseVersion,
 		"-output", outputDir,
+		"-node-version", nodeVersion,
+		"-pnpm-version", pnpmVersion,
 	)
 	t.Logf("发布制品输出目录: %s", outputDir)
 
@@ -221,6 +237,11 @@ func TestReleaseArtifacts(t *testing.T) {
 	}
 	if !strings.HasPrefix(manifest.GoVersion, "go") {
 		t.Fatalf("清单 Go 工具链版本无效: %q", manifest.GoVersion)
+	}
+	// 前端工具链版本必须如实记录：制品能否复现取决于"前端产物由哪套工具链构建"。
+	if manifest.NodeVersion != nodeVersion || manifest.PnpmVersion != pnpmVersion {
+		t.Fatalf("清单前端工具链版本与调用参数不一致: %q/%q，期望 %q/%q",
+			manifest.NodeVersion, manifest.PnpmVersion, nodeVersion, pnpmVersion)
 	}
 	if len(manifest.Artifacts) != len(release.SupportedPlatforms) {
 		t.Fatalf("制品数量应为 %d，实际 %d", len(release.SupportedPlatforms), len(manifest.Artifacts))
@@ -266,7 +287,8 @@ func TestReleaseArtifacts(t *testing.T) {
 		if metadata.Version != manifest.Version || metadata.Commit != manifest.Commit {
 			t.Fatalf("制品 %s 的版本元数据与清单不一致: %+v", artifact.File, metadata)
 		}
-		if metadata.BuildDate != manifest.BuildDate || metadata.GoVersion != manifest.GoVersion {
+		if metadata.BuildDate != manifest.BuildDate || metadata.GoVersion != manifest.GoVersion ||
+			metadata.NodeVersion != manifest.NodeVersion || metadata.PnpmVersion != manifest.PnpmVersion {
 			t.Fatalf("制品 %s 的构建信息与清单不一致: %+v", artifact.File, metadata)
 		}
 		if metadata.OS != artifact.OS || metadata.Arch != artifact.Arch {
@@ -305,8 +327,76 @@ func TestReleaseArtifacts(t *testing.T) {
 		}
 	}
 
-	// 6. 当前平台制品必须真的能运行：解压后执行 version 并核对元数据。
+	// 6. 用发布核验入口复核目录：这条路径与发布工作流的"发布前核验"是同一份实现。
+	// 缺少制品、多余文件、摘要不一致或平台覆盖不完整都必须让构建失败。
+	verifyReleaseDir(t, root, outputDir, manifest)
+	// 7. 用同一份清单构造"远端资产列表"并核验：这是上传后核验的本地等价入口。
+	verifyReleaseAssets(t, root, outputDir, manifest, workspace)
+	// 8. 当前平台制品必须真的能运行：解压后执行 version 并核对元数据。
 	verifyCurrentPlatformArtifact(t, workspace, outputDir, manifest)
+}
+
+// verifyReleaseDir 用发布核验入口复核制品目录。
+//
+// 这条入口与发布工作流的"发布前核验"是同一份实现：版本、提交、平台覆盖、摘要、
+// 压缩包布局与"目录中没有多余文件"都由它判定，避免发布流水线与测试各写一套规则。
+func verifyReleaseDir(t *testing.T, root string, outputDir string, manifest artifactManifest) {
+	t.Helper()
+	runCommand(t, root, "go", "run", "./cmd/agentflow-release", "verify-release",
+		"-dir", outputDir,
+		"-version", manifest.Version,
+		"-commit", manifest.Commit,
+	)
+}
+
+// verifyReleaseAssets 用同一份清单核验"远端资产列表"，并验证遗漏与多余都会被拒绝。
+//
+// 上传后的核验不能只看上传命令的返回值，因此这里既验证正常路径，也验证两种异常路径，
+// 确认核验入口真的会失败而不是永远返回成功。
+func verifyReleaseAssets(
+	t *testing.T,
+	root string,
+	outputDir string,
+	manifest artifactManifest,
+	workspace *testkit.Workspace,
+) {
+	t.Helper()
+	names := make([]string, 0, len(manifest.Artifacts)+2)
+	for _, artifact := range manifest.Artifacts {
+		names = append(names, artifact.File)
+	}
+	names = append(names, release.ChecksumFileName, release.ManifestFileName)
+
+	verify := func(listName string, assets []string) error {
+		t.Helper()
+		path := filepath.Join(workspace.Dir("asset-lists"), listName)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("创建资产列表目录失败: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(strings.Join(assets, "\n")+"\n"), 0o644); err != nil {
+			t.Fatalf("写入资产列表失败: %v", err)
+		}
+		command := exec.Command("go", "run", "./cmd/agentflow-release", "verify-assets",
+			"-dir", outputDir,
+			"-version", manifest.Version,
+			"-assets-file", path,
+		)
+		command.Dir = root
+		var stdout, stderr bytes.Buffer
+		command.Stdout = &stdout
+		command.Stderr = &stderr
+		return command.Run()
+	}
+
+	if err := verify("complete.txt", names); err != nil {
+		t.Fatalf("完整资产列表应通过核验: %v", err)
+	}
+	if err := verify("missing.txt", names[:len(names)-1]); err == nil {
+		t.Fatal("缺少资产的列表必须核验失败")
+	}
+	if err := verify("unexpected.txt", append(append([]string{}, names...), "debug.log")); err == nil {
+		t.Fatal("存在未声明资产的列表必须核验失败")
+	}
 }
 
 // verifyCurrentPlatformArtifact 解压当前平台制品，执行 version 查询并核对元数据。

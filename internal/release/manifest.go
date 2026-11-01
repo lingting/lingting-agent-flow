@@ -60,6 +60,22 @@ type Manifest struct {
 	BuildDate string `json:"build_date"`
 	// GoVersion 是实际使用的 Go 工具链版本。
 	GoVersion string `json:"go_version"`
+	// NodeVersion 是实际用于构建前端产物的 Node.js 版本。
+	NodeVersion string `json:"node_version"`
+	// PnpmVersion 是实际用于构建前端产物的 pnpm 版本。
+	PnpmVersion string `json:"pnpm_version"`
+	// SourceRepository 是构建该制品的仓库（owner/name）；本地构建为空。
+	SourceRepository string `json:"source_repository,omitempty"`
+	// SourceWorkflow 是执行构建的工作流文件（例如 .github/workflows/publish.yml）；
+	// 本地构建为空。
+	SourceWorkflow string `json:"source_workflow,omitempty"`
+	// SourceRunID 是执行构建的工作流运行标识；本地构建为空。
+	SourceRunID string `json:"source_run_id,omitempty"`
+	// AttestationProvider 是来源证明的生成机制；本地构建为空。
+	//
+	// 它的取值必须是 AttestationProviderGitHub：发布流程只认可 GitHub Actions OIDC
+	// 无密钥证明，不提供任何"降级为无证明"的正式发布路径。
+	AttestationProvider string `json:"attestation_provider,omitempty"`
 	// Artifacts 是本次生成的制品列表。
 	Artifacts []Artifact `json:"artifacts"`
 }
@@ -67,12 +83,14 @@ type Manifest struct {
 // Metadata 返回某个制品的版本元数据。
 func (m Manifest) Metadata(platform Platform) Metadata {
 	return Metadata{
-		Version:   m.Version,
-		Commit:    m.Commit,
-		BuildDate: m.BuildDate,
-		GoVersion: m.GoVersion,
-		OS:        platform.OS,
-		Arch:      platform.Arch,
+		Version:     m.Version,
+		Commit:      m.Commit,
+		BuildDate:   m.BuildDate,
+		GoVersion:   m.GoVersion,
+		NodeVersion: m.NodeVersion,
+		PnpmVersion: m.PnpmVersion,
+		OS:          platform.OS,
+		Arch:        platform.Arch,
 	}
 }
 
@@ -81,8 +99,18 @@ func (m Manifest) Metadata(platform Platform) Metadata {
 // 它同时充当"发布制品自检"的规则来源：文件名必须与命名规范一致、每个平台只能
 // 出现一次、摘要必须是合法的 SHA-256、大小必须为正数。
 func (m Manifest) Validate() error {
-	header := Metadata{Version: m.Version, Commit: m.Commit, BuildDate: m.BuildDate, GoVersion: m.GoVersion}
+	header := Metadata{
+		Version:     m.Version,
+		Commit:      m.Commit,
+		BuildDate:   m.BuildDate,
+		GoVersion:   m.GoVersion,
+		NodeVersion: m.NodeVersion,
+		PnpmVersion: m.PnpmVersion,
+	}
 	if err := header.Validate(); err != nil {
+		return err
+	}
+	if err := m.ValidateSource(); err != nil {
 		return err
 	}
 	if len(m.Artifacts) == 0 {

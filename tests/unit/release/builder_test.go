@@ -53,16 +53,22 @@ func unsupportedPlatformList() []release.Platform {
 func buildOptions(t *testing.T, repoRoot string, outputDir string) release.BuildOptions {
 	t.Helper()
 	return release.BuildOptions{
-		RepoRoot:       repoRoot,
-		OutputDir:      outputDir,
-		WebDistDir:     stubWebDist(t),
-		QuickstartPath: filepath.Join("docs", "release", "QUICKSTART.md"),
-		NoticesPath:    filepath.Join("docs", "release", "THIRD-PARTY-NOTICES.md"),
-		Platforms:      currentPlatformList(),
-		Version:        testVersion,
-		Commit:         testCommit,
-		BuildDate:      testBuildDate,
-		GoVersion:      testGoVersion,
+		RepoRoot:            repoRoot,
+		OutputDir:           outputDir,
+		WebDistDir:          stubWebDist(t),
+		QuickstartPath:      filepath.Join("docs", "release", "QUICKSTART.md"),
+		NoticesPath:         filepath.Join("docs", "release", "THIRD-PARTY-NOTICES.md"),
+		Platforms:           currentPlatformList(),
+		Version:             testVersion,
+		Commit:              testCommit,
+		BuildDate:           testBuildDate,
+		GoVersion:           testGoVersion,
+		NodeVersion:         testNodeVersion,
+		PnpmVersion:         testPnpmVersion,
+		SourceRepository:    testRepository,
+		SourceWorkflow:      testWorkflow,
+		SourceRunID:         testRunID,
+		AttestationProvider: release.AttestationProviderGitHub,
 	}
 }
 
@@ -80,6 +86,9 @@ func TestBuildDistributionRejectsBadInput(t *testing.T) {
 		{"提交号非法", func(o *release.BuildOptions) { o.Commit = "abc1234" }},
 		{"构建时间非法", func(o *release.BuildOptions) { o.BuildDate = "2026-01-02" }},
 		{"Go 版本非法", func(o *release.BuildOptions) { o.GoVersion = "1.24.5" }},
+		{"Node 版本缺失", func(o *release.BuildOptions) { o.NodeVersion = "" }},
+		{"pnpm 版本非法", func(o *release.BuildOptions) { o.PnpmVersion = "latest" }},
+		{"来源证明提供方不受支持", func(o *release.BuildOptions) { o.AttestationProvider = "self-signed" }},
 		{"平台不受支持", func(o *release.BuildOptions) { o.Platforms = unsupportedPlatformList() }},
 		{"前端产物缺失", func(o *release.BuildOptions) { o.WebDistDir = o.OutputDir }},
 		{"快速启动说明缺失", func(o *release.BuildOptions) { o.QuickstartPath = "docs/release/missing.md" }},
@@ -125,6 +134,13 @@ func TestBuildDistributionProducesVerifiedArtifacts(t *testing.T) {
 	}
 	if manifest.GoVersion != testGoVersion || manifest.BuildDate != testBuildDate {
 		t.Fatalf("清单构建信息错误: %+v", manifest)
+	}
+	// 前端工具链版本与来源信息是制品溯源的一部分，必须写进清单。
+	if manifest.NodeVersion != testNodeVersion || manifest.PnpmVersion != testPnpmVersion {
+		t.Fatalf("清单前端工具链版本错误: %+v", manifest)
+	}
+	if err := manifest.RequireProvenance(); err != nil {
+		t.Fatalf("清单应带完整来源信息: %v", err)
 	}
 
 	// 2. 校验文件必须与清单逐行一致，且摘要与制品内容匹配。

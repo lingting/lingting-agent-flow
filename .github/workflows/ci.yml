@@ -11,6 +11,9 @@
 # 汇总步骤单独标注这一点，跳过原因保留在 test.log 产物里。
 #
 # 所有 Action 都用提交 SHA 固定（不用可移动的 tag），避免上游重新指向标签时 CI 行为变化。
+#
+# 本工作流同时提供给 publish.yml 复用（workflow_call）：正式 Release 必须以同一次运行
+# 里通过的 CI 门禁为前提，而不是"标签提交早先碰巧在 master 上通过过"。
 name: CI
 
 on:
@@ -19,6 +22,7 @@ on:
   pull_request:
     branches: [master]
   workflow_dispatch:
+  workflow_call:
 
 # 最小权限：所有 Job 只读取仓库内容，不使用 Secret、不写入仓库、不需要额外作用域。
 permissions:

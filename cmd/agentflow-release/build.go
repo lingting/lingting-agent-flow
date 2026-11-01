@@ -8,11 +8,15 @@ import (
 	"github.com/lingting/agentflow/internal/release"
 )
 
-// buildRelease 把命令行参数转换成发布构建输入并执行。
+// buildRelease 解析命令行参数并执行发布构建。
 //
 // 具体流程（前端校验 → 交叉编译 → 打包 → 校验文件 → 自检）全部位于
 // internal/release，测试与本地入口共用同一份实现，不会出现"CI 一套、本地一套"。
-func buildRelease(opts *options, stdout, stderr io.Writer) error {
+func buildRelease(args []string, stdout, stderr io.Writer) error {
+	opts, err := parseOptions(args, stderr)
+	if err != nil {
+		return err
+	}
 	if err := release.ValidateVersion(opts.version); err != nil {
 		return err
 	}
@@ -21,16 +25,22 @@ func buildRelease(opts *options, stdout, stderr io.Writer) error {
 		return err
 	}
 	_, err = release.BuildDistribution(release.BuildOptions{
-		RepoRoot:       opts.repoRoot,
-		OutputDir:      opts.output,
-		WebDistDir:     opts.webDist,
-		QuickstartPath: opts.quickstart,
-		NoticesPath:    opts.notices,
-		Platforms:      platforms,
-		Version:        opts.version,
-		Commit:         opts.commit,
-		BuildDate:      opts.buildDate,
-		GoVersion:      opts.goVersion,
+		RepoRoot:            opts.repoRoot,
+		OutputDir:           opts.output,
+		WebDistDir:          opts.webDist,
+		QuickstartPath:      opts.quickstart,
+		NoticesPath:         opts.notices,
+		Platforms:           platforms,
+		Version:             opts.version,
+		Commit:              opts.commit,
+		BuildDate:           opts.buildDate,
+		GoVersion:           opts.goVersion,
+		NodeVersion:         opts.nodeVersion,
+		PnpmVersion:         opts.pnpmVersion,
+		SourceRepository:    opts.sourceRepository,
+		SourceWorkflow:      opts.sourceWorkflow,
+		SourceRunID:         opts.sourceRunID,
+		AttestationProvider: opts.attestationProvider,
 	}, stdout, stderr)
 	return err
 }

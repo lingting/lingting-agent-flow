@@ -1,12 +1,15 @@
-# AgentFlow 正式发布制品构建。
+# AgentFlow 正式发布制品构建（可被 publish.yml 复用）。
 #
 # 本工作流只负责"构建与制品准备"：
-#   - 只在版本标签（vMAJOR.MINOR.PATCH）推送或手动触发时运行；
+#   - 由 publish.yml 复用（workflow_call），或手动触发做一次构建预演（workflow_dispatch）；
 #   - 生成经过校验的跨平台压缩包、SHA256SUMS 与 release-manifest.json；
 #   - 把制品上传到本次 Actions 运行的制品区；
 #   - 不创建 GitHub Release、不推送镜像、不部署环境、不写入仓库。
 #
-# 制品构建本身复用仓库唯一年度发布入口 `make release-dist`（内部调用
+# 版本标签推送不再直接触发本工作流：标签发布统一走 publish.yml，由它先跑 CI 门禁再
+# 复用本工作流构建，避免同一个标签被构建两次、也避免"两次构建产出不同制品"。
+#
+# 制品构建本身复用仓库唯一的发布入口 `make release-dist`（内部调用
 # cmd/agentflow-release），不在工作流里复制一套可能不一致的编译命令。
 #
 # 运行冒烟在目标平台的原生 Runner 上执行。若某个平台的 Runner 标签在目标仓库不可用，
@@ -15,9 +18,22 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
+  workflow_call:
+    inputs:
+      version:
+        description: "版本号 vMAJOR.MINOR.PATCH；由调用方从标签解析后传入"
+        required: true
+        type: string
+    outputs:
+      version:
+        description: "本次构建的版本号"
+        value: ${{ jobs.resolve.outputs.version }}
+      commit:
+        description: "本次构建使用的完整提交 SHA"
+        value: ${{ jobs.resolve.outputs.commit }}
+      artifact_name:
+        description: "Actions 制品名称，调用方据此下载制品"
+        value: ${{ jobs.resolve.outputs.artifact_name }}
   workflow_dispatch:
     inputs:
       version:
@@ -27,6 +43,7 @@ on:
         type: string
 
 # 最小权限：只读取仓库内容，不使用 Secret，也不写入仓库。
+# 发布权限只授予 publish.yml 中实际创建 Release 的 Job。
 permissions:
   contents: read
 
@@ -48,6 +65,7 @@ jobs:
     outputs:
       version: ${{ steps.resolve.outputs.version }}
       commit: ${{ steps.resolve.outputs.commit }}
+      artifact_name: ${{ steps.resolve.outputs.artifact_name }}
     steps:
       # 版本与提交都来自事件上下文，不需要检出代码即可解析。
       - name: 解析版本号与提交号
@@ -93,6 +111,8 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "commit=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
+          # 制品名只在这里生成一次：构建上传与发布下载都用同一个取值，避免两处命名漂移。
+          echo "artifact_name=agentflow-release-$version" >> "$GITHUB_OUTPUT"
           {
             echo "### 发布版本"
             echo
@@ -135,8 +155,29 @@ jobs:
       # make release-dist 的顺序是：前端生产构建 → 校验入口 HTML/JS/CSS → 逐平台交叉编译
       # → 打包 → 写 SHA256SUMS 与 release-manifest.json → 回读自检。顺序由 Makefile 保证，
       # 不允许先编译 Go 再构建前端。
+      #
+      # 这里同时把"实际用于构建的环境"写进制品元数据：Go/Node/pnpm 版本、仓库、工作流、
+      # 运行标识。缺少这些信息时正式版本的构建会直接失败，而不是产出无法溯源的制品。
       - name: 构建并打包发布制品
-        run: make release-dist VERSION="${{ needs.resolve.outputs.version }}" RELEASE_DIR="${{ env.RELEASE_DIR }}"
+        env:
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SOURCE_RUN_ID: ${{ github.run_id }}
+          SOURCE_WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          # 从 owner/repo/.github/workflows/x.yml@ref 里取出工作流文件路径。
+          workflow_file="${SOURCE_WORKFLOW_REF#*/}"
+          workflow_file="${workflow_file#*/}"
+          workflow_file="${workflow_file%%@*}"
+          make release-dist \
+            VERSION="${{ needs.resolve.outputs.version }}" \
+            RELEASE_DIR="${{ env.RELEASE_DIR }}" \
+            NODE_VERSION="$(node --version)" \
+            PNPM_VERSION="$(pnpm --version)" \
+            SOURCE_REPOSITORY="$SOURCE_REPOSITORY" \
+            SOURCE_WORKFLOW="$workflow_file" \
+            SOURCE_RUN_ID="$SOURCE_RUN_ID" \
+            ATTESTATION_PROVIDER="github-artifact-attestation"
       # 独立复核：用 sha256sum 校验制品与校验文件一致，而不是只看构建工具的退出码。
       - name: 校验制品与校验文件一致
         working-directory: ${{ env.RELEASE_DIR }}
@@ -144,6 +185,15 @@ jobs:
           set -euo pipefail
           sha256sum -c SHA256SUMS
           ls -l
+      # 再核验一次版本、提交、平台覆盖与"目录里没有多余文件"：发布工作流会把这份结论
+      # 当作上传依据，不能只靠人眼看摘要。
+      - name: 核验发布目录
+        run: |
+          set -euo pipefail
+          go run ./cmd/agentflow-release verify-release \
+            -dir "${{ env.RELEASE_DIR }}" \
+            -version "${{ needs.resolve.outputs.version }}" \
+            -commit "${{ needs.resolve.outputs.commit }}"
       - name: 输出发布清单摘要
         working-directory: ${{ env.RELEASE_DIR }}
         run: |
@@ -158,7 +208,7 @@ jobs:
           manifest = json.loads(pathlib.Path("release-manifest.json").read_text(encoding="utf-8"))
           lines = ["### 发布制品", "", "| 制品 | 大小（字节） | SHA-256 |", "| --- | --- | --- |"]
           for artifact in manifest["artifacts"]:
-              lines.append(f"| `artifact['file']}` | {artifact['size']} | `artifact['sha256']}` |")
+              lines.append(f"| `{artifact['file']}` | {artifact['size']} | `{artifact['sha256']}` |")
           pathlib.Path(sys.argv[1]).write_text("\n".join(lines) + "\n", encoding="utf-8")
           PY
           cat "$summary" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
@@ -166,7 +216,7 @@ jobs:
       - name: 上传发布制品
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: agentflow-release-${{ needs.resolve.outputs.version }}
+          name: ${{ needs.resolve.outputs.artifact_name }}
           path: |
             ${{ env.RELEASE_DIR }}/*.tar.gz
             ${{ env.RELEASE_DIR }}/*.zip
@@ -219,7 +269,7 @@ jobs:
       - name: 下载发布制品
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          name: agentflow-release-${{ needs.resolve.outputs.version }}
+          name: ${{ needs.resolve.outputs.artifact_name }}
           path: ${{ github.workspace }}/.release-artifacts
       # 冒烟测试本体是仓库内的 Go 用例：它独立解压制品、校验布局与 version.json、
       # 执行版本查询，再从解压目录启动程序核验 HTTP API 与前端静态资源。
@@ -262,6 +312,7 @@ jobs:
             echo "版本：\`${VERSION:-（未解析）}\`　提交：\`${COMMIT:-（未解析）}\`"
             echo
             echo "本工作流只上传 Actions 运行制品，不创建 GitHub Release、不推送镜像、不部署环境。"
+            echo "正式 Release 由 .github/workflows/publish.yml 在 CI 门禁与全部冒烟通过后创建。"
           } > "$report"
           cat "$report"
           cat "$report" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"

@@ -40,6 +40,20 @@ type BuildOptions struct {
 	BuildDate string
 	// GoVersion 是 Go 工具链版本；留空时取运行期版本。
 	GoVersion string
+	// NodeVersion 是实际用于构建前端产物的 Node.js 版本，可带 v 前缀。
+	//
+	// 正式版本必须给出：制品的可复现性依赖"前端产物由哪套工具链构建"。
+	NodeVersion string
+	// PnpmVersion 是实际用于构建前端产物的 pnpm 版本。
+	PnpmVersion string
+	// SourceRepository 是构建该制品的仓库（owner/name），本地构建留空。
+	SourceRepository string
+	// SourceWorkflow 是执行构建的工作流文件，本地构建留空。
+	SourceWorkflow string
+	// SourceRunID 是执行构建的工作流运行标识，本地构建留空。
+	SourceRunID string
+	// AttestationProvider 是来源证明的生成机制，本地构建留空。
+	AttestationProvider string
 }
 
 // BuildResult 是一次发布构建的结果。
@@ -104,11 +118,17 @@ func BuildDistribution(options BuildOptions, stdout, stderr io.Writer) (BuildRes
 	}
 
 	manifest := Manifest{
-		Version:   metadata.Version,
-		Commit:    metadata.Commit,
-		BuildDate: metadata.BuildDate,
-		GoVersion: metadata.GoVersion,
-		Artifacts: artifacts,
+		Version:             metadata.Version,
+		Commit:              metadata.Commit,
+		BuildDate:           metadata.BuildDate,
+		GoVersion:           metadata.GoVersion,
+		NodeVersion:         metadata.NodeVersion,
+		PnpmVersion:         metadata.PnpmVersion,
+		SourceRepository:    strings.TrimSpace(options.SourceRepository),
+		SourceWorkflow:      strings.TrimSpace(options.SourceWorkflow),
+		SourceRunID:         strings.TrimSpace(options.SourceRunID),
+		AttestationProvider: strings.TrimSpace(options.AttestationProvider),
+		Artifacts:           artifacts,
 	}
 	if err := manifest.Validate(); err != nil {
 		return BuildResult{}, fmt.Errorf("发布清单校验失败: %w", err)
@@ -153,10 +173,12 @@ func resolveMetadata(options BuildOptions) (Metadata, error) {
 		goVersion = runtime.Version()
 	}
 	metadata := Metadata{
-		Version:   version,
-		Commit:    commit,
-		BuildDate: buildDate,
-		GoVersion: goVersion,
+		Version:     version,
+		Commit:      commit,
+		BuildDate:   buildDate,
+		GoVersion:   goVersion,
+		NodeVersion: NormalizeToolVersion(options.NodeVersion),
+		PnpmVersion: NormalizeToolVersion(options.PnpmVersion),
 	}
 	if err := metadata.Validate(); err != nil {
 		return Metadata{}, err

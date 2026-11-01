@@ -207,7 +207,118 @@ make release
 # AgentFlow 服务已启动: http://127.0.0.1:26380
 ```
 
-### 跨平台发布制品
+### 正式版本下载、校验与安装
+
+> **当前状态**：正式发布能力（构建制品、`SHA256SUMS`、`release-manifest.json`、来源证明、
+> 发布门禁与上传后核验）已经实现并通过本地静态验证与本地等价命令验证，但**尚未发布任何
+> 公开正式版本**，`publish.yml` 也尚未在 GitHub Actions 上真实运行。下面的下载入口在首次
+> 正式发布之后才可用。
+
+#### 1. 下载入口
+
+正式版本发布在 GitHub Releases：
+
+```text
+https://github.com/lingting/lingting-agent-flow/releases
+```
+
+每个 Release 恰好包含 `SHA256SUMS`、`release-manifest.json` 与各平台压缩包，正文是该版本的
+版本说明。版本号形如 `v1.2.3`，与标签、制品文件名、`version.json` 完全一致。
+
+#### 2. 选择平台
+
+| 你的系统 | 下载 |
+| --- | --- |
+| Linux x86_64 | `agentflow_v1.2.3_linux_amd64.tar.gz` |
+| Linux arm64（含多数 ARM 服务器） | `agentflow_v1.2.3_linux_arm64.tar.gz` |
+| macOS Intel | `agentflow_v1.2.3_darwin_amd64.tar.gz` |
+| macOS Apple Silicon | `agentflow_v1.2.3_darwin_arm64.tar.gz` |
+| Windows x86_64 | `agentflow_v1.2.3_windows_amd64.zip` |
+
+其他平台（Linux 386、Windows arm64 等）不在发布矩阵内：能交叉编译不等于产品支持，这些
+平台没有制品。
+
+#### 3. 校验文件一致性（SHA-256）
+
+```bash
+# Linux
+sha256sum -c SHA256SUMS
+
+# macOS
+shasum -a 256 -c SHA256SUMS
+
+# Windows（PowerShell）：逐个文件计算，再与 release-manifest.json 中的 sha256 比对
+Get-FileHash .\agentflow_v1.2.3_windows_amd64.zip -Algorithm SHA256
+```
+
+只下载了单个文件时，也可以直接对清单里对应行校验：
+
+```bash
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+#### 4. 校验来源（来源证明）
+
+SHA-256 只能说明"文件与校验值一致"，无法说明文件是不是由本仓库构建出来的。正式制品的
+来源用 GitHub Artifact Attestation（Actions OIDC 无密钥证明）核验，需要 GitHub CLI 2.49+：
+
+```bash
+gh attestation verify agentflow_v1.2.3_linux_amd64.tar.gz \
+  --repo lingting/lingting-agent-flow
+```
+
+核验通过说明该文件由本仓库的构建工作流在对应提交上产出。它不代表代码经过安全审计或功能
+验收。两种能力的分工见 [`docs/release.md`](./docs/release.md) §7、§8。
+
+**未通过来源核验的二进制不应被当作已验证的官方制品。**
+
+#### 5. 解压与执行
+
+```bash
+# Linux / macOS
+tar -xzf agentflow_v1.2.3_linux_amd64.tar.gz
+chmod +x agentflow
+./agentflow version
+```
+
+```powershell
+# Windows PowerShell
+Expand-Archive .\agentflow_v1.2.3_windows_amd64.zip -DestinationPath .\agentflow
+.\agentflow\agentflow.exe version
+```
+
+压缩包是扁平布局：`agentflow`（或 `agentflow.exe`）、`QUICKSTART.md`、
+`THIRD-PARTY-NOTICES.md`、`version.json`。`version` 输出的版本、提交与构建时间必须与
+`version.json` 一致。
+
+#### 6. 首次启动与健康检查
+
+```bash
+./agentflow server --config /path/to/agentflow.yaml
+# AgentFlow 服务已启动: http://127.0.0.1:26380
+
+curl http://127.0.0.1:26380/api/v1/health     # 期望 {"status":"ok"}
+```
+
+页面、API 与后台服务都由同一个可执行文件提供，不需要 Node.js 或额外的静态文件服务器。
+默认只监听 `127.0.0.1`。
+
+#### 7. 故障诊断
+
+| 现象 | 排查方向 |
+| --- | --- |
+| `sha256sum -c` 报 FAILED | 下载不完整或文件被替换：重新下载，仍失败则不要使用 |
+| `gh attestation verify` 失败 | 文件不是该仓库该工作流产出的；确认仓库名与版本，不要使用未经核验的二进制 |
+| `version` 输出与 `version.json` 不一致 | 压缩包被替换或混用了不同版本：重新下载 |
+| 启动即退出并提示缺少前端产物 | 该二进制不是正式制品（可能是本地 `go build`）：改用 Release 中的制品 |
+| 页面空白、静态资源 404 | 同上，`//go:embed` 产物缺失时会在启动阶段报错，请核对来源 |
+| 服务启动失败、端口被占用 | 用 `--address 127.0.0.1:<端口>` 指定其他端口 |
+| 远程任务执行报前置条件错误 | 需要目标机器具备 SSH 与 Docker CLI/Engine 29.0.0 及以上 |
+
+更多运行与配置说明见本文「统一服务入口」「HTTP 接口与路径分发」两节；发布相关的完整规则见
+[`docs/release.md`](./docs/release.md)。
+
+### 构建发布制品（维护者）
 
 正式发布制品由同一个入口生成：
 
@@ -218,8 +329,17 @@ make release-dist VERSION=v1.2.3
 该目标先构建并校验前端产物，再按发布矩阵交叉编译（`CGO_ENABLED=0`），最后在
 `dist/release/` 生成压缩包、`SHA256SUMS` 与 `release-manifest.json`，并回读自检
 （压缩包布局、版本元数据与 SHA-256 一致性）。版本号缺省为 `dev`，只用于本地核对打包流程；
-正式版本必须是 `vMAJOR.MINOR.PATCH`，否则构建立即失败。CI 中由
-`.github/workflows/release.yml` 在版本标签推送或手动触发时执行同一入口。
+正式版本必须是 `vMAJOR.MINOR.PATCH`，否则构建立即失败。
+
+本地复核已生成的目录（与发布工作流使用同一份核验规则）：
+
+```bash
+make release-verify VERSION=v1.2.3
+```
+
+正式发布由 `.github/workflows/publish.yml` 在版本标签推送或手动触发时执行：先跑 `ci.yml`
+全量门禁，再由 `.github/workflows/release.yml` 构建制品与运行冒烟，最后生成来源证明、
+创建草稿 Release、上传、重新下载核验后才公开。
 
 发布矩阵（只包含经过核实的平台）：
 
@@ -231,20 +351,12 @@ make release-dist VERSION=v1.2.3
 | macOS arm64 | `agentflow_<version>_darwin_arm64.tar.gz` | 已完成 | 未执行（本机无 macOS 环境） |
 | Windows amd64 | `agentflow_<version>_windows_amd64.zip` | 已完成 | 已完成（本机解压启动并核验页面与 API） |
 
-其他平台（例如 Linux 386、Windows arm64）不在发布矩阵内：能交叉编译不等于产品支持。
-Linux 与 macOS 的待验证项需要对应平台的原生 Runner 才能补齐，交叉编译成功不能替代运行验收。
+其他平台（例如 Linux 386、Windows arm64）不在发布矩阵内。Linux 与 macOS 的待验证项需要
+对应平台的原生 Runner 才能补齐，交叉编译成功不能替代运行验收。
 
-每个压缩包包含可执行文件、`QUICKSTART.md`、`THIRD-PARTY-NOTICES.md` 与 `version.json`。
-`version.json` 与 `release-manifest.json` 记录版本、提交 SHA、构建时间、Go 工具链版本与目标
-平台。构建环境、制品布局与平台支持边界的完整说明见 [`docs/release.md`](./docs/release.md)。
-
-下载后核对制品：
-
-```bash
-sha256sum -c SHA256SUMS          # Linux
-shasum -a 256 -c SHA256SUMS      # macOS
-Get-FileHash <文件名> -Algorithm SHA256   # Windows
-```
+`version.json` 与 `release-manifest.json` 记录版本、提交 SHA、构建时间、Go / Node / pnpm
+工具链版本与目标平台。构建环境、制品布局、来源证明与发布门禁的完整说明见
+[`docs/release.md`](./docs/release.md)。
 
 ### 版本查询
 

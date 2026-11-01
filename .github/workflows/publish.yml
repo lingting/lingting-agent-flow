@@ -1,0 +1,298 @@
+# AgentFlow 正式 Release 发布流水线。
+#
+# 触发方式（只有这两种）：
+#   - 推送 vMAJOR.MINOR.PATCH 版本标签；
+#   - 在某个版本标签上手动运行（workflow_dispatch），用于失败重试。
+# 分支、dev 分支名或临时构建号一律拒绝：正式版本必须能对应到唯一提交。
+#
+# 阶段与门禁（任何一步不是 success，都不会创建 Release）：
+#   1. resolve  校验标签格式与提交 SHA；
+#   2. ci       复用 ci.yml 全量门禁（Go 全量测试、竞态、前端单元与 E2E、lint / 类型 / 构建）；
+#   3. build    复用 release.yml 构建五个平台制品、SHA256SUMS 与 release-manifest.json，
+#               并在目标平台原生 Runner 上跑运行冒烟；
+#   4. publish  核验制品 → 生成 GitHub OIDC 来源证明 → 创建草稿 Release → 上传 →
+#               重新下载并核验远端资产与来源证明 → 最后才把草稿转成公开 Release。
+#
+# 权限边界：工作流默认只读仓库内容。只有 publish Job 取得 contents: write 与
+# id-token / attestations 权限；构建与 CI Job 保持只读，且整个流程不使用任何仓库 Secret。
+#
+# 制品只构建一次：publish 复用 build 产出的 Actions 制品，不会另跑一遍编译，避免
+# "CI 验证的对象"和"实际发布的制品"不是同一份字节。
+name: Publish
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+# 默认最小权限；发布权限在 publish Job 上单独授予。
+permissions:
+  contents: read
+
+# 同一个标签不允许并行发布；取消会留下只有一半资产的草稿。
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_DIR: dist/release
+  # Release 说明写在制品目录之外：发布目录只允许出现清单声明的资产。
+  RELEASE_NOTES: dist/RELEASE_NOTES.md
+
+jobs:
+  resolve:
+    name: 校验版本标签
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      commit: ${{ steps.resolve.outputs.commit }}
+    steps:
+      # 标签校验不检出代码：失败要在任何构建开始之前发生。
+      - name: 校验标签格式与提交号
+        id: resolve
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # 只接受版本标签：分支上的手动运行不算正式发布。
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "::error::正式发布只能由版本标签触发：当前 ref 是 $REF_TYPE（$REF_NAME）"
+            exit 1
+          fi
+          # 与 internal/release.ValidateVersion 保持同一格式，拒绝 dev、分支名与构建号。
+          if ! printf '%s' "$REF_NAME" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "::error::标签 $REF_NAME 不是 vMAJOR.MINOR.PATCH 形式"
+            exit 1
+          fi
+          if ! printf '%s' "$COMMIT_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::提交号 $COMMIT_SHA 不是完整的 Git SHA"
+            exit 1
+          fi
+          echo "version=$REF_NAME" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
+          {
+            echo "## 正式发布"
+            echo
+            echo "| 字段 | 取值 |"
+            echo "| --- | --- |"
+            echo "| 版本标签 | \`$REF_NAME\` |"
+            echo "| 提交 | \`$COMMIT_SHA\` |"
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+  ci:
+    name: CI 门禁
+    needs: resolve
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: 构建发布制品
+    needs: resolve
+    uses: ./.github/workflows/release.yml
+    with:
+      version: ${{ needs.resolve.outputs.version }}
+
+  publish:
+    name: 发布正式 Release
+    needs: [resolve, ci, build]
+    # 三个前置 Job 必须都是 success：失败或被跳过都不允许发布。
+    if: needs.resolve.result == 'success' && needs.ci.result == 'success' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # 发布权限只授予这个 Job：创建 Release 与生成来源证明是唯一需要写权限的动作。
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.resolve.outputs.version }}
+      COMMIT: ${{ needs.resolve.outputs.commit }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 安装 Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - name: 下载发布制品
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: ${{ env.RELEASE_DIR }}
+      # 发布前的完整性核验：校验文件、清单、版本、提交、平台覆盖与目录中是否存在多余文件。
+      - name: 发布前核验制品
+        run: |
+          set -euo pipefail
+          cd "$RELEASE_DIR"
+          sha256sum -c SHA256SUMS
+          cd "$GITHUB_WORKSPACE"
+          go run ./cmd/agentflow-release verify-release \
+            -dir "$RELEASE_DIR" \
+            -version "$TAG" \
+            -commit "$COMMIT"
+      # GitHub Actions OIDC 无密钥来源证明：把制品摘要与本次工作流运行、仓库、提交绑定。
+      # 这是唯一未按提交 SHA 固定的 Action 引用，原因与后续动作见 docs/release.md。
+      - name: 生成来源证明
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: |
+            ${{ env.RELEASE_DIR }}/*.tar.gz
+            ${{ env.RELEASE_DIR }}/*.zip
+            ${{ env.RELEASE_DIR }}/SHA256SUMS
+            ${{ env.RELEASE_DIR }}/release-manifest.json
+          show-summary: true
+      # 没有来源证明的制品不得作为正式发布：这一步在证明生成之后复核清单声明。
+      - name: 核验来源信息完整
+        run: |
+          set -euo pipefail
+          go run ./cmd/agentflow-release verify-release \
+            -dir "$RELEASE_DIR" \
+            -version "$TAG" \
+            -commit "$COMMIT" \
+            -require-provenance
+      - name: 生成 Release 说明
+        run: |
+          set -euo pipefail
+          go run ./cmd/agentflow-release notes \
+            -dir "$RELEASE_DIR" \
+            -version "$TAG" \
+            -output "$RELEASE_NOTES"
+      # 同一个标签不允许静默覆盖：已存在的 Release（含上次失败留下的草稿）必须由人处理。
+      - name: 拒绝覆盖已有 Release
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::已存在 $TAG 的 Release（含草稿）。正式制品不允许静默覆盖。"
+            echo "::error::请先在 GitHub 上确认并删除该 Release（含草稿），再从标签重新运行本工作流。"
+            exit 1
+          fi
+          echo "确认 $TAG 尚无 Release。"
+      # 先创建草稿：任何上传或核验失败都不会让外部看到"发布成功但资产不全"。
+      - name: 创建草稿 Release
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "AgentFlow $TAG" \
+            --notes-file "$RELEASE_NOTES" \
+            --draft \
+            --verify-tag
+      - name: 上传发布资产
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" \
+            "$RELEASE_DIR"/*.tar.gz \
+            "$RELEASE_DIR"/*.zip \
+            "$RELEASE_DIR/SHA256SUMS" \
+            "$RELEASE_DIR/release-manifest.json" \
+            --repo "$GITHUB_REPOSITORY"
+      # 上传后核验：不看上传命令的返回值，而是重新读取远端资产列表并重新下载核对。
+      - name: 上传后核验远端资产
+        run: |
+          set -euo pipefail
+          verify_dir="$RUNNER_TEMP/verify-assets"
+          mkdir -p "$verify_dir"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$verify_dir"
+          names="$RUNNER_TEMP/release-assets.txt"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' > "$names"
+          go run ./cmd/agentflow-release verify-assets \
+            -dir "$verify_dir" \
+            -version "$TAG" \
+            -assets-file "$names"
+          cd "$verify_dir"
+          sha256sum -c SHA256SUMS
+          cd "$GITHUB_WORKSPACE"
+          go run ./cmd/agentflow-release verify-release \
+            -dir "$verify_dir" \
+            -version "$TAG" \
+            -commit "$COMMIT" \
+            -require-provenance
+      # 来源证明必须能被官方 CLI 验证通过，否则不允许把草稿转为正式发布。
+      - name: 核验来源证明
+        run: |
+          set -euo pipefail
+          verify_dir="$RUNNER_TEMP/verify-assets"
+          for asset in "$verify_dir"/*.tar.gz "$verify_dir"/*.zip \
+            "$verify_dir/SHA256SUMS" "$verify_dir/release-manifest.json"; do
+            echo "核验来源证明: $(basename "$asset")"
+            gh attestation verify "$asset" --repo "$GITHUB_REPOSITORY"
+          done
+      # 全部核验通过后才公开：草稿到公开是最后一步，失败则保持草稿供人工处置。
+      - name: 发布正式 Release
+        run: |
+          set -euo pipefail
+          gh release edit "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false \
+            --latest
+      - name: 核验 Release 已公开
+        run: |
+          set -euo pipefail
+          is_draft="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')"
+          if [ "$is_draft" != "false" ]; then
+            echo "::error::$TAG 仍处于草稿状态，发布未完成"
+            exit 1
+          fi
+          {
+            echo "### 正式 Release 已发布"
+            echo
+            echo "标签：\`$TAG\`　提交：\`$COMMIT\`"
+            echo
+            echo "资产、SHA-256 与来源证明均已在上传后重新核验。"
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+  publish-summary:
+    name: 发布汇总
+    needs: [resolve, ci, build, publish]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # 结论只来自结构化结果：被跳过的 Job 不计为通过，发布未完成必须让工作流失败。
+      - name: 汇总发布结论
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          COMMIT: ${{ needs.resolve.outputs.commit }}
+          RESOLVE_RESULT: ${{ needs.resolve.result }}
+          CI_RESULT: ${{ needs.ci.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+        run: |
+          set -uo pipefail
+          report="$RUNNER_TEMP/publish-summary.md"
+          {
+            echo "## 发布结论"
+            echo
+            echo "| 阶段 | 结论 |"
+            echo "| --- | --- |"
+            echo "| 标签校验 | ${RESOLVE_RESULT:-（空）} |"
+            echo "| CI 门禁 | ${CI_RESULT:-（空）} |"
+            echo "| 制品构建与冒烟 | ${BUILD_RESULT:-（空）} |"
+            echo "| 正式 Release 发布 | ${PUBLISH_RESULT:-（空）} |"
+            echo
+            echo "版本：\`${VERSION:-（未解析）}\`　提交：\`${COMMIT:-（未解析）}\`"
+          } > "$report"
+          cat "$report"
+          cat "$report" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          failed=0
+          for result in "${RESOLVE_RESULT:-}" "${CI_RESULT:-}" "${BUILD_RESULT:-}" "${PUBLISH_RESULT:-}"; do
+            case "$result" in
+              success) ;;
+              *)
+                failed=1
+                ;;
+            esac
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::正式发布未完成：存在非成功的阶段（跳过与失败都不计为通过）"
+            exit 1
+          fi
+          echo "正式 Release 发布完成。"

@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check vet test test-unit test-local test-pi test-ssh test-e2e test-packaging test-release-verify test-race build release release-dist run web-install web-build web-dev web-verify serve clean check
+.PHONY: fmt fmt-check vet test test-unit test-local test-pi test-ssh test-e2e test-packaging test-release-verify test-race build release release-dist release-verify release-notes run web-install web-build web-dev web-verify serve clean check
 
 VERSION ?= dev
 # 开发构建使用短提交便于阅读；正式发布制品中的提交由 cmd/agentflow-release 写入完整 SHA。
@@ -6,10 +6,20 @@ COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildDate=$(BUILD_DATE)
 BINARY := bin/agentflow
-# 发布制品输出目录与目标平台列表：留空表示使用 internal/release 中的发布矩阵。
+# 发布制品输出目录与目标平台列表：目标平台留空表示使用 internal/release 中的发布矩阵。
 RELEASE_DIR ?= dist/release
+# Release 说明写在制品目录之外：发布目录只允许出现清单声明的资产。
+RELEASE_NOTES ?= dist/RELEASE_NOTES.md
 RELEASE_PLATFORMS ?=
 PARALLEL ?= 8
+# 前端构建工具链版本：记进制品的版本元数据，正式版本必须能取到真实版本。
+NODE_VERSION ?= $(shell node --version 2>/dev/null)
+PNPM_VERSION ?= $(shell pnpm --version 2>/dev/null)
+# 正式发布的来源信息：只由发布工作流传入，本地构建留空。
+SOURCE_REPOSITORY ?=
+SOURCE_WORKFLOW ?=
+SOURCE_RUN_ID ?=
+ATTESTATION_PROVIDER ?=
 
 fmt:
 	gofmt -w cmd internal tests
@@ -83,7 +93,23 @@ release: web-build web-verify
 # 最后写出压缩包、SHA256SUMS 与 release-manifest.json 并自检。
 # 正式版本必须通过 VERSION=vMAJOR.MINOR.PATCH 传入；缺省值 dev 只用于本地核对打包流程。
 release-dist: web-build web-verify
-	go run ./cmd/agentflow-release -version "$(VERSION)" -output "$(RELEASE_DIR)" -platforms "$(RELEASE_PLATFORMS)"
+	go run ./cmd/agentflow-release -version "$(VERSION)" -output "$(RELEASE_DIR)" \
+		-platforms "$(RELEASE_PLATFORMS)" \
+		-node-version "$(NODE_VERSION)" \
+		-pnpm-version "$(PNPM_VERSION)" \
+		-source-repository "$(SOURCE_REPOSITORY)" \
+		-source-workflow "$(SOURCE_WORKFLOW)" \
+		-source-run-id "$(SOURCE_RUN_ID)" \
+		-attestation-provider "$(ATTESTATION_PROVIDER)"
+
+# release-verify 核验已生成的发布目录：版本与提交一致、平台覆盖完整、资产摘要匹配、
+# 目录中没有多余文件。发布工作流在构建之后与下载之后都执行同一入口。
+release-verify:
+	go run ./cmd/agentflow-release verify-release -dir "$(RELEASE_DIR)" -version "$(VERSION)"
+
+# release-notes 由发布清单生成 Release 说明（要求清单已声明来源信息）。
+release-notes:
+	go run ./cmd/agentflow-release notes -dir "$(RELEASE_DIR)" -version "$(VERSION)" -output "$(RELEASE_NOTES)"
 
 # test-release-verify 执行发布制品的端到端打包验收：真实生成全部目标平台制品并校验
 # 压缩包布局、版本元数据与 SHA-256。需要 pnpm 与已安装的前端依赖，否则用例自行跳过。

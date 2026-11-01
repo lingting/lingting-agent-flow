@@ -907,6 +907,25 @@
   **`P4-M5` 仍为 `pending`**，本轮未采集任何真实使用数据。下一步候选：①首次推送版本标签后按
   `release.yml` 的真实结果补齐四个平台的运行验收证据；②按包归属/运行标识过滤远程零残留核验，
   消除并行误判；③评估并发迁移的忙等待窗口与两处 `-race` 下的测试隔离问题。
+- **正式 Release 发布与制品可信分发（2026-11-01，基线为当前本地 checkout `8c6a28b`，不执行
+  `git fetch`）已完成，记录见 [`P4-release-publish.md`](./P4-release-publish.md)**。本轮把"能构建
+  发布制品"推进到"能发布可验证的正式版本"：①补齐制品溯源信息——清单与 `version.json` 新增
+  `node_version` / `pnpm_version`（取自构建时实际执行的 `node --version` / `pnpm --version`）
+  与 `source_repository` / `source_workflow` / `source_run_id` / `attestation_provider`；②新增
+  `internal/release/publish.go` 作为发布核验的唯一规则来源（资产集合、平台覆盖、来源信息、发布
+  目录、远端资产列表、版本说明），并由 `cmd/agentflow-release` 的 `verify-release` /
+  `verify-assets` / `notes` 子命令暴露；③`release.yml` 改为 `workflow_call` +
+  `workflow_dispatch`、去掉标签推送触发，`ci.yml` 增加 `workflow_call`，新增
+  `publish.yml`：标签校验 → 复用 CI 全量门禁 → 复用制品构建与五平台冒烟 → 发布前核验 →
+  GitHub OIDC 来源证明 → 拒绝覆盖 → 草稿 Release → 上传 → 重新下载核验 → 核验来源证明 →
+  转公开，写权限只授予 `publish` Job；④顺手修复 `release.yml` 摘要步骤里 Python f-string
+  的语法缺陷（少一个 `{`，会让构建 Job 在最后一步失败）；⑤新增发布专项测试（目录/资产核验、
+  来源信息、说明生成、三个工作流的触发/权限/依赖/步骤顺序/豁免清单一致性）并扩展 e2e 打包
+  验收。**状态严格区分**：工作流与规则已实现、本地静态验证与本地等价命令验证已通过；GitHub
+  Actions 上的实际运行与公开 Release **均未执行**。**`P4-M5` 仍为 `pending`**，本轮未产生
+  任何真实使用数据。下一步候选：①推送首个版本标签后按 `publish.yml` 的真实结果补齐远端发布
+  与四平台运行验收证据；②把 `actions/attest-build-provenance` 收紧到可核对的提交 SHA；③按包
+  归属/运行标识过滤远程零残留核验。
 
 > 阶段与里程碑的状态可能随开发推进而变化，以上仅为撰写本路线图时的快照；最新状态
 > 以 `ROADMAP.md` 的"当前实现状态摘要"、`P1-single-task-e2e.md` 的里程碑表与
@@ -964,6 +983,7 @@
 | [`P4-task-event-stream.md`](./P4-task-event-stream.md) | P4 常规开发：任务事件实时推送（SSE）与 Web 实时展示（实施前的服务端 / 前端代码证据、`GET /tasks/{taskID}/events/stream` 契约与错误语义、事件自增标识游标与断线补发、`latest_event_id` 消除"查询 ↔ 连接"窗口、服务端长连接关闭信号、前端连接生命周期与重连退避、与历史分页并存的独立实时区域、收到事件后的合并状态确认、文件清单与调用链、实际执行的非测试检查、未执行测试与剩余风险；§10 重连失败上限的原始错误与修复后语义、既有 SSE 契约用例的补充范围、未覆盖的实时推送行为与专项验收条件；§11 浏览器端 SSE 消费路径的 E2E 断言：历史拦截器与 `/events/stream` 的显式区分、受控 `EventSource` 替身与 6 个浏览器用例、替身限制与仍未覆盖的传输层行为、实际执行的非测试检查与未运行的测试；§12 浏览器 E2E 全量测试验收的实际结果（6 个用例 1 通过 / 5 失败、定位器歧义根因、Go 与前端全量统计、跳过项与产物路径）；§13 SSE 全链路验收闭环：定位器歧义修复、5 个服务端真实传输用例（15 秒心跳、205 条多批、写失败、请求取消、慢客户端）、2 个重连耗尽与手动重连浏览器用例、1 个原生 `EventSource` 用例与 `route.fulfill` 截断发现、其余失败的范围外证据、逐条命令退出码与 PASS / FAIL / SKIP 统计、测试产物、仍未覆盖项与收工检查） |
 | [`P4-ci-gate.md`](./P4-ci-gate.md) | P4 工程质量：全栈 CI 测试门禁（现有 CI 盘点与缺口清单、4 个必需 Job 的职责划分与覆盖范围、触发与并发策略、版本 / 缓存 / 依赖安全、失败产物与脱敏边界、统一验收状态机、工作流静态校验与实际本地测试结果、远端 Workflow Run 证据缺失说明） |
 | [`P4-release-pipeline.md`](./P4-release-pipeline.md) | P4 工程质量：正式发布与构建制品流水线（开工前现状盘点与"已实现 / 缺失"边界、统一版本元数据与拒绝规则、发布矩阵的核实依据、`make release-dist` 与 `cmd/agentflow-release` 的构建顺序、制品命名与扁平布局、`SHA256SUMS` 与 `release-manifest.json` 的四项自检、发布工作流四个 Job 与最小权限、新增测试分层与实际执行结果、制品实测数据表、交叉编译 / 运行验收 / 待验证三态的严格区分、未执行项与剩余限制） |
+| [`P4-release-publish.md`](./P4-release-publish.md) | P4 工程质量：正式 Release 发布与制品可信分发（开工前资产盘点与三处溯源缺口、Node / pnpm 与来源字段进入元数据、`internal/release/publish.go` 的六类发布核验规则、`verify-release` / `verify-assets` / `notes` 三个子命令、`release.yml` 改为可复用 + `ci.yml` 可调用 + 新增 `publish.yml` 的门禁链与权限边界、草稿 Release 与上传后重新核验、GitHub OIDC 无密钥来源证明的取舍与唯一未固定 SHA 的例外、修复的 f-string 缺陷、新增 / 扩展测试清单、实际执行结果、未执行项与 `P4-M5` 关系） |
 
 ## 下一步工作的选择规则
 
