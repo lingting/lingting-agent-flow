@@ -15,6 +15,9 @@
 # 运行冒烟在目标平台的原生 Runner 上执行。若某个平台的 Runner 标签在目标仓库不可用，
 # 对应的冒烟 Job 会明确失败，而不是静默跳过：平台要么被真实验证，要么在 docs/release.md
 # 中标注为"仅交叉编译成功、运行验证未执行"。
+#
+# 具体执行逻辑在 .github/scripts/ 下（版本解析、制品构建、制品核验、结论汇总），
+# 本文件只声明 Job、依赖、矩阵与脚本调用。
 name: Release
 
 on:
@@ -67,7 +70,12 @@ jobs:
       commit: ${{ steps.resolve.outputs.commit }}
       artifact_name: ${{ steps.resolve.outputs.artifact_name }}
     steps:
-      # 版本与提交都来自事件上下文，不需要检出代码即可解析。
+      # 版本解析逻辑在 .github/scripts 里，因此这一步需要先检出代码；检出只读取源码，
+      # 不会在版本不合格之前开始构建。
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: 解析版本号与提交号
         id: resolve
         env:
@@ -75,52 +83,7 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           REF_TYPE: ${{ github.ref_type }}
           COMMIT_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          version=""
-          if [ "$REF_TYPE" = "tag" ]; then
-            # 标签推送：版本号必须与标签完全一致，不接受任何改写。
-            case "$REF_NAME" in
-              v[0-9]*.[0-9]*.[0-9]*) version="$REF_NAME" ;;
-              *)
-                echo "::error::标签 $REF_NAME 不是 vMAJOR.MINOR.PATCH 形式"
-                exit 1
-                ;;
-            esac
-          fi
-          if [ -n "$INPUT_VERSION" ]; then
-            if [ -n "$version" ] && [ "$INPUT_VERSION" != "$version" ]; then
-              echo "::error::手动输入的版本 $INPUT_VERSION 与标签 $version 不一致"
-              exit 1
-            fi
-            version="$INPUT_VERSION"
-          fi
-          if [ -z "$version" ]; then
-            echo "::error::无法确定版本号：请推送 vMAJOR.MINOR.PATCH 标签，或手动指定 version"
-            exit 1
-          fi
-          # 与 internal/release.ValidateVersion 保持同一格式；这里再校验一次是为了在
-          # 构建开始前失败，避免把无效版本写进制品文件名。
-          if ! printf '%s' "$version" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
-            echo "::error::版本号 $version 不是 vMAJOR.MINOR.PATCH 形式"
-            exit 1
-          fi
-          if ! printf '%s' "$COMMIT_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "::error::提交号 $COMMIT_SHA 不是完整的 Git SHA"
-            exit 1
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "commit=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
-          # 制品名只在这里生成一次：构建上传与发布下载都用同一个取值，避免两处命名漂移。
-          echo "artifact_name=agentflow-release-$version" >> "$GITHUB_OUTPUT"
-          {
-            echo "### 发布版本"
-            echo
-            echo "| 字段 | 取值 |"
-            echo "| --- | --- |"
-            echo "| 版本 | \`$version\` |"
-            echo "| 提交 | \`$COMMIT_SHA\` |"
-          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+        run: bash .github/scripts/resolve-release-version.sh --input-version "$INPUT_VERSION"
 
   build:
     name: 构建发布制品
@@ -164,46 +127,22 @@ jobs:
           SOURCE_RUN_ID: ${{ github.run_id }}
           SOURCE_WORKFLOW_REF: ${{ github.workflow_ref }}
         run: |
-          set -euo pipefail
-          # 从 owner/repo/.github/workflows/x.yml@ref 里取出工作流文件路径。
-          workflow_file="${SOURCE_WORKFLOW_REF#*/}"
-          workflow_file="${workflow_file#*/}"
-          workflow_file="${workflow_file%%@*}"
-          make release-dist \
-            VERSION="${{ needs.resolve.outputs.version }}" \
-            RELEASE_DIR="${{ env.RELEASE_DIR }}" \
-            NODE_VERSION="$(node --version)" \
-            PNPM_VERSION="$(pnpm --version)" \
-            SOURCE_REPOSITORY="$SOURCE_REPOSITORY" \
-            SOURCE_WORKFLOW="$workflow_file" \
-            SOURCE_RUN_ID="$SOURCE_RUN_ID" \
-            ATTESTATION_PROVIDER="github-artifact-attestation"
-      # 独立复核：用 sha256sum 校验制品与校验文件一致，而不是只看构建工具的退出码。
+          bash .github/scripts/build-release-dist.sh \
+            --version "${{ needs.resolve.outputs.version }}" \
+            --dir "${{ env.RELEASE_DIR }}" \
+            --attestation-provider "github-artifact-attestation"
+      # 独立复核：一次核验完成摘要、版本、提交、平台覆盖与"目录里没有多余文件"，
+      # 而不是只看构建工具的退出码；发布工作流会把这份结论当作上传依据。
       - name: 校验制品与校验文件一致
-        working-directory: ${{ env.RELEASE_DIR }}
         run: |
-          set -euo pipefail
-          sha256sum -c SHA256SUMS
-          ls -l
-      # 再核验一次版本、提交、平台覆盖与"目录里没有多余文件"：发布工作流会把这份结论
-      # 当作上传依据，不能只靠人眼看摘要。
-      - name: 核验发布目录
-        run: |
-          set -euo pipefail
-          go run ./cmd/agentflow-release verify-release \
-            -dir "${{ env.RELEASE_DIR }}" \
-            -version "${{ needs.resolve.outputs.version }}" \
-            -commit "${{ needs.resolve.outputs.commit }}"
+          bash .github/scripts/verify-release-assets.sh \
+            --dir "${{ env.RELEASE_DIR }}" \
+            --version "${{ needs.resolve.outputs.version }}" \
+            --commit "${{ needs.resolve.outputs.commit }}"
       - name: 输出发布清单摘要
-        working-directory: ${{ env.RELEASE_DIR }}
-        run: |
-          set -euo pipefail
-          summary="$RUNNER_TEMP/release-artifacts.md"
-          # 只列出清单里的制品名称、大小与摘要；不打印仓库路径、环境变量或凭据。
-          # 摘要生成逻辑放在仓库脚本里：YAML 块标量的内容自带缩进，here-document 的
-          # 结束标记同样会被缩进，导致整段脚本被当成数据吞掉。
-          python3 "$GITHUB_WORKSPACE/.github/scripts/release-artifacts-summary.py" "$summary"
-          cat "$summary" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+        # 摘要生成逻辑在 .github/scripts/release-artifacts-summary.py：它只读取清单声明的
+        # 制品名称、大小与 SHA-256，并直接追加到 Job 摘要，不打印仓库路径或环境变量。
+        run: python3 .github/scripts/release-artifacts-summary.py "${{ env.RELEASE_DIR }}"
       # 上传失败必须让 Job 失败，不能"显示成功后遗漏制品"。
       - name: 上传发布制品
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -271,8 +210,7 @@ jobs:
           AGENTFLOW_RELEASE_PLATFORM: ${{ matrix.os }}/${{ matrix.arch }}
           AGENTFLOW_RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
           AGENTFLOW_RELEASE_COMMIT: ${{ needs.resolve.outputs.commit }}
-        run: |
-          go test -count=1 -v -run TestReleaseArchiveSmoke ./tests/e2e/packaging/...
+        run: go test -count=1 -v -run TestReleaseArchiveSmoke ./tests/e2e/packaging/...
 
   release-summary:
     name: 发布汇总
@@ -290,35 +228,12 @@ jobs:
           BUILD_RESULT: ${{ needs.build.result }}
           SMOKE_RESULT: ${{ needs.smoke.result }}
         run: |
-          set -uo pipefail
-          report="$RUNNER_TEMP/release-summary.md"
-          {
-            echo "## 发布构建结论"
-            echo
-            echo "| 阶段 | 结论 |"
-            echo "| --- | --- |"
-            echo "| 版本解析 | ${RESOLVE_RESULT:-（空）} |"
-            echo "| 制品构建与上传 | ${BUILD_RESULT:-（空）} |"
-            echo "| 目标平台运行冒烟 | ${SMOKE_RESULT:-（空）} |"
-            echo
-            echo "版本：\`${VERSION:-（未解析）}\`　提交：\`${COMMIT:-（未解析）}\`"
-            echo
-            echo "本工作流只上传 Actions 运行制品，不创建 GitHub Release、不推送镜像、不部署环境。"
-            echo "正式 Release 由 .github/workflows/publish.yml 在 CI 门禁与全部冒烟通过后创建。"
-          } > "$report"
-          cat "$report"
-          cat "$report" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-          failed=0
-          for result in "${RESOLVE_RESULT:-}" "${BUILD_RESULT:-}" "${SMOKE_RESULT:-}"; do
-            case "$result" in
-              success) ;;
-              *)
-                failed=1
-                ;;
-            esac
-          done
-          if [ "$failed" -ne 0 ]; then
-            echo "::error::发布构建未全部成功：请按上表核对失败阶段"
-            exit 1
-          fi
-          echo "发布制品构建、上传与冒烟全部完成。"
+          bash .github/scripts/summarize-release-stages.sh \
+            --title "发布构建结论" \
+            --stage "版本解析=$RESOLVE_RESULT" \
+            --stage "制品构建与上传=$BUILD_RESULT" \
+            --stage "目标平台运行冒烟=$SMOKE_RESULT" \
+            --version "$VERSION" \
+            --commit "$COMMIT" \
+            --note "本工作流只上传 Actions 运行制品，不创建 GitHub Release、不推送镜像、不部署环境。" \
+            --note "正式 Release 由 .github/workflows/publish.yml 在 CI 门禁与全部冒烟通过后创建。"

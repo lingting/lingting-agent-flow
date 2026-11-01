@@ -955,6 +955,23 @@
   与 Docker 相关 Secret，取得真实测试 Job 的远端运行证据；②核实 `github.token` 是否能读取
   collaborator 权限接口，若不能则按文档回落到 `self`；③评估把 `real-tests` 的 environment
   保护规则（部署分支限制）与 PR 触发的兼容性写成明确的运维说明。
+- **CI/CD 脚本外置化与工作流精简（2026-11-01，基线为当前本地 checkout，不执行 `git fetch`）
+  已实施**，记录见
+  [`P4-ci-script-externalization.md`](./P4-ci-script-externalization.md)。三个工作流里所有
+  Shell 逻辑（Go 格式与静态检查、全量测试与竞态检测、前端测试与格式门禁、真实测试授权转发、
+  真实测试执行与产物汇总、CI 门禁汇总、版本解析、制品构建与核验、Release 生命周期、阶段汇总）
+  迁移到 `.github/scripts/`（16 个脚本 + 索引 README），YAML 只保留声明、Action 调用与脚本调用，
+  参数由步骤显式传入；新增 `tests/unit/release/ci_scripts_test.go` 机械约束"脚本存在且用显式
+  解释器调用、参数与脚本一致、YAML 无内嵌程序、脚本 LF 与严格模式、授权脚本只转发不判定"，
+  并覆盖版本解析 / 阶段汇总 / 门禁汇总 / 真实测试守卫的退出码。**真实测试授权语义未变**：
+  `AGENTFLOW_REAL_TESTS` 仍是唯一变量、规则仍在 `internal/cigate`，8 组事件与模式组合经新脚本
+  实测结论一致；新增的一道收紧是未授权时 `run-real-tests.sh` 直接失败而不是"跑出全 SKIP 后
+  成功"。**状态严格区分**：`bash -n`、`gofmt`、`go vet`、脚本手工执行（含真实 `make release-dist`
+  制品与 `verify-release-assets` 正反用例）、`tests/unit/release` 与 `tests/unit/cigate`
+  （172 passed）、前端 `pnpm test:all:safe`（257 个 E2E 通过）均已实际执行；`make test` 与竞态
+  检测在同一台机器上出现环境相关失败（真实远程 Git 连接被远端关闭、历史残留测试容器、高并发
+  `-race` 下的 SQLite 忙与超时），失败包单独执行均通过，已在记录中逐项列明且**未报告为通过**；
+  `github-release.sh` 的远端写操作与 Actions 远端运行**未执行**。**`P4-M5` 仍为 `pending`**。
 
 > 阶段与里程碑的状态可能随开发推进而变化，以上仅为撰写本路线图时的快照；最新状态
 > 以 `ROADMAP.md` 的"当前实现状态摘要"、`P1-single-task-e2e.md` 的里程碑表与
@@ -1013,6 +1030,7 @@
 | [`P4-ci-gate.md`](./P4-ci-gate.md) | P4 工程质量：全栈 CI 测试门禁（现有 CI 盘点与缺口清单、4 个必需 Job 的职责划分与覆盖范围、触发与并发策略、版本 / 缓存 / 依赖安全、失败产物与脱敏边界、统一验收状态机、工作流静态校验与实际本地测试结果、远端 Workflow Run 证据缺失说明） |
 | [`P4-release-pipeline.md`](./P4-release-pipeline.md) | P4 工程质量：正式发布与构建制品流水线（开工前现状盘点与"已实现 / 缺失"边界、统一版本元数据与拒绝规则、发布矩阵的核实依据、`make release-dist` 与 `cmd/agentflow-release` 的构建顺序、制品命名与扁平布局、`SHA256SUMS` 与 `release-manifest.json` 的四项自检、发布工作流四个 Job 与最小权限、新增测试分层与实际执行结果、制品实测数据表、交叉编译 / 运行验收 / 待验证三态的严格区分、未执行项与剩余限制） |
 | [`P4-release-publish.md`](./P4-release-publish.md) | P4 工程质量：正式 Release 发布与制品可信分发（开工前资产盘点与三处溯源缺口、Node / pnpm 与来源字段进入元数据、`internal/release/publish.go` 的六类发布核验规则、`verify-release` / `verify-assets` / `notes` 三个子命令、`release.yml` 改为可复用 + `ci.yml` 可调用 + 新增 `publish.yml` 的门禁链与权限边界、草稿 Release 与上传后重新核验、GitHub OIDC 无密钥来源证明的取舍与唯一未固定 SHA 的例外、修复的 f-string 缺陷、新增 / 扩展测试清单、实际执行结果、未执行项与 `P4-M5` 关系） |
+| [`P4-ci-script-externalization.md`](./P4-ci-script-externalization.md) | P4 工程质量：CI/CD 脚本外置化与工作流精简（迁移前的内嵌逻辑盘点表、新的 `.github/scripts/` 目录与职责划分、YAML 与脚本的职责边界、参数传递规范、与迁移前一致的安全边界与新增的授权守卫、6 项行为差异与取舍、静态检查与脚本行为测试结果、经新脚本实测的 8 组授权语义、`make test` / 竞态检测 / 前端测试的真实结果与失败归因、未覆盖项与限制、与 `P4-M5` 的关系） |
 
 ## 下一步工作的选择规则
 

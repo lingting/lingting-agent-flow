@@ -1987,6 +1987,11 @@ SSH 连接层按三层覆盖：`tests/unit/ssh/`（主机密钥、认证配置�
 
 仓库通过 `.github/workflows/ci.yml` 在 Pull Request、`master` 分支 push 与手动触发时执行门禁。
 每个必需 Job 都在本地有对应入口，CI 只是把它们串起来，不引入额外的测试逻辑：
+工作流 YAML 只负责声明与调度（触发条件、Job、依赖、权限与步骤参数），具体执行脚本统一放在
+[`.github/scripts/`](./.github/scripts/README.md)：Go 格式检查与测试、竞态检测、前端测试与
+格式门禁、真实测试授权判定与产物汇总、发布制品构建/核验与 Release 生命周期都在那里，
+每个脚本的参数都在对应 YAML 步骤里显式传入。参数与退出码契约见
+[`.github/scripts/README.md`](./.github/scripts/README.md)。
 
 | CI Job | 覆盖范围 | 本地等价入口 |
 |---|---|---|
@@ -2048,6 +2053,9 @@ all
   Job 都不读取 Secret；fork PR 默认拿不到环境 Secret，此时 `real-tests` 明确报告 SKIP。
 - 未运行真实测试时不得对外报告"已通过真实验收"：CI 摘要会分别列出授权模式、判定原因与
   真实测试是否实际执行。
+- 授权判定由 `.github/scripts/check-real-test-authorization.sh` 调用 `cmd/agentflow-ci`，脚本
+  只转发事件上下文；`AGENTFLOW_REAL_TESTS` 的取值语义与身份规则都只在 `internal/cigate` 实现，
+  不在脚本或 YAML 里重复。未获授权时 `run-real-tests.sh` 直接失败，不会把"没有执行"报告为成功。
 - 工作流权限固定为 `permissions: contents: read`；授权判断 Job 只检出可信提交（PR 事件
   检出基础提交），不执行被提交的代码；所有 Action 用提交 SHA 固定。
 - 前端 `vp fmt` / `vp lint --fix` 会自动修改文件且不返回失败，因此 `ui-test` 另有一个步骤

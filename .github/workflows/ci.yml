@@ -28,6 +28,9 @@
 # 本工作流同时提供给 publish.yml 复用（workflow_call）：正式 Release 必须以同一次运行
 # 里通过的 CI 门禁为前提，而不是"标签提交早先碰巧在 master 上通过过"。workflow_call
 # 不参与真实测试身份判定，因此复用运行时 real-tests 一律跳过。
+#
+# 具体执行逻辑在 .github/scripts/ 下：本文件只负责触发条件、Job、权限、依赖与脚本调用，
+# 每个脚本的参数都在对应步骤里显式传入（参数与退出码契约见 .github/scripts/README.md）。
 name: CI
 
 on:
@@ -73,17 +76,7 @@ jobs:
           cache-dependency-path: go.sum
       - name: 格式、静态检查与编译
         id: static
-        run: |
-          set -euo pipefail
-          # make fmt-check 只打印未格式化文件且退出码为 0，这里必须以非零退出码作为门禁。
-          unformatted="$(gofmt -l cmd internal tests)"
-          if [ -n "$unformatted" ]; then
-            echo "::error::以下文件未按 gofmt 格式化，请执行 make fmt 后重新提交"
-            echo "$unformatted"
-            exit 1
-          fi
-          go vet ./...
-          go build ./...
+        run: bash .github/scripts/check-go-static.sh
 
   go-test:
     name: Go 全量测试
@@ -121,34 +114,10 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: 全量 Go 测试
         id: tests
-        run: |
-          set -euo pipefail
-          # 测试工作空间落在 TMPDIR 之下，指向工作区内固定目录以便上传失败产物。
-          mkdir -p "$TEST_ARTIFACT_ROOT/go"
-          export TMPDIR="$TEST_ARTIFACT_ROOT/go"
-          make test 2>&1 | tee "$TEST_ARTIFACT_ROOT/go/make-test-output.log"
+        run: bash .github/scripts/run-go-tests.sh --artifact-dir "$TEST_ARTIFACT_ROOT/go" --parallel 8
       - name: 汇总外部依赖跳过原因
         if: always()
-        run: |
-          set -uo pipefail
-          base="$TEST_ARTIFACT_ROOT/go/lingting-agent-flow-tests"
-          skipped=""
-          if [ -d "$base" ]; then
-            skipped="$(grep -rh 'WARN \[SKIP\]' --include=test.log "$base" 2>/dev/null | sort -u || true)"
-          fi
-          {
-            echo "### 外部依赖测试跳过情况"
-            echo
-            if [ -n "$skipped" ]; then
-              echo '```text'
-              echo "$skipped"
-              echo '```'
-              echo
-              echo "以上用例因 CI 未提供真实 Pi / SSH / 远程 Docker 配置而跳过，不计为通过。"
-            else
-              echo "本次运行没有产生跳过记录。"
-            fi
-          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+        run: bash .github/scripts/summarize-test-skips.sh --title "外部依赖测试跳过情况" --base "$TEST_ARTIFACT_ROOT/go/lingting-agent-flow-tests"
       # 只上传 test.log 与 latest-run.txt：逐用例结论、跳过原因与应用日志都在其中。
       # 不上传整个测试工作空间，避免把用例生成的临时私钥、数据库与 Session 一并带走。
       # 上传失败不得覆盖原本的测试失败结论，因此显式 continue-on-error。
@@ -184,26 +153,7 @@ jobs:
           cache-dependency-path: go.sum
       - name: 竞态检测
         id: tests
-        run: |
-          set -o pipefail
-          mkdir -p "$TEST_ARTIFACT_ROOT/go-race"
-          export TMPDIR="$TEST_ARTIFACT_ROOT/go-race"
-          log="$TEST_ARTIFACT_ROOT/go-race/race-output.log"
-          {
-            # make test-race 已经覆盖 ./tests/unit/...（含 unit/store、unit/app、unit/httpapi、
-            # unit/source/codesaver）与 ./tests/integration/local/ssh/...，因此这些范围不再
-            # 重复执行；下面只补充 test-race 未包含的两个范围，实际覆盖是要求的超集。
-            make test-race
-            # 数据库迁移与并发访问
-            go test -race -count=1 ./tests/integration/local/database/
-            # 任务级工作流编排与并发隔离
-            go test -race -count=1 ./tests/integration/local/workflow/
-          } 2>&1 | tee "$log"
-          # 管道会吃掉退出码，这里显式核对三组命令的结论。
-          if grep -q '^FAIL' "$log"; then
-            echo "::error::竞态检测存在失败的测试包"
-            exit 1
-          fi
+        run: bash .github/scripts/run-go-race-tests.sh --artifact-dir "$TEST_ARTIFACT_ROOT/go-race"
       - name: 上传竞态检测日志
         if: failure()
         continue-on-error: true
@@ -251,25 +201,11 @@ jobs:
       # vp fmt / vp lint --fix / tsc --noEmit → 生产构建。并发度保持项目既有设置，不提高。
       - name: 前端单元、E2E、格式、lint、类型检查与构建
         id: tests
-        run: |
-          set -o pipefail
-          # 测试工作空间落在 TMPDIR 之下，指向工作区内固定目录以便上传失败产物。
-          mkdir -p "$TEST_ARTIFACT_ROOT/ui"
-          export TMPDIR="$TEST_ARTIFACT_ROOT/ui"
-          pnpm test:all:safe 2>&1 | tee "$TEST_ARTIFACT_ROOT/ui/ui-test-output.log"
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/run-frontend-tests.sh" --artifact-dir "$TEST_ARTIFACT_ROOT/ui"
       # vp fmt 与 vp lint --fix 会自动修改文件且不返回失败，因此单独核验工作区是否仍有待修复
       # 改动：有改动说明提交前没跑格式化，格式检查才算真正的门禁。
       - name: 核验格式与 lint 无待修复改动
-        working-directory: .
-        run: |
-          set -euo pipefail
-          dirty="$(git -C "$GITHUB_WORKSPACE" status --porcelain -- lingting-agent-flow-ui)"
-          if [ -n "$dirty" ]; then
-            echo "::error::前端仍有 vp fmt / vp lint --fix 会自动修改的文件"
-            echo "$dirty"
-            git -C "$GITHUB_WORKSPACE" --no-pager diff -- lingting-agent-flow-ui
-            exit 1
-          fi
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/check-frontend-clean.sh"
       # 前端产物只包含测试输出、Playwright HTML 报告、失败截图与 trace，不含依赖目录。
       # 上传失败不得覆盖原本的测试失败结论，因此显式 continue-on-error。
       - name: 上传前端测试产物
@@ -321,17 +257,7 @@ jobs:
           # 令牌只用于查询推送者的仓库权限（collaborator 模式 + push 事件），
           # 其他判定不发起任何网络访问；查不出权限时按拒绝处理（fail closed）。
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          go run ./cmd/agentflow-ci real-tests-gate \
-            -mode "$AGENTFLOW_REAL_TESTS" \
-            -event "$GITHUB_EVENT_NAME" \
-            -actor "$GITHUB_ACTOR" \
-            -repository-owner "$REPOSITORY_OWNER" \
-            -pr-author "$PR_AUTHOR" \
-            -author-association "$AUTHOR_ASSOCIATION" \
-            -repository "$GITHUB_REPOSITORY" \
-            -api-url "$GITHUB_API_URL"
+        run: bash .github/scripts/check-real-test-authorization.sh
 
   # 真实外部依赖测试：只有授权判断通过后才运行，且只执行需要真实设备的测试包。
   #
@@ -381,11 +307,7 @@ jobs:
           # REAL_PI_MODEL 只是可选的套件参数（模型标识），不参与授权判定：
           # 真实测试的信任范围始终只由 AGENTFLOW_REAL_TESTS 决定。留空时使用免费模型 group/free。
           REAL_PI_MODEL: ${{ vars.REAL_PI_MODEL }}
-        run: |
-          set -euo pipefail
-          # 配置生成逻辑放在仓库脚本里，便于审阅与独立校验；它只读取环境变量、
-          # 只写 tests/config/*.yml 与 RUNNER_TEMP 下的临时文件。
-          python3 .github/scripts/prepare-real-tests-config.py
+        run: python3 .github/scripts/prepare-real-tests-config.py
       - name: 真实外部依赖测试
         id: real
         if: steps.config.outputs.configured == 'true'
@@ -394,22 +316,7 @@ jobs:
           # 未设置或非 true 时测试辅助代码按未授权处理并跳过。
           AGENTFLOW_REAL_TESTS_GRANTED: "true"
           AGENTFLOW_REAL_TESTS_GRANT_REASON: ${{ needs.real-tests-gate.outputs.reason }}
-        run: |
-          set -o pipefail
-          mkdir -p "$TEST_ARTIFACT_ROOT/real"
-          export TMPDIR="$TEST_ARTIFACT_ROOT/real"
-          log="$TEST_ARTIFACT_ROOT/real/real-tests-output.log"
-          # 只执行需要真实外部依赖的测试包：真实 Pi CLI、真实 SSH、真实远程 Docker /
-          # Agent / 代码保存 / 工作流。本机模拟测试仍由普通 CI 的 go-test 覆盖。
-          go test -count=1 -v -p 4 -parallel 4 \
-            ./tests/integration/pi/... \
-            ./tests/integration/ssh/... \
-            ./tests/integration/remote/... 2>&1 | tee "$log"
-          status=${PIPESTATUS[0]}
-          if [ "$status" -ne 0 ]; then
-            echo "::error::真实外部依赖测试失败"
-            exit "$status"
-          fi
+        run: bash .github/scripts/run-real-tests.sh --artifact-dir "$TEST_ARTIFACT_ROOT/real" --parallel 4
       # 汇总只用于展示跳过原因，退出码完全由上面的 go test 决定，不对日志做结论判断。
       - name: 汇总真实测试结论
         if: always()
@@ -418,35 +325,7 @@ jobs:
           GATE_REASON: ${{ needs.real-tests-gate.outputs.reason }}
           CONFIGURED: ${{ steps.config.outputs.configured }}
           TESTS_OUTCOME: ${{ steps.real.outcome }}
-        run: |
-          set -uo pipefail
-          base="$TEST_ARTIFACT_ROOT/real/lingting-agent-flow-tests"
-          skipped=""
-          if [ -d "$base" ]; then
-            skipped="$(grep -rh 'WARN \[SKIP\]' --include=test.log "$base" 2>/dev/null | sort -u || true)"
-          fi
-          {
-            echo "### 真实外部依赖测试"
-            echo
-            echo "| 项目 | 值 |"
-            echo "| --- | --- |"
-            echo "| 授权模式 | ${GATE_MODE} |"
-            echo "| 测试配置 | ${CONFIGURED} |"
-            echo "| 测试步骤结论 | ${TESTS_OUTCOME} |"
-            echo "| 授权原因 | ${GATE_REASON} |"
-            echo
-            if [ "${CONFIGURED}" != "true" ]; then
-              echo "本次运行没有执行真实测试：缺少真实测试配置或凭据，未执行的用例不计为通过。"
-            elif [ -n "$skipped" ]; then
-              echo '```text'
-              echo "$skipped"
-              echo '```'
-              echo
-              echo "以上用例按套件配置跳过（目标或镜像未启用、本机/容器内缺少 CLI），不计为通过。"
-            else
-              echo "本次运行没有产生跳过记录。"
-            fi
-          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+        run: bash .github/scripts/summarize-real-tests.sh --skip-base "$TEST_ARTIFACT_ROOT/real/lingting-agent-flow-tests"
       # 失败时保留日志便于定位；只上传日志，不上传配置、私钥或数据库。
       - name: 上传真实测试日志
         if: failure()
@@ -487,103 +366,4 @@ jobs:
           REAL_GATE_ENABLED: ${{ needs.real-tests-gate.outputs.enabled }}
           REAL_GATE_REASON: ${{ needs.real-tests-gate.outputs.reason }}
           REAL_TESTS_RESULT: ${{ needs.real-tests.result }}
-        run: |
-          set -uo pipefail
-          report="$RUNNER_TEMP/ci-summary.md"
-          {
-            echo "## CI 门禁结论"
-            echo
-            echo "| Job | Job 结论 | 汇总判定 |"
-            echo "| --- | --- | --- |"
-          } > "$report"
-          failed=0
-          # 逐行处理必需 Job：每行格式为 Job 名|Job 结论|测试步骤结论|环境准备步骤结论。
-          # 这里用数组而不是 here-document：YAML 块标量的内容自带缩进，缩进的结束标记
-          # 不会被 bash 识别为 heredoc 终止行，会让整段脚本被当成数据吞掉。
-          for row in \
-            "go-static|${GO_STATIC_RESULT}|${GO_STATIC_STEP}|-" \
-            "go-test|${GO_TEST_RESULT}|${GO_TEST_STEP}|${GO_TEST_PREPARE}" \
-            "go-race|${GO_RACE_RESULT}|${GO_RACE_STEP}|-" \
-            "ui-test|${UI_TEST_RESULT}|${UI_TEST_STEP}|${UI_TEST_PREPARE}"; do
-            IFS='|' read -r job result tests prepare <<< "$row"
-            [ -z "$job" ] && continue
-            case "$result" in
-              success)
-                verdict="成功"
-                ;;
-              failure)
-                if [ "$tests" = "failure" ]; then
-                  verdict="失败：测试步骤失败"
-                elif [ "$prepare" = "failure" ]; then
-                  verdict="失败：环境准备失败，测试未执行"
-                elif [ "$tests" = "skipped" ] || [ -z "$tests" ]; then
-                  verdict="失败：测试步骤未执行"
-                else
-                  verdict="失败：测试之外的步骤失败"
-                fi
-                failed=1
-                ;;
-              cancelled)
-                verdict="未完成：运行被取消"
-                failed=1
-                ;;
-              skipped)
-                verdict="未执行：Job 被跳过，不计为通过"
-                failed=1
-                ;;
-              *)
-                verdict="未执行：缺少 Job 结论，不计为通过"
-                failed=1
-                ;;
-            esac
-            echo "| ${job} | ${result:-（空）} | ${verdict} |" >> "$report"
-          done
-          # 授权判断 Job 必须成功：它失败说明判定本身没跑完，不能当成"未授权"放行。
-          case "$REAL_GATE_RESULT" in
-            success)
-              gate_verdict="成功（判定已完成）"
-              ;;
-            *)
-              gate_verdict="失败：授权判定未完成"
-              failed=1
-              ;;
-          esac
-          echo "| real-tests-gate | ${REAL_GATE_RESULT:-（空）} | ${gate_verdict} |" >> "$report"
-          # 真实测试 Job：未获授权时被跳过是预期状态，不计为通过，但不算失败；
-          # 实际执行后失败必须让门禁失败，不得把真实测试失败报告为通过。
-          case "$REAL_TESTS_RESULT" in
-            success)
-              real_verdict="已执行：结论见该 Job 摘要"
-              ;;
-            skipped)
-              real_verdict="未执行：未获授权或本次事件不参与判定，不计为通过"
-              ;;
-            failure)
-              real_verdict="失败：真实外部依赖测试未通过"
-              failed=1
-              ;;
-            cancelled)
-              real_verdict="未完成：运行被取消"
-              failed=1
-              ;;
-            *)
-              real_verdict="未执行：缺少 Job 结论，不计为通过"
-              failed=1
-              ;;
-          esac
-          echo "| real-tests | ${REAL_TESTS_RESULT:-（空）} | ${real_verdict} |" >> "$report"
-          {
-            echo
-            echo "真实测试授权：模式 \`${REAL_GATE_MODE:-（空）}\`，结论 enabled=${REAL_GATE_ENABLED:-false}。"
-            echo "判定原因：${REAL_GATE_REASON:-（空）}。"
-            echo
-            echo "外部依赖用例（真实 Pi / SSH / 远程 Docker）在未获授权时输出 WARN \[SKIP\] 并跳过；"
-            echo "跳过与未执行都不计为通过，跳过原因见对应 Job 产物中的 test.log。"
-          } >> "$report"
-          cat "$report"
-          cat "$report" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-          if [ "$failed" -ne 0 ]; then
-            echo "::error::CI 门禁未通过：存在非成功的必需 Job 或真实测试执行失败"
-            exit 1
-          fi
-          echo "全部必需 Job 通过；真实测试未执行时已标注不计为通过。"
+        run: bash .github/scripts/summarize-ci-gate.sh

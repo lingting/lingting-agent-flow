@@ -400,7 +400,7 @@ func TestReleaseWorkflowStages(t *testing.T) {
 		switch {
 		case strings.Contains(name, "前端依赖") && strings.Contains(run, "pnpm install --frozen-lockfile"):
 			indexes["install"] = index
-		case strings.Contains(run, "make release-dist"):
+		case strings.Contains(run, "build-release-dist.sh"):
 			indexes["release"] = index
 		case strings.Contains(name, "上传发布制品"):
 			indexes["upload"] = index
@@ -424,6 +424,10 @@ func TestReleaseWorkflowStages(t *testing.T) {
 	releaseRun, _ := releaseStep["run"].(string)
 	if strings.Contains(releaseRun, "go build") {
 		t.Fatal("发布工作流不得自己拼接 go build 命令")
+	}
+	// 编译编排只在脚本内部：它必须调用唯一发布入口 make release-dist。
+	if !strings.Contains(readScriptText(t, "build-release-dist.sh"), "make release-dist") {
+		t.Fatal("发布构建脚本必须调用 make release-dist，而不是另拼一套编译命令")
 	}
 	uploadStep, _ := buildSteps[indexes["upload"]].(map[string]any)
 	uploadWith := mapValue(uploadStep, "with")
@@ -659,24 +663,32 @@ func TestCIWorkflowSecretBoundary(t *testing.T) {
 		t.Errorf("真实测试 Job 必须使用 real-tests 环境承载凭据，实际 %v", realTests["environment"])
 	}
 	realText := jobText(t, realTests)
+	// 执行清单已外置到脚本：Job 只需调用该脚本并传入授权标记。
+	if !strings.Contains(realText, ".github/scripts/run-real-tests.sh") {
+		t.Error("真实测试 Job 必须调用 .github/scripts/run-real-tests.sh")
+	}
+	if !strings.Contains(realText, "AGENTFLOW_REAL_TESTS_GRANTED") {
+		t.Error("真实测试 Job 必须传入授权标记 AGENTFLOW_REAL_TESTS_GRANTED")
+	}
+	realScript := readScriptText(t, "run-real-tests.sh")
 	for _, required := range []string{
 		"./tests/integration/pi/...",
 		"./tests/integration/ssh/...",
 		"./tests/integration/remote/...",
 		"AGENTFLOW_REAL_TESTS_GRANTED",
 	} {
-		if !strings.Contains(realText, required) {
-			t.Errorf("真实测试 Job 缺少 %q", required)
+		if !strings.Contains(realScript, required) {
+			t.Errorf("真实测试脚本缺少 %q", required)
 		}
 	}
-	// 本机模拟测试不得出现在真实测试 Job 里：它们属于普通 CI。
+	// 本机模拟测试不得出现在真实测试范围内：它们属于普通 CI 的 go-test。
 	for _, local := range []string{
 		"./tests/integration/local/",
 		"./tests/unit/",
 		"./tests/e2e/",
 	} {
-		if strings.Contains(realText, local) {
-			t.Errorf("真实测试 Job 不应执行本机测试包 %q", local)
+		if strings.Contains(realText, local) || strings.Contains(realScript, local) {
+			t.Errorf("真实测试不应执行本机测试包 %q", local)
 		}
 	}
 	// 授权判断 Job 不读取 Secret、不绑定环境，并且只检出可信提交。
@@ -907,7 +919,7 @@ func TestPublishWorkflowAttestation(t *testing.T) {
 			}
 		}
 		run, _ := step["run"].(string)
-		if strings.Contains(run, "gh attestation verify") {
+		if strings.Contains(run, "github-release.sh verify-attestations") {
 			verifyIndex = index
 		}
 	}
@@ -915,7 +927,11 @@ func TestPublishWorkflowAttestation(t *testing.T) {
 		t.Fatal("发布 Job 必须生成 GitHub OIDC 来源证明")
 	}
 	if verifyIndex < 0 {
-		t.Fatal("发布 Job 必须用 gh attestation verify 核验来源证明")
+		t.Fatal("发布 Job 必须调用 .github/scripts/github-release.sh verify-attestations 核验来源证明")
+	}
+	// 证明核验的具体命令在脚本里：它必须逐个资产执行 gh attestation verify。
+	if !strings.Contains(readScriptText(t, "github-release.sh"), "gh attestation verify") {
+		t.Fatal("Release 生命周期脚本必须用 gh attestation verify 核验来源证明")
 	}
 	if verifyIndex < attestIndex {
 		t.Error("来源证明核验必须发生在生成之后")
@@ -929,9 +945,13 @@ func TestPublishWorkflowAttestation(t *testing.T) {
 // TestPublishWorkflowAssetWiring 校验制品名只有一个来源，构建与下载不会对不上。
 func TestPublishWorkflowAssetWiring(t *testing.T) {
 	t.Parallel()
+	// 制品名只在一个地方生成：外置的版本解析脚本。工作流只消费该输出。
+	if !strings.Contains(readScriptText(t, "resolve-release-version.sh"), `artifact_name="agentflow-release-$version"`) {
+		t.Error("制品名必须由 .github/scripts/resolve-release-version.sh 生成一次")
+	}
 	releaseText := readWorkflowText(t, releaseWorkflowPath)
-	if !strings.Contains(releaseText, `echo "artifact_name=agentflow-release-$version"`) {
-		t.Error("制品名必须由构建工作流的 resolve 步骤生成")
+	if !strings.Contains(releaseText, "resolve-release-version.sh") {
+		t.Error("构建工作流必须通过 .github/scripts/resolve-release-version.sh 解析版本与制品名")
 	}
 	releaseWorkflow := loadWorkflow(t, releaseWorkflowPath)
 	var uploadWith map[string]any

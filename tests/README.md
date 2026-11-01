@@ -143,6 +143,14 @@ go test -race -count=1 ./tests/integration/local/ssh/...
 | `real-tests` | 仅授权通过时执行真实外部依赖测试包（见下文清单） | `go test -count=1 ./tests/integration/pi/... ./tests/integration/ssh/... ./tests/integration/remote/...` |
 | `ci-summary` | 四个必需 Job 全部成功才通过；授权判断失败算失败，真实测试未授权跳过不算失败但也不计为通过 | 无（仅 CI） |
 
+这些 Job 的执行逻辑都在 `.github/scripts/` 下，工作流只负责触发、依赖与参数传递：脚本内部
+调用的正是本地入口（`make test`、`make test-race`、`pnpm test:all:safe`、
+`go run ./cmd/agentflow-ci ...`、`make release-dist`），CI 与本地命令因此不会各跑一套。
+脚本清单、参数与退出码见 [`.github/scripts/README.md`](../.github/scripts/README.md)；
+脚本自身的存在性、解释器调用方式、参数一致性与退出码由
+`tests/unit/release/ci_scripts_test.go` 覆盖，本地可用
+`go test -count=1 ./tests/unit/release/` 复核。
+
 `.github/workflows/release.yml` 是制品构建流水线，只做"构建与制品准备"：它由
 `publish.yml` 复用（`workflow_call`）或手动触发（`workflow_dispatch`）运行，调用
 `make release-dist` 构建五个平台制品，用 `verify-release` 复核目录，再用
@@ -257,6 +265,9 @@ tests/integration/remote/workflow/    # 真实远程端到端工作流
   原有 `WARN [SKIP]` 语义跳过并说明缺少哪一项；
 - 配置完整但连接、认证或主机密钥校验失败时必须让测试失败——跳过只来自"未提供配置"或
   "未获授权"，不来自"配置存在但连不上"。
+- 真实测试 Job 的执行清单只写在 `.github/scripts/run-real-tests.sh`，它要求
+  `AGENTFLOW_REAL_TESTS_GRANTED=true` 才肯执行：缺少授权标记时脚本直接失败，不会跑出一堆
+  SKIP 后把"一个用例都没跑"报告成成功。
 
 本机开发不受 CI 授权门禁影响：没有 `GITHUB_ACTIONS` 标记时，真实测试仍由
 `tests/config/*.yml` 的 `enable` 开关决定。要在本地复现 CI 的跳过行为，可以显式设置 CI
@@ -279,6 +290,9 @@ GITHUB_ACTIONS=true go test -count=1 -v ./tests/integration/pi/... ./tests/integ
   设备凭据；缺少必需 Secret 时 `real-tests` 明确报告 SKIP，不伪造通过。
 - 授权判断 Job 只检出可信提交（PR 事件检出基础提交），不执行被提交的代码；所有 Action 用
   提交 SHA 固定；`pull_request_target` 不被使用。
+- 授权判定脚本（`check-real-test-authorization.sh`）只把事件上下文转发给
+  `cmd/agentflow-ci real-tests-gate`，不读取 Secret、不重新实现身份判断；本机开发完全不走这条
+  判定，仍由 `tests/config/*.yml` 的 `enable` 开关决定是否执行真实测试。
 - 配置内容、私钥、令牌与认证头都不写入日志；真实测试日志只在失败时上传。
 
 ### CI 产物留存
