@@ -53,6 +53,7 @@ type target struct {
 // 并跳过。目标完整时由后续步骤真实连接，失败必须判定为测试失败。
 func loadTarget(t *testing.T) target {
 	t.Helper()
+	testkit.RequireRealTests(t, "真实远程工作流集成测试")
 	enabled, _ := testkit.LoadDockerConfig(t)
 	if !enabled.RemoteEnabled {
 		reason := fmt.Sprintf(

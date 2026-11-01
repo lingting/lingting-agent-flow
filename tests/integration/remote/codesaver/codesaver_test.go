@@ -16,6 +16,8 @@
 //   - 只使用带随机后缀的容器与远程目录，只操作本次测试创建的资源；
 //   - 不执行全局 prune，不删除共享镜像、共享缓存卷或其他测试的资源；
 //   - 不在用户的真实主分支上执行合并：合并验证只在本次测试创建的临时 bare 仓库内进行。
+//
+// 在 GitHub Actions 中未获真实测试授权时先跳过，不读取配置、不建立任何远程连接。
 package codesaver_remote
 
 import (
@@ -77,6 +79,7 @@ type target struct {
 // 返回配置，由后续连接与断言决定测试是否失败。
 func loadTarget(t *testing.T) target {
 	t.Helper()
+	testkit.RequireRealTests(t, "真实远程代码保存集成测试")
 	enabled, _ := testkit.LoadDockerConfig(t)
 	if !enabled.RemoteEnabled {
 		reason := fmt.Sprintf(

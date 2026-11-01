@@ -8,6 +8,7 @@
 //
 // 安全约束（与仓库测试规范一致）：只操作带随机后缀、属于本次测试的容器与远程目录；
 // 不执行全局 prune；主机密钥校验不可关闭；测试产物保留，不自动清理。
+// 在 GitHub Actions 中未获真实测试授权时先跳过，不读取配置、不建立任何远程连接。
 package workflow_remote
 
 import (
@@ -58,6 +59,7 @@ type e2eEnv struct {
 // newE2EEnv 装配真实远程现场；配置不完整时输出 WARN 并跳过。
 func newE2EEnv(t *testing.T) *e2eEnv {
 	t.Helper()
+	testkit.RequireRealTests(t, "真实远程端到端验收")
 	if report := e2eConfigReport(t); len(report) > 0 {
 		reason := "WARN [SKIP] 真实远程端到端验收缺少配置: " + strings.Join(report, "；")
 		fmt.Fprintln(os.Stdout, reason)

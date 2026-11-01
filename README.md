@@ -1994,21 +1994,69 @@ SSH 连接层按三层覆盖：`tests/unit/ssh/`（主机密钥、认证配置�
 | `go-test` | `tests/...` 全量（单元、本机集成、真实 Pi / SSH / 远程 Docker、CLI E2E、单文件打包冒烟） | `make test` |
 | `go-race` | `make test-race` 的全部范围，另加数据库迁移与任务级工作流编排的竞态检测 | `make test-race` + `go test -race -count=1 ./tests/integration/local/database/` + `go test -race -count=1 ./tests/integration/local/workflow/` |
 | `ui-test` | 前端单元测试（`--maxWorkers 4`）、Playwright E2E（`--workers=4`）、格式、lint、类型检查与生产构建 | `cd lingting-agent-flow-ui && pnpm test:all:safe` |
-| `ci-summary` | 只有上面四个 Job 全部成功才报告通过，并区分成功 / 失败 / 跳过 / 未执行 / 环境准备失败 | 无（仅在 CI 中运行） |
+| `real-tests-gate` | 只读判定本次运行是否获准执行真实外部依赖测试，输出授权结论与原因 | `go run ./cmd/agentflow-ci real-tests-gate -mode ... -event ...` |
+| `real-tests` | 仅授权通过时运行：真实 Pi CLI、真实 SSH、真实远程 Docker / Agent / 代码保存 / 工作流 | `go test -count=1 ./tests/integration/pi/... ./tests/integration/ssh/... ./tests/integration/remote/...` |
+| `ci-summary` | 四个必需 Job 全部成功才报告通过；授权判断失败算失败，真实测试未授权跳过不算失败但也不计为通过 | 无（仅在 CI 中运行） |
+
+#### 真实测试授权（唯一用户变量）
+
+真实外部依赖测试需要一个明确的信任范围，避免不符合信任策略的提交和 PR 自动操作用户的
+真实测试设备。控制项只有一个 GitHub Repository Variable：
+
+```text
+Settings → Secrets and variables → Actions → Variables → AGENTFLOW_REAL_TESTS
+```
+
+它不是 Secret，不需要额外的凭据管理机制。未设置、为空或取值无法识别时一律关闭真实测试。
+
+| 取值 | 授权范围 |
+|---|---|
+| `self` | 只有仓库所有者发起的 push 与 PR |
+| `collaborator` | 仓库所有者、组织成员与仓库协作者 |
+| `all` | 不区分作者身份，所有 push 与 PR |
+| 其他任意值 | 关闭（`SELF`、`Collaborator` 等错误拼写同样按关闭处理） |
+
+```text
+# 个人开发、需要保护真实设备
+self
+
+# 确认仓库成员与协作者可信
+collaborator
+
+# 明确接受所有 PR 代码进入真实测试执行环境的风险
+all
+```
+
+身份判定只使用 GitHub 事件字段，不使用 commit 的 author 姓名或邮箱（这些字段由提交者自行
+填写，没有权限证明能力）：
+
+- **push**：用 `github.actor` 判定 Push 发起者；`self` 要求它等于 `github.repository_owner`
+  （忽略大小写）；`collaborator` 还要求该账号具备仓库写入权限，查不出权限一律按拒绝处理。
+- **pull_request**：用 `github.event.pull_request.author_association` 判定 PR 作者；
+  `self` 只允许 `OWNER`，`collaborator` 允许 `OWNER` / `MEMBER` / `COLLABORATOR`，
+  历史贡献者 `CONTRIBUTOR` 不算当前协作者。
+- **其他事件**（含 `workflow_call`）：不参与身份判定，真实测试一律跳过，因此 `publish.yml`
+  复用本工作流时不会执行真实测试。
 
 几点边界必须明确：
 
-- 真实 Pi、SSH 与远程 Docker 用例由 `tests/config/*.yml` 显式开启，CI 不提供这些配置，
-  相应用例输出 `WARN [SKIP]` 并跳过。**跳过与未执行都不算通过**，跳过原因写在
-  `test.log` 与 `go-test` 的 Job 摘要里。
-- CI 不关闭 SSH 主机密钥校验，不注入任何真实凭据，也不使用 Secret。
-- 工作流权限固定为 `permissions: contents: read`；所有 Action 用提交 SHA 固定。
+- `all` 是主动放宽的信任策略，**不等于安全隔离**：启用后任意 PR 作者的代码都可能进入真实
+  测试执行环境并接触真实测试设备与凭据。这两件事无法同时承诺。
+- 未授权时真实测试跳过是成功的预期状态：用例在读取配置、建立连接之前就输出
+  `WARN [SKIP]`，`make test` 不会因此失败，跳过也不会被统计成 PASS。
+- 真实测试的连接配置只来自 `real-tests` 环境的 Environment Secrets，普通 CI 与授权判断
+  Job 都不读取 Secret；fork PR 默认拿不到环境 Secret，此时 `real-tests` 明确报告 SKIP。
+- 未运行真实测试时不得对外报告"已通过真实验收"：CI 摘要会分别列出授权模式、判定原因与
+  真实测试是否实际执行。
+- 工作流权限固定为 `permissions: contents: read`；授权判断 Job 只检出可信提交（PR 事件
+  检出基础提交），不执行被提交的代码；所有 Action 用提交 SHA 固定。
 - 前端 `vp fmt` / `vp lint --fix` 会自动修改文件且不返回失败，因此 `ui-test` 另有一个步骤
   核验工作区没有待修复改动，格式与 lint 才算真正的门禁。
 - 失败产物只上传 `test.log`、`latest-run.txt`、Playwright HTML 报告、失败截图与 trace，
   以及完整控制台日志；不上传整个测试工作空间（其中含用例生成的临时私钥与数据库）。
-- 尚未取得 GitHub Actions 远端 Workflow Run 证据：本轮只完成工作流配置与本地等价测试，
-  **不能据此声称"GitHub Actions 已经通过"**。
+- 尚未取得 GitHub Actions 远端 Workflow Run 证据：工作流与判定规则已实现，本地等价命令与
+  SKIP 语义已实际执行，但**不能据此声称"GitHub Actions 已经通过"**，也不能声称真实设备
+  验收已完成。
 
 开发环境、代码风格与提交约定见 [docs/development.md](docs/development.md)，分层与依赖方向见 [docs/architecture.md](docs/architecture.md)。
 

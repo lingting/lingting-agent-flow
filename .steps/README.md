@@ -927,6 +927,35 @@
   与四平台运行验收证据；②把 `actions/attest-build-provenance` 收紧到可核对的提交 SHA；③按包
   归属/运行标识过滤远程零残留核验。
 
+- **Go CI/CD 真实测试授权门禁与跳过语义（2026-11-01，基线为当前本地 checkout，不执行
+  `git fetch`）已实施**。本轮把"CI 里的真实外部依赖测试"从"依赖 tests/config/*.yml 恰好缺失"
+  变成显式的信任策略：①唯一用户变量 `AGENTFLOW_REAL_TESTS`（Repository Variable，非 Secret）
+  取 `self` / `collaborator` / `all`，未设置、为空或未知取值（含 `SELF`、`Collaborator` 等错误
+  拼写）一律关闭；②判定规则集中在 `internal/cigate`（`Mode`/`Event`/`Input`/`Decide` 与
+  `GitHubPermissionChecker`），由新增的 `cmd/agentflow-ci real-tests-gate` 在 CI 中执行并写出
+  `real_tests_enabled` / `mode` / `reason` 与 Job 摘要，工作流 YAML 里不写授权决策；③身份判定
+  只用 GitHub 事件字段——push 用 `github.actor` 对比 `github.repository_owner`（忽略大小写），
+  collaborator 模式的 push 额外查询仓库写入权限（查不出即拒绝）；pull_request 用
+  `author_association`（`self` 只认 `OWNER`，`collaborator` 认 `OWNER`/`MEMBER`/`COLLABORATOR`，
+  `CONTRIBUTOR` 不算当前协作者）；`workflow_call` 等其他事件不参与判定，因此 `publish.yml`
+  复用 CI 时不跑真实测试；④`ci.yml` 新增 `real-tests-gate`（只读、检出 PR 基础提交、不读
+  Secret、不绑定环境）与 `real-tests`（`environment: real-tests`，凭据只来自 Environment
+  Secrets，仅执行 `tests/integration/{pi,ssh,remote/...}`，不重复跑普通 Go 测试）；⑤各处真实
+  测试入口在读取配置与建连之前统一调用 `testkit.RequireRealTests`，未授权时按
+  `WARN [SKIP] 真实测试未获 CI 授权` 跳过；本机开发仍由 `tests/config/*.yml` 的 `enable` 开关
+  决定，未被 CI 门禁改变；⑥`ci-summary` 把授权判断失败算失败、真实测试未授权跳过不算失败但
+  明确标注"不计为通过"、实际执行失败必须失败；⑦修复两处会让工作流步骤永远不生效的
+  here-document 缺陷（`ci.yml` 的汇总循环与 `release.yml` 的制品摘要步骤：YAML 块标量内容自带
+  缩进，缩进的结束标记不会被 bash 识别，整段脚本被当作数据吞掉），后者改为调用
+  `.github/scripts/release-artifacts-summary.py`。**状态严格区分**：授权矩阵、跳过语义、
+  `make test`、竞态检测与工作流静态核验均已实际执行并通过；`real-tests` 在 GitHub Actions 上
+  的真实运行**未执行**（本机没有用于 CI 的 real-tests 环境 Secret），因此不得声称真实设备验收
+  已完成。**`P4-M5` 仍为 `pending`**，本轮只处理 Go CI/CD 的安全与执行语义，未采集任何真实
+  使用数据。下一步候选：①推送首个版本标签/PR 前在仓库创建 `real-tests` Environment 并补齐 SSH
+  与 Docker 相关 Secret，取得真实测试 Job 的远端运行证据；②核实 `github.token` 是否能读取
+  collaborator 权限接口，若不能则按文档回落到 `self`；③评估把 `real-tests` 的 environment
+  保护规则（部署分支限制）与 PR 触发的兼容性写成明确的运维说明。
+
 > 阶段与里程碑的状态可能随开发推进而变化，以上仅为撰写本路线图时的快照；最新状态
 > 以 `ROADMAP.md` 的"当前实现状态摘要"、`P1-single-task-e2e.md` 的里程碑表与
 > `P2-reliability-recovery.md` 的里程碑清单为准。

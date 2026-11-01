@@ -106,6 +106,10 @@ AGENTFLOW_RELEASE_ARCHIVE=/路径/agentflow_v1.2.3_linux_amd64.tar.gz AGENTFLOW_
 # 完整测试
 go test -count=1 -v -p 8 -parallel 8 ./tests/...
 
+# 真实测试授权判定（CI 使用同一入口；只读判定，不连接任何真实设备）
+go run ./cmd/agentflow-ci real-tests-gate \
+  -mode self -event push -actor <账号> -repository-owner <所有者> \
+  -github-output "$GITHUB_OUTPUT" -step-summary "$GITHUB_STEP_SUMMARY"
 # 竞态检测
 go test -race -count=1 ./tests/unit/...
 # 数据库约束、Schema 审计与旧库升级
@@ -132,10 +136,12 @@ go test -race -count=1 ./tests/integration/local/ssh/...
 | CI Job | 覆盖范围 | 本地等价入口 |
 |---|---|---|
 | `go-static` | `gofmt -l cmd internal tests` 无输出、`go vet ./...`、`go build ./...` | `make fmt-check`、`make vet`、`make build` |
-| `go-test` | 全部 Go 测试包（`tests/...`，含 CLI E2E 与单文件打包冒烟） | `make test` |
+| `go-test` | 全部 Go 测试包（`tests/...`，含 CLI E2E 与单文件打包冒烟）；真实外部依赖用例在 CI 中跳过 | `make test` |
 | `go-race` | `make test-race` 的全部范围 + 数据库迁移 + 任务级工作流编排 | `make test-race`，再执行下文两条补充命令 |
 | `ui-test` | 前端单元（`--maxWorkers 4`）、Playwright E2E（`--workers=4`）、格式、lint、类型检查、生产构建 | `cd lingting-agent-flow-ui && pnpm test:all:safe` |
-| `ci-summary` | 必需 Job 全部成功才通过，并区分成功 / 失败 / 跳过 / 未执行 / 环境准备失败 | 无（仅 CI） |
+| `real-tests-gate` | 只读判定真实测试是否获授权，输出 `real_tests_enabled`、`mode` 与 `reason` | `go run ./cmd/agentflow-ci real-tests-gate -mode ... -event ...` |
+| `real-tests` | 仅授权通过时执行真实外部依赖测试包（见下文清单） | `go test -count=1 ./tests/integration/pi/... ./tests/integration/ssh/... ./tests/integration/remote/...` |
+| `ci-summary` | 四个必需 Job 全部成功才通过；授权判断失败算失败，真实测试未授权跳过不算失败但也不计为通过 | 无（仅 CI） |
 
 `.github/workflows/release.yml` 是制品构建流水线，只做"构建与制品准备"：它由
 `publish.yml` 复用（`workflow_call`）或手动触发（`workflow_dispatch`）运行，调用
@@ -177,16 +183,103 @@ go test -race -count=1 ./tests/integration/local/workflow/
 `unit/source/codesaver`）与 `./tests/integration/local/ssh/...`，因此 CI 不再重复执行这些范围，
 实际覆盖是上表所列范围的超集而不是子集。
 
-### 跳过规则在 CI 中的表现
+### 真实测试授权与跳过语义
 
-真实 Pi、SSH 与远程 Docker 用例由 `tests/config/*.yml` 显式开启。CI 不提供这些配置，
-也不注入任何凭据，因此相应用例输出 `WARN [SKIP]` 并跳过：
+真实外部依赖测试（真实 SSH 设备、真实远程 Docker、容器内真实 Pi、真实远程 Git）的
+执行许可由**一个** GitHub Repository Variable 控制：
 
-- 跳过不计为通过，`ci-summary` 单独标注这一点；
-- 跳过原因（例如"配置文件不存在""未把 `ssh.enable` 设为 true"）由 `go-test` 的
-  "汇总外部依赖跳过原因"步骤写进 Job 摘要，同时也保留在 `test.log` 里；
-- 启用但目标配置完整、只是连接 / 认证 / 主机密钥校验失败时必须让测试失败，这一点在 CI 中
-  同样成立——CI 的跳过只来自"未提供配置"，不来自"配置存在但连不上"。
+```text
+Settings → Secrets and variables → Actions → Variables → AGENTFLOW_REAL_TESTS
+```
+
+它不是 Secret，也不需要额外的凭据管理机制；未设置、为空或取值无法识别时一律关闭。
+
+| 取值 | 授权范围 |
+|---|---|
+| `self` | 只有仓库所有者发起的 push 与 PR |
+| `collaborator` | 仓库所有者、组织成员与仓库协作者 |
+| `all` | 不区分作者身份，所有 push 与 PR |
+| 其他任意值 | 关闭（`SELF`、`Collaborator` 等错误拼写同样按关闭处理） |
+
+```text
+# 个人开发、需要保护真实设备
+self
+
+# 确认仓库成员与协作者可信
+collaborator
+
+# 明确接受所有 PR 代码进入真实测试执行环境的风险
+all
+```
+
+`all` 是主动放宽的信任策略，**不等于安全隔离**：启用后任意 PR 作者的代码都可能进入真实
+测试执行环境并接触真实测试设备与凭据。任务执行权限与信任边界由这个取值决定，不是 GitHub
+Actions 表达式能够兜住的问题。
+
+判定规则集中在 `internal/cigate`（由 `cmd/agentflow-ci real-tests-gate` 在 CI 中执行），
+不在工作流 YAML 里重复实现：
+
+- 只看 GitHub 事件字段，不看 commit author 姓名或邮箱（这些字段由提交者自行填写，没有权限
+  证明能力）。
+- **push**：用 `github.actor` 判定 Push 发起者；`self` 要求它等于 `github.repository_owner`
+  （忽略大小写）；`collaborator` 还要求该账号有仓库写入权限，查不出权限按拒绝处理。
+- **pull_request**：用 `github.event.pull_request.author_association` 判定 PR **作者**
+  （不是触发者）；`self` 只允许 `OWNER`，`collaborator` 允许 `OWNER` / `MEMBER` /
+  `COLLABORATOR`；`CONTRIBUTOR` 只是历史贡献者，不算当前协作者。
+- **其他事件**（含 `workflow_call`）：不参与身份判定，真实测试一律跳过。因此
+  `publish.yml` 复用 `ci.yml` 时不会执行真实测试。
+- 身份字段缺失、变量取值未知、权限查询失败都按拒绝处理（fail closed）。
+
+真实测试包清单（`real-tests` Job 只执行这些，不重复跑普通 Go 测试）：
+
+```text
+tests/integration/pi/                 # 本机真实 Pi CLI
+tests/integration/ssh/                # 真实远程 Linux 机器
+tests/integration/remote/docker/      # 真实远程 Docker Engine
+tests/integration/remote/agent/       # 真实远程容器与容器内真实 Pi
+tests/integration/remote/codesaver/   # 真实远程容器与容器内 Git
+tests/integration/remote/workflow/    # 真实远程端到端工作流
+```
+
+以下本机模拟测试**不属于**真实测试，继续在普通 CI 的 `go-test` 中执行：
+`tests/integration/local/ssh/`、`tests/integration/local/docker/`、使用本机 SQLite 的工作流
+测试、使用 `tests/internal/fakepi` 的 Agent 测试，以及使用本机 bare 仓库的代码保存测试。
+
+#### 跳过规则
+
+所有真实测试入口在读取配置、建立连接、执行外部命令之前先调用
+`testkit.RequireRealTests`，因此：
+
+- 未授权时用例输出 `WARN [SKIP] 真实测试未获 CI 授权：<套件>；<判定原因>` 并跳过；
+- 跳过不计为通过，`ci-summary` 与 `real-tests` 的 Job 摘要单独标注这一点；
+- 跳过不会让 `make test` 失败：只要没有真实测试之外的失败，整体 Go CI 仍然成功；
+- 已授权但没有可用配置（配置文件缺失、`enable` 为 false、目标字段不全）时，各套件仍按
+  原有 `WARN [SKIP]` 语义跳过并说明缺少哪一项；
+- 配置完整但连接、认证或主机密钥校验失败时必须让测试失败——跳过只来自"未提供配置"或
+  "未获授权"，不来自"配置存在但连不上"。
+
+本机开发不受 CI 授权门禁影响：没有 `GITHUB_ACTIONS` 标记时，真实测试仍由
+`tests/config/*.yml` 的 `enable` 开关决定。要在本地复现 CI 的跳过行为，可以显式设置 CI
+标记：
+
+```bash
+# 复现"CI 未授权"：真实外部依赖用例全部 WARN [SKIP]，其余测试照常执行
+GITHUB_ACTIONS=true make test
+
+# 只跑真实测试包并观察跳过原因
+GITHUB_ACTIONS=true go test -count=1 -v ./tests/integration/pi/... ./tests/integration/ssh/... ./tests/integration/remote/...
+```
+
+#### 凭据边界
+
+- 真实测试的连接配置只来自 `real-tests` 环境的 Environment Secrets，由
+  `.github/scripts/prepare-real-tests-config.py` 现场生成被 `.gitignore` 忽略的
+  `tests/config/*.yml`；私钥与 known_hosts 写入 `RUNNER_TEMP` 下的临时目录（0600）。
+- 普通 CI 的四个必需 Job 与授权判断 Job 都不读取任何 Secret，fork PR 因此也无法获得真实
+  设备凭据；缺少必需 Secret 时 `real-tests` 明确报告 SKIP，不伪造通过。
+- 授权判断 Job 只检出可信提交（PR 事件检出基础提交），不执行被提交的代码；所有 Action 用
+  提交 SHA 固定；`pull_request_target` 不被使用。
+- 配置内容、私钥、令牌与认证头都不写入日志；真实测试日志只在失败时上传。
 
 ### CI 产物留存
 
@@ -195,6 +288,7 @@ go test -race -count=1 ./tests/integration/local/workflow/
 | `go-test` | `make test` 完整控制台输出、各测试包 `test.log`、`latest-run.txt` | 仅失败 | 7 天 |
 | `go-race` | 竞态检测控制台输出、各测试包 `test.log`、`latest-run.txt` | 仅失败 | 7 天 |
 | `ui-test` | Vitest 输出、Playwright HTML 报告、失败截图与 trace、完整控制台日志 | 仅失败 | 7 天 |
+| `real-tests` | 真实测试控制台输出、各测试包 `test.log`、`latest-run.txt` | 仅失败 | 7 天 |
 
 产物名包含 `github.run_id` 与 `github.run_attempt`，同一提交的多次重跑不会互相覆盖。
 **不整体上传测试工作空间**：其中含用例生成的临时私钥、SQLite 数据库与 Session 文件，

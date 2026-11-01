@@ -8,6 +8,7 @@
 // 配置项来自 tests/config/ssh.yml，字段说明见 tests/config/example.ssh.yml。
 // 未把 ssh.enable 设为 true 时输出 WARN 并跳过；已启用但必需配置缺失时同样跳过；
 // 配置完整但连接、认证或主机密钥校验失败时必须让测试失败，不得当作缺少可选依赖跳过。
+// 在 GitHub Actions 中未获真实测试授权时先跳过，不读取配置、不建立连接。
 package ssh_integration
 
 import (
@@ -41,6 +42,7 @@ type target struct {
 // 让测试直接失败，避免把配置错误当成缺少环境。
 func loadTarget(t *testing.T) target {
 	t.Helper()
+	testkit.RequireRealTests(t, "真实 SSH 集成测试")
 	config, ok := testkit.LoadSSHConfig(t)
 	if !ok || !config.Enabled {
 		reason := testkit.EnableReason(t, testkit.SSHConfigFile, "ssh.enable")
@@ -84,12 +86,15 @@ func logTarget(t *testing.T, tg target) {
 	t.Logf("主机密钥来源: %s", testkit.DescribeKnownHosts(t))
 }
 
-// describeKeyPath 描述私钥来源，未指定时说明缺少私钥配置。
+// describeKeyPath 描述私钥是否已配置。
+//
+// 只报告"已配置 / 未配置"，不回显路径：真实测试的日志会被 CI 上传，路径属于运行环境
+// 信息，不需要出现在日志里。
 func describeKeyPath(path string) string {
 	if path == "" {
 		return "未配置（ssh.private_key_path）"
 	}
-	return path
+	return "已配置（ssh.private_key_path）"
 }
 
 // dial 建立经过主机密钥校验与身份认证的连接，并在测试结束时关闭。

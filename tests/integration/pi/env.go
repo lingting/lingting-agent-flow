@@ -7,6 +7,7 @@
 //
 // 配置项来自 tests/config/pi.yml，字段说明见 tests/config/example.pi.yml。
 // 未把 pi.enable 设为 true，或本机不存在 pi 时，依赖真实 CLI 的用例输出 WARN 并跳过；
+// 在 GitHub Actions 中未获真实测试授权时先跳过，不读取配置、不执行任何外部命令。
 // Pi Runner 的单元测试位于 tests/unit/agent/pi，不依赖本机是否安装 Pi。
 package pi_integration
 
@@ -22,12 +23,15 @@ import (
 
 // requirePi 返回可用于真实调用的 Pi 可执行文件路径。
 //
+// 未获 CI 真实测试授权时先跳过：不读取配置、不执行任何外部命令。本机运行不受该门禁
+// 影响，仍由配置文件与 PATH 决定。
 // 未在 tests/config/pi.yml 中把 pi.enable 设为 true 时输出警告并跳过；该开关是
 // 该目录下所有真实调用用例的唯一启用入口，缺少配置文件同样视为未启用。
 // 已启用但本机不存在 Pi 时同样输出警告并跳过；Pi 存在但后续调用失败时必须由
 // 用例如实报告失败，不得在这里当作缺少可选依赖跳过。
 func requirePi(t *testing.T) string {
 	t.Helper()
+	testkit.RequireRealTests(t, "真实 Pi CLI 集成测试")
 	config, ok := testkit.LoadPiConfig(t)
 	if !ok || !config.Enabled {
 		reason := testkit.EnableReason(t, testkit.PiConfigFile, "pi.enable")

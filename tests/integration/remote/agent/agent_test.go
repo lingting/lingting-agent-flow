@@ -20,6 +20,8 @@
 //   - 不执行全局 prune，不删除共享镜像、共享缓存卷或其他测试的资源；
 //   - 始终使用正式的主机密钥校验，禁止关闭验证或自动接受未知主机；
 //   - 填写 docker.pi 时只覆盖容器内 Pi 自己的配置目录，密钥不写入日志或宿主机。
+//
+// 在 GitHub Actions 中未获真实测试授权时先跳过，不读取配置、不建立任何远程连接。
 package agent_remote
 
 import (
@@ -76,6 +78,7 @@ type target struct {
 // 开关未启用时输出明确警告并跳过，避免普通测试意外修改远程 Docker。
 func requireEnabled(t *testing.T) target {
 	t.Helper()
+	testkit.RequireRealTests(t, "真实远程容器与容器内真实 Pi 测试")
 	enabled, _ := testkit.LoadDockerConfig(t)
 	if !enabled.RemoteEnabled {
 		reason := fmt.Sprintf(

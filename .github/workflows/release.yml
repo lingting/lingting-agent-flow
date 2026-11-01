@@ -200,17 +200,9 @@ jobs:
           set -euo pipefail
           summary="$RUNNER_TEMP/release-artifacts.md"
           # 只列出清单里的制品名称、大小与摘要；不打印仓库路径、环境变量或凭据。
-          python3 - "$summary" <<'PY'
-          import json
-          import pathlib
-          import sys
-
-          manifest = json.loads(pathlib.Path("release-manifest.json").read_text(encoding="utf-8"))
-          lines = ["### 发布制品", "", "| 制品 | 大小（字节） | SHA-256 |", "| --- | --- | --- |"]
-          for artifact in manifest["artifacts"]:
-              lines.append(f"| `{artifact['file']}` | {artifact['size']} | `{artifact['sha256']}` |")
-          pathlib.Path(sys.argv[1]).write_text("\n".join(lines) + "\n", encoding="utf-8")
-          PY
+          # 摘要生成逻辑放在仓库脚本里：YAML 块标量的内容自带缩进，here-document 的
+          # 结束标记同样会被缩进，导致整段脚本被当成数据吞掉。
+          python3 "$GITHUB_WORKSPACE/.github/scripts/release-artifacts-summary.py" "$summary"
           cat "$summary" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
       # 上传失败必须让 Job 失败，不能"显示成功后遗漏制品"。
       - name: 上传发布制品

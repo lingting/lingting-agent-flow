@@ -15,6 +15,8 @@
 //   - 目标配置完整但连接、认证、主机密钥校验失败或 Docker 不可用时必须让测试失败；
 //   - 所有镜像标签、容器名称与远程目录都带随机后缀，并只操作本次测试创建的资源；
 //   - 不执行全局 prune，不删除共享镜像、共享缓存卷或其他测试的资源。
+//
+// 在 GitHub Actions 中未获真实测试授权时先跳过，不读取配置、不建立任何远程连接。
 package docker_remote
 
 import (
@@ -58,6 +60,7 @@ type target struct {
 // 开关未启用时输出明确警告并跳过，避免普通测试意外修改远程 Docker。
 func requireEnabled(t *testing.T) target {
 	t.Helper()
+	testkit.RequireRealTests(t, "真实远程 Docker 集成测试")
 	enabled, _ := testkit.LoadDockerConfig(t)
 	if !enabled.RemoteEnabled {
 		reason := fmt.Sprintf(

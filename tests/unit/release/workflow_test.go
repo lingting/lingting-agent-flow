@@ -50,6 +50,14 @@ var expressionContextPattern = regexp.MustCompile(`^[!(\s]*([A-Za-z_][A-Za-z0-9_
 // 参数或日志里塞凭据。
 var forbiddenExpressionContexts = []string{"secrets"}
 
+// secretsAllowedIn 是允许出现 secrets 上下文的工作流。
+//
+// 只有 ci.yml 的真实测试 Job 需要读取 real-tests 环境的凭据；它出现的位置由
+// TestCIWorkflowSecretBoundary 逐条限定。发布与构建流程仍然完全不使用仓库凭据。
+var secretsAllowedIn = map[string]bool{
+	ciWorkflowPath: true,
+}
+
 // allowedExpressionContexts 是允许出现在本项目工作流里的上下文。
 //
 // jobs 只在 workflow_call.outputs.value 里合法（复用工作流对外暴露的结论），
@@ -516,14 +524,13 @@ func TestWorkflowActionsPinned(t *testing.T) {
 
 // TestWorkflowExpressions 校验工作流中的表达式语法与可用上下文。
 //
-// 只允许已声明的上下文标识符，并拒绝 secrets：发布构建不需要任何仓库凭据。
+// 只允许已声明的上下文标识符。secrets 默认禁用：发布与构建流程不需要任何仓库凭据；
+// ci.yml 的真实测试 Job 是唯一例外，其出现位置由 TestCIWorkflowSecretBoundary 限定。
 func TestWorkflowExpressions(t *testing.T) {
 	t.Parallel()
-	allowed := make(map[string]bool, len(allowedExpressionContexts))
-	for _, context := range allowedExpressionContexts {
-		allowed[context] = true
-	}
 	for _, relative := range workflowPaths() {
+		allowed := allowedContextsFor(relative)
+		forbidden := forbiddenContextsFor(relative)
 		text := readWorkflowText(t, relative)
 		// 括号数量必须配对：多写一个右括号会让整个工作流在运行时才失败。
 		if strings.Count(text, "${{") != strings.Count(text, "}}") {
@@ -539,9 +546,9 @@ func TestWorkflowExpressions(t *testing.T) {
 			}
 			// 上下文出现在链中间（例如 format('0}', secrets.X)）时上面的检查看不到，
 			// 因此对禁用上下文再做一次整体扫描。
-			for _, forbidden := range forbiddenExpressionContexts {
-				if strings.Contains(expression, forbidden+".") {
-					t.Errorf("%s 的表达式引用了禁用的上下文 %q：%s", relative, forbidden, match[0])
+			for _, entry := range forbidden {
+				if strings.Contains(expression, entry+".") {
+					t.Errorf("%s 的表达式引用了禁用的上下文 %q：%s", relative, entry, match[0])
 				}
 			}
 		}
@@ -551,13 +558,35 @@ func TestWorkflowExpressions(t *testing.T) {
 			if context != "" && !allowed[context] {
 				t.Errorf("%s 的 if 条件使用了不允许的上下文 %q：%s", relative, context, condition)
 			}
-			for _, forbidden := range forbiddenExpressionContexts {
-				if strings.Contains(condition, forbidden+".") {
-					t.Errorf("%s 的 if 条件引用了禁用的上下文 %q：%s", relative, forbidden, condition)
+			for _, entry := range forbidden {
+				if strings.Contains(condition, entry+".") {
+					t.Errorf("%s 的 if 条件引用了禁用的上下文 %q：%s", relative, entry, condition)
 				}
 			}
 		}
 	}
+}
+
+// allowedContextsFor 返回指定工作流允许出现的表达式上下文集合。
+func allowedContextsFor(relative string) map[string]bool {
+	contexts := make([]string, 0, len(allowedExpressionContexts)+1)
+	contexts = append(contexts, allowedExpressionContexts...)
+	if secretsAllowedIn[relative] {
+		contexts = append(contexts, "secrets")
+	}
+	allowed := make(map[string]bool, len(contexts))
+	for _, context := range contexts {
+		allowed[context] = true
+	}
+	return allowed
+}
+
+// forbiddenContextsFor 返回指定工作流仍然禁用的上下文。
+func forbiddenContextsFor(relative string) []string {
+	if secretsAllowedIn[relative] {
+		return nil
+	}
+	return forbiddenExpressionContexts
 }
 
 // TestCIWorkflowGatePreserved 校验 CI 门禁结构在新增发布流程后仍然完整。
@@ -568,12 +597,144 @@ func TestCIWorkflowGatePreserved(t *testing.T) {
 	if permissions == nil || permissions["contents"] != "read" {
 		t.Fatal("CI 工作流的 contents 权限必须保持 read")
 	}
-	for _, job := range []string{"go-static", "go-test", "go-race", "ui-test", "ci-summary"} {
+	jobs := []string{
+		"go-static", "go-test", "go-race", "ui-test",
+		"real-tests-gate", "real-tests", "ci-summary",
+	}
+	for _, job := range jobs {
 		jobMap(t, workflow, job)
 	}
-	if needs := stringList(workflow, "jobs", "ci-summary", "needs"); len(needs) != 4 {
-		t.Fatalf("ci-summary 必须依赖四个必需 Job，实际 %v", needs)
+	needs := stringList(workflow, "jobs", "ci-summary", "needs")
+	if len(needs) != len(jobs)-1 {
+		t.Fatalf("ci-summary 必须依赖其余全部 Job，实际 %v", needs)
 	}
+	required := make(map[string]bool, len(needs))
+	for _, name := range needs {
+		required[name] = true
+	}
+	for _, name := range jobs[:len(jobs)-1] {
+		if !required[name] {
+			t.Fatalf("ci-summary 缺少依赖 %s，实际 %v", name, needs)
+		}
+	}
+	// 真实测试 Job 必须由授权判断结论驱动，并且只依赖授权判断。
+	realTests := jobMap(t, workflow, "real-tests")
+	if condition, _ := realTests["if"].(string); !strings.Contains(
+		condition, "needs.real-tests-gate.outputs.enabled",
+	) {
+		t.Errorf("真实测试 Job 必须以授权判断结论为条件，实际 %q", condition)
+	}
+	if realNeeds := stringList(workflow, "jobs", "real-tests", "needs"); len(realNeeds) != 1 ||
+		realNeeds[0] != "real-tests-gate" {
+		t.Errorf("真实测试 Job 只应依赖授权判断 Job，实际 %v", realNeeds)
+	}
+}
+
+// TestCIWorkflowSecretBoundary 校验 ci.yml 的凭据边界。
+//
+// 只有 real-tests Job 可以读取 Secret，而且必须把凭据挂在 real-tests 环境上：
+// 普通 CI、授权判断与汇总 Job 都不得接触真实设备凭据，也不得获取写权限。
+func TestCIWorkflowSecretBoundary(t *testing.T) {
+	t.Parallel()
+	workflow := loadWorkflow(t, ciWorkflowPath)
+	for name, jobValue := range mapValue(workflow, "jobs") {
+		job, ok := jobValue.(map[string]any)
+		if !ok {
+			continue
+		}
+		text := jobText(t, job)
+		if strings.Contains(text, "secrets.") && name != "real-tests" {
+			t.Errorf("Job %s 不应引用任何 Secret", name)
+		}
+		if jobPermissions, ok := job["permissions"].(map[string]any); ok {
+			for scope, level := range jobPermissions {
+				if level != "read" {
+					t.Errorf("Job %s 的 %s 权限超出最小化边界: %v", name, scope, level)
+				}
+			}
+		}
+	}
+	realTests := jobMap(t, workflow, "real-tests")
+	if environment, _ := realTests["environment"].(string); environment != "real-tests" {
+		t.Errorf("真实测试 Job 必须使用 real-tests 环境承载凭据，实际 %v", realTests["environment"])
+	}
+	realText := jobText(t, realTests)
+	for _, required := range []string{
+		"./tests/integration/pi/...",
+		"./tests/integration/ssh/...",
+		"./tests/integration/remote/...",
+		"AGENTFLOW_REAL_TESTS_GRANTED",
+	} {
+		if !strings.Contains(realText, required) {
+			t.Errorf("真实测试 Job 缺少 %q", required)
+		}
+	}
+	// 本机模拟测试不得出现在真实测试 Job 里：它们属于普通 CI。
+	for _, local := range []string{
+		"./tests/integration/local/",
+		"./tests/unit/",
+		"./tests/e2e/",
+	} {
+		if strings.Contains(realText, local) {
+			t.Errorf("真实测试 Job 不应执行本机测试包 %q", local)
+		}
+	}
+	// 授权判断 Job 不读取 Secret、不绑定环境，并且只检出可信提交。
+	gate := jobMap(t, workflow, "real-tests-gate")
+	if strings.Contains(jobText(t, gate), "secrets.") {
+		t.Error("授权判断 Job 不得读取任何 Secret")
+	}
+	if gate["environment"] != nil {
+		t.Errorf("授权判断 Job 不应绑定任何环境，实际 %v", gate["environment"])
+	}
+	outputs := mapValue(workflow, "jobs", "real-tests-gate", "outputs")
+	if outputs == nil || !strings.Contains(jobText(t, outputs), "enabled") {
+		t.Error("授权判断 Job 必须输出授权结论")
+	}
+	if !hasKey(outputs, "reason") {
+		t.Error("授权判断 Job 必须输出判定原因")
+	}
+	if ref := checkoutRef(t, workflow, "real-tests-gate"); !strings.Contains(
+		ref, "github.event.pull_request.base.sha",
+	) {
+		t.Errorf("授权判断必须检出可信的基础提交，实际 ref=%q", ref)
+	}
+	// 唯一的用户配置变量是 AGENTFLOW_REAL_TESTS；不得再用其他变量覆盖授权策略。
+	raw := readWorkflowText(t, ciWorkflowPath)
+	if strings.Contains(raw, "vars.AGENTFLOW_REAL_TESTS_ALLOW") ||
+		strings.Contains(raw, "vars.AGENTFLOW_REAL_TESTS_ENABLED") {
+		t.Error("授权策略不得由第二个用户变量覆盖")
+	}
+}
+
+// jobText 把 Job 定义序列化为文本，用于检查 YAML 结构无法直接表达的约束。
+func jobText(t *testing.T, job map[string]any) string {
+	t.Helper()
+	data, err := yaml.Marshal(job)
+	if err != nil {
+		t.Fatalf("序列化 Job 定义失败: %v", err)
+	}
+	return string(data)
+}
+
+// checkoutRef 返回指定 Job 中检出步骤声明的 ref，没有声明时返回空串。
+func checkoutRef(t *testing.T, workflow map[string]any, job string) string {
+	t.Helper()
+	reference := ""
+	for _, stepValue := range jobSteps(t, workflow, job) {
+		step, ok := stepValue.(map[string]any)
+		if !ok {
+			continue
+		}
+		with, ok := step["with"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if ref, ok := with["ref"].(string); ok {
+			reference = ref
+		}
+	}
+	return reference
 }
 
 // stepIndex 返回指定 Job 中第一个名字包含 fragment 的步骤序号，找不到时结束用例。
