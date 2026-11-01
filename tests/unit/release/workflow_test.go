@@ -602,7 +602,8 @@ func TestCIWorkflowGatePreserved(t *testing.T) {
 		t.Fatal("CI 工作流的 contents 权限必须保持 read")
 	}
 	jobs := []string{
-		"go-static", "go-test", "go-race", "ui-test",
+		"go-static", "go-inventory", "go-unit", "go-local", "go-e2e",
+		"go-race", "ui-test",
 		"real-tests-gate", "real-tests", "ci-summary",
 	}
 	for _, job := range jobs {
@@ -631,6 +632,65 @@ func TestCIWorkflowGatePreserved(t *testing.T) {
 	if realNeeds := stringList(workflow, "jobs", "real-tests", "needs"); len(realNeeds) != 1 ||
 		realNeeds[0] != "real-tests-gate" {
 		t.Errorf("真实测试 Job 只应依赖授权判断 Job，实际 %v", realNeeds)
+	}
+}
+
+// TestCIGoTestJobSplit 校验普通 Go 测试按职责拆分成互不重叠的并行 Job。
+//
+// 拆分的前提是"分组由脚本定义、任务由清单驱动"：三个分组 Job 只传分组名，包模式与
+// Makefile 入口都来自 go-test-groups.sh；分组之间没有 needs 依赖，因此可以并行执行；
+// 三者都必须依赖 go-inventory，使"分组遗漏"在跑测试之前就被拦下。
+func TestCIGoTestJobSplit(t *testing.T) {
+	t.Parallel()
+	workflow := loadWorkflow(t, ciWorkflowPath)
+	groups := []struct {
+		job    string
+		group  string
+		legacy string // 该分组不得出现的真实外部依赖包前缀
+	}{
+		{job: "go-unit", group: "unit", legacy: "tests/integration/"},
+		{job: "go-local", group: "local", legacy: "tests/integration/pi"},
+		{job: "go-e2e", group: "e2e", legacy: "tests/integration/remote"},
+	}
+	for _, item := range groups {
+		t.Run(item.job, func(t *testing.T) {
+			t.Parallel()
+			job := jobMap(t, workflow, item.job)
+			needs := stringList(workflow, "jobs", item.job, "needs")
+			if len(needs) != 1 || needs[0] != "go-inventory" {
+				t.Fatalf("分组 Job %s 必须只依赖 go-inventory，实际 %v", item.job, needs)
+			}
+			text := jobText(t, job)
+			if !strings.Contains(text, ".github/scripts/run-go-group-tests.sh") {
+				t.Fatalf("分组 Job %s 必须调用 .github/scripts/run-go-group-tests.sh", item.job)
+			}
+			// 分组名是唯一传入的测试范围信息：包模式不得写进 YAML。
+			if !strings.Contains(text, "--group "+item.group) {
+				t.Errorf("分组 Job %s 必须以 --group %s 调用脚本，实际:\n%s", item.job, item.group, text)
+			}
+			if !strings.Contains(text, "--parallel") {
+				t.Errorf("分组 Job %s 必须显式声明并行度，避免依赖脚本默认值漂移", item.job)
+			}
+			if strings.Contains(text, "./tests/") {
+				t.Errorf("分组 Job %s 不得在 YAML 里列举测试包，分组范围只由 go-test-groups.sh 定义", item.job)
+			}
+			if strings.Contains(text, item.legacy) {
+				t.Errorf("分组 Job %s 不应执行 %s 下的测试包", item.job, item.legacy)
+			}
+		})
+	}
+	// 分组核验必须在测试之前跑：它的失败会跳过全部分组 Job，门禁因此不会误报成功。
+	inventory := jobMap(t, workflow, "go-inventory")
+	if !strings.Contains(jobText(t, inventory), "go-test-groups.sh --check") {
+		t.Error("go-inventory 必须调用 go-test-groups.sh --check 核验分组完整性")
+	}
+	// 普通 Go 测试组不得互相依赖，否则失去并行意义。
+	for _, name := range []string{"go-unit", "go-local", "go-e2e"} {
+		for _, dependency := range stringList(workflow, "jobs", name, "needs") {
+			if dependency != "go-inventory" {
+				t.Errorf("Job %s 不应对 %s 产生测试顺序依赖", name, dependency)
+			}
+		}
 	}
 }
 
@@ -670,18 +730,27 @@ func TestCIWorkflowSecretBoundary(t *testing.T) {
 	if !strings.Contains(realText, "AGENTFLOW_REAL_TESTS_GRANTED") {
 		t.Error("真实测试 Job 必须传入授权标记 AGENTFLOW_REAL_TESTS_GRANTED")
 	}
+	// 真实测试范围只来自分组清单：执行脚本自己不得列举任何测试包。
 	realScript := readScriptText(t, "run-real-tests.sh")
 	for _, required := range []string{
-		"./tests/integration/pi/...",
-		"./tests/integration/ssh/...",
-		"./tests/integration/remote/...",
+		"go-test-groups.sh",
 		"AGENTFLOW_REAL_TESTS_GRANTED",
 	} {
 		if !strings.Contains(realScript, required) {
 			t.Errorf("真实测试脚本缺少 %q", required)
 		}
 	}
-	// 本机模拟测试不得出现在真实测试范围内：它们属于普通 CI 的 go-test。
+	groupsScript := readScriptText(t, "go-test-groups.sh")
+	for _, required := range []string{
+		"./tests/integration/pi/...",
+		"./tests/integration/ssh/...",
+		"./tests/integration/remote/...",
+	} {
+		if !strings.Contains(groupsScript, required) {
+			t.Errorf("分组清单缺少真实测试包模式 %q", required)
+		}
+	}
+	// 本机模拟测试不得出现在真实测试范围内：它们属于普通 CI 的分组 Job。
 	for _, local := range []string{
 		"./tests/integration/local/",
 		"./tests/unit/",

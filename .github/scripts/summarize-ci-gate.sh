@@ -9,7 +9,12 @@
 #
 # 环境变量（输入，全部是 GitHub Actions 的结构化结论）:
 #   GO_STATIC_RESULT / GO_STATIC_STEP     go-static 的 Job 结论与检查步骤结论
-#   GO_TEST_RESULT / GO_TEST_PREPARE / GO_TEST_STEP
+#   GO_INVENTORY_RESULT / GO_INVENTORY_STEP        go-inventory 的 Job 结论与分组核验步骤结论
+#   GO_INVENTORY_COVERAGE / GO_INVENTORY_PACKAGES  分组核验结论与测试包总数
+#   GO_GROUPS_SUMMARY                              go-inventory 输出的分组清单表格（Markdown）
+#   GO_UNIT_RESULT / GO_UNIT_STEP                  go-unit 的 Job 结论与测试步骤结论
+#   GO_LOCAL_RESULT / GO_LOCAL_STEP                go-local 的 Job 结论与测试步骤结论
+#   GO_E2E_RESULT / GO_E2E_PREPARE / GO_E2E_STEP   go-e2e 的 Job、环境准备与测试步骤结论
 #   GO_RACE_RESULT / GO_RACE_STEP
 #   UI_TEST_RESULT / UI_TEST_PREPARE / UI_TEST_STEP
 #   REAL_GATE_RESULT / REAL_GATE_MODE / REAL_GATE_ENABLED / REAL_GATE_REASON
@@ -76,7 +81,10 @@ failed=0
 # 不会被 bash 识别为 heredoc 终止行。
 for row in \
     "go-static|${GO_STATIC_RESULT:-}|${GO_STATIC_STEP:-}|-" \
-    "go-test|${GO_TEST_RESULT:-}|${GO_TEST_STEP:-}|${GO_TEST_PREPARE:-}" \
+    "go-inventory|${GO_INVENTORY_RESULT:-}|${GO_INVENTORY_STEP:-}|-" \
+    "go-unit|${GO_UNIT_RESULT:-}|${GO_UNIT_STEP:-}|-" \
+    "go-local|${GO_LOCAL_RESULT:-}|${GO_LOCAL_STEP:-}|-" \
+    "go-e2e|${GO_E2E_RESULT:-}|${GO_E2E_STEP:-}|${GO_E2E_PREPARE:-}" \
     "go-race|${GO_RACE_RESULT:-}|${GO_RACE_STEP:-}|-" \
     "ui-test|${UI_TEST_RESULT:-}|${UI_TEST_STEP:-}|${UI_TEST_PREPARE:-}"; do
     IFS='|' read -r job result tests prepare <<< "$row"
@@ -114,6 +122,20 @@ for row in \
     esac
     echo "| ${job} | ${result:-（空）} | ${verdict} |" >> "$report_path"
 done
+
+# Go 测试分组：清单与核验结论来自 go-inventory 的结构化输出，不重新解析测试日志。
+if [ -n "${GO_INVENTORY_COVERAGE:-}" ] || [ -n "${GO_GROUPS_SUMMARY:-}" ]; then
+    {
+        echo
+        echo "### Go 测试分组"
+        echo
+        echo "- 分组核验：${GO_INVENTORY_COVERAGE:-（未提供）}（测试包总数 ${GO_INVENTORY_PACKAGES:-（未提供）}）"
+        if [ -n "${GO_GROUPS_SUMMARY:-}" ]; then
+            echo
+            printf '%s\n' "$GO_GROUPS_SUMMARY"
+        fi
+    } >> "$report_path"
+fi
 
 # 授权判断 Job 必须成功：它失败说明判定本身没跑完，不能当成"未授权"放行。
 case "${REAL_GATE_RESULT:-}" in

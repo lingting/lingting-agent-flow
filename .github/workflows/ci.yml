@@ -1,18 +1,32 @@
 # AgentFlow 持续集成门禁。
 #
 # 必需 Job（任一非成功，ci-summary 一律失败，不会把门禁报告为通过）：
-# - go-static：Go 格式、静态检查与编译，最先失败以获得最快反馈
-# - go-test  ：`make test` 全量测试（单元 / 本机集成 / 真实外部依赖 / CLI E2E / 打包冒烟）
-# - go-race  ：竞态检测（`make test-race` 覆盖范围 + 数据库迁移 + 任务级工作流编排）
-# - ui-test  ：前端单元测试、Playwright 浏览器 E2E、格式、lint、类型检查与生产构建
+# - go-static    ：Go 格式、静态检查与编译，最先失败以获得最快反馈
+# - go-inventory ：测试包清单与分组核验（未经核验就不执行普通测试，避免"分组遗漏被静默忽略"）
+# - go-unit      ：`./tests/unit/...`（不需要任何外部设备）
+# - go-local     ：`./tests/integration/local/...`（本机 SQLite / 进程 / 本机 bare 仓库 / 进程内
+#                  模拟 SSH 服务端；这些是普通测试，不属于真实外部依赖）
+# - go-e2e       ：`./tests/e2e/...`（CLI 端到端与单文件打包冒烟，需要 pnpm 与前端依赖）
+# - go-race      ：竞态检测（`make test-race` 覆盖范围 + 数据库迁移 + 任务级工作流编排）
+# - ui-test      ：前端单元测试、Playwright 浏览器 E2E、格式、lint、类型检查与生产构建
+#
+# 普通 Go 测试按职责拆成三个互不依赖的 Job，由 GitHub Actions 在不同 Runner 上并行执行；
+# 分组归属、包模式、Makefile 入口与并行度只定义在 `.github/scripts/go-test-groups.sh`，
+# YAML 只传分组名与产物目录。三个 Job 的包集合互不重叠且并集等于 `make test` 的全部测试包，
+# 这一点由 go-inventory 用 `go list` 的真实清单核验，不靠人眼比对。
+#
+# 并行度上限：Go 分组 Job 各自独享一台 4 vCPU Runner，因此每个分组内部只开 `-p 4`
+# 与 `-parallel 4`，不在同一台机器上叠加多个高并发测试进程；三个分组 Job 加上
+# go-static / go-race / ui-test 同时最多 6 台 Runner。真实远程设备始终只有一台，
+# 因此真实测试保持单 Job 串行（详见下方 real-tests 说明）。
 #
 # 真实外部依赖测试（真实 SSH 设备、真实远程 Docker、容器内真实 Pi、真实远程 Git）
 # 与普通 CI 分成两层，互不重叠：
-# - 普通 CI 的四个必需 Job 不读取任何真实设备凭据；GitHub Actions 中没有授权标记时，
+# - 普通 CI 的必需 Job 不读取任何真实设备凭据；GitHub Actions 中没有授权标记时，
 #   这些用例在读取配置、建立连接之前就输出 WARN [SKIP] 并跳过。跳过不是通过，也不会
 #   让 CI 失败。
-# - real-tests 只在真实测试授权判断通过后运行，且只执行需要真实外部依赖的测试包，
-#   不重复执行普通 Go 测试。
+# - real-tests 只在真实测试授权判断通过后运行，且只执行 go-test-groups.sh 中 real 分组
+#   （pi / ssh / remote），不重复执行普通 Go 测试。
 #
 # 真实测试授权由唯一的用户变量 AGENTFLOW_REAL_TESTS 控制（self / collaborator / all；
 # 未设置、为空或取值未知时关闭）。判定规则集中在 internal/cigate，由
@@ -22,6 +36,13 @@
 # 凭据边界：真实测试的连接配置只来自 real-tests 环境的 Environment Secrets，
 # 普通 CI 与授权判断 Job 都不读取 Secret；pull_request 事件不会把真实设备凭据交给
 # fork PR，缺少 Secret 时 real-tests 明确报告 SKIP 而不是失败或伪造通过。
+#
+# 缓存：Go 环境统一由 actions/setup-go 的 `cache: true` 缓存，它同时缓存 Go Module 下载
+# 缓存（GOMODCACHE）与编译 / 测试包缓存（GOCACHE）。缓存键由 setup-go 生成，包含实际安装
+# 的 Go 版本、Runner 操作系统与镜像、架构以及 `go.mod` + `go.sum` 的内容哈希，因此不同
+# Go 版本与不同操作系统不会错误共享缓存，依赖变更会自动失效；未命中时按普通构建继续，
+# 缓存损坏只会退化为重新编译。缓存里只有依赖与编译产物，不含测试数据库、Session、测试
+# 工作空间、真实测试凭据或任何用户配置。
 #
 # 所有 Action 都用提交 SHA 固定（不用可移动的 tag），避免上游重新指向标签时 CI 行为变化。
 #
@@ -73,15 +94,134 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-          cache-dependency-path: go.sum
+          cache-dependency-path: |
+            go.mod
+            go.sum
       - name: 格式、静态检查与编译
         id: static
         run: bash .github/scripts/check-go-static.sh
 
-  go-test:
-    name: Go 全量测试
+  # 测试包清单与分组核验：普通测试 Job 全部依赖本 Job。分组遗漏、一个测试包落在多个
+  # 分组、分组已定义却没有 Job 执行、Makefile 入口与分组清单不一致时，本 Job 失败，
+  # 后续测试 Job 被跳过，ci-summary 因此不会把门禁报告为通过。
+  go-inventory:
+    name: Go 测试包清单与分组核验
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 10
+    outputs:
+      check: ${{ steps.groups.outcome }}
+      coverage: ${{ steps.groups.outputs.coverage }}
+      package_total: ${{ steps.groups.outputs.package_total }}
+      groups_markdown: ${{ steps.groups.outputs.groups_markdown }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 安装 Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      # 声明的普通分组必须与清单一致：新增分组却没有对应 Job 同样算遗漏。
+      - name: 核验测试包分组覆盖
+        id: groups
+        run: bash .github/scripts/go-test-groups.sh --check --declared-groups unit,local,e2e
+
+  # 三个普通分组互不依赖，可以并行执行；每个分组内部只开与 Runner 匹配的并行度。
+  go-unit:
+    name: Go 单元测试
+    needs: [go-inventory]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      tests: ${{ steps.tests.outcome }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 安装 Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      - name: 执行 Go 单元测试
+        id: tests
+        run: bash .github/scripts/run-go-group-tests.sh --group unit --artifact-dir "$TEST_ARTIFACT_ROOT/unit" --parallel 4
+      - name: 汇总外部依赖跳过原因
+        if: always()
+        run: bash .github/scripts/summarize-test-skips.sh --title "Go 单元测试跳过情况" --base "$TEST_ARTIFACT_ROOT/unit/lingting-agent-flow-tests"
+      # 失败时收集并上传诊断产物：只有控制台输出、各测试包 test.log 与 latest-run.txt，
+      # 不含测试工作空间里的数据库、Session 与临时私钥。两步都允许失败，避免产物问题
+      # 覆盖测试本身的失败结论。
+      - name: 收集测试产物
+        id: artifacts
+        if: failure()
+        continue-on-error: true
+        run: bash .github/scripts/collect-test-artifacts.sh --source-dir "$TEST_ARTIFACT_ROOT/unit" --job go-unit
+      - name: 上传测试产物
+        if: failure() && steps.artifacts.outputs.staging-dir != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.artifacts.outputs.artifact-name }}
+          path: ${{ steps.artifacts.outputs.staging-dir }}
+          if-no-files-found: warn
+          retention-days: 7
+
+  go-local:
+    name: Go 本机集成测试
+    needs: [go-inventory]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      tests: ${{ steps.tests.outcome }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 安装 Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      - name: 执行 Go 本机集成测试
+        id: tests
+        run: bash .github/scripts/run-go-group-tests.sh --group local --artifact-dir "$TEST_ARTIFACT_ROOT/local" --parallel 4
+      - name: 汇总外部依赖跳过原因
+        if: always()
+        run: bash .github/scripts/summarize-test-skips.sh --title "Go 本机集成测试跳过情况" --base "$TEST_ARTIFACT_ROOT/local/lingting-agent-flow-tests"
+      - name: 收集测试产物
+        id: artifacts
+        if: failure()
+        continue-on-error: true
+        run: bash .github/scripts/collect-test-artifacts.sh --source-dir "$TEST_ARTIFACT_ROOT/local" --job go-local
+      - name: 上传测试产物
+        if: failure() && steps.artifacts.outputs.staging-dir != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.artifacts.outputs.artifact-name }}
+          path: ${{ steps.artifacts.outputs.staging-dir }}
+          if-no-files-found: warn
+          retention-days: 7
+
+  go-e2e:
+    name: Go 端到端测试
+    needs: [go-inventory]
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
     outputs:
       prepare: ${{ steps.prepare.outcome }}
       tests: ${{ steps.tests.outcome }}
@@ -95,9 +235,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-          cache-dependency-path: go.sum
+          cache-dependency-path: |
+            go.mod
+            go.sum
       # 单文件打包冒烟测试（tests/e2e/packaging）会调用 `pnpm build`，缺少 pnpm 或前端
-      # 依赖时该用例自行跳过。为了让 make test 真正覆盖打包冒烟，这里安装前端依赖。
+      # 依赖时该用例自行跳过。为了让端到端分组真正覆盖打包冒烟，只有这个 Job 安装前端依赖。
       - name: 安装 pnpm
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
@@ -112,25 +254,24 @@ jobs:
         id: prepare
         working-directory: lingting-agent-flow-ui
         run: pnpm install --frozen-lockfile
-      - name: 全量 Go 测试
+      - name: 执行 Go 端到端测试
         id: tests
-        run: bash .github/scripts/run-go-tests.sh --artifact-dir "$TEST_ARTIFACT_ROOT/go" --parallel 8
+        run: bash .github/scripts/run-go-group-tests.sh --group e2e --artifact-dir "$TEST_ARTIFACT_ROOT/e2e" --parallel 4
       - name: 汇总外部依赖跳过原因
         if: always()
-        run: bash .github/scripts/summarize-test-skips.sh --title "外部依赖测试跳过情况" --base "$TEST_ARTIFACT_ROOT/go/lingting-agent-flow-tests"
-      # 只上传 test.log 与 latest-run.txt：逐用例结论、跳过原因与应用日志都在其中。
-      # 不上传整个测试工作空间，避免把用例生成的临时私钥、数据库与 Session 一并带走。
-      # 上传失败不得覆盖原本的测试失败结论，因此显式 continue-on-error。
-      - name: 上传 Go 测试日志
+        run: bash .github/scripts/summarize-test-skips.sh --title "Go 端到端测试跳过情况" --base "$TEST_ARTIFACT_ROOT/e2e/lingting-agent-flow-tests"
+      - name: 收集测试产物
+        id: artifacts
         if: failure()
+        continue-on-error: true
+        run: bash .github/scripts/collect-test-artifacts.sh --source-dir "$TEST_ARTIFACT_ROOT/e2e" --job go-e2e
+      - name: 上传测试产物
+        if: failure() && steps.artifacts.outputs.staging-dir != ''
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: go-test-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ github.workspace }}/.test-artifacts/go/make-test-output.log
-            ${{ github.workspace }}/.test-artifacts/go/lingting-agent-flow-tests/**/test.log
-            ${{ github.workspace }}/.test-artifacts/go/lingting-agent-flow-tests/latest-run.txt
+          name: ${{ steps.artifacts.outputs.artifact-name }}
+          path: ${{ steps.artifacts.outputs.staging-dir }}
           if-no-files-found: warn
           retention-days: 7
 
@@ -150,20 +291,24 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-          cache-dependency-path: go.sum
+          cache-dependency-path: |
+            go.mod
+            go.sum
       - name: 竞态检测
         id: tests
-        run: bash .github/scripts/run-go-race-tests.sh --artifact-dir "$TEST_ARTIFACT_ROOT/go-race"
-      - name: 上传竞态检测日志
+        run: bash .github/scripts/run-go-race-tests.sh --artifact-dir "$TEST_ARTIFACT_ROOT/go-race" --parallel 4
+      - name: 收集测试产物
+        id: artifacts
         if: failure()
+        continue-on-error: true
+        run: bash .github/scripts/collect-test-artifacts.sh --source-dir "$TEST_ARTIFACT_ROOT/go-race" --job go-race
+      - name: 上传测试产物
+        if: failure() && steps.artifacts.outputs.staging-dir != ''
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: go-race-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ github.workspace }}/.test-artifacts/go-race/race-output.log
-            ${{ github.workspace }}/.test-artifacts/go-race/lingting-agent-flow-tests/**/test.log
-            ${{ github.workspace }}/.test-artifacts/go-race/lingting-agent-flow-tests/latest-run.txt
+          name: ${{ steps.artifacts.outputs.artifact-name }}
+          path: ${{ steps.artifacts.outputs.staging-dir }}
           if-no-files-found: warn
           retention-days: 7
 
@@ -244,7 +389,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-          cache-dependency-path: go.sum
+          cache-dependency-path: |
+            go.mod
+            go.sum
       - name: 判定真实测试资格
         id: gate
         env:
@@ -260,6 +407,13 @@ jobs:
         run: bash .github/scripts/check-real-test-authorization.sh
 
   # 真实外部依赖测试：只有授权判断通过后才运行，且只执行需要真实设备的测试包。
+  #
+  # 保持单 Job 串行：真实 Pi、真实 SSH、真实远程 Docker / Agent / 代码保存 / 工作流共用
+  # 同一台真实远程机器与同一个 Docker Engine，没有可证明的按套件资源隔离（容器虽有随机
+  # 后缀，但 SSH 连接数、镜像构建与磁盘仍共享），因此不为追求速度把它们拆成并发 Job。
+  # 拆分只发生在"是否执行"这一层：普通 CI 与真实测试互不重叠，普通 CI 成功不依赖本 Job。
+  # 同一 Job 内的真实测试包之间也固定串行（`run-real-tests.sh` 使用 `-p 1`）：并发跑多个
+  # 远程套件时，各套件会在"零残留核验"里把对方刚创建的一次性容器当成未登记残留而互相失败。
   #
   # 连接配置只来自 real-tests 环境的 Environment Secrets（不是全仓库可读的
   # Repository Secrets）：普通 CI 拿不到这些凭据，fork PR 也拿不到。
@@ -284,7 +438,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-          cache-dependency-path: go.sum
+          cache-dependency-path: |
+            go.mod
+            go.sum
       # 现场生成 tests/config/*.yml：这些文件被 .gitignore 忽略，不会被提交或上传。
       # 私钥与 known_hosts 写入 RUNNER_TEMP 下的临时目录，测试结束时随 Runner 销毁；
       # 配置内容与凭据值一律不打印，输出里只出现"哪些文件已生成"。
@@ -327,22 +483,33 @@ jobs:
           TESTS_OUTCOME: ${{ steps.real.outcome }}
         run: bash .github/scripts/summarize-real-tests.sh --skip-base "$TEST_ARTIFACT_ROOT/real/lingting-agent-flow-tests"
       # 失败时保留日志便于定位；只上传日志，不上传配置、私钥或数据库。
-      - name: 上传真实测试日志
+      - name: 收集测试产物
+        id: artifacts
         if: failure()
+        continue-on-error: true
+        run: bash .github/scripts/collect-test-artifacts.sh --source-dir "$TEST_ARTIFACT_ROOT/real" --job real-tests
+      - name: 上传真实测试产物
+        if: failure() && steps.artifacts.outputs.staging-dir != ''
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: real-tests-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ github.workspace }}/.test-artifacts/real/real-tests-output.log
-            ${{ github.workspace }}/.test-artifacts/real/lingting-agent-flow-tests/**/test.log
-            ${{ github.workspace }}/.test-artifacts/real/lingting-agent-flow-tests/latest-run.txt
+          name: ${{ steps.artifacts.outputs.artifact-name }}
+          path: ${{ steps.artifacts.outputs.staging-dir }}
           if-no-files-found: warn
           retention-days: 7
 
   ci-summary:
     name: CI 汇总
-    needs: [go-static, go-test, go-race, ui-test, real-tests-gate, real-tests]
+    needs:
+      - go-static
+      - go-inventory
+      - go-unit
+      - go-local
+      - go-e2e
+      - go-race
+      - ui-test
+      - real-tests-gate
+      - real-tests
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -353,9 +520,18 @@ jobs:
         env:
           GO_STATIC_RESULT: ${{ needs.go-static.result }}
           GO_STATIC_STEP: ${{ needs.go-static.outputs.static }}
-          GO_TEST_RESULT: ${{ needs.go-test.result }}
-          GO_TEST_PREPARE: ${{ needs.go-test.outputs.prepare }}
-          GO_TEST_STEP: ${{ needs.go-test.outputs.tests }}
+          GO_INVENTORY_RESULT: ${{ needs.go-inventory.result }}
+          GO_INVENTORY_STEP: ${{ needs.go-inventory.outputs.check }}
+          GO_INVENTORY_COVERAGE: ${{ needs.go-inventory.outputs.coverage }}
+          GO_INVENTORY_PACKAGES: ${{ needs.go-inventory.outputs.package_total }}
+          GO_GROUPS_SUMMARY: ${{ needs.go-inventory.outputs.groups_markdown }}
+          GO_UNIT_RESULT: ${{ needs.go-unit.result }}
+          GO_UNIT_STEP: ${{ needs.go-unit.outputs.tests }}
+          GO_LOCAL_RESULT: ${{ needs.go-local.result }}
+          GO_LOCAL_STEP: ${{ needs.go-local.outputs.tests }}
+          GO_E2E_RESULT: ${{ needs.go-e2e.result }}
+          GO_E2E_PREPARE: ${{ needs.go-e2e.outputs.prepare }}
+          GO_E2E_STEP: ${{ needs.go-e2e.outputs.tests }}
           GO_RACE_RESULT: ${{ needs.go-race.result }}
           GO_RACE_STEP: ${{ needs.go-race.outputs.tests }}
           UI_TEST_RESULT: ${{ needs.ui-test.result }}

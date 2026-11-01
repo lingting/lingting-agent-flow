@@ -973,6 +973,38 @@
   `-race` 下的 SQLite 忙与超时），失败包单独执行均通过，已在记录中逐项列明且**未报告为通过**；
   `github-release.sh` 的远端写操作与 Actions 远端运行**未执行**。**`P4-M5` 仍为 `pending`**。
 
+- **Go CI/CD 执行效率与资源管理优化（2026-11-02，基线为当前本地 checkout，不执行
+  `git fetch`）已实施**。本轮只改 CI 执行结构与脚本，不改产品业务代码：①普通 Go 测试从
+  单个 `go-test` Job（一条 `make test`）拆成 `go-inventory`（清单与分组核验）+ `go-unit` +
+  `go-local` + `go-e2e` 四个 Job，三个测试组互不依赖、由 Actions 在不同 Runner 上并行执行，
+  且都必须等分组核验通过；②分组归属、包模式与 Makefile 入口只在新增的
+  `.github/scripts/go-test-groups.sh` 中定义一次，工作流与执行脚本都不列举测试包，
+  `go-inventory` 用 `go list` 的真实测试包清单做集合核验（新增包未分类、一个包落在多个分组、
+  分组已定义却无 Job 执行、Makefile 入口与清单漂移、执行脚本硬编码包路径都会让 CI 失败）；
+  ③并行度按 Runner 显式设置（三个分组与 `go-race` 都是 `-p 4`/`-parallel 4`，
+  `make test-race` 改为跟随 `PARALLEL`），真实测试保持单 Job 且包之间固定 `-p 1` 串行——
+  实测并发跑多个远程套件时，各套件会在"零残留核验"里把对方刚创建的一次性容器当成未登记
+  残留而互相失败；④Go 缓存不新增第三方缓存系统：`actions/setup-go` 的 `cache: true` 本身
+  同时缓存 `GOMODCACHE` 与 `GOCACHE`，键包含实际 Go 版本、OS/镜像、架构与 `go.mod`+`go.sum`
+  哈希，本轮只把依赖路径补成 `go.mod` + `go.sum` 并在文档中写明键的构成；⑤失败产物统一由
+  `.github/scripts/collect-test-artifacts.sh` 收集（白名单：`*-output.log`、`test.log`、
+  `latest-run.txt`，不含数据库 / Session / 临时私钥），制品名为 `<job>-<run>-<attempt>`，
+  收集与上传都 `continue-on-error`；⑥每个分组把开始 / 结束时间、耗时、退出码、测试包数量与
+  顶层用例 PASS/FAIL/SKIP 写进 Job 摘要（同时落盘 `<group>-summary.txt`），`ci-summary`
+  增加分组表与分组核验结论，真实测试授权语义（唯一变量 `AGENTFLOW_REAL_TESTS`、规则在
+  `internal/cigate`、未授权 Job 跳过且不计为通过、执行失败必须失败）完全未变。
+  **状态严格区分**：`GITHUB_ACTIONS=true make test`（全量 45 个测试包、真实用例按 CI 语义
+  跳过）通过，三个分组分别实际执行并通过（unit 23 包 / 1479 通过 2 跳过，local 14 包 /
+  434 通过，e2e 2 包 / 67 通过 1 跳过），`run-go-race-tests.sh --parallel 4` 与
+  `make test-race` 通过，`go test ./tests/unit/release/`（含新增的分组核验、分组守卫、
+  产物白名单与门禁结论用例）通过，`bash -n`、`gofmt`、`go vet ./...`、`actionlint` 通过；
+  本机带真实设备配置跑了一次 `make test` 备份基线：`remote/agent` 与 `remote/codesaver`
+  因并发套件互相判为残留失败（同一命令在本轮并发修复之前即存在），`tests/integration/local/database`
+  在高核数机器上用默认并行度出现 `database is locked`，两者都不属于本轮改动引入的失败，
+  已在报告与 `tests/README.md` 中逐项写明并给出对应并行度。CI 在 GitHub Actions 上的真实
+  运行**未执行**（本机无 Runner），因此不声称任何提速百分比，本轮的分组耗时只作为新基线。
+  **`P4-M5` 仍为 `pending`**。
+
 > 阶段与里程碑的状态可能随开发推进而变化，以上仅为撰写本路线图时的快照；最新状态
 > 以 `ROADMAP.md` 的"当前实现状态摘要"、`P1-single-task-e2e.md` 的里程碑表与
 > `P2-reliability-recovery.md` 的里程碑清单为准。

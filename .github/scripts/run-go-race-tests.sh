@@ -5,6 +5,8 @@
 #
 # 参数:
 #   --artifact-dir DIR  必填。测试产物目录，同时作为 TMPDIR。
+#   --parallel N        可选，默认 4。同时作为 make 的 PARALLEL 与补充命令的 -p / -parallel。
+#                       竞态检测比普通测试更吃资源，并行度按 Runner 的 4 vCPU 设置。
 #
 # 环境变量: 无必需项。
 #
@@ -21,12 +23,12 @@
 set -euo pipefail
 
 usage() {
-    echo "用法: run-go-race-tests.sh --artifact-dir DIR"
+    echo "用法: run-go-race-tests.sh --artifact-dir DIR [--parallel N]"
     echo "  执行 make test-race 与两个补充范围的 -race 检测。"
 }
 
 artifact_dir=""
-
+parallel="4"
 while [ $# -gt 0 ]; do
     case "$1" in
         --artifact-dir)
@@ -35,6 +37,14 @@ while [ $# -gt 0 ]; do
                 exit 2
             fi
             artifact_dir="$2"
+            shift 2
+            ;;
+        --parallel)
+            if [ $# -lt 2 ] || [ -z "$2" ]; then
+                echo "错误: --parallel 缺少取值" >&2
+                exit 2
+            fi
+            parallel="$2"
             shift 2
             ;;
         -h | --help)
@@ -54,6 +64,10 @@ if [ -z "$artifact_dir" ]; then
     usage >&2
     exit 2
 fi
+if ! [[ "$parallel" =~ ^[1-9][0-9]*$ ]]; then
+    echo "错误: --parallel 必须是正整数，实际 $parallel" >&2
+    exit 2
+fi
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 
@@ -66,6 +80,7 @@ export TMPDIR="$artifact_dir"
 echo "仓库根目录: $repo_root"
 echo "测试工作空间: $TMPDIR"
 echo "测试日志: $log_file"
+echo "并行度: ${parallel}"
 
 cd "$repo_root"
 
@@ -76,12 +91,13 @@ set +e
     # make test-race 已经覆盖 ./tests/unit/...（含 unit/store、unit/app、unit/httpapi、
     # unit/source/codesaver）与 ./tests/integration/local/ssh/...，因此这些范围不再
     # 重复执行；下面只补充 test-race 未包含的两个范围，实际覆盖是要求的超集。
-    make test-race
+    # 并行度显式传入：-race 下 SQLite 迁移与连接建立对并发量敏感，不能用机器核数兜底。
+    PARALLEL="$parallel" make test-race
     status=$?
     # 数据库迁移与并发访问
-    go test -race -count=1 ./tests/integration/local/database/ || status=$?
+    go test -race -count=1 -p "$parallel" -parallel "$parallel" ./tests/integration/local/database/ || status=$?
     # 任务级工作流编排与并发隔离
-    go test -race -count=1 ./tests/integration/local/workflow/ || status=$?
+    go test -race -count=1 -p "$parallel" -parallel "$parallel" ./tests/integration/local/workflow/ || status=$?
     exit "$status"
 } 2>&1 | tee "$log_file"
 status=${PIPESTATUS[0]}

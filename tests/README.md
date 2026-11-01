@@ -128,6 +128,12 @@ go test -race -count=1 ./tests/integration/local/ssh/...
 并发由 Go 测试工具负责：`-p` 控制同时运行的测试包数量，`-parallel` 控制单个包内
 并行用例数量。用例内部通过 `t.Parallel()` 声明可并行，不依赖固定执行顺序。
 
+CI 不会让 `go test` 按机器核数自行决定并行度：三个 Go 测试组与竞态检测都显式使用 4
+（Runner 为 4 vCPU），真实测试在单 Job 内以 `-p 1` 串行执行多个真实套件。`-race` 下
+SQLite 迁移与连接建立对并发量敏感，在高核数机器上用默认并行度会出现
+`database is locked` 与迁移超时，因此竞态检测的并行度同样显式设置（`make test-race`
+跟随 `PARALLEL`）。
+
 ## CI 门禁与本地入口的对应关系
 
 `.github/workflows/ci.yml` 在 Pull Request、`master` push 与手动触发时执行。它不新增测试
@@ -136,20 +142,40 @@ go test -race -count=1 ./tests/integration/local/ssh/...
 | CI Job | 覆盖范围 | 本地等价入口 |
 |---|---|---|
 | `go-static` | `gofmt -l cmd internal tests` 无输出、`go vet ./...`、`go build ./...` | `make fmt-check`、`make vet`、`make build` |
-| `go-test` | 全部 Go 测试包（`tests/...`，含 CLI E2E 与单文件打包冒烟）；真实外部依赖用例在 CI 中跳过 | `make test` |
+| `go-inventory` | Go 测试包清单与分组核验：`go list` 得到的真实测试包必须恰好被分组清单覆盖一次（遗漏、重复归属、分组未被任何 Job 执行都会失败） | `bash .github/scripts/go-test-groups.sh --check --declared-groups unit,local,e2e` |
+| `go-unit` | `./tests/unit/...`（不需要任何外部设备） | `make test-unit` |
+| `go-local` | `./tests/integration/local/...`（本机 SQLite / 进程 / 本机 bare 仓库 / 进程内模拟 SSH 服务端） | `make test-local` |
+| `go-e2e` | `./tests/e2e/...`（CLI 端到端与单文件打包冒烟，需要 pnpm 与前端依赖） | `make test-e2e` |
 | `go-race` | `make test-race` 的全部范围 + 数据库迁移 + 任务级工作流编排 | `make test-race`，再执行下文两条补充命令 |
 | `ui-test` | 前端单元（`--maxWorkers 4`）、Playwright E2E（`--workers=4`）、格式、lint、类型检查、生产构建 | `cd lingting-agent-flow-ui && pnpm test:all:safe` |
 | `real-tests-gate` | 只读判定真实测试是否获授权，输出 `real_tests_enabled`、`mode` 与 `reason` | `go run ./cmd/agentflow-ci real-tests-gate -mode ... -event ...` |
 | `real-tests` | 仅授权通过时执行真实外部依赖测试包（见下文清单） | `go test -count=1 ./tests/integration/pi/... ./tests/integration/ssh/... ./tests/integration/remote/...` |
-| `ci-summary` | 四个必需 Job 全部成功才通过；授权判断失败算失败，真实测试未授权跳过不算失败但也不计为通过 | 无（仅 CI） |
+| `ci-summary` | 其余全部 Job 都成功才通过；分组核验失败算失败，授权判断失败算失败，真实测试未授权跳过不算失败但也不计为通过 | 无（仅 CI） |
 
 这些 Job 的执行逻辑都在 `.github/scripts/` 下，工作流只负责触发、依赖与参数传递：脚本内部
-调用的正是本地入口（`make test`、`make test-race`、`pnpm test:all:safe`、
-`go run ./cmd/agentflow-ci ...`、`make release-dist`），CI 与本地命令因此不会各跑一套。
+调用的正是本地入口（`make test-unit`、`make test-local`、`make test-e2e`、`make test-race`、
+`pnpm test:all:safe`、`go run ./cmd/agentflow-ci ...`、`make release-dist`），CI 与本地命令
+因此不会各跑一套。分组归属、包模式与 Makefile 入口只定义在
+`.github/scripts/go-test-groups.sh`，工作流与执行脚本都不重复列举测试包。
+
+Go 测试的分组与并行策略：
+
+- 三个普通分组（`unit` / `local` / `e2e`）各自对应一个 CI Job，互不依赖，由 GitHub Actions
+  在不同 Runner 上并行执行；三者都依赖 `go-inventory`，分组核验失败时不会跑一半测试；
+- 分组包集合互不重叠，并集等于 `make test` 覆盖的全部普通测试包；这一点由
+  `go list` 的真实清单核验，而不是人眼比对；
+- 每个分组 Job 独享一台 4 vCPU Runner，`go test` 只用 `-p 4` / `-parallel 4`；`go-race` 也
+  显式传入 `--parallel 4`（`-race` 下 SQLite 迁移与连接建立对并发量敏感）；
+- 真实测试（`pi` / `ssh` / `remote`）不进普通 CI，并由 `real-tests` 单 Job 执行，包之间固定
+  `-p 1` 串行：全部真实套件共用同一台远程机器与同一个 Docker Engine。
+
+本地等价入口与全量入口的关系：`make test` 仍是本地全量入口（`tests/...` 全部测试包），
+分组入口是它的子集划分，CI 用三个分组 Job 并行覆盖同一批普通测试包。
+
 脚本清单、参数与退出码见 [`.github/scripts/README.md`](../.github/scripts/README.md)；
 脚本自身的存在性、解释器调用方式、参数一致性与退出码由
-`tests/unit/release/ci_scripts_test.go` 覆盖，本地可用
-`go test -count=1 ./tests/unit/release/` 复核。
+`tests/unit/release/ci_scripts_test.go` 覆盖（含分组核验、分组执行守卫与产物收集白名单），
+本地可用 `go test -count=1 ./tests/unit/release/` 复核。
 
 `.github/workflows/release.yml` 是制品构建流水线，只做"构建与制品准备"：它由
 `publish.yml` 复用（`workflow_call`）或手动触发（`workflow_dispatch`）运行，调用
@@ -180,16 +206,17 @@ go test -race -count=1 ./tests/integration/local/ssh/...
 Release。上表"本地等价入口"一列是可以在本地真实执行并已执行过的部分；远端上传、来源证明
 签发与草稿转公开只经过 YAML 静态核验（`TestPublishWorkflow*`）。
 
-`go-race` 的补充范围（`make test-race` 未包含）：
+`go-race` 的补充范围（`make test-race` 未包含），竞态检测同样按 Runner 的 4 vCPU 显式限制
+并行度（`-race` 下 SQLite 迁移与连接建立对并发量敏感，用机器核数兜底会在高核数机器上超时）：
 
 ```bash
-go test -race -count=1 ./tests/integration/local/database/
-go test -race -count=1 ./tests/integration/local/workflow/
+go test -race -count=1 -p 4 -parallel 4 ./tests/integration/local/database/
+go test -race -count=1 -p 4 -parallel 4 ./tests/integration/local/workflow/
 ```
 
 `make test-race` 本身已覆盖 `./tests/unit/...`（含 `unit/store`、`unit/app`、`unit/httpapi`、
 `unit/source/codesaver`）与 `./tests/integration/local/ssh/...`，因此 CI 不再重复执行这些范围，
-实际覆盖是上表所列范围的超集而不是子集。
+实际覆盖是上表所列范围的超集而不是子集；`make test-race` 的并行度跟随 `PARALLEL`（CI 传 4）。
 
 ### 真实测试授权与跳过语义
 
@@ -238,18 +265,20 @@ Actions 表达式能够兜住的问题。
   `publish.yml` 复用 `ci.yml` 时不会执行真实测试。
 - 身份字段缺失、变量取值未知、权限查询失败都按拒绝处理（fail closed）。
 
-真实测试包清单（`real-tests` Job 只执行这些，不重复跑普通 Go 测试）：
+真实测试包清单（`real-tests` Job 只执行这些，不重复跑普通 Go 测试）。范围由
+`.github/scripts/go-test-groups.sh` 的 `real` 分组定义（`pi` / `ssh` / `remote`），执行脚本
+不自己列举包路径：
 
 ```text
-tests/integration/pi/                 # 本机真实 Pi CLI
-tests/integration/ssh/                # 真实远程 Linux 机器
-tests/integration/remote/docker/      # 真实远程 Docker Engine
-tests/integration/remote/agent/       # 真实远程容器与容器内真实 Pi
-tests/integration/remote/codesaver/   # 真实远程容器与容器内 Git
-tests/integration/remote/workflow/    # 真实远程端到端工作流
+tests/integration/pi/                 # pi 分组：本机真实 Pi CLI
+tests/integration/ssh/                # ssh 分组：真实远程 Linux 机器
+tests/integration/remote/docker/      # remote 分组：真实远程 Docker Engine
+tests/integration/remote/agent/       # remote 分组：真实远程容器与容器内真实 Pi
+tests/integration/remote/codesaver/   # remote 分组：真实远程容器与容器内 Git
+tests/integration/remote/workflow/    # remote 分组：真实远程端到端工作流
 ```
 
-以下本机模拟测试**不属于**真实测试，继续在普通 CI 的 `go-test` 中执行：
+以下本机模拟测试**不属于**真实测试，继续在普通 CI 的 `go-local` 分组中执行：
 `tests/integration/local/ssh/`、`tests/integration/local/docker/`、使用本机 SQLite 的工作流
 测试、使用 `tests/internal/fakepi` 的 Agent 测试，以及使用本机 bare 仓库的代码保存测试。
 
@@ -286,8 +315,8 @@ GITHUB_ACTIONS=true go test -count=1 -v ./tests/integration/pi/... ./tests/integ
 - 真实测试的连接配置只来自 `real-tests` 环境的 Environment Secrets，由
   `.github/scripts/prepare-real-tests-config.py` 现场生成被 `.gitignore` 忽略的
   `tests/config/*.yml`；私钥与 known_hosts 写入 `RUNNER_TEMP` 下的临时目录（0600）。
-- 普通 CI 的四个必需 Job 与授权判断 Job 都不读取任何 Secret，fork PR 因此也无法获得真实
-  设备凭据；缺少必需 Secret 时 `real-tests` 明确报告 SKIP，不伪造通过。
+- 普通 CI 的必需 Job（含 `go-inventory` 与三个 Go 测试组）与授权判断 Job 都不读取任何 Secret，
+  fork PR 因此也无法获得真实设备凭据；缺少必需 Secret 时 `real-tests` 明确报告 SKIP，不伪造通过。
 - 授权判断 Job 只检出可信提交（PR 事件检出基础提交），不执行被提交的代码；所有 Action 用
   提交 SHA 固定；`pull_request_target` 不被使用。
 - 授权判定脚本（`check-real-test-authorization.sh`）只把事件上下文转发给
@@ -299,15 +328,22 @@ GITHUB_ACTIONS=true go test -count=1 -v ./tests/integration/pi/... ./tests/integ
 
 | Job | 产物 | 触发条件 | 保留 |
 |---|---|---|---|
-| `go-test` | `make test` 完整控制台输出、各测试包 `test.log`、`latest-run.txt` | 仅失败 | 7 天 |
+| `go-unit` / `go-local` / `go-e2e` | 该分组的控制台输出、各测试包 `test.log`、`latest-run.txt` | 仅失败 | 7 天 |
 | `go-race` | 竞态检测控制台输出、各测试包 `test.log`、`latest-run.txt` | 仅失败 | 7 天 |
 | `ui-test` | Vitest 输出、Playwright HTML 报告、失败截图与 trace、完整控制台日志 | 仅失败 | 7 天 |
 | `real-tests` | 真实测试控制台输出、各测试包 `test.log`、`latest-run.txt` | 仅失败 | 7 天 |
 
-产物名包含 `github.run_id` 与 `github.run_attempt`，同一提交的多次重跑不会互相覆盖。
-**不整体上传测试工作空间**：其中含用例生成的临时私钥、SQLite 数据库与 Session 文件，
-这些不是诊断必需，也不该离开 Runner。Artifact 上传步骤显式 `continue-on-error`，上传失败
-不会改写原本的测试失败结论。
+产物由 `.github/scripts/collect-test-artifacts.sh` 统一收集：它只把白名单文件（该 Job 的
+`*-output.log`、各测试包 `test.log`、`latest-run.txt`）复制到暂存目录再上传，制品名为
+`<job>-<run_id>-<run_attempt>`，同一提交的多次重跑不会互相覆盖。**不整体上传测试工作空间**：
+其中含用例生成的临时私钥、SQLite 数据库与 Session 文件，这些不是诊断必需，也不该离开 Runner。
+收集与上传两步都显式 `continue-on-error`，产物问题不会改写原本的测试失败结论。
+
+每个分组还会把开始 / 结束时间、耗时、执行命令、退出码、测试包数量与顶层用例通过 / 失败 /
+跳过数量写进 Job 摘要（同时落盘为 `<group>-summary.txt`）；这是本轮建立的 CI 耗时基线，
+用于判断后续优化是否真实有效。测试包数量与用例数量分开记录：用例数量只统计
+`go test -v` 的顶层结论行，子用例不计入。`ci-summary` 展示 `go-inventory` 输出的分组表与
+各 Job 结论，不重新解析日志。
 
 CI 中测试工作空间仍然落在 `os.TempDir()/lingting-agent-flow-tests/` 之下；Job 只把
 `TMPDIR` 指向工作区内的 `.test-artifacts/` 目录，使失败产物可被 `upload-artifact` 取到。

@@ -539,7 +539,12 @@ func TestSummarizeCIGateScript(t *testing.T) {
 
 	successEnv := []string{
 		"GO_STATIC_RESULT=success", "GO_STATIC_STEP=success",
-		"GO_TEST_RESULT=success", "GO_TEST_PREPARE=success", "GO_TEST_STEP=success",
+		"GO_INVENTORY_RESULT=success", "GO_INVENTORY_STEP=success",
+		"GO_INVENTORY_COVERAGE=passed", "GO_INVENTORY_PACKAGES=45",
+		"GO_GROUPS_SUMMARY=| 分组 | 类型 |\n| --- | --- |\n| unit | 普通 CI |",
+		"GO_UNIT_RESULT=success", "GO_UNIT_STEP=success",
+		"GO_LOCAL_RESULT=success", "GO_LOCAL_STEP=success",
+		"GO_E2E_RESULT=success", "GO_E2E_PREPARE=success", "GO_E2E_STEP=success",
 		"GO_RACE_RESULT=success", "GO_RACE_STEP=success",
 		"UI_TEST_RESULT=success", "UI_TEST_PREPARE=success", "UI_TEST_STEP=success",
 		"REAL_GATE_RESULT=success", "REAL_GATE_MODE=", "REAL_GATE_ENABLED=false",
@@ -564,7 +569,7 @@ func TestSummarizeCIGateScript(t *testing.T) {
 		t.Parallel()
 		dir := testkit.Dir(t)
 		reportPath := filepath.ToSlash(filepath.Join(dir, "ci-summary.md"))
-		env := replaceEnv(successEnv, "GO_TEST_RESULT=failure", "GO_TEST_STEP=failure")
+		env := replaceEnv(successEnv, "GO_LOCAL_RESULT=failure", "GO_LOCAL_STEP=failure")
 		code, stdout := runCIScript(t, "summarize-ci-gate.sh", env, "--report-path", reportPath)
 		if code != 1 {
 			t.Fatalf("测试失败必须以 1 结束，实际退出码 %d：%s", code, stdout)
@@ -582,6 +587,46 @@ func TestSummarizeCIGateScript(t *testing.T) {
 		code, stdout := runCIScript(t, "summarize-ci-gate.sh", env, "--report-path", reportPath)
 		if code != 1 {
 			t.Fatalf("真实测试失败必须以 1 结束，实际退出码 %d：%s", code, stdout)
+		}
+	})
+	t.Run("分组核验失败必须让门禁失败", func(t *testing.T) {
+		t.Parallel()
+		dir := testkit.Dir(t)
+		reportPath := filepath.ToSlash(filepath.Join(dir, "ci-summary.md"))
+		env := replaceEnv(successEnv,
+			"GO_INVENTORY_RESULT=failure", "GO_INVENTORY_STEP=failure",
+			"GO_UNIT_RESULT=skipped", "GO_UNIT_STEP=skipped",
+			"GO_LOCAL_RESULT=skipped", "GO_LOCAL_STEP=skipped",
+			"GO_E2E_RESULT=skipped", "GO_E2E_STEP=skipped",
+		)
+		code, stdout := runCIScript(t, "summarize-ci-gate.sh", env, "--report-path", reportPath)
+		if code != 1 {
+			t.Fatalf("分组核验失败必须以 1 结束，实际退出码 %d：%s", code, stdout)
+		}
+		report := readTestFile(t, reportPath, true)
+		if !strings.Contains(report, "| go-inventory | failure |") {
+			t.Errorf("报告应把分组核验失败列为失败 Job，实际:\n%s", report)
+		}
+		if !strings.Contains(report, "| go-unit | skipped |") {
+			t.Errorf("报告应如实记录因分组核验失败而未执行的测试 Job，实际:\n%s", report)
+		}
+	})
+
+	t.Run("分组清单进入报告", func(t *testing.T) {
+		t.Parallel()
+		dir := testkit.Dir(t)
+		reportPath := filepath.ToSlash(filepath.Join(dir, "ci-summary.md"))
+		code, stdout := runCIScript(t, "summarize-ci-gate.sh", successEnv, "--report-path", reportPath)
+		if code != 0 {
+			t.Fatalf("全部分组成功时应以 0 结束，实际退出码 %d：%s", code, stdout)
+		}
+		report := readTestFile(t, reportPath, true)
+		for _, expected := range []string{
+			"### Go 测试分组", "| go-unit | success |", "| unit | 普通 CI |", "测试包总数 45",
+		} {
+			if !strings.Contains(report, expected) {
+				t.Errorf("报告缺少 %q，实际:\n%s", expected, report)
+			}
 		}
 	})
 
@@ -619,6 +664,200 @@ func TestRunRealTestsScriptRequiresGrant(t *testing.T) {
 			[]string{"AGENTFLOW_REAL_TESTS_GRANTED=true"})
 		if code != 2 {
 			t.Fatalf("缺少 --artifact-dir 必须以 2 拒绝，实际退出码 %d：%s", code, stdout)
+		}
+	})
+}
+
+// TestGoTestGroupsScript 覆盖分组清单脚本的核验与查询契约。
+//
+// 分组清单是普通 CI 与真实测试的唯一范围来源，因此它的正向结论、拒绝路径与
+// GITHUB_OUTPUT 结构都要被机械约束，而不是只在 workflow YAML 里"看起来对"。
+func TestGoTestGroupsScript(t *testing.T) {
+	t.Parallel()
+
+	t.Run("分组覆盖完整", func(t *testing.T) {
+		t.Parallel()
+		dir := testkit.Dir(t)
+		outputPath := filepath.ToSlash(filepath.Join(dir, "output.txt"))
+		code, stdout := runCIScript(t, "go-test-groups.sh",
+			[]string{"GITHUB_OUTPUT=" + outputPath},
+			"--check", "--declared-groups", "unit,local,e2e")
+		if code != 0 {
+			t.Fatalf("仓库当前分组应当完整覆盖全部测试包，实际退出码 %d：%s", code, stdout)
+		}
+		if !strings.Contains(stdout, "分组核验通过") {
+			t.Errorf("核验通过时必须给出可读结论，实际输出:\n%s", stdout)
+		}
+		output := readTestFile(t, outputPath, true)
+		for _, expected := range []string{
+			"coverage=passed", "package_total=", "groups_markdown<<AGENTFLOW_GROUPS_MARKDOWN",
+		} {
+			if !strings.Contains(output, expected) {
+				t.Errorf("GITHUB_OUTPUT 缺少 %q，实际:\n%s", expected, output)
+			}
+		}
+	})
+
+	t.Run("工作流漏掉分组必须失败", func(t *testing.T) {
+		t.Parallel()
+		code, stdout := runCIScript(t, "go-test-groups.sh",
+			nil, "--check", "--declared-groups", "unit,local")
+		if code != 1 {
+			t.Fatalf("普通分组没有被工作流执行时必须失败，实际退出码 %d：%s", code, stdout)
+		}
+		if !strings.Contains(stdout, "不一致") {
+			t.Errorf("失败原因必须可读，实际输出:\n%s", stdout)
+		}
+	})
+
+	t.Run("真实分组不得进入普通 CI", func(t *testing.T) {
+		t.Parallel()
+		code, stdout := runCIScript(t, "go-test-groups.sh",
+			nil, "--check", "--declared-groups", "unit,local,e2e,pi")
+		if code != 1 {
+			t.Fatalf("把真实测试分组声明为普通分组时必须失败，实际退出码 %d：%s", code, stdout)
+		}
+		if !strings.Contains(stdout, "真实外部依赖") {
+			t.Errorf("失败原因必须说明分组类型，实际输出:\n%s", stdout)
+		}
+	})
+
+	t.Run("未知分组以 2 拒绝", func(t *testing.T) {
+		t.Parallel()
+		code, stdout := runCIScript(t, "go-test-groups.sh", nil, "--packages", "nosuch")
+		if code != 2 {
+			t.Fatalf("未知分组必须以 2 拒绝，实际退出码 %d：%s", code, stdout)
+		}
+	})
+
+	t.Run("缺少操作以 2 拒绝", func(t *testing.T) {
+		t.Parallel()
+		code, stdout := runCIScript(t, "go-test-groups.sh", nil)
+		if code != 2 {
+			t.Fatalf("没有指定操作必须以 2 拒绝，实际退出码 %d：%s", code, stdout)
+		}
+	})
+}
+
+// TestRunGoGroupTestsScript 覆盖分组执行脚本的参数校验与分组归属守卫。
+//
+// 它不实际运行测试（各分组由 CI 与本地入口覆盖），只保证真实测试分组不会被
+// 普通 CI 的入口执行、非法参数明确失败。
+func TestRunGoGroupTestsScript(t *testing.T) {
+	t.Parallel()
+
+	t.Run("拒绝真实测试分组", func(t *testing.T) {
+		t.Parallel()
+		dir := testkit.Dir(t)
+		code, stdout := runCIScript(t, "run-go-group-tests.sh",
+			nil,
+			"--group", "remote",
+			"--artifact-dir", filepath.ToSlash(filepath.Join(dir, "artifacts")))
+		if code != 1 {
+			t.Fatalf("普通 CI 入口执行真实测试分组必须以 1 结束，实际退出码 %d：%s", code, stdout)
+		}
+		if !strings.Contains(stdout, "真实外部依赖") {
+			t.Errorf("拒绝原因必须可读，实际输出:\n%s", stdout)
+		}
+	})
+
+	t.Run("未知分组以 2 拒绝", func(t *testing.T) {
+		t.Parallel()
+		dir := testkit.Dir(t)
+		code, stdout := runCIScript(t, "run-go-group-tests.sh",
+			nil,
+			"--group", "nosuch",
+			"--artifact-dir", filepath.ToSlash(filepath.Join(dir, "artifacts")))
+		if code != 2 {
+			t.Fatalf("未知分组必须以 2 拒绝，实际退出码 %d：%s", code, stdout)
+		}
+	})
+
+	t.Run("缺少参数以 2 拒绝", func(t *testing.T) {
+		t.Parallel()
+		code, stdout := runCIScript(t, "run-go-group-tests.sh", nil, "--group", "unit")
+		if code != 2 {
+			t.Fatalf("缺少 --artifact-dir 必须以 2 拒绝，实际退出码 %d：%s", code, stdout)
+		}
+	})
+}
+
+// TestCollectTestArtifactsScript 校验产物收集脚本的白名单与命名契约。
+//
+// 上传集合必须只包含诊断必需的文件：多带一个数据库或私钥都会把测试现场的敏感数据
+// 送出 Runner，因此正反两面都要断言。
+func TestCollectTestArtifactsScript(t *testing.T) {
+	t.Parallel()
+	dir := testkit.Dir(t)
+	sourceDir := filepath.Join(dir, "unit")
+	baseDir := filepath.Join(sourceDir, "lingting-agent-flow-tests")
+	caseDir := filepath.Join(baseDir, "unit-agent-1234")
+	files := map[string]string{
+		filepath.Join(sourceDir, "unit-output.log"):         "测试输出",
+		filepath.Join(baseDir, "latest-run.txt"):            "latest",
+		filepath.Join(caseDir, "test.log"):                  "用例日志",
+		filepath.Join(caseDir, "agentflow.db"):              "数据库",
+		filepath.Join(caseDir, "sessions", "session.jsonl"): "会话",
+		filepath.Join(caseDir, "keys", "id_ed25519"):        "私钥",
+		filepath.Join(sourceDir, "node_modules", "a.js"):    "依赖",
+	}
+	for path, content := range files {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("创建测试产物目录失败: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatalf("写入测试产物失败: %v", err)
+		}
+	}
+
+	outputPath := filepath.ToSlash(filepath.Join(dir, "output.txt"))
+	stagingDir := filepath.Join(dir, "staging")
+	code, stdout := runCIScript(t, "collect-test-artifacts.sh", []string{
+		"GITHUB_OUTPUT=" + filepath.ToSlash(outputPath),
+		"GITHUB_RUN_ID=1234",
+		"GITHUB_RUN_ATTEMPT=2",
+	},
+		"--source-dir", filepath.ToSlash(sourceDir),
+		"--job", "go-unit",
+		"--staging-dir", filepath.ToSlash(stagingDir))
+	if code != 0 {
+		t.Fatalf("收集测试产物应当成功，实际退出码 %d：%s", code, stdout)
+	}
+
+	output := readTestFile(t, outputPath, true)
+	for _, expected := range []string{
+		"artifact-name=go-unit-1234-2", "file-count=3",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Errorf("GITHUB_OUTPUT 缺少 %q，实际:\n%s", expected, output)
+		}
+	}
+
+	for _, relative := range []string{
+		"unit-output.log",
+		"lingting-agent-flow-tests/latest-run.txt",
+		"lingting-agent-flow-tests/unit-agent-1234/test.log",
+	} {
+		if _, err := os.Stat(filepath.Join(stagingDir, filepath.FromSlash(relative))); err != nil {
+			t.Errorf("暂存目录缺少白名单文件 %s: %v", relative, err)
+		}
+	}
+	for _, relative := range []string{
+		"lingting-agent-flow-tests/unit-agent-1234/agentflow.db",
+		"lingting-agent-flow-tests/unit-agent-1234/sessions/session.jsonl",
+		"lingting-agent-flow-tests/unit-agent-1234/keys/id_ed25519",
+		"node_modules/a.js",
+	} {
+		if _, err := os.Stat(filepath.Join(stagingDir, filepath.FromSlash(relative))); err == nil {
+			t.Errorf("暂存目录不得包含非白名单文件 %s", relative)
+		}
+	}
+
+	t.Run("缺少参数以 2 拒绝", func(t *testing.T) {
+		t.Parallel()
+		code, stdout := runCIScript(t, "collect-test-artifacts.sh", nil, "--job", "go-unit")
+		if code != 2 {
+			t.Fatalf("缺少 --source-dir 必须以 2 拒绝，实际退出码 %d：%s", code, stdout)
 		}
 	})
 }

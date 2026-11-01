@@ -1996,12 +1996,15 @@ SSH 连接层按三层覆盖：`tests/unit/ssh/`（主机密钥、认证配置�
 | CI Job | 覆盖范围 | 本地等价入口 |
 |---|---|---|
 | `go-static` | `gofmt -l cmd internal tests` 无输出、`go vet ./...`、`go build ./...` | `make fmt-check`、`make vet`、`make build` |
-| `go-test` | `tests/...` 全量（单元、本机集成、真实 Pi / SSH / 远程 Docker、CLI E2E、单文件打包冒烟） | `make test` |
-| `go-race` | `make test-race` 的全部范围，另加数据库迁移与任务级工作流编排的竞态检测 | `make test-race` + `go test -race -count=1 ./tests/integration/local/database/` + `go test -race -count=1 ./tests/integration/local/workflow/` |
+| `go-inventory` | Go 测试包清单与分组核验：`go list` 得到的真实测试包必须恰好被分组清单覆盖一次 | `bash .github/scripts/go-test-groups.sh --check --declared-groups unit,local,e2e` |
+| `go-unit` | `tests/unit/...`（不需要任何外部设备） | `make test-unit` |
+| `go-local` | `tests/integration/local/...`（本机 SQLite、进程、本机 bare 仓库与进程内模拟 SSH 服务端） | `make test-local` |
+| `go-e2e` | `tests/e2e/...`（CLI 端到端与单文件打包冒烟） | `make test-e2e` |
+| `go-race` | `make test-race` 的全部范围，另加数据库迁移与任务级工作流编排的竞态检测 | `make test-race` + `go test -race -count=1 -p 4 -parallel 4 ./tests/integration/local/database/` + `go test -race -count=1 -p 4 -parallel 4 ./tests/integration/local/workflow/` |
 | `ui-test` | 前端单元测试（`--maxWorkers 4`）、Playwright E2E（`--workers=4`）、格式、lint、类型检查与生产构建 | `cd lingting-agent-flow-ui && pnpm test:all:safe` |
 | `real-tests-gate` | 只读判定本次运行是否获准执行真实外部依赖测试，输出授权结论与原因 | `go run ./cmd/agentflow-ci real-tests-gate -mode ... -event ...` |
 | `real-tests` | 仅授权通过时运行：真实 Pi CLI、真实 SSH、真实远程 Docker / Agent / 代码保存 / 工作流 | `go test -count=1 ./tests/integration/pi/... ./tests/integration/ssh/... ./tests/integration/remote/...` |
-| `ci-summary` | 四个必需 Job 全部成功才报告通过；授权判断失败算失败，真实测试未授权跳过不算失败但也不计为通过 | 无（仅在 CI 中运行） |
+| `ci-summary` | 其余全部 Job 都成功才报告通过；分组核验失败与授权判断失败算失败，真实测试未授权跳过不算失败但也不计为通过 | 无（仅在 CI 中运行） |
 
 #### 真实测试授权（唯一用户变量）
 

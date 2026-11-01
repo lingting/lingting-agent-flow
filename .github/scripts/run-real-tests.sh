@@ -2,11 +2,13 @@
 #
 # 用途: 真实外部依赖测试的执行入口。只运行需要真实设备的测试包（真实 Pi CLI、
 #       真实 SSH 机器、真实远程 Docker / Agent / 代码保存 / 工作流），不重复执行
-#       本机模拟测试（它们属于普通 Go CI 的 run-go-tests.sh）。
+#       本机模拟测试（它们属于普通 Go CI 的 run-go-group-tests.sh）。真实测试范围由
+#       go-test-groups.sh 的 real 分组（pi / ssh / remote）定义。
 #
 # 参数:
 #   --artifact-dir DIR  必填。测试产物目录，同时作为 TMPDIR。
-#   --parallel N        可选，默认 4。同时作为 go test 的 -p 与 -parallel。
+#   --parallel N        可选，默认 4。go test 的 -parallel（包内并行度）。包之间固定
+#                       以 -p 1 串行，避免多个真实套件同时操作同一台远程设备。
 #
 # 环境变量（输入）:
 #   AGENTFLOW_REAL_TESTS_GRANTED  必须是 true。它由授权判定 Job 产生，不是第二个
@@ -96,16 +98,31 @@ echo "测试日志: $log_file"
 
 cd "$repo_root"
 
-# 只执行需要真实外部依赖的测试包：真实 Pi CLI、真实 SSH、真实远程 Docker /
-# Agent / 代码保存 / 工作流。本机模拟测试仍由普通 CI 的 go-test 覆盖。
-packages=(
-    ./tests/integration/pi/...
-    ./tests/integration/ssh/...
-    ./tests/integration/remote/...
-)
+# 真实测试范围只从 go-test-groups.sh 解析（pi / ssh / remote 三个分组）：本脚本不认识
+# 具体测试包，分组清单变更后无需改这里。本机模拟测试仍由普通 CI 的分组 Job 覆盖。
+groups_script="$script_dir/go-test-groups.sh"
+mapfile -t real_groups < <(bash "$groups_script" --list real)
+if [ "${#real_groups[@]}" -eq 0 ]; then
+    echo "错误: go-test-groups.sh 没有定义任何真实测试分组" >&2
+    exit 1
+fi
+packages=()
+for group in "${real_groups[@]}"; do
+    mapfile -t group_patterns < <(bash "$groups_script" --packages "$group")
+    if [ "${#group_patterns[@]}" -eq 0 ]; then
+        echo "错误: 真实测试分组 ${group} 没有包模式" >&2
+        exit 1
+    fi
+    packages+=("${group_patterns[@]}")
+done
+echo "真实测试分组: ${real_groups[*]}"
+echo "真实测试包: ${packages[*]}"
 
 status=0
-go test -count=1 -v -p "$parallel" -parallel "$parallel" "${packages[@]}" 2>&1 | tee "$log_file" || status=$?
+# 包之间固定串行（-p 1）：全部真实套件共享同一台远程机器与同一个 Docker Engine，
+# 并发执行时各套件会在"零残留核验"里把对方刚创建的一次性容器当成未登记残留而互相失败。
+# --parallel 只作用于包内并行度（-parallel），不用于叠加跨套件并发。
+go test -count=1 -v -p 1 -parallel "$parallel" "${packages[@]}" 2>&1 | tee "$log_file" || status=$?
 if [ "$status" -ne 0 ]; then
     echo "::error::真实外部依赖测试失败（退出码 $status），测试日志: $log_file"
     exit "$status"
