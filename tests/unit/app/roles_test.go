@@ -42,4 +42,33 @@ func TestRoleSeedsProvideFourFixedRoles(t *testing.T) {
 	if seeds[0].ToolsPolicy.Has(domain.ToolPermissionWrite) {
 		t.Fatalf("需求分析师不应具备写权限: %+v", seeds[0].ToolsPolicy)
 	}
+	// 四个角色的默认策略经能力上限映射后必须遵守系统安全边界：规划角色与验收者只读，
+	// 只有开发者可以写入并执行命令。
+	for _, seed := range seeds {
+		tools, err := domain.EffectivePiTools(seed.Type, seed.ToolsPolicy)
+		if err != nil {
+			t.Fatalf("计算角色 %s 的有效工具失败: %v", seed.ID, err)
+		}
+		writable := containsTool(tools, domain.PiToolEdit) || containsTool(tools, domain.PiToolWrite)
+		executable := containsTool(tools, domain.PiToolBash)
+		if seed.Type == domain.RoleTypeDeveloper {
+			if !writable || !executable {
+				t.Fatalf("开发者应可写入并执行命令: %v", tools)
+			}
+			continue
+		}
+		if writable || executable {
+			t.Fatalf("角色 %s 不应具备写入或执行能力: %v", seed.ID, tools)
+		}
+	}
+}
+
+// containsTool 判断工具列表中是否包含指定工具。
+func containsTool(tools []string, want string) bool {
+	for _, tool := range tools {
+		if tool == want {
+			return true
+		}
+	}
+	return false
 }

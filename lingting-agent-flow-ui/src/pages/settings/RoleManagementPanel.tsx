@@ -4,7 +4,7 @@
  * 职责：
  *   - 展示四个固定角色及其名称、职责、模型与启用状态；
  *   - 通过对话框编辑系统 Prompt、模型与启用状态，保存后重新读取服务端结果；
- *   - 不提供新增与删除入口：角色集合由服务端固定，工具策略只展示不可编辑。
+ *   - 不提供新增与删除入口：角色集合由服务端固定，工具策略只能在角色能力上限内收紧。
  */
 import { Alert, Flex, Tag, Typography } from "antd";
 import { useCallback, useMemo, useState } from "react";
@@ -98,8 +98,9 @@ export function RoleManagementPanel() {
       <Alert
         showIcon
         description={
-          "角色集合固定为四个，不能新增或删除。可以修改系统 Prompt、模型与启用状态，" +
-          "保存后立即对新的调用生效；工具策略本阶段只展示，暂不可编辑。"
+          "角色集合固定为四个，不能新增或删除。可以修改系统 Prompt、模型、启用状态与工具策略，" +
+          "保存后立即对新的调用生效；工具策略只能在角色能力上限内收紧，超出上限的能力与工具" +
+          "由服务端拒绝，MCP 与扩展不会加载。"
         }
         title="固定四角色"
         type="info"

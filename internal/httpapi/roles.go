@@ -46,7 +46,8 @@ type RoleListResponse struct {
 
 // RoleToolsPolicyResponse 是角色工具策略的对外表示。
 //
-// 本阶段只读：实际执行层限制由后续任务实施，接口不提供修改入口。
+// 它只是保存的策略声明：实际可用工具由 RoleDetailResponse.EffectiveTools 给出，
+// 客户端不需要、也不允许自行推算。
 type RoleToolsPolicyResponse struct {
 	Permissions []string `json:"permissions"`
 	AllowTools  []string `json:"allow_tools,omitempty"`
@@ -54,6 +55,9 @@ type RoleToolsPolicyResponse struct {
 }
 
 // RoleDetailResponse 是单个角色的完整配置响应。
+//
+// 除保存的配置外还返回三项由服务端计算的只读信息：角色身份的固定能力上限、
+// 该上限内可选的 Pi 内置工具，以及当前配置实际生效的工具列表。
 type RoleDetailResponse struct {
 	ID           string                  `json:"id"`
 	Name         string                  `json:"name"`
@@ -62,19 +66,37 @@ type RoleDetailResponse struct {
 	Model        string                  `json:"model"`
 	SystemPrompt string                  `json:"system_prompt"`
 	ToolsPolicy  RoleToolsPolicyResponse `json:"tools_policy"`
-	Enabled      bool                    `json:"enabled"`
-	CreatedAt    time.Time               `json:"created_at"`
-	UpdatedAt    time.Time               `json:"updated_at"`
+	// CapabilityCeiling 是角色类型固定不可突破的能力上限。
+	CapabilityCeiling []string `json:"capability_ceiling"`
+	// AvailableTools 是能力上限内的内置工具，设置页只在这些工具中配置允许与拒绝。
+	AvailableTools []string `json:"available_tools"`
+	// EffectiveTools 是本次配置最终交给 Pi 的工具列表，为空表示不加载任何工具。
+	EffectiveTools []string  `json:"effective_tools"`
+	Enabled        bool      `json:"enabled"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// UpdateRoleToolsPolicyRequest 是请求体中的工具策略。
+//
+// 字段语义与 domain.ToolsPolicy 一致：permissions 是被授权的能力类别，allow_tools 为空
+// 表示不按名称限制已授权的工具，deny_tools 始终优先。
+type UpdateRoleToolsPolicyRequest struct {
+	Permissions []string `json:"permissions"`
+	AllowTools  []string `json:"allow_tools"`
+	DenyTools   []string `json:"deny_tools"`
 }
 
 // UpdateRoleRequest 是 PUT /api/v1/roles/{roleID} 的请求体。
 //
-// 只有三个可编辑字段：请求体里出现 id、name、type、runner、tools_policy 或任何未知
-// 字段都会因为拒绝未知字段而返回 400。字段为 nil 表示本次不修改该字段。
+// 只有四个可编辑字段：请求体里出现 id、name、type、runner 或任何未知字段都会因为
+// 拒绝未知字段而返回 400。字段为 nil 表示本次不修改该字段；tools_policy 一旦提交即
+// 整体替换已保存的策略，越出角色能力上限时返回 400。
 type UpdateRoleRequest struct {
-	SystemPrompt *string `json:"system_prompt"`
-	Model        *string `json:"model"`
-	Enabled      *bool   `json:"enabled"`
+	SystemPrompt *string                       `json:"system_prompt"`
+	Model        *string                       `json:"model"`
+	Enabled      *bool                         `json:"enabled"`
+	ToolsPolicy  *UpdateRoleToolsPolicyRequest `json:"tools_policy"`
 }
 
 // roleHandler 处理角色接口请求。
@@ -169,7 +191,7 @@ func (h *roleHandler) detail(w http.ResponseWriter, r *http.Request, roleID stri
 		h.writeServiceError(w, r, err)
 		return
 	}
-	writeJSON(w, r, h.logger, http.StatusOK, roleDetailResponse(role))
+	h.writeDetail(w, r, role)
 }
 
 // update 处理 PUT /api/v1/roles/{roleID}。
@@ -180,16 +202,70 @@ func (h *roleHandler) update(w http.ResponseWriter, r *http.Request, roleID stri
 	if !decodeJSONBodyWithLimit(w, r, h.logger, &request, maxRoleRequestBytes) {
 		return
 	}
+	policy, err := updateToolsPolicyOf(request.ToolsPolicy)
+	if err != nil {
+		h.writeServiceError(w, r, err)
+		return
+	}
 	role, err := h.roles.Update(r.Context(), roleID, app.RoleUpdate{
 		SystemPrompt: request.SystemPrompt,
 		Model:        request.Model,
 		Enabled:      request.Enabled,
+		ToolsPolicy:  policy,
 	})
 	if err != nil {
 		h.writeServiceError(w, r, err)
 		return
 	}
-	writeJSON(w, r, h.logger, http.StatusOK, roleDetailResponse(role))
+	h.writeDetail(w, r, role)
+}
+
+// writeDetail 输出单个角色的完整配置。
+//
+// 工具策略无法换算成实际工具时返回 500：此时既不能返回一个"没有工具限制"的响应，也不能
+// 把服务端配置异常伪装成请求参数错误。
+func (h *roleHandler) writeDetail(w http.ResponseWriter, r *http.Request, role domain.Role) {
+	response, err := roleDetailResponse(role)
+	if err != nil {
+		h.logger.ErrorContext(
+			r.Context(),
+			"角色工具策略无法计算",
+			slog.String("role_id", role.ID.String()),
+			slog.String("error", err.Error()),
+		)
+		writeError(
+			w,
+			r,
+			h.logger,
+			http.StatusInternalServerError,
+			CodeInternal,
+			"角色 "+role.ID.String()+" 的工具策略无法计算: "+err.Error(),
+		)
+		return
+	}
+	writeJSON(w, r, h.logger, http.StatusOK, response)
+}
+
+// updateToolsPolicyOf 把请求中的工具策略转换为领域类型，未提交时返回 nil 表示不修改。
+func updateToolsPolicyOf(
+	request *UpdateRoleToolsPolicyRequest,
+) (*domain.ToolsPolicy, error) {
+	if request == nil {
+		return nil, nil
+	}
+	permissions := make([]domain.ToolPermission, 0, len(request.Permissions))
+	for _, permission := range request.Permissions {
+		value := domain.ToolPermission(strings.TrimSpace(permission))
+		if err := value.Validate(); err != nil {
+			return nil, err
+		}
+		permissions = append(permissions, value)
+	}
+	return &domain.ToolsPolicy{
+		Permissions: permissions,
+		AllowTools:  request.AllowTools,
+		DenyTools:   request.DenyTools,
+	}, nil
 }
 
 // roleIDFromPath 解析单角色路径中的角色标识。
@@ -220,32 +296,51 @@ func roleResponse(role domain.Role) RoleResponse {
 }
 
 // roleDetailResponse 把领域角色转换为完整配置表示。
-func roleDetailResponse(role domain.Role) RoleDetailResponse {
-	return RoleDetailResponse{
-		ID:           role.ID.String(),
-		Name:         role.Name,
-		Type:         role.Type.String(),
-		Runner:       role.Runner,
-		Model:        role.Model,
-		SystemPrompt: role.SystemPrompt,
-		ToolsPolicy:  roleToolsPolicyResponse(role.ToolsPolicy),
-		Enabled:      role.Enabled,
-		CreatedAt:    role.CreatedAt,
-		UpdatedAt:    role.UpdatedAt,
+//
+// 系统能力上限、上限内可选工具与实际生效工具都在这里由 domain 计算一次：Handler 与前端
+// 都不重新实现权限判定。
+func roleDetailResponse(role domain.Role) (RoleDetailResponse, error) {
+	ceiling, err := domain.RoleToolCeiling(role.Type)
+	if err != nil {
+		return RoleDetailResponse{}, err
 	}
+	effective, err := domain.EffectivePiTools(role.Type, role.ToolsPolicy)
+	if err != nil {
+		return RoleDetailResponse{}, err
+	}
+	return RoleDetailResponse{
+		ID:                role.ID.String(),
+		Name:              role.Name,
+		Type:              role.Type.String(),
+		Runner:            role.Runner,
+		Model:             role.Model,
+		SystemPrompt:      role.SystemPrompt,
+		ToolsPolicy:       roleToolsPolicyResponse(role.ToolsPolicy),
+		CapabilityCeiling: permissionNames(ceiling),
+		AvailableTools:    domain.ToolsForPermissions(ceiling),
+		EffectiveTools:    effective,
+		Enabled:           role.Enabled,
+		CreatedAt:         role.CreatedAt,
+		UpdatedAt:         role.UpdatedAt,
+	}, nil
 }
 
 // roleToolsPolicyResponse 把领域工具策略转换为对外表示。
 func roleToolsPolicyResponse(policy domain.ToolsPolicy) RoleToolsPolicyResponse {
-	permissions := make([]string, 0, len(policy.Permissions))
-	for _, permission := range policy.Permissions {
-		permissions = append(permissions, string(permission))
-	}
 	return RoleToolsPolicyResponse{
-		Permissions: permissions,
+		Permissions: permissionNames(policy.Permissions),
 		AllowTools:  policy.AllowTools,
 		DenyTools:   policy.DenyTools,
 	}
+}
+
+// permissionNames 把能力类别转换为对外字符串表示，保持输入顺序。
+func permissionNames(permissions []domain.ToolPermission) []string {
+	names := make([]string, 0, len(permissions))
+	for _, permission := range permissions {
+		names = append(names, string(permission))
+	}
+	return names
 }
 
 // writeServiceError 把角色服务错误映射为统一错误响应。

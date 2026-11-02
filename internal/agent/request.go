@@ -26,6 +26,10 @@ type RunRequest struct {
 	Model string
 	// SystemPrompt 是角色的系统提示词，非空时追加到 Pi 的默认系统提示词之后。
 	SystemPrompt string
+	// Tools 是本次调用允许 Pi 使用的内置工具名称，由调用方按角色工具策略计算后给出。
+	//
+	// 执行层不会回退到 Pi 配置中的默认工具列表：为空表示本次调用不加载任何工具。
+	Tools []string
 	// Prompt 是本次执行的完整提示词。
 	Prompt string
 	// WorkingDir 是执行时的工作目录，通常是任务的 Git Worktree。

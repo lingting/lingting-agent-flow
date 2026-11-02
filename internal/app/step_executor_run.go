@@ -124,6 +124,8 @@ func (e *StepExecutor) callAgent(
 		RoleType:     request.role.Type.String(),
 		Model:        request.role.Model,
 		SystemPrompt: request.role.SystemPrompt,
+		// 工具策略与开发会话快照取自同一个角色配置。
+		ToolsPolicy:  request.role.ToolsPolicy,
 		Prompt:       request.prompt,
 		SessionRoot:  e.sessions.LocalRoot(),
 		SessionID:    session.ID.String(),

@@ -780,4 +780,9 @@ HTTP Handler / CLI
 
 - HTTP 服务默认只监听 `127.0.0.1`，未实现远程访问认证前不得默认监听所有网卡，不开放任意来源 CORS。
 - 不存储模型 API 密钥，凭据由 Pi 及其 Provider 管理。
-- 角色权限采用最小化原则，实际权限通过 Agent 配置与执行环境实施，不能只靠提示词。
+- 角色权限采用最小化原则，实际权限通过 Pi 执行参数与执行环境实施，不能只靠提示词：
+  `domain.EffectivePiTools` 按角色能力上限与角色策略计算工具列表，
+  `app.ContainerService.RunAgent` 是唯一换算位置，Pi Runner 构造 `--tools <list>`（为空时
+  `--no-tools`）并固定附加 `--no-mcp`、`--no-extensions`。规划角色与验收者的能力上限只有 `read`，
+  配置无法突破；托管调用不加载 MCP 与扩展，也不修改用户的 Pi 配置与凭据。该限制不提供文件系统
+  隔离，只读容器仍是规划阶段代码只读的最终边界。

@@ -235,7 +235,7 @@ func TestAgentHelp(t *testing.T) {
 // TestAgentRunRequiresModelAndPrompt 校验容器内调用要求显式指定模型与提示词。
 //
 // 本版本只支持在远程容器内执行 Agent 调用，因此 `agent run` 是唯一的执行入口，
-// 两个参数都必须显式给出。
+// 角色类型、模型与提示词都必须显式给出：角色类型决定工具策略的系统能力上限。
 func TestAgentRunRequiresModelAndPrompt(t *testing.T) {
 	t.Parallel()
 	code, _, stderr := run(t, "agent", "run", "container-1")
@@ -259,6 +259,10 @@ func TestAgentRunRejectsUnknownContainer(t *testing.T) {
 		"agent",
 		"run",
 		"container-not-exists",
+		"--role-type",
+		"developer",
+		"--permissions",
+		"read",
 		"--model",
 		"group/free",
 		"--prompt",

@@ -202,6 +202,7 @@ export type {
   RoleListResponse,
   RoleType,
   RoleToolsPolicy,
+  ToolPermission,
   Session,
   SessionListResponse,
   StartTaskRequest,

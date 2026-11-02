@@ -223,6 +223,91 @@ func TestRoleAPIRejectsForbiddenFields(t *testing.T) {
 	}
 }
 
+// TestRoleAPIUpdatesToolsPolicyWithinCeiling 校验工具策略按角色能力上限保存并返回生效工具。
+//
+// 覆盖三条业务规则：开发者可按配置收紧工具、拒绝列表优先于允许列表、规划角色即使直接
+// 提交 HTTP 请求也不能获得写入或执行能力。
+func TestRoleAPIUpdatesToolsPolicyWithinCeiling(t *testing.T) {
+	t.Parallel()
+	fixture := newRoleAPIFixture(t)
+
+	developer := decodeRoleDetail(t, fixture.send(
+		t, http.MethodGet, roleTarget(domain.RoleIDDeveloper), nil,
+	))
+	if !containsValue(developer.AvailableTools, domain.PiToolBash) {
+		t.Fatalf("开发者应能选择 bash: %+v", developer.AvailableTools)
+	}
+	updated := fixture.send(t, http.MethodPut, roleTarget(domain.RoleIDDeveloper), map[string]any{
+		"tools_policy": map[string]any{
+			"permissions": []string{"read", "write", "execute"},
+			"deny_tools":  []string{domain.PiToolBash},
+		},
+	})
+	if updated.Code != http.StatusOK {
+		t.Fatalf("更新工具策略应返回 200，实际 %d: %s", updated.Code, updated.Body.String())
+	}
+	saved := decodeRoleDetail(t, updated)
+	// 返回的生效工具必须由服务端按保存后的策略计算：bash 被拒绝，其余工具保留。
+	if containsValue(saved.EffectiveTools, domain.PiToolBash) {
+		t.Fatalf("拒绝列表应优先于允许列表: %+v", saved.EffectiveTools)
+	}
+	for _, want := range []string{domain.PiToolRead, domain.PiToolEdit, domain.PiToolWrite} {
+		if !containsValue(saved.EffectiveTools, want) {
+			t.Fatalf("开发者应保留工具 %s: %+v", want, saved.EffectiveTools)
+		}
+	}
+	reloaded := decodeRoleDetail(t, fixture.send(
+		t, http.MethodGet, roleTarget(domain.RoleIDDeveloper), nil,
+	))
+	if !containsValue(reloaded.ToolsPolicy.DenyTools, domain.PiToolBash) {
+		t.Fatalf("工具策略未落库: %+v", reloaded.ToolsPolicy)
+	}
+
+	// 规划角色只读：越界能力、越界允许工具与未知工具名都被拒绝。
+	for _, body := range []map[string]any{
+		{"tools_policy": map[string]any{"permissions": []string{"read", "write"}}},
+		{"tools_policy": map[string]any{"permissions": []string{"read", "execute"}}},
+		{"tools_policy": map[string]any{
+			"permissions": []string{"read"},
+			"allow_tools": []string{domain.PiToolBash},
+		}},
+		{"tools_policy": map[string]any{
+			"permissions": []string{"read"},
+			"deny_tools":  []string{"not-a-tool"},
+		}},
+	} {
+		recorder := fixture.send(t, http.MethodPut, roleTarget(domain.RoleIDPlanner), body)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("请求体 %v 应返回 400，实际 %d: %s", body, recorder.Code, recorder.Body.String())
+		}
+	}
+	planner := decodeRoleDetail(t, fixture.send(
+		t, http.MethodGet, roleTarget(domain.RoleIDPlanner), nil,
+	))
+	if containsValue(planner.CapabilityCeiling, string(domain.ToolPermissionWrite)) ||
+		containsValue(planner.CapabilityCeiling, string(domain.ToolPermissionExecute)) {
+		t.Fatalf("规划角色的能力上限应只有只读: %+v", planner.CapabilityCeiling)
+	}
+	for _, forbidden := range []string{domain.PiToolBash, domain.PiToolEdit, domain.PiToolWrite} {
+		if containsValue(planner.EffectiveTools, forbidden) {
+			t.Fatalf("规划角色不应获得工具 %s: %+v", forbidden, planner.EffectiveTools)
+		}
+		if containsValue(planner.AvailableTools, forbidden) {
+			t.Fatalf("规划角色不应能选择工具 %s: %+v", forbidden, planner.AvailableTools)
+		}
+	}
+}
+
+// containsValue 判断字符串列表中是否包含指定取值。
+func containsValue(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 // TestRoleAPIKeepsTaskCreationRoles 校验任务创建仍能使用角色列表返回的启用角色。
 func TestRoleAPIKeepsTaskCreationRoles(t *testing.T) {
 	t.Parallel()

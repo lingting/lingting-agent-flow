@@ -44,7 +44,7 @@ V2 不引入第二套工作流引擎，也不新增分层。新能力一律按�
 | `RequirementPlanningService` | 调用方案规划师、解析实施方案、结构化校验 | 不写数据库正式实体 |
 | `RequirementService` | 正式需求的创建（含事务）、查询、逻辑删除、进度聚合 | 不调度、不执行 |
 | `ProjectExecutionService` | 项目级启动/停止、执行租约、同项目串行、项目状态汇总 | 不实现第二套任务执行流程 |
-| `RoleConfigService` | 固定四角色读取与更新、配置快照 | 不增删角色、不放宽安全边界 |
+| `RoleConfigService` | 固定四角色读取与更新、配置快照（`app.RoleService`，V2-M1-E2/E3 已落地） | 不增删角色、不放宽安全边界；工具策略只能收敛在角色能力上限内 |
 
 复用（不得重写）：`TaskWorkflowService`、`StepWorkflowService`、`StepExecutor`、
 `ValidationService`、`TaskScheduler`、`TaskLaunchService`、`ContainerService`、
@@ -62,6 +62,34 @@ ProjectExecutionService.Start(projectID)
   └─ 调用既有 TaskLaunchService / TaskWorkflowService（不新建执行路径）
   └─ 收敛后释放或续租；失败/不确定一律停止继续领取
 ```
+
+### 3.2 角色工具策略执行路径（V2-M1-E3 已落地）
+
+```text
+roles.tools_policy_json（SQLite）
+  └── app.RoleService.Get / 任务配置关联的角色读取
+        ├── app.SessionService.Start → sessions.role_snapshot_json（快照）
+        └── app.ContainerService.RunAgent
+              ├── domain.EffectivePiTools(RoleType, ToolsPolicy)
+              │     ├── domain.RoleToolCeiling(RoleType)       角色能力上限（系统固定）
+              │     ├── domain.ToolsForPermissions(granted)    能力 → Pi 内置工具
+              │     └── ToolsPolicy.AllowsTool(tool)           allow / deny（deny 优先）
+              └── agent.RunRequest.Tools → pi.ContainerRunner.execute
+                    ├── --tools read,grep,find,ls,…（列表为空时 --no-tools）
+                    ├── --no-mcp
+                    └── --no-extensions
+```
+
+- 策略计算只在 `domain`（`internal/domain/role_tools.go`）定义一次；Handler 与前端都不做权限判定，
+  也不存在按调用路径分裂的第二套映射。
+- `app.ContainerService.RunAgent` 是唯一把策略换算为工具列表的位置；Pi Runner 只把列表转成命令行参数，
+  空列表必须落到 `--no-tools`，不得省略参数回落到 Pi 默认工具。
+- 三条真实调用路径（Planner / Developer / Validator）只提交 `role.ToolsPolicy`，与 Session 快照取自
+  同一个 `domain.Role` 值。
+- 托管调用固定 `--no-mcp` 与 `--no-extensions`：MCP 工具与扩展注册的工具不能绕过策略。该限制只作用于
+  AgentFlow 发起的 Pi 调用，不修改用户的 Pi 配置、扩展、MCP 服务器与凭据。
+- 策略无法换算（未识别角色类型、非法策略）时 `RunAgent` 直接失败，不允许回退到默认权限。
+- 这一层不提供文件系统隔离：规划阶段的项目代码只读仍由 §4 的只读容器实施。
 
 ## 4. 规划运行环境（只读代码）实施点
 
@@ -83,7 +111,8 @@ ProjectExecutionService.Start(projectID)
 
 约束：
 
-- 只读是最终安全边界；工具白名单与 Prompt 是额外限制，两者不可相互替代。
+- 只读是最终安全边界；工具白名单与 Prompt 是额外限制，两者不可相互替代。工具策略自 V2-M1-E3 起
+  在真实调用链路上生效（见 §3.2），但它不能替代 M2 的只读文件系统。
 - 新增 Docker 参数（`--read-only`、`--tmpfs`、`--mount ...,readonly`、`--user`）必须同步
   `docker.RequiredCLICommands`，否则节点预检会漏检。
 - 规划容器不得进入任何提交/推送/合并路径；规划容器内 Session 与任务执行 Session 是两套模型，
@@ -153,8 +182,8 @@ PUT    /api/v1/roles/{roleID}
 
 | 编号 | 缺口 | 证据 | 归属 |
 |---|---|---|---|
-| G1 | 角色工具策略未在调用层实施 | `internal/agent/pi/command.go` 只传 `--print/--session/--model/--append-system-prompt`；`ToolsPolicy` 仅落库 | M1 |
-| G2 | 无角色更新 API，`PUT /api/v1/roles/{roleID}` 不存在 | `internal/httpapi/roles.go` 只有集合 GET | M1 |
+| G1 | ~~角色工具策略未在调用层实施~~ **已关闭**（V2-M1-E3） | 现状：`internal/domain/role_tools.go` 计算能力上限与工具列表，`app.ContainerService.RunAgent` 统一换算，`internal/agent/pi/command.go` 构造 `--tools`/`--no-tools` 并固定 `--no-mcp`/`--no-extensions`；Planner / Developer / Validator 三条路径均提交 `role.ToolsPolicy` | M1 |
+| G2 | ~~无角色更新 API~~ **已关闭**（V2-M1-E2 / E3） | 现状：`internal/httpapi/roles.go` 提供角色列表、详情与 `PUT /api/v1/roles/{roleID}`；E3 起 `tools_policy` 可更新，越出角色能力上限返回 400 | M1 |
 | G3 | ~~环境管理只有查询 API，无创建/修改/构建 HTTP 入口~~ **已关闭**（V2-M1-E1） | 现状：`internal/httpapi/environments.go` 提供环境详情、创建版本、初始化、后台构建与构建状态/日志/Dockerfile 读取入口，写路径全部复用 `app.EnvironmentService` | M1 |
 | G4 | `execenv` 无只读挂载与只读 rootfs 能力 | `internal/execenv/workspace.go`、`internal/docker/container.go` | M2 |
 | G5 | `Requirement` 无项目关联、无规划快照、无逻辑删除 | `domain/requirement.go`、迁移 `0009` 的 `requirements` 表 | M3/M4 |

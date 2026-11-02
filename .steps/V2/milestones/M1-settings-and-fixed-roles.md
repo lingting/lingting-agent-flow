@@ -1,6 +1,6 @@
 # M1：设置中心、环境管理与固定角色
 
-> 状态：**pending**（子任务 V2-M1-E1、V2-M1-E2 已完成）。
+> 状态：**pending**（子任务 V2-M1-E1、V2-M1-E2、V2-M1-E3 已完成；基础配置只读查看待做）。
 > 前置：M0 completed。参考：[`../ROLE-DESIGN.md`](../ROLE-DESIGN.md)、
 > [`../ENVIRONMENT-MANAGEMENT.md`](../ENVIRONMENT-MANAGEMENT.md)、[`../ARCHITECTURE.md`](../ARCHITECTURE.md) §8。
 
@@ -10,7 +10,8 @@
 |---|---|---|
 | V2-M1-E1 | Settings 内嵌环境管理、环境写 API、后台构建、构建日志 | **已完成**（2026-11-02） |
 | V2-M1-E2 | 固定四角色、角色配置持久化、角色配置服务、角色管理与角色 API | **已完成**（2026-11-02） |
-| 其余 | 执行层工具限制（Pi 工具策略真正生效）、基础配置只读查看 | pending |
+| V2-M1-E3 | 角色工具策略执行（Pi `--tools` / `--no-tools` / `--no-mcp` / `--no-extensions`）、工具策略编辑 | **已完成**（2026-11-02） |
+| V2-M1-E4 | 基础配置只读查看 | pending |
 
 E1 的交付范围：`GET /api/v1/environments`、`GET /api/v1/environments/{type}/{name}`、
 `GET .../versions/{v}`、`GET .../versions/{v}/dockerfile`、`GET .../versions/{v}/build-log`、
@@ -26,8 +27,34 @@ E2 的交付范围：`domain` 定义四个固定角色类型与固定 Role ID，
 （无 `POST` / `DELETE`）；YAML 不再承担角色定义；设置页承载角色列表与编辑对话框，工具策略只展示。
 E2 明确**不**实现工具策略的编辑与执行层限制。
 
-M1 整体状态仍为 **pending**：上面的"其余"项未满足退出条件，不得把 E1 / E2 的完成当作 M1 完成。
-特别是工具策略目前仍只落库、不生效，角色配置的"真正生效"仍缺执行层限制。
+E3 的交付范围：`domain` 新增 `internal/domain/role_tools.go`（Pi 内置工具名称、能力→工具映射、
+角色能力上限 `RoleToolCeiling`、策略校验 `ValidateToolsPolicyForRole`、实际工具计算
+`EffectivePiTools`）；`app.ContainerService.RunAgent` 统一把角色类型与 `ToolsPolicy` 换算为工具列表，
+`agent.RunRequest.Tools` 由 Pi Runner 统一构造 `--tools <list>` 或 `--no-tools`，并固定附加
+`--no-mcp`、`--no-extensions`；`TaskWorkflowService`（Planner）、`StepExecutor`（Developer）、
+`ValidatorReviewer`（Validator）三条真实调用路径提交 `role.ToolsPolicy`，与 Session 快照同源；
+`PUT /api/v1/roles/{roleID}` 开放 `tools_policy`，越出角色能力上限返回 400；`GET`/`PUT` 角色详情新增
+`capability_ceiling`、`available_tools`、`effective_tools` 三个服务端计算字段；设置页可编辑能力、
+允许工具与拒绝工具，上限与生效工具只按服务端返回值展示。
+验收者的默认策略调整为只读（能力上限 read，不含 execute）：确定性验证命令由
+`app.ValidationService` 在容器内执行，模型调用只审阅代码与验证证据。
+
+E3 的退出条件与证据：
+
+- 规划角色（Planner / 需求分析师）调用不含 `bash`、`edit`、`write`：`RoleToolCeiling` 只读、
+  `EffectivePiTools` 先与上限取交集；`tests/unit/app/plan_generation_test.go`、
+  `tests/unit/app/roles_test.go` 覆盖。
+- Developer 的实际工具与配置一致，`deny_tools` 优先：`tests/unit/app/role_service_test.go`、
+  `tests/unit/httpapi/roles_test.go` 覆盖。
+- 验收者不获得写入能力：`tests/unit/app/validation_review_test.go` 覆盖。
+- Pi 参数构造正确（空工具走 `--no-tools`，MCP 与扩展始终关闭）：`tests/unit/agent/container_runner_test.go`
+  覆盖。
+- 本次**未运行**上述测试（用户未授权测试），只完成编译、`gofmt`、`go vet ./...`、前端 lint / 类型检查
+  与 `git diff --check`。
+
+M1 整体状态仍为 **pending**：基础配置只读查看（E4）未交付，退出条件尚未全部满足，不得把
+E1 / E2 / E3 的完成当作 M1 完成。工具策略自 E3 起在真实调用链路上生效，但"项目代码只读"的最终
+文件系统边界仍由 M2 的只读容器承担。
 
 ## 1. 目标
 
@@ -59,17 +86,23 @@ M1 整体状态仍为 **pending**：上面的"其余"项未满足退出条件，
 ### 2.3 HTTP
 
 - `GET /api/v1/roles`、`GET /api/v1/roles/{roleID}`、`PUT /api/v1/roles/{roleID}`。**已完成（E2）**：
-  列表响应保持旧字段不变；更新只接受 `system_prompt` / `model` / `enabled`，未知字段 400，无 `POST` / `DELETE`。
+  列表响应保持旧字段不变；更新接受 `system_prompt` / `tools_policy` / `model` / `enabled`，未知字段 400，
+  无 `POST` / `DELETE`。**E3 补充**：`tools_policy` 越出角色能力上限（规划角色写/执行、验收者执行、
+  未知工具名）返回 400；详情响应新增服务端计算的 `capability_ceiling` / `available_tools` /
+  `effective_tools`，策略无法换算为工具时返回 500 而不是返回"无限制"。
 - 环境写入口（方向见 `ENVIRONMENT-MANAGEMENT.md` §5），DTO 按当时方法签名核实后确定。**已完成（E1）**：
   实际交付路径见该文档 §5 与 `docs/http-api.md` §5。
 
 ### 2.4 执行层
 
-- Pi 调用按快照应用工具允许/拒绝列表；无法通过 CLI 参数表达的，由执行环境实施。**未完成（pending）**：
-  `tools_policy_json` 仍只落库、不生效，本项是 M1 剩余的主要缺口。
-- 每次调用的生效策略写入 Session 快照；配置修改不影响在途会话。**部分完成（E2）**：会话仍按创建时读取
-  的角色配置写入快照，配置修改不影响在途调用；但"生效的策略"在执行层尚未实施，因此快照里的策略目前
-  不代表真实限制。
+- Pi 调用按快照应用工具允许/拒绝列表；无法通过 CLI 参数表达的，由执行环境实施。**已完成（E3）**：
+  `app.ContainerService.RunAgent` 用 `domain.EffectivePiTools` 把角色类型与 `ToolsPolicy` 换算为工具
+  列表，`pi.ContainerRunner.execute` 统一构造 `--tools <list>`（为空时 `--no-tools`）并固定附加
+  `--no-mcp`、`--no-extensions`。工具映射与能力上限只在 `internal/domain/role_tools.go` 定义一次，
+  三条调用路径都只提交 `role.ToolsPolicy`。
+- 每次调用的生效策略写入 Session 快照；配置修改不影响在途会话。**已完成（E2 + E3）**：会话在创建时
+  按当次读取的角色配置写入快照，`ToolsPolicy` 与快照取自同一个 `domain.Role` 值，因此 Pi 实际工具
+  与快照策略一致；配置修改只影响后续新会话。
 
 ### 2.5 前端
 
@@ -77,32 +110,37 @@ M1 整体状态仍为 **pending**：上面的"其余"项未满足退出条件，
   环境管理，独立环境页面与导航入口已删除。**角色部分已完成（E2）**：设置页新增角色列表与编辑对话框。
 - 环境页支持版本列表、构建状态、构建日志、新建版本；构建失败原因如实展示。**已完成（E1）**：
   构建状态额外区分“结果不确定”（`uncertain`），并用独立提示展示。
-- 角色编辑只暴露可改字段；保存失败显示服务端原因，不伪造成功。**已完成（E2）**：工具策略只展示并标注
-  “暂不可编辑”，保存结果取服务端重新读取的返回值。
+- 角色编辑只暴露可改字段；保存失败显示服务端原因，不伪造成功。**已完成（E3）**：`RoleEditModal`
+  可编辑能力、允许工具与拒绝工具，选项全部来自服务端的 `capability_ceiling` / `available_tools`，并展示
+  `effective_tools`；保存结果取服务端重新读取的返回值。
 
 ## 3. 退出条件
 
 | 条件 | 判定方式 |
 |---|---|
 | 四个角色不能新增或删除（**已满足**，E2） | 无 `POST /roles`、无 `DELETE /roles/{id}`（均返回 405）；`RoleType.Validate` 只接受四个固定类型，角色集合固定 |
-| 角色配置修改能持久化（**已满足**，E2） | `PUT /api/v1/roles/{roleID}` 只更新 `roles` 行的 `system_prompt` / `model` / `enabled`，响应取重新读取结果；启动补齐不覆盖已有行 |
+| 角色配置修改能持久化（**已满足**，E2 + E3） | `PUT /api/v1/roles/{roleID}` 只更新 `roles` 行的 `system_prompt` / `tools_policy_json` / `model` / `enabled`，响应取重新读取结果；启动补齐不覆盖已有行；越出角色能力上限的工具策略返回 400，不落库 |
 | 历史 Session 保留原角色快照（**已满足**，E2 未改动该路径） | 快照只在会话创建时由 `Role.Snapshot()` 写入；没有任何代码在会话创建后回写 `role_snapshot_json` |
-| 规划角色不能写入项目代码 | 工具限制在执行层生效；容器只读为 M2 的最终边界 |
-| 现有 V1 任务工作流不回归失败（**待人工确认**） | E2 只改角色定义来源、角色种子与角色接口，未改动计划 / 开发 / 验证 / 收尾调用链；接口兼容性由任务创建仍使用角色列表完成核验 |
+| 规划角色不能写入项目代码（**工具层已满足**，E3） | 规划角色能力上限只读，Pi 调用只收到 `read`/`grep`/`find`/`ls`，并固定 `--no-mcp` / `--no-extensions`；文件系统级的只读边界仍属 M2 |
+| 现有 V1 任务工作流不回归失败（**待人工确认**） | E2 只改角色定义来源、角色种子与角色接口，E3 只在三条调用路径上增加 `ToolsPolicy` 透传与 Pi 工具参数，未改动状态机与收尾逻辑；默认策略仍允许 Developer 读写执行、Planner 只读，需真实跑一轮计划→开发→验证确认 |
 | 环境版本只追加（**已满足**，E1） | 提交不同内容产生新版本号，旧版本内容、哈希与构建元数据不变；提交内容与某个成功版本完全一致时复用该版本号，不产生重复版本 |
 
 ## 4. 验收方式（默认不自动执行）
 
-- 阅读代码与 `git diff`，核对：角色更新字段白名单、快照生成点、Pi 参数构造点、
-  环境写入口的前置校验、历史版本不可覆盖的写入路径。
-- `gofmt`、`go vet ./...`；前端 `pnpm lint` / 构建（不触发测试的部分）。
-- 若用户明确要求测试，则覆盖：角色更新与快照、非法字段拒绝、环境版本追加与构建状态、
-  Pi 参数包含工具限制、前端角色编辑禁用态与错误展示。
+- 阅读代码与 `git diff`，核对：角色更新字段白名单、能力上限校验点、快照生成点、工具列表计算点、
+  Pi 参数构造点、环境写入口的前置校验、历史版本不可覆盖的写入路径。
+- `gofmt`、`go vet ./...`；前端 `vp fmt` / `vp lint` / `tsc --noEmit`（均不触发测试）。
+- E3 已把必要断言写入既有测试文件（`tests/unit/app/{roles,role_service,plan_generation,validation_review}_test.go`、
+  `tests/unit/httpapi/roles_test.go`、`tests/unit/agent/container_runner_test.go`），但**未运行**：
+  本次任务未获测试授权。
+- 若用户明确要求测试，则运行上述文件并覆盖：工具策略持久化与上限拒绝、规划/验收者工具限制、
+  Pi 参数包含工具限制、环境版本追加与构建状态、前端角色编辑错误展示。
 
 ## 5. 风险与待决
 
-1. **Pi CLI 是否有工具限制参数未知**。若没有，必须由执行环境实施（例如规划阶段只读容器，
-   或禁用写入类工具的包装），不得退化为只改 Prompt。
+1. ~~Pi CLI 是否有工具限制参数未知~~ **已定稿（E3）**：Pi 官方 CLI 提供 `--tools`、`--no-tools`、
+   `--no-mcp`、`--no-extensions`。工具限制由 Pi Runner 的参数实施，MCP 与扩展在托管调用中不加载；
+   规划阶段的项目代码只读边界仍由 M2 的容器只读挂载兜底。
 2. ~~角色配置迁移会影响现有配置文件中的角色段读取路径~~ **已定稿（E2）**：角色定义改为代码内置，
    `Config.Roles` 与 `roles[].tools_policy.mode` 校验已移除，YAML 不再声明角色；配置加载器仍拒绝未知字段，
    因此已存在的本地配置必须删除 `roles:` 段（`configs/example.yaml` 与本地 `configs/agentflow.yaml` 已同步）。

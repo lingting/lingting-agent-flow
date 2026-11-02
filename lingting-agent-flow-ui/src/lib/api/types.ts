@@ -680,12 +680,21 @@ export type RoleListResponse = {
 };
 
 /**
+ * 角色工具策略中的能力类别，取值与 Go 端 `domain.ToolPermission` 完全一致。
+ *
+ * 能力是工具的分组：read 对应读取与检索类内置工具，write 对应写入类工具，
+ * execute 对应 bash。角色身份决定了能用哪些能力，配置不能突破该上限。
+ */
+export type ToolPermission = "read" | "write" | "execute";
+
+/**
  * 角色的工具策略，与 Go 端 `httpapi.RoleToolsPolicyResponse` 一一对应。
  *
- * 本阶段只读：设置页只展示当前策略，实际执行层限制属于后续任务。
+ * `permissions` 是保存的能力声明，`allow_tools` 为空表示不按名称限制已授权的工具，
+ * `deny_tools` 始终优先。实际生效工具由服务端的 `effective_tools` 给出。
  */
 export type RoleToolsPolicy = {
-  permissions: string[];
+  permissions: ToolPermission[];
   allow_tools?: string[];
   deny_tools?: string[];
 };
@@ -693,26 +702,43 @@ export type RoleToolsPolicy = {
 /**
  * 角色的完整配置，与 Go 端 `httpapi.RoleDetailResponse` 一一对应。
  *
- * 由 `GET /api/v1/roles/{roleID}` 返回；`system_prompt`、`model` 与 `enabled`
- * 是唯一可通过 `PUT` 修改的字段。
+ * 由 `GET /api/v1/roles/{roleID}` 返回；`system_prompt`、`tools_policy`、`model` 与
+ * `enabled` 是可修改字段。其余三项由服务端计算，前端只展示不推算：
+ * `capability_ceiling` 是角色身份的固定能力上限，`available_tools` 是该上限内的内置
+ * 工具，`effective_tools` 是当前配置最终交给 Pi 的工具列表。
  */
 export type RoleDetail = Role & {
   system_prompt: string;
   tools_policy: RoleToolsPolicy;
+  capability_ceiling: ToolPermission[];
+  available_tools: string[];
+  effective_tools: string[];
   created_at: string;
   updated_at: string;
 };
 
 /**
+ * `PUT /api/v1/roles/{roleID}` 请求体中的工具策略。
+ *
+ * 提交即整体替换已保存的策略：越出角色能力上限、或包含未知工具名时服务端返回 400。
+ */
+export type UpdateRoleToolsPolicy = {
+  permissions: ToolPermission[];
+  allow_tools: string[];
+  deny_tools: string[];
+};
+
+/**
  * `PUT /api/v1/roles/{roleID}` 的请求体。
  *
- * 只允许这三个字段：角色标识、名称、类型、执行器与工具策略不在可修改范围内，
- * 携带它们会被服务端按未知字段拒绝。
+ * 只允许这四个字段：角色标识、名称、类型与执行器不在可修改范围内，携带它们会被
+ * 服务端按未知字段拒绝。
  */
 export type UpdateRoleRequest = {
   system_prompt?: string;
   model?: string;
   enabled?: boolean;
+  tools_policy?: UpdateRoleToolsPolicy;
 };
 
 /**

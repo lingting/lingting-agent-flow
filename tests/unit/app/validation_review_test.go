@@ -891,6 +891,24 @@ func TestReviewPromptCarriesDeterministicEvidence(t *testing.T) {
 	if request.AttemptID != "" && request.StepID == "" {
 		t.Fatal("审查调用必须带步骤归属")
 	}
+	// 验收者的模型调用只读：策略不授予写入或执行能力，实际可用工具里也没有写入类工具与
+	// bash。确定性验证命令由 ValidationService 在容器内执行，不通过验收者的工具能力完成。
+	if request.ToolsPolicy.Has(domain.ToolPermissionWrite) ||
+		request.ToolsPolicy.Has(domain.ToolPermissionExecute) {
+		t.Fatalf("验收者不应被授予写入或执行能力: %+v", request.ToolsPolicy)
+	}
+	validatorTools, toolsErr := domain.EffectivePiTools(
+		domain.RoleType(request.RoleType),
+		request.ToolsPolicy,
+	)
+	if toolsErr != nil {
+		t.Fatalf("计算验收者有效工具失败: %v", toolsErr)
+	}
+	for _, forbidden := range []string{domain.PiToolBash, domain.PiToolEdit, domain.PiToolWrite} {
+		if containsTool(validatorTools, forbidden) {
+			t.Fatalf("验收者不应获得工具 %s: %v", forbidden, validatorTools)
+		}
+	}
 }
 
 // passedWorkflowCheck 返回一条通过的检查结果。

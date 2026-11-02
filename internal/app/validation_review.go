@@ -201,6 +201,8 @@ func (r *ValidatorReviewer) Review(
 		RoleType:     role.Type.String(),
 		Model:        role.Model,
 		SystemPrompt: role.SystemPrompt,
+		// 工具策略与审查会话快照取自同一个角色配置：验收者只读。
+		ToolsPolicy:  role.ToolsPolicy,
 		Prompt:       prompt,
 		SessionRoot:  r.sessions.LocalRoot(),
 		SessionID:    session.ID.String(),

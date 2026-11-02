@@ -21,7 +21,7 @@ const (
 	RoleTypePlanner RoleType = "planner"
 	// RoleTypeDeveloper 是开发者：执行开发步骤，可读写并执行命令。
 	RoleTypeDeveloper RoleType = "developer"
-	// RoleTypeValidator 是验收者：执行验证与验收，只读并执行验证命令。
+	// RoleTypeValidator 是验收者：审定验收结论，只读代码与验证证据。
 	RoleTypeValidator RoleType = "validator"
 )
 
@@ -74,7 +74,8 @@ func (p ToolPermission) Validate() error {
 
 // ToolsPolicy 描述角色可使用的工具范围。
 //
-// 权限采用最小化原则：允许列表为空表示不按名称限制，但拒绝列表始终优先。
+// 权限采用最小化原则：允许列表为空表示不按名称限制，但拒绝列表始终优先。策略本身
+// 不能突破角色身份对应的能力上限（RoleToolCeiling），最终可用工具由 EffectivePiTools 计算。
 type ToolsPolicy struct {
 	Permissions []ToolPermission `json:"permissions"`
 	AllowTools  []string         `json:"allow_tools,omitempty"`
@@ -83,18 +84,17 @@ type ToolsPolicy struct {
 
 // DefaultToolsPolicy 返回角色类型的默认最小权限策略。
 //
-// 需求分析师与 Planner 只读；Developer 可读写并执行命令；Validator 只读并执行验证命令。
+// 需求分析师、Planner 与 Validator 只读；Developer 可读写并执行命令。
+//
+// 默认值同样受 RoleToolCeiling 约束：验收者的确定性验证命令由 app.ValidationService
+// 在容器内执行，模型调用本身只需要读取代码与验证证据，因此默认不授予 execute。
 func DefaultToolsPolicy(roleType RoleType) ToolsPolicy {
 	switch roleType {
 	case RoleTypeDeveloper:
 		return ToolsPolicy{
 			Permissions: []ToolPermission{ToolPermissionRead, ToolPermissionWrite, ToolPermissionExecute},
 		}
-	case RoleTypeValidator:
-		return ToolsPolicy{
-			Permissions: []ToolPermission{ToolPermissionRead, ToolPermissionExecute},
-		}
-	case RoleTypeRequirementAnalyst, RoleTypePlanner:
+	case RoleTypeValidator, RoleTypeRequirementAnalyst, RoleTypePlanner:
 		return ToolsPolicy{Permissions: []ToolPermission{ToolPermissionRead}}
 	default:
 		return ToolsPolicy{Permissions: []ToolPermission{ToolPermissionRead}}
@@ -195,7 +195,7 @@ func (s RoleSnapshot) Validate() error {
 // Role 是固定角色的运行配置，用于驱动某一阶段的一次 Agent 执行。
 //
 // 角色标识、名称与类型由固定定义确定，工作流只依据类型识别职责；用户可修改的只有
-// 系统提示词、模型与启用状态。
+// 系统提示词、工具策略、模型与启用状态。
 type Role struct {
 	ID           ID          `json:"id"`
 	Name         string      `json:"name"`

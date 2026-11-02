@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/lingting/agentflow/internal/app"
+	"github.com/lingting/agentflow/internal/domain"
 	"github.com/spf13/cobra"
 )
 
@@ -14,6 +15,11 @@ func newAgentRunCommand(a *app.App) *cobra.Command {
 	var flags credentialFlags
 	var request app.ContainerAgentRequest
 	var timeout string
+	// permissions、allowTools 与 denyTools 是本次调用的角色工具策略输入，
+	// 由 domain 统一校验角色能力上限，子命令不自行判定权限。
+	var permissions string
+	var allowTools string
+	var denyTools string
 	command := &cobra.Command{
 		Use:   "run <container>",
 		Short: "在任务容器内部执行一次 Pi 调用并把 Session 保存到本机",
@@ -41,6 +47,16 @@ func newAgentRunCommand(a *app.App) *cobra.Command {
 						"请在配置中设置 storage.database_path 或显式传入 --session-root",
 				)
 			}
+			policy, policyErr := parseToolsPolicy(
+				strings.TrimSpace(request.RoleType),
+				permissions,
+				allowTools,
+				denyTools,
+			)
+			if policyErr != nil {
+				return policyErr
+			}
+			request.ToolsPolicy = policy
 			request.SessionRoot = sessionRoot
 			request.Timeout = parsedTimeout
 			return withContainerService(cmd.Context(), a, hostConfigPath(cmd), func(
@@ -60,7 +76,12 @@ func newAgentRunCommand(a *app.App) *cobra.Command {
 	command.Flags().StringVar(&request.TaskID, "task", "", "任务标识，用于确定 Session 目录归属")
 	command.Flags().StringVar(&request.StepID, "step", "", "步骤标识，可为空")
 	command.Flags().StringVar(&request.AttemptID, "attempt", "", "尝试标识，可为空")
-	command.Flags().StringVar(&request.RoleType, "role-type", "", "角色类型，仅用于日志与诊断")
+	command.Flags().StringVar(
+		&request.RoleType,
+		"role-type",
+		"",
+		"角色类型（必填）：决定本次调用的系统能力上限",
+	)
 	command.Flags().StringVar(&request.Model, "model", "", "Pi 使用的模型标识（必填）")
 	command.Flags().StringVar(&request.SystemPrompt, "system-prompt", "", "追加到默认系统提示词之后的内容")
 	command.Flags().StringVar(&request.Prompt, "prompt", "", "发送给 Agent 的提示词（必填）")
@@ -76,13 +97,72 @@ func newAgentRunCommand(a *app.App) *cobra.Command {
 		"",
 		"调用标识，省略时自动生成；指定时必须保证唯一",
 	)
+	command.Flags().StringVar(
+		&permissions,
+		"permissions",
+		"",
+		"授权能力，逗号分隔：read、write、execute；省略表示不加载任何工具",
+	)
+	command.Flags().StringVar(
+		&allowTools,
+		"allow-tools",
+		"",
+		"允许的内置工具，逗号分隔；省略表示不按名称限制已授权的工具",
+	)
+	command.Flags().StringVar(
+		&denyTools,
+		"deny-tools",
+		"",
+		"拒绝的内置工具，逗号分隔；拒绝优先于允许",
+	)
 	command.Flags().StringVar(&timeout, "timeout", "", "本次调用的超时时间，例如 10m")
-	for _, required := range []string{"model", "prompt"} {
+	for _, required := range []string{"role-type", "model", "prompt"} {
 		if err := command.MarkFlagRequired(required); err != nil {
 			panic(fmt.Sprintf("cli: 标记必需参数失败: %v", err))
 		}
 	}
 	return command
+}
+
+// parseToolsPolicy 把命令行参数转换为角色工具策略。
+//
+// 只做参数解析与校验：能力到内置工具的映射、角色能力上限与实际生效工具都由 domain
+// 统一计算，子命令不构造 Pi 参数，也不自行判定权限。
+func parseToolsPolicy(
+	roleType, permissions, allowTools, denyTools string,
+) (domain.ToolsPolicy, error) {
+	values := make([]domain.ToolPermission, 0, 3)
+	for _, name := range splitCSV(permissions) {
+		permission := domain.ToolPermission(name)
+		if err := permission.Validate(); err != nil {
+			return domain.ToolsPolicy{}, fmt.Errorf("--permissions 取值非法: %w", err)
+		}
+		values = append(values, permission)
+	}
+	policy := domain.ToolsPolicy{
+		Permissions: values,
+		AllowTools:  splitCSV(allowTools),
+		DenyTools:   splitCSV(denyTools),
+	}
+	if err := domain.ValidateToolsPolicyForRole(domain.RoleType(roleType), policy); err != nil {
+		return domain.ToolsPolicy{}, fmt.Errorf("工具策略取值非法: %w", err)
+	}
+	return policy, nil
+}
+
+// splitCSV 把逗号分隔的参数拆成去空白的非空取值。
+func splitCSV(value string) []string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	items := make([]string, 0, len(trimmed))
+	for _, item := range strings.Split(trimmed, ",") {
+		if name := strings.TrimSpace(item); name != "" {
+			items = append(items, name)
+		}
+	}
+	return items
 }
 
 // printContainerAgentResult 输出容器内 Agent 调用结果。

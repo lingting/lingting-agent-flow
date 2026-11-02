@@ -402,6 +402,32 @@ func TestGeneratePlanPersistsPlan(t *testing.T) {
 	if !found {
 		t.Fatalf("缺少 plan.created 事件")
 	}
+	// Planner 调用必须携带规划角色的工具策略：规划角色只读，实际可用工具里没有写入与
+	// 执行类工具，策略来自调用时读取的角色配置而不是执行层的默认值。
+	requests := fixture.containers.agentRequests
+	if len(requests) != 1 {
+		t.Fatalf("一次计划生成应只有一次 Agent 调用，实际 %d", len(requests))
+	}
+	plannerRequest := requests[0]
+	if plannerRequest.RoleType != domain.RoleTypePlanner.String() {
+		t.Fatalf("规划调用角色类型不符: %s", plannerRequest.RoleType)
+	}
+	if plannerRequest.ToolsPolicy.Has(domain.ToolPermissionWrite) ||
+		plannerRequest.ToolsPolicy.Has(domain.ToolPermissionExecute) {
+		t.Fatalf("规划角色不应被授予写入或执行能力: %+v", plannerRequest.ToolsPolicy)
+	}
+	plannerTools, err := domain.EffectivePiTools(
+		domain.RoleType(plannerRequest.RoleType),
+		plannerRequest.ToolsPolicy,
+	)
+	if err != nil {
+		t.Fatalf("计算规划调用工具失败: %v", err)
+	}
+	for _, forbidden := range []string{domain.PiToolBash, domain.PiToolEdit, domain.PiToolWrite} {
+		if containsTool(plannerTools, forbidden) {
+			t.Fatalf("规划调用不应获得工具 %s: %v", forbidden, plannerTools)
+		}
+	}
 }
 
 // TestGeneratePlanRejectsInvalidOutput 校验非法输出不会让任务进入 planned。

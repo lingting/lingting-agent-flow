@@ -34,12 +34,17 @@ type ContainerAgentRequest struct {
 	StepID string
 	// AttemptID 是本次调用所属尝试，可为空。
 	AttemptID string
-	// RoleType 是执行本次调用的角色类型，只用于日志与诊断。
+	// RoleType 是执行本次调用的角色类型：它决定系统固定的能力上限，未识别的类型会
+	// 阻止本次调用，不会回退到开发者权限。
 	RoleType string
 	// Model 是 Pi CLI 使用的模型标识，必须显式给出。
 	Model string
 	// SystemPrompt 是追加到 Pi 默认系统提示词之后的内容。
 	SystemPrompt string
+	// ToolsPolicy 是本次调用使用的角色工具策略，必须与 Session 快照取自同一份角色配置。
+	//
+	// 为空值表示该角色没有任何工具能力：本方法不会用默认开发权限兜底。
+	ToolsPolicy domain.ToolsPolicy
 	// Prompt 是本次调用的完整提示词。
 	Prompt string
 	// SessionRoot 是本机 Session 持久化根目录，为空时使用配置数据目录。
@@ -87,6 +92,15 @@ func (s *ContainerService) RunAgent(
 	}
 	if strings.TrimSpace(request.Prompt) == "" {
 		return ContainerAgentResult{}, fmt.Errorf("容器内 Agent 调用失败: 提示词不能为空")
+	}
+	// 工具列表在这里统一计算一次：三条调用路径都只提交角色类型与策略，不各自映射工具。
+	// 计算失败必须阻止本次调用，不能改用 Pi 的默认工具列表。
+	tools, err := domain.EffectivePiTools(
+		domain.RoleType(strings.TrimSpace(request.RoleType)),
+		request.ToolsPolicy,
+	)
+	if err != nil {
+		return ContainerAgentResult{}, fmt.Errorf("容器内 Agent 调用失败: %w", err)
 	}
 	container, err := s.loadContainer(ctx, request.ContainerID)
 	if err != nil {
@@ -149,6 +163,7 @@ func (s *ContainerService) RunAgent(
 				RoleType:     strings.TrimSpace(request.RoleType),
 				Model:        strings.TrimSpace(request.Model),
 				SystemPrompt: request.SystemPrompt,
+				Tools:        tools,
 				Prompt:       request.Prompt,
 				WorkingDir:   workDir,
 				SessionRoot:  sessionRoot,

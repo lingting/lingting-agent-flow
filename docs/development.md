@@ -166,8 +166,10 @@ make release                                         # 单文件生产构建：�
 
 ## 新增角色类型或状态
 
-- 新增角色类型：在 `internal/domain/role.go` 增加 `RoleType` 常量与 `Validate` 分支，并在
-  `internal/config/config.go` 补充对应的工具策略模式映射与示例配置。
+- 新增角色类型：在 `internal/domain/role.go` 增加 `RoleType` 常量与 `Validate` 分支，同时补齐
+  `internal/domain/role_tools.go` 的能力上限（`RoleToolCeiling`）、默认策略与能力→Pi 工具映射；
+  未补齐时 `EffectivePiTools` 会因"不支持的角色类型"拒绝调用，而不会回退到开发者权限。
+  角色定义随代码内置，YAML 不再声明角色。
 - 新增状态：在对应实体的状态机中声明合法迁移与终态，并确认重试、取消路径可达。
 - 新增状态后，必须检查持久化层对旧数据的兼容性，必要时提供迁移。
 

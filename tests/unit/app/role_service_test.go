@@ -115,3 +115,74 @@ func TestRoleServiceRejectsIncompleteConfig(t *testing.T) {
 		t.Fatalf("被拒绝的更新不应写入数据库: %+v", reloaded)
 	}
 }
+
+// TestRoleServiceUpdateToolsPolicy 校验工具策略按角色能力上限校验、持久化并影响实际工具。
+//
+// 断言的是保存后重新读取的策略与由它计算出的工具列表：配置保存之后，Pi 实际可用工具
+// 必须与配置一致，拒绝列表优先于允许列表。
+func TestRoleServiceUpdateToolsPolicy(t *testing.T) {
+	t.Parallel()
+	fixture := newRoleFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+
+	// 开发者可以拒绝 bash：拒绝列表优先于已授权的 execute 能力。
+	policy := domain.ToolsPolicy{
+		Permissions: []domain.ToolPermission{
+			domain.ToolPermissionRead,
+			domain.ToolPermissionWrite,
+			domain.ToolPermissionExecute,
+		},
+		DenyTools: []string{domain.PiToolBash},
+	}
+	updated, err := fixture.service.Update(ctx, domain.RoleIDDeveloper.String(), app.RoleUpdate{
+		ToolsPolicy: &policy,
+	})
+	if err != nil {
+		t.Fatalf("更新开发者工具策略失败: %v", err)
+	}
+	reloaded, err := fixture.service.Get(ctx, domain.RoleIDDeveloper.String())
+	if err != nil {
+		t.Fatalf("重新读取开发者失败: %v", err)
+	}
+	if len(reloaded.ToolsPolicy.DenyTools) != 1 || reloaded.ToolsPolicy.DenyTools[0] != domain.PiToolBash {
+		t.Fatalf("工具策略未持久化: %+v", reloaded.ToolsPolicy)
+	}
+	tools, err := domain.EffectivePiTools(updated.Type, updated.ToolsPolicy)
+	if err != nil {
+		t.Fatalf("计算开发者有效工具失败: %v", err)
+	}
+	if containsTool(tools, domain.PiToolBash) {
+		t.Fatalf("拒绝列表应优先于授予的能力: %v", tools)
+	}
+	if !containsTool(tools, domain.PiToolWrite) {
+		t.Fatalf("开发者仍应保留写入工具: %v", tools)
+	}
+
+	// 规划角色不能通过配置获得写入或执行能力。
+	for _, invalid := range [][]domain.ToolPermission{
+		{domain.ToolPermissionRead, domain.ToolPermissionWrite},
+		{domain.ToolPermissionRead, domain.ToolPermissionExecute},
+		{domain.ToolPermissionExecute},
+	} {
+		request := domain.ToolsPolicy{Permissions: invalid}
+		if _, updateErr := fixture.service.Update(ctx, domain.RoleIDPlanner.String(), app.RoleUpdate{
+			ToolsPolicy: &request,
+		}); !errors.Is(updateErr, app.ErrRoleInvalidInput) {
+			t.Fatalf("规划角色的越界能力 %v 应被拒绝，实际: %v", invalid, updateErr)
+		}
+	}
+	planner, err := fixture.service.Get(ctx, domain.RoleIDPlanner.String())
+	if err != nil {
+		t.Fatalf("读取规划角色失败: %v", err)
+	}
+	plannerTools, err := domain.EffectivePiTools(planner.Type, planner.ToolsPolicy)
+	if err != nil {
+		t.Fatalf("计算规划角色有效工具失败: %v", err)
+	}
+	for _, forbidden := range []string{domain.PiToolBash, domain.PiToolEdit, domain.PiToolWrite} {
+		if containsTool(plannerTools, forbidden) {
+			t.Fatalf("规划角色不应获得工具 %s: %v", forbidden, plannerTools)
+		}
+	}
+}

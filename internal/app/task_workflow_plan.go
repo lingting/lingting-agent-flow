@@ -464,6 +464,8 @@ func (s *TaskWorkflowService) callPlanner(
 		RoleType:     role.Type.String(),
 		Model:        role.Model,
 		SystemPrompt: role.SystemPrompt,
+		// 工具策略与上面的会话快照取自同一个角色配置。
+		ToolsPolicy:  role.ToolsPolicy,
 		Prompt:       prompt,
 		SessionRoot:  s.sessions.LocalRoot(),
 		SessionID:    session.ID.String(),

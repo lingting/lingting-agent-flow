@@ -372,6 +372,49 @@ func TestCommandConstruction(t *testing.T) {
 	if main.DockerID != testDockerID {
 		t.Fatalf("执行容器不符: %s", main.DockerID)
 	}
+	// 没有可用工具时必须显式关闭全部工具，不能省略参数让 Pi 回退到默认工具列表。
+	for _, required := range []string{"--no-tools", "--no-mcp", "--no-extensions"} {
+		if !containsArg(main.Command, required) {
+			t.Fatalf("缺少参数 %s: %v", required, main.Command)
+		}
+	}
+	if toolListIndex(main.Command) >= 0 {
+		t.Fatalf("没有可用工具时不允许使用 --tools: %v", main.Command)
+	}
+
+	// 有可用工具时用显式列表替换默认选择，并保持关闭 MCP 与扩展。
+	request := h.request
+	request.Tools = []string{"read", "grep"}
+	if _, err := h.runner.Run(context.Background(), request, nil); err != nil {
+		t.Fatalf("带工具策略的执行失败: %v", err)
+	}
+	requests := h.executor.requests()
+	withTools := mainCallOf(requests[len(requests)-3:])
+	if withTools == nil {
+		t.Fatalf("没有收到带工具策略的 --print 调用")
+	}
+	index := toolListIndex(withTools.Command)
+	if index < 0 || withTools.Command[index] != "read,grep" {
+		t.Fatalf("工具列表参数不符: %v", withTools.Command)
+	}
+	if containsArg(withTools.Command, "--no-tools") {
+		t.Fatalf("带工具列表时不允许同时使用 --no-tools: %v", withTools.Command)
+	}
+	for _, required := range []string{"--no-mcp", "--no-extensions"} {
+		if !containsArg(withTools.Command, required) {
+			t.Fatalf("带工具列表时仍缺少参数 %s: %v", required, withTools.Command)
+		}
+	}
+}
+
+// toolListIndex 返回 --tools 在命令中的位置，缺失时返回 -1。
+func toolListIndex(command []string) int {
+	for index, arg := range command {
+		if arg == "--tools" {
+			return index + 1
+		}
+	}
+	return -1
 }
 
 // TestSessionPathUniquePerInvocation 验证每次调用使用独立的容器内与本机 Session 路径。

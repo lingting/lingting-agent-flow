@@ -318,6 +318,7 @@ func (r *ContainerRunner) execute(
 		executable = executableName
 	}
 	args := []string{executable, argPrint, argSession, remote.JSONL, argModel, request.Model}
+	args = append(args, toolPolicyArguments(request.Tools)...)
 	if prompt := strings.TrimSpace(request.SystemPrompt); prompt != "" {
 		args = append(args, argAppendSystemPrompt, prompt)
 	}

@@ -25,8 +25,8 @@ var (
 //
 // 角色集合固定为四个，由服务启动时按内置默认定义补齐（app.RoleSeeds +
 // storage.RoleSeeder.SeedRoles）；本服务不提供角色新增与删除，只允许修改
-// system_prompt、model 与 enabled 三个字段。工具策略在本阶段只读，实际执行层限制
-// 由后续任务实施。
+// system_prompt、tools_policy、model 与 enabled 四个字段，其中工具策略只能收敛在角色的
+// 系统能力上限内；策略到 Pi 实际可用工具的映射由 domain.EffectivePiTools 统一计算。
 type RoleService struct {
 	store storage.Store
 }

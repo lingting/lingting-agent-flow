@@ -4,7 +4,7 @@
  * 角色集合固定为四个，由服务端初始化：这里只决定展示顺序、中文标签与"哪些字段可以编辑"，
  * 不复制后端的校验规则。数据全部来自服务端，是否启用、模型与提示词都按接口返回值展示。
  */
-import type { Role, RoleToolsPolicy, RoleType } from "@/lib/api";
+import type { Role, RoleType } from "@/lib/api";
 import { ApiError } from "@/lib/api";
 
 /** 固定角色标识与设置页展示顺序：角色集合固定为四个，不可新增或删除 */
@@ -15,7 +15,7 @@ const ROLE_DUTY: Record<RoleType, string> = {
   requirement_analyst: "分析用户需求与项目现状，只读",
   planner: "生成实施方案与任务拆分，同时承担任务内部计划，只读",
   developer: "按开发步骤实现代码，可读写并执行命令",
-  validator: "执行验证与验收，只读取并执行验证命令",
+  validator: "审阅代码与验证证据，只读",
 };
 
 /** 工具能力的中文标签，取值与 Go 端 `domain.ToolPermission` 一致 */
@@ -50,23 +50,51 @@ export function fixedRoleRows(roles: Role[]): Role[] {
   return rows;
 }
 
+/** Pi 内置工具的中文标签，取值与 Go 端 `domain.PiTool*` 一致 */
+const TOOL_LABEL: Record<string, string> = {
+  read: "读取文件",
+  grep: "搜索内容",
+  find: "查找路径",
+  ls: "列出目录",
+  edit: "编辑文件",
+  write: "写入文件",
+  bash: "执行命令",
+};
+
+/** 读取工具标签；未知工具名原样展示，不隐藏服务端返回的值 */
+export function toolLabel(tool: string): string {
+  return TOOL_LABEL[tool] ?? tool;
+}
+
 /**
- * 工具策略说明。
+ * 把工具列表渲染成一句说明。
  *
- * 本阶段策略只读：设置页只展示当前生效的声明，实际执行层限制由后续任务实施。
+ * 空列表表示本次调用不加载任何工具，因此显示"无"而不是"不限制"。
  */
-export function toolsPolicySummary(policy: RoleToolsPolicy | undefined): string {
-  if (!policy) return "服务端未返回工具策略";
-  const permissions = policy.permissions.map(permissionLabel);
-  const parts: string[] = [];
-  parts.push(`能力：${permissions.length > 0 ? permissions.join("、") : "未声明"}`);
-  if (policy.allow_tools && policy.allow_tools.length > 0) {
-    parts.push(`仅允许：${policy.allow_tools.join("、")}`);
-  }
-  if (policy.deny_tools && policy.deny_tools.length > 0) {
-    parts.push(`禁止：${policy.deny_tools.join("、")}`);
-  }
-  return parts.join("；");
+export function toolsSummary(tools: readonly string[] | undefined): string {
+  if (!tools || tools.length === 0) return "无";
+  return tools.map(toolLabel).join("、");
+}
+
+/** 把能力列表渲染成一句说明，空列表表示未声明任何能力 */
+export function permissionsSummary(permissions: readonly string[] | undefined): string {
+  if (!permissions || permissions.length === 0) return "无";
+  return permissions.map(permissionLabel).join("、");
+}
+
+/**
+ * 取出已保存取值中仍属于系统能力上限的部分。
+ *
+ * 上限由服务端返回：超出上限的旧配置在服务端不会生效，界面也不把它展示为可选项，
+ * 保存时按上限收敛，而不是把无效取值继续提交回去。
+ */
+export function clampToCeiling<T extends string>(
+  values: readonly T[] | undefined,
+  ceiling: readonly T[] | undefined,
+): T[] {
+  if (!values || values.length === 0) return [];
+  if (!ceiling) return [...values];
+  return values.filter((value) => ceiling.includes(value));
 }
 
 /** 把未知错误转成可读说明，保留服务端返回的真实原因 */

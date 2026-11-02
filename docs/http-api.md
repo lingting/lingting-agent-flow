@@ -188,3 +188,36 @@
 - 该入口是尝试级的：要求 `step_id` / `attempt_id`，并核验容器登记的 `attempt_id` 与本请求一致。
 - 错误映射：参数错误 400、目标不存在或归属不符 404、状态冲突 409、前置条件缺失 412、执行未成功 500。
   需要认证的私有仓库返回明确的认证要求（`repository_auth_required`），不静默降级为匿名访问。
+
+## 13. 角色配置
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/v1/roles` | 四个固定角色的列表（保留旧字段） |
+| `GET` | `/api/v1/roles/{roleID}` | 单个角色的完整配置与工具信息 |
+| `PUT` | `/api/v1/roles/{roleID}` | 更新 `system_prompt` / `tools_policy` / `model` / `enabled` |
+
+- 角色集合固定为四个；`POST /api/v1/roles` 与 `DELETE /api/v1/roles/{roleID}` 返回 `405`。
+- `PUT` 只接受上述四个字段：携带 `id`、`name`、`type`、`runner` 或未知字段返回 `400`；未提交的字段
+  保持数据库中的值，响应取重新读取的真实保存结果。
+- `tools_policy` 是整体替换：`permissions` 取值 `read` / `write` / `execute`，`allow_tools` 与
+  `deny_tools` 取 Pi 内置工具名（`read` / `grep` / `find` / `ls` / `edit` / `write` / `bash`）。
+  `allow_tools` 为空表示不按名称限制已授权的工具，`deny_tools` 始终优先。
+- 工具策略只能在角色的系统能力上限内收紧：规划角色（`requirement_analyst`、`planner`）与
+  `validator` 的上限只有 `read`，提交 `write` / `execute`、上限外的 `allow_tools` 或未知工具名一律
+  `400`，不落库。
+- 详情响应在保存的配置之外返回三项服务端计算的只读字段：
+
+```json
+{
+  "tools_policy": {"permissions": ["read"], "deny_tools": ["ls"]},
+  "capability_ceiling": ["read"],
+  "available_tools": ["read", "grep", "find", "ls"],
+  "effective_tools": ["read", "grep", "find"]
+}
+```
+
+- `effective_tools` 就是该角色下一次 Pi 调用实际收到的工具列表；为空表示以 `--no-tools` 调用。
+  客户端不得自行推算这三个字段。
+- 工具策略无法换算（例如数据库出现不支持的角色类型）时返回 `500`，不返回"没有工具限制"的响应。
+- 配置修改只影响后续新会话；已创建会话的 `role_snapshot_json` 不随配置变化。

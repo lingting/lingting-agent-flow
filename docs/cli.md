@@ -106,3 +106,8 @@
 | `agent run <container>` | 在任务容器内执行一次 Pi 调用并把 Session 保存到本机 |
 
 这些命令用于诊断与运维，不是业务执行入口：业务链路只能经由 `agentflow server` 中的编排器推进。
+
+`agent run` 也必须遵守角色工具策略：`--role-type`（必填）决定系统能力上限，`--permissions`、
+`--allow-tools`、`--deny-tools`（逗号分隔）给出本次策略，取值由 `domain` 统一校验。省略
+`--permissions` 表示以 `--no-tools` 调用（不加载任何工具）；越出能力上限或无可用工具时不会回退到
+Pi 的默认工具列表，命令直接失败并说明原因。
