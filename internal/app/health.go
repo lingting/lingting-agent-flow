@@ -56,7 +56,8 @@ type Health struct {
 
 // SystemInfo 是适合公开给本地 UI 的系统信息。
 //
-// 只包含构建期确定、不含凭据与路径的字段；数据库路径等本机信息不对外暴露。
+// 只包含构建期确定、不含凭据与路径的字段；数据库路径等本机运行参数不并入本接口，
+// 由 GET /api/v1/settings/config 单独只读提供。
 type SystemInfo struct {
 	// Version 是程序版本。
 	Version string `json:"version"`

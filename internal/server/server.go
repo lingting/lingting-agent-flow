@@ -945,8 +945,12 @@ func (s *Server) startHTTP(ctx context.Context) error {
 	if _, projectErr := s.projectService(); projectErr != nil {
 		return projectErr
 	}
+	// 基础运行配置快照只在启动阶段生成一次：它绑定已加载并完成 --address 覆盖的真实
+	// 配置，HTTP 请求期间不重新读取配置文件，也不重新计算 Session 目录。
+	runtimeConfig := app.NewRuntimeConfig(s.cfg, s.address)
 	web, err := httpserver.New(httpserver.Options{
 		Address:           s.address,
+		RuntimeConfig:     runtimeConfig,
 		Roles:             s.roleQuery,
 		Projects:          s.projects,
 		Health:            app.NewHealthService(s.store),

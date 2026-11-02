@@ -1,6 +1,6 @@
 # M1：设置中心、环境管理与固定角色
 
-> 状态：**pending**（子任务 V2-M1-E1、V2-M1-E2、V2-M1-E3 已完成；基础配置只读查看待做）。
+> 状态：**pending**（子任务 V2-M1-E1～V2-M1-E4 已完成；退出条件「现有 V1 任务工作流不回归失败」仍待人工确认）。
 > 前置：M0 completed。参考：[`../ROLE-DESIGN.md`](../ROLE-DESIGN.md)、
 > [`../ENVIRONMENT-MANAGEMENT.md`](../ENVIRONMENT-MANAGEMENT.md)、[`../ARCHITECTURE.md`](../ARCHITECTURE.md) §8。
 
@@ -11,7 +11,7 @@
 | V2-M1-E1 | Settings 内嵌环境管理、环境写 API、后台构建、构建日志 | **已完成**（2026-11-02） |
 | V2-M1-E2 | 固定四角色、角色配置持久化、角色配置服务、角色管理与角色 API | **已完成**（2026-11-02） |
 | V2-M1-E3 | 角色工具策略执行（Pi `--tools` / `--no-tools` / `--no-mcp` / `--no-extensions`）、工具策略编辑 | **已完成**（2026-11-02） |
-| V2-M1-E4 | 基础配置只读查看 | pending |
+| V2-M1-E4 | 基础配置只读查看（`GET /api/v1/settings/config`、Settings 只读区域） | **已完成**（2026-11-02） |
 
 E1 的交付范围：`GET /api/v1/environments`、`GET /api/v1/environments/{type}/{name}`、
 `GET .../versions/{v}`、`GET .../versions/{v}/dockerfile`、`GET .../versions/{v}/build-log`、
@@ -52,9 +52,30 @@ E3 的退出条件与证据：
 - 本次**未运行**上述测试（用户未授权测试），只完成编译、`gofmt`、`go vet ./...`、前端 lint / 类型检查
   与 `git diff --check`。
 
-M1 整体状态仍为 **pending**：基础配置只读查看（E4）未交付，退出条件尚未全部满足，不得把
-E1 / E2 / E3 的完成当作 M1 完成。工具策略自 E3 起在真实调用链路上生效，但"项目代码只读"的最终
-文件系统边界仍由 M2 的只读容器承担。
+E4 的交付范围：`app.RuntimeConfig` 是启动阶段生成的只读快照（`database_path`、`listen_address`、
+`max_concurrent_tasks`、`session_root`），由 `internal/server` 在启动 HTTP 前用已加载并完成覆盖的
+`config.Config` 与 `resolveAddress` 的结果构造一次，再经 `httpserver` 注入 `httpapi`；
+`GET /api/v1/settings/config` 只做协议转换，请求期间不重新读取 YAML、不扫描磁盘、不建立远程连接，
+快照缺失时返回 `503` 而不是默认值。`database_path` 与 `sqlite.Open` 收到的路径表达式一致；
+`session_root` 与 `SessionService.localRoot` 同源（`app.SessionRoot` 由数据库目录派生的 `sessions`
+目录再绝对化），不使用 `workspace.worktree_root`。Settings 页新增"基础配置"只读区域，加载中、
+失败与成功三种状态分别展示，不提供编辑、保存、重置或重启入口；`/api/v1/system/info` 字段与语义不变。
+
+E4 的退出条件与证据：
+
+- 四项取值来自服务启动时实际生效的配置：`internal/app/runtime_config.go`（`NewRuntimeConfig`）、
+  `internal/server/server.go`（`startHTTP` 生成一次快照并注入）、`internal/httpapi/settings.go`（只读入口）。
+- 监听地址包含启动参数覆盖：`resolveAddress` 先应用 `--address`，未覆盖时回落到 `cfg.Server.Address()`。
+- Session 根目录来自真实写入路径：`internal/app/sessions.go` 的 `resolveSessionRoot` 同时供
+  `NewSessionService` 与 `NewRuntimeConfig` 使用。
+- 前端展示服务端真实值、失败时展示服务端原因：`src/pages/settings/BasicConfigPanel.tsx`、
+  `src/lib/api/endpoints.ts`（`fetchSettingsConfig`），页面不直接调用 `fetch`。
+- 本次**未运行**测试（用户未授权），只完成 `gofmt`、`go vet ./...`、前端 `pnpm lint`（fmt / lint / tsc）、
+  前端生产构建与 `git diff --check`。
+
+M1 整体状态仍为 **pending**：E1～E4 已交付，但退出条件「现有 V1 任务工作流不回归失败」需要真实跑一轮
+计划→开发→验证确认，因此不得把 M1 标记为 completed，也不得据 E4 的完成把 M2 标记为已开始。
+工具策略自 E3 起在真实调用链路上生效，但"项目代码只读"的最终文件系统边界仍由 M2 的只读容器承担。
 
 ## 1. 目标
 
@@ -92,6 +113,10 @@ E1 / E2 / E3 的完成当作 M1 完成。工具策略自 E3 起在真实调用�
   `effective_tools`，策略无法换算为工具时返回 500 而不是返回"无限制"。
 - 环境写入口（方向见 `ENVIRONMENT-MANAGEMENT.md` §5），DTO 按当时方法签名核实后确定。**已完成（E1）**：
   实际交付路径见该文档 §5 与 `docs/http-api.md` §5。
+- 基础运行配置只读入口 `GET /api/v1/settings/config`。**已完成（E4）**：返回 `database_path` /
+  `listen_address` / `max_concurrent_tasks` / `session_root` 四项，取自启动阶段的配置快照（含
+  `--address` 覆盖）；不与 `/api/v1/system/info` 混合，不提供编辑、保存、热更新或重启入口，快照缺失
+  返回 `503`，不返回默认配置。
 
 ### 2.4 执行层
 
@@ -113,6 +138,9 @@ E1 / E2 / E3 的完成当作 M1 完成。工具策略自 E3 起在真实调用�
 - 角色编辑只暴露可改字段；保存失败显示服务端原因，不伪造成功。**已完成（E3）**：`RoleEditModal`
   可编辑能力、允许工具与拒绝工具，选项全部来自服务端的 `capability_ceiling` / `available_tools`，并展示
   `effective_tools`；保存结果取服务端重新读取的返回值。
+- Settings 增加基础配置只读区域：展示数据库路径、监听地址、最大并发任务数与 Session 根目录。**已完成（E4）**：
+  `BasicConfigPanel` 经 `src/lib/api/` 的 `fetchSettingsConfig` 读取，加载中 / 失败 / 成功分别展示，
+  不出现编辑、保存、重置或重启按钮。
 
 ## 3. 退出条件
 
@@ -124,6 +152,7 @@ E1 / E2 / E3 的完成当作 M1 完成。工具策略自 E3 起在真实调用�
 | 规划角色不能写入项目代码（**工具层已满足**，E3） | 规划角色能力上限只读，Pi 调用只收到 `read`/`grep`/`find`/`ls`，并固定 `--no-mcp` / `--no-extensions`；文件系统级的只读边界仍属 M2 |
 | 现有 V1 任务工作流不回归失败（**待人工确认**） | E2 只改角色定义来源、角色种子与角色接口，E3 只在三条调用路径上增加 `ToolsPolicy` 透传与 Pi 工具参数，未改动状态机与收尾逻辑；默认策略仍允许 Developer 读写执行、Planner 只读，需真实跑一轮计划→开发→验证确认 |
 | 环境版本只追加（**已满足**，E1） | 提交不同内容产生新版本号，旧版本内容、哈希与构建元数据不变；提交内容与某个成功版本完全一致时复用该版本号，不产生重复版本 |
+| Settings 展示真实运行配置且不泄露无关信息（**已满足**，E4） | `GET /api/v1/settings/config` 只返回四项运行参数，取值来自启动快照；不返回 SSH known_hosts 路径、凭据、私钥、模型或仓库凭据与完整配置对象；`/api/v1/system/info` 字段与语义不变 |
 
 ## 4. 验收方式（默认不自动执行）
 
@@ -133,6 +162,9 @@ E1 / E2 / E3 的完成当作 M1 完成。工具策略自 E3 起在真实调用�
 - E3 已把必要断言写入既有测试文件（`tests/unit/app/{roles,role_service,plan_generation,validation_review}_test.go`、
   `tests/unit/httpapi/roles_test.go`、`tests/unit/agent/container_runner_test.go`），但**未运行**：
   本次任务未获测试授权。
+- E4 的核对点：`NewRuntimeConfig` 的三项取值来源（配置快照、`resolveAddress` 结果、`resolveSessionRoot`）、
+  快照缺失时的 `503`、Settings 页只读展示与错误提示；已执行的非测试验证为 `gofmt`、`go vet ./...`、
+  前端 `pnpm lint`（fmt / lint / tsc）、前端生产构建与 `git diff --check`，未新增测试文件。
 - 若用户明确要求测试，则运行上述文件并覆盖：工具策略持久化与上限拒绝、规划/验收者工具限制、
   Pi 参数包含工具限制、环境版本追加与构建状态、前端角色编辑错误展示。
 

@@ -45,18 +45,31 @@ func NewSessionService(store storage.Store, localRoot string, logger *slog.Logge
 	if store == nil {
 		return nil, fmt.Errorf("会话服务初始化失败: 存储不能为空")
 	}
-	root := strings.TrimSpace(localRoot)
-	if root == "" {
-		return nil, fmt.Errorf("会话服务初始化失败: 本机 Session 根目录不能为空")
-	}
-	absolute, err := filepath.Abs(root)
+	absolute, err := resolveSessionRoot(localRoot)
 	if err != nil {
-		return nil, fmt.Errorf("会话服务初始化失败: 解析 Session 根目录失败: %w", err)
+		return nil, err
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &SessionService{store: store, localRoot: absolute, logger: logger}, nil
+}
+
+// resolveSessionRoot 把本机 Session 根目录解析为绝对路径。
+//
+// Session 文件按进程工作目录解析相对路径，这里与数据库路径的处理方式一致：目录规则只在
+// app.SessionRoot 定义一次，绝对化只在构造会话服务时发生一次，读取运行配置快照时复用同一
+// 结果，避免"配置里的相对路径"与"实际写入目录"被展示成两个值。
+func resolveSessionRoot(localRoot string) (string, error) {
+	root := strings.TrimSpace(localRoot)
+	if root == "" {
+		return "", fmt.Errorf("会话服务初始化失败: 本机 Session 根目录不能为空")
+	}
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("会话服务初始化失败: 解析 Session 根目录失败: %w", err)
+	}
+	return absolute, nil
 }
 
 // LocalRoot 返回本机 Session 持久化根目录。

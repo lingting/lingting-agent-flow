@@ -14,11 +14,11 @@
 | 环境构建管理 | **已有**：`app.EnvironmentBuildManager` 实现 `lifecycle.Service`，负责受理去重、后台执行、停止取消与启动收敛 | `internal/app/environments_build_manager.go`、`internal/server/server.go` |
 | 环境 CLI | 已有：`agentflow docker env` 系列命令可用 | `internal/cli/docker_env*.go` |
 | 环境 Web 页 | **已内嵌设置中心**：独立环境页面与导航入口已移除 | `src/pages/settings/` |
-| 设置页 | 已承载环境管理；角色管理与基础配置只读仍待 M1 剩余交付 | `src/pages/settings/SettingsPage.tsx` |
-| 角色 | 只在首次初始化从配置导入，接口只读 | `app.RoleService`、`internal/httpapi/roles.go` |
+| 设置页 | 已承载环境管理、固定角色管理与基础配置只读查看 | `src/pages/settings/SettingsPage.tsx` |
+| 角色 | 内置四个固定角色，配置持久化在 SQLite；列表、详情与 `PUT` 只改 Prompt / 工具策略 / 模型 / 启用状态 | `app.RoleService`、`internal/httpapi/roles.go` |
 
-结论：环境**能力**、**受控写入口**与**内嵌管理 UI**均已具备，没有第二套环境服务；M1 剩余的是
-角色配置与执行层工具限制。
+结论：环境**能力**、**受控写入口**与**内嵌管理 UI**均已具备，没有第二套环境服务；角色配置与
+执行层工具限制由 V2-M1-E2 / E3 交付，基础配置只读查看由 V2-M1-E4 交付。
 
 ## 2. 设置中心结构
 
@@ -32,8 +32,8 @@
 │   ├── 编辑 Dockerfile 生成新版本（不覆盖历史版本）
 │   ├── 构建指定版本（后台执行，状态与结论来自服务端）
 │   └── 项目默认环境选择（未交付：待 §7 第 2 项定稿）
-├── 角色管理（四个固定角色，见 ROLE-DESIGN.md）—— 未交付（M1 剩余）
-└── 基础配置查看（只读：数据库路径、监听地址、调度并发、Session 根目录）—— 未交付（M1 剩余）
+├── 角色管理（四个固定角色，见 ROLE-DESIGN.md）—— 已交付（V2-M1-E2 / E3）
+└── 基础配置查看（只读：数据库路径、监听地址、调度并发、Session 根目录）—— 已交付（V2-M1-E4）
 ```
 
 规则：
@@ -50,6 +50,11 @@
 - 所有写操作经由 `app.EnvironmentService`，Handler 只做协议转换；CLI 与 Web 共用同一套方法。
 - 前端只显示服务端返回的 `usable` 与 `usable_for_remote_task`，不得由 `version` 或 `image_ref`
   自行推断可用性；`202`（已受理）不得显示为构建成功。
+
+- 基础配置只读：四项取值来自服务启动时实际生效的配置快照（`GET /api/v1/settings/config`），请求期间
+  不重新读取配置文件；监听地址是包含 `--address` 覆盖的最终值，Session 根目录取真实写入目录
+  （数据库目录下的 `sessions`），不映射 `workspace.worktree_root`；接口不返回 SSH 路径、凭据或完整
+  配置对象，也不提供编辑、保存、热更新与重启入口。
 
 ## 3. 配置迁移边界
 
@@ -113,5 +118,5 @@ POST   /api/v1/environments/{type}/{name}/build                         受理�
    停止时；停止前把在途构建收敛，进程重启时把遗留 `building` 收敛为 `uncertain`（结果无法确认）。
 2. 项目默认环境选择是新建 `projects.env_version` 必填项，还是沿用"空值=当前可用版本"——**仍未定稿**，
    V2-M1-E1 未实现该功能。
-3. 基础配置查看是否提供"编辑并提供重启提示"，默认倾向：**只读**，修改配置仍由用户改文件并重启——
-   **仍未定稿**，V2-M1-E1 未实现基础配置查看。
+3. ~~基础配置查看是否提供"编辑并提供重启提示"~~ **已定稿（V2-M1-E4）**：只读。修改配置仍由用户改文件
+   并重启服务，页面只展示启动阶段生效的四项运行参数，不提供编辑、保存、热更新或重启入口。

@@ -48,9 +48,15 @@ HTTP 接口契约见 [http-api.md](http-api.md)；测试规范见 [testing.md](t
 
 ## 配置与领域的关系
 
-配置中的 `roles[].type` 复用 `domain.RoleType` 的取值与校验，因此角色类型只在一处定义。配置结构自身定义 `runner`、`model`、`system_prompt` 与 `tools_policy.mode`，这些是部署期参数，不属于领域实体。
-
-第一版只定义 `tools_policy` 的结构并校验其取值，不据此实施实际权限控制。配置中出现权限声明，并不意味着 Pi 已经执行了对应限制。
+- 配置文件（`configs/agentflow.yaml`）只保留运行期启动参数：应用标识与日志级别、HTTP 监听与关闭超时、
+  数据库路径、工作区根目录、调度并发与重试上限、SSH 连接层的路径与超时。角色定义随代码内置，角色配置
+  持久化在 SQLite 的 `roles` 表并由 `app.RoleService` 读取与更新；工具限制由 `domain.EffectivePiTools`
+  在执行层实施，不再依赖配置文件中的声明。
+- 配置在启动阶段一次性加载并完成命令行覆盖，之后作为运行期事实传给需要它的组件：数据库、调度器、
+  SSH、Session 与验证输出目录都由同一份 `config.Config` 派生。`app.RuntimeConfig` 是这份事实的只读
+  快照（数据库路径、最终监听地址、调度并发上限、Session 根目录四项），由
+  `GET /api/v1/settings/config` 提供；接口不重新读取配置文件，也不暴露 SSH 路径、凭据或完整配置对象。
+- 配置变更只通过修改配置文件并重启服务生效，不提供编辑、保存、热更新或重启入口。
 
 ## 数据与状态
 

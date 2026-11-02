@@ -28,6 +28,7 @@ import type {
   EnvironmentType,
   EnvironmentVersion,
   ResumeEligibilityResponse,
+  SettingsConfigResponse,
   RetryEligibilityResponse,
   RetryTaskRequest,
   RetryTaskResponse,
@@ -72,6 +73,19 @@ export function fetchHealth(options: ApiRequestOptions = {}) {
 /** 查询程序版本等系统信息。 */
 export function fetchSystemInfo(options: ApiRequestOptions = {}) {
   return apiRequest<SystemInfoResponse>(SYSTEM_INFO_PATH, options);
+}
+
+/** 基础运行配置只读路径 */
+export const SETTINGS_CONFIG_PATH = `${API_PREFIX}/settings/config`;
+
+/**
+ * 查询服务启动时实际生效的四项基础运行配置。
+ *
+ * 只读：服务端不重新读取配置文件，也不触发磁盘扫描、远程连接、Docker 操作或配置重载。
+ * 失败时调用方会收到 `ApiError`，不得用本地默认值兜底。
+ */
+export function fetchSettingsConfig(options: ApiRequestOptions = {}) {
+  return apiRequest<SettingsConfigResponse>(SETTINGS_CONFIG_PATH, options);
 }
 
 /** 任务集合路径 */

@@ -43,6 +43,8 @@ type Options struct {
 	Health *app.HealthService
 	// SystemInfo 返回系统信息，为空时该接口报告服务不可用。
 	SystemInfo func() app.SystemInfo
+	// RuntimeConfig 是服务启动时实际生效的基础运行配置快照，为空时该接口报告服务不可用。
+	RuntimeConfig *app.RuntimeConfig
 	// Tasks 是任务管理服务，为空时任务接口报告服务不可用。
 	Tasks *app.TaskService
 	// Hosts 是执行节点服务，为空时执行节点接口报告服务不可用。
@@ -136,6 +138,7 @@ func New(options Options) (*Server, error) {
 		Projects:          options.Projects,
 		Health:            options.Health,
 		SystemInfo:        options.SystemInfo,
+		RuntimeConfig:     options.RuntimeConfig,
 		Tasks:             options.Tasks,
 		Hosts:             options.Hosts,
 		Environments:      options.Environments,

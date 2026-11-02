@@ -40,6 +40,23 @@ export type SystemInfoResponse = {
 };
 
 /**
+ * `GET /api/v1/settings/config` 的响应。
+ *
+ * 四项取值全部来自服务启动时实际生效的运行配置（含启动参数覆盖），不是前端默认值。
+ * 接口只读且只包含这四项运行参数，不包含 SSH、凭据、模型或仓库相关信息。
+ */
+export type SettingsConfigResponse = {
+  /** 数据库实际使用的文件路径表达式 */
+  database_path: string;
+  /** 最终生效的监听地址，形如 `127.0.0.1:26380` */
+  listen_address: string;
+  /** 任务调度的并发任务上限 */
+  max_concurrent_tasks: number;
+  /** Session 文件实际写入的根目录 */
+  session_root: string;
+};
+
+/**
  * 任务状态。
  *
  * 取值与 Go 端 `domain.TaskStatus` 完全一致，不在前端维护第二套状态名称。

@@ -32,6 +32,9 @@ type Deps struct {
 	Health *app.HealthService
 	// SystemInfo 返回系统信息，为空时接口返回服务不可用。
 	SystemInfo func() app.SystemInfo
+	// RuntimeConfig 是服务启动时实际生效的基础运行配置快照，为空时该接口返回服务
+	// 不可用：没有快照就不能用默认值补造一份配置。
+	RuntimeConfig *app.RuntimeConfig
 	// Tasks 是任务管理服务，为空时任务接口返回服务不可用。
 	Tasks *app.TaskService
 	// Hosts 是执行节点服务，为空时执行节点接口返回服务不可用。
@@ -126,11 +129,12 @@ func NewHandler(deps Deps) http.Handler {
 			deps.EnvironmentBuilds,
 			logger,
 		),
-		health:     deps.Health,
-		systemInfo: deps.SystemInfo,
-		tasks:      newTaskHandler(deps.Tasks, logger),
-		hosts:      newHostHandler(deps.Hosts, logger),
-		executions: newExecutionHandler(deps.ExecutionRecords, logger),
+		health:        deps.Health,
+		systemInfo:    deps.SystemInfo,
+		runtimeConfig: deps.RuntimeConfig,
+		tasks:         newTaskHandler(deps.Tasks, logger),
+		hosts:         newHostHandler(deps.Hosts, logger),
+		executions:    newExecutionHandler(deps.ExecutionRecords, logger),
 		stepExec: newStepExecutionHandler(
 			deps.StepExecutor,
 			deps.StepWorkflow,
@@ -166,6 +170,8 @@ func NewHandler(deps Deps) http.Handler {
 	mux.HandleFunc(environmentPathPrefix, router.environmentsHandler)
 	mux.HandleFunc(PathHealth, router.healthHandler)
 	mux.HandleFunc(PathSystemInfo, router.systemInfoHandler)
+	// 基础运行配置是独立的只读接口：它描述运行参数，不与构建信息混合。
+	mux.HandleFunc(PathSettingsConfig, router.settingsConfigHandler)
 	// 任务集合路径与单任务路径分别注册：ServeMux 会按更具体的模式优先匹配。
 	mux.HandleFunc(PathTasks, router.tasksHandler)
 	mux.HandleFunc(taskPathPrefix, router.tasksHandler)
@@ -184,8 +190,10 @@ type router struct {
 	projects   *projectHandler
 	health     *app.HealthService
 	systemInfo func() app.SystemInfo
-	tasks      *taskHandler
-	hosts      *hostHandler
+	// runtimeConfig 是启动阶段生成的运行配置快照，为空时该接口返回服务不可用。
+	runtimeConfig *app.RuntimeConfig
+	tasks         *taskHandler
+	hosts         *hostHandler
 	// environments 处理环境只读查询；服务未初始化时接口返回 503。
 	environments *environmentHandler
 	executions   *executionHandler

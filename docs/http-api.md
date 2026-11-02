@@ -28,6 +28,28 @@
 |---|---|---|
 | `GET` | `/api/v1/health` | 报告 HTTP API 与 SQLite 可用性 |
 | `GET` | `/api/v1/system/info` | 构建信息（版本、提交、构建时间） |
+| `GET` | `/api/v1/settings/config` | 基础运行配置只读快照（四项运行参数） |
+
+基础运行配置接口只读，返回服务启动时实际生效的取值，不与构建信息混合：
+
+```json
+{
+  "database_path": ".agentflow/agentflow.db",
+  "listen_address": "127.0.0.1:26380",
+  "max_concurrent_tasks": 3,
+  "session_root": "D:\\code\\example\\.agentflow\\sessions"
+}
+```
+
+- 响应只有这四个字段：`database_path` 是数据库实际使用的路径表达式（相对路径按进程工作目录解析，
+  与打开数据库时一致）；`listen_address` 是最终生效的 `host:port`，已包含 `--address` 覆盖；
+  `max_concurrent_tasks` 是任务调度的并发上限；`session_root` 是 Session 文件实际写入的绝对目录
+  （由数据库目录派生的 `sessions` 目录，与 `workspace.worktree_root` 无关）。
+- 取值来自启动阶段已加载并完成覆盖的配置：请求期间不重新读取配置文件，也不触发磁盘扫描、远程连接、
+  Docker 操作或配置重载。
+- 不返回 SSH known_hosts 路径、凭据、私钥、模型凭据、仓库凭据或完整配置对象，也不提供编辑、保存、
+  热更新与重启入口。
+- 运行配置快照不可用时返回 `503`（`internal_error`），不返回默认配置或猜测值。
 
 ## 3. 任务管理
 
