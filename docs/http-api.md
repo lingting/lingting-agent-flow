@@ -61,7 +61,54 @@
 校验字段：新建与影响连接的修改由服务端置为 `checking` 并提交后台校验。错误映射与任务接口一致，
 节点不存在返回 404，预检未通过导致的真实远程操作拒绝返回 412。预检语义见 [ssh-hosts.md](ssh-hosts.md)。
 
-## 5. 统一任务启动
+## 5. 环境管理
+
+环境接口挂在 `/api/v1/environments` 下，分为只读查询与受控写入口两类。环境属于具体执行节点，
+因此所有接口都必须带 `host_id`（查询用查询参数，写接口用请求体），服务端不会回退到默认节点。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/v1/environments` | 列出该节点上的环境与全部版本（含服务端计算的 `usable`） |
+| `GET` | `/api/v1/environments/{type}/{name}` | 环境详情：当前可用版本、最新创建版本与版本列表 |
+| `GET` | `/api/v1/environments/{type}/{name}/versions/{version}` | 单版本元数据 |
+| `GET` | `/api/v1/environments/{type}/{name}/versions/{version}/dockerfile` | 该版本 Dockerfile 正文 |
+| `GET` | `/api/v1/environments/{type}/{name}/versions/{version}/build-log` | 该版本构建日志正文 |
+| `GET` | `/api/v1/environments/{type}/{name}/versions/{version}/build-status` | 该版本构建结论 |
+| `POST` | `/api/v1/environments/init` | 初始化远程环境工作空间（预检 → 目录 → 默认基础/语言环境版本） |
+| `POST` | `/api/v1/environments/{type}/{name}/versions` | 追加一个不可覆盖的新版本（内容与既有成功版本一致时复用该版本，返回 `201` 与其元数据） |
+| `POST` | `/api/v1/environments/{type}/{name}/build` | 受理一次后台构建 |
+
+约束：
+
+- **版本只追加**：写入口只能新增版本号，历史版本的 Dockerfile、哈希与构建结果不可改写。提交内容与
+  某个已成功构建的版本完全一致时，服务端复用该版本号，不产生重复版本。
+- 请求体只接受 `host_id`、`dockerfile`、`parent_version`、`extra_files`、`version`、`no_cache` 与
+  `with_languages`；不接受 Session 路径、本机/远程工作目录、日志路径、命令行参数或任何凭据。
+  Dockerfile 与构建上下文（额外文件的相对路径、权限位、大小）由服务端二次校验，请求体上限 8 MiB。
+- 语言环境版本必须记录已构建成功的父基础环境版本；父版本不可用时拒绝创建。
+- 构建是长操作：`POST .../build` 只返回 `202` 与 `in_progress`，表示服务端已受理并在后台执行，
+  **不代表构建成功**。同一节点同一环境同时只允许一个构建，重复请求返回 409。构建结论只能由
+  `GET .../build-status` 读取真实记录得出。
+- 构建日志与 Dockerfile 的路径由服务端从已验证的节点、环境与版本记录推导，文件缺失返回 404，
+  不会被伪造成空内容。
+
+错误语义：
+
+| 情形 | 状态码 | `error.code` |
+|---|---|---|
+| 环境类型/名称/版本号非法、Dockerfile 或上下文不合法、缺少 `host_id` | 400 | `invalid_request` |
+| 执行节点不存在、环境不存在、版本不存在、构建日志缺失 | 404 | `not_found` |
+| 版本写入冲突、状态不允许该操作 | 409 | `state_conflict` |
+| 该环境已有构建进行中 | 409 | `environment_build_in_progress` |
+| 执行节点未通过环境预检 | 412 | `precondition_failed` |
+| 构建已执行且确定失败 | 500 | `environment_build_failed` |
+| 构建被中断、结果无法确认 | 500 | `environment_build_uncertain` |
+| 环境管理或后台构建服务未装配/已停止 | 503 | `environment_management_unavailable` |
+
+构建中与成功由状态码区分：`GET .../build-status` 在 `pending` / `building` 时返回 `202`（`in_progress`
+表示本服务是否有在途构建），`succeeded` 返回 `200`；`failed` 与 `uncertain` 不合并为同一个结论。
+
+## 6. 统一任务启动
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -73,7 +120,7 @@
 - 阶段判定依据数据库事实，不由客户端指定从哪个阶段继续。工作区初始化结果为 `uncertain` 时返回 409，
   必须先在容器内核验现场。
 
-## 6. 单步骤执行
+## 7. 单步骤执行
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -85,7 +132,7 @@
 - 顺序执行响应必须逐步骤返回 Attempt、Session、执行结论与停止原因；遇到失败、超时、取消或中断立即
   停止。
 
-## 7. 确定性验证
+## 8. 确定性验证
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -96,7 +143,7 @@
 - 结论或检查结果写入失败时不得报告验证成功：结果携带 `Persisted=false` 与 `PersistenceErrors`，
   映射为 `execution_not_persisted`（500）。
 
-## 8. 单步骤开发—验证闭环
+## 9. 单步骤开发—验证闭环
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -106,7 +153,7 @@
 - 响应必须如实区分开发结论、验证是否发起、验证结论与最终状态；未验证通过不得返回 `200`。
 - 验证配置缺失或无效时在开发之前返回明确错误，不把配置问题伪装成"验证未通过"。
 
-## 9. 计划生成
+## 10. 计划生成
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -116,7 +163,7 @@
 - 失败收敛：调用失败 / 超时 / 输出非法 / 校验失败 / 持久化失败 → `failed`；取消 → `cancelling` →
   `cancelled`；服务中断 → `recovery_required`。
 
-## 10. 任务级工作流编排
+## 11. 任务级工作流编排
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -131,7 +178,7 @@
   处理，禁止在未知现场上重放调用。
 - 任务没有已持久化的步骤时返回状态冲突，编排器不会临时生成计划。
 
-## 11. 代码获取
+## 12. 代码获取
 
 | 方法 | 路径 | 说明 |
 |---|---|---|

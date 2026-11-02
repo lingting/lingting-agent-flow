@@ -448,7 +448,7 @@ Unix 套接字时该用例输出 `WARN [SKIP]` 并跳过，其余用例仍会执
 
 | 目录 | 内容 | 外部依赖 |
 |---|---|---|
-| `tests/unit/environment/` | 环境类型、版本号递增、构建状态迁移、镜像引用与 ID 校验 | 无 |
+| `tests/unit/environment/` | 环境类型、版本号递增与复用判定、构建状态迁移（含 `uncertain`）、镜像引用与 ID 校验 | 无 |
 | `tests/unit/image/` | 构建上下文确定性哈希、Dockerfile 静态校验、语言模板、构建配置哈希 | 无 |
 | `tests/unit/container/` | 容器状态迁移、detached 语义、生命周期策略、缓存卷命名、创建参数安全边界、JSON 解析 | 无 |
 | `tests/integration/local/docker/` | 预检错误分类、命令构造与转义、幂等删除、状态不确定分类、清单读写 | 无（使用 SSH 执行替身） |
@@ -486,6 +486,29 @@ Unix 套接字时该用例输出 `WARN [SKIP]` 并跳过，其余用例仍会执
   `REMOTE_CONTAINER_BASELINE` / `REMOTE_CONTAINER_FINAL`、`REMOTE_CONTAINER_RESIDUE`、
   `REMOTE_CONTAINER_PREEXISTING`、`REMOTE_CONTAINER_VERIFY` 与 `FINALIZER`。
 - 机制与验收证据见 `.steps/remote-test-resource-cleanup.md`。
+
+## 环境管理测试分层
+
+环境管理（设置页内嵌化与后台构建）的测试全部使用受控替身，不依赖真实 SSH、Docker 或远程主机：
+
+| 目录 | 覆盖内容 |
+|---|---|
+| `tests/unit/environment/` | 版本号递增与复用判定（`domain.FindReusableVersion`：只有内容、父版本一致且已成功构建才复用）、`uncertain` 表示"结果无法确认"且不可用、已成功版本不得被改写成不确定 |
+| `tests/unit/app/` | 后台构建管理器：受理返回真实版本快照、重复提交拒绝、节点/版本非法时不启动构建、未启动时拒绝受理、启动时把遗留 `building` 收敛为 `uncertain`、停止时取消在途构建并等其收敛、条件更新拒绝迟到的构建结果 |
+| `tests/unit/store/` | `environment_versions` 的只追加约束：重复版本号被唯一约束拒绝，历史版本内容与哈希不被覆盖 |
+| `tests/unit/httpapi/` | 环境写接口的参数校验（缺失 `host_id`、Dockerfile 非法、未知字段、非法类型/名称、方法不允许、未知子路径）、错误类别映射（400/404/409/412/503）、请求透传、构建受理返回 `202` 且不声称成功、构建状态查询区分成功/在途/失败/不确定、日志接口不接受路径参数且缺失时 404、只读查询回归 |
+| `tests/unit/server/` | 统一服务装配：注入 SSH 工厂后构建入口返回 404（而不是 503），且启动时把遗留 `building` 收敛为 `uncertain`（证明构建管理器注册进了 `lifecycle`） |
+| `lingting-agent-flow-ui/tests/unit/` | 前端展示与判定规则：状态标签、可用性只认服务端字段、构建结论归一（失败与不确定分别保留服务端原因）、节点选项与阻断原因 |
+| `lingting-agent-flow-ui/tests/e2e/` | 浏览器用例：设置页承载环境管理、独立环境导航已移除、不自动选中默认节点、真实状态展示、构建失败原因、结果不确定、在途构建禁止重复提交、日志读取失败不显示为空、Dockerfile 编辑为新版本、切换节点丢弃迟到响应、不可用节点只读可看 |
+
+环境相关用例的关键约束：
+
+- 构建替身不调用 Docker：它只记录收到的 `BuildRequest`，或在 `ctx` 取消时返回错误，因此"停止取消"
+  与"重复受理拒绝"都经过真实管理器的代码路径。
+- HTTP 用例的写路径替身不建立 SSH 会话：协议转换与错误映射被完整覆盖，远程副作用由应用层与本机
+  集成测试分别验证。
+- 真实远程环境操作仍由 `tests/integration/remote/` 覆盖，需要 `tests/config/ssh.yml` 与
+  `docker.yml` 显式启用。
 
 ## 测试配置
 

@@ -2,42 +2,54 @@
 
 > 状态：V2 设计基线。前置阅读：[`ARCHITECTURE.md`](./ARCHITECTURE.md) §3、§6，[`ROLE-DESIGN.md`](./ROLE-DESIGN.md)。
 
-## 1. 现状事实（M0 核实）
+## 1. 现状事实
+
+> M0 核实了原始缺口；V2-M1-E1（环境管理内嵌化）完成后按当时代码更新如下。
 
 | 能力 | 现状 | 证据 |
 |---|---|---|
-| 环境定义与版本 | 应用层已具备：`EnvironmentService.Init`、`CreateVersion`、`Build`、`DownloadBuildLog`、`ReadDockerfile` | `internal/app/environments*.go` |
-| 环境查询 API | 已有：环境列表、单版本详情、真实构建状态与服务端计算的 `usable` | `internal/httpapi/environments.go`、`app.EnvironmentQueryService` |
-| 环境写 API | **缺失**：无创建版本、构建、上传/编辑 Dockerfile 的 HTTP 入口（G3） | 同上 |
+| 环境定义与版本 | 应用层已具备：`EnvironmentService.Init`、`CreateVersion`、`Build`、`DownloadBuildLog`、`ReadDockerfile`、`ReadBuildLog` | `internal/app/environments*.go` |
+| 环境查询 API | 已有：环境列表、环境详情、单版本详情、构建状态、真实构建状态与服务端计算的 `usable` | `internal/httpapi/environments.go`、`app.EnvironmentQueryService` |
+| 环境写 API | **已有**（V2-M1-E1，原缺口 G3 已关闭）：初始化工作空间、追加版本、受理后台构建、读取 Dockerfile 与构建日志 | 同上；写路径全部复用 `app.EnvironmentService` |
+| 环境构建管理 | **已有**：`app.EnvironmentBuildManager` 实现 `lifecycle.Service`，负责受理去重、后台执行、停止取消与启动收敛 | `internal/app/environments_build_manager.go`、`internal/server/server.go` |
 | 环境 CLI | 已有：`agentflow docker env` 系列命令可用 | `internal/cli/docker_env*.go` |
-| 环境 Web 页 | 存在独立页面（诊断为主），未纳入设置中心 | `src/pages/environments/` |
-| 设置页 | 占位 | `src/pages/settings/SettingsPage.tsx` |
+| 环境 Web 页 | **已内嵌设置中心**：独立环境页面与导航入口已移除 | `src/pages/settings/` |
+| 设置页 | 已承载环境管理；角色管理与基础配置只读仍待 M1 剩余交付 | `src/pages/settings/SettingsPage.tsx` |
 | 角色 | 只在首次初始化从配置导入，接口只读 | `app.RoleService`、`internal/httpapi/roles.go` |
 
-结论：环境**能力**基本齐备，缺的是**受控的写入口**与**内嵌管理 UI**；不需要重建一套环境服务。
+结论：环境**能力**、**受控写入口**与**内嵌管理 UI**均已具备，没有第二套环境服务；M1 剩余的是
+角色配置与执行层工具限制。
 
-## 2. 设置中心结构（M1 交付）
+## 2. 设置中心结构
 
 ```text
 设置
-├── 环境管理
-│   ├── 环境列表（type / name / 当前可用版本 / 构建状态）
-│   ├── 环境详情（版本列表、Dockerfile 只读查看、构建状态与日志）
-│   ├── 新建语言环境定义
-│   ├── 编辑环境定义（生成新版本，不覆盖历史版本）
-│   ├── 构建指定版本（异步状态，失败原因如实显示）
-│   └── 项目默认环境选择（写回项目，不隐式批量改历史任务）
-├── 角色管理（四个固定角色，见 ROLE-DESIGN.md）
-└── 基础配置查看（只读：数据库路径、监听地址、调度并发、Session 根目录）
+├── 环境管理（V2-M1-E1 已交付）
+│   ├── 执行节点选择（环境属于具体节点，不猜默认值）
+│   ├── 环境列表（type / name / 当前可用版本 / 最新版本 / 版本数与失败数）
+│   ├── 环境详情（版本列表、构建状态、失败与不确定原因、Dockerfile、构建日志）
+│   ├── 初始化环境工作空间 / 新建语言环境定义（服务端模板路径）
+│   ├── 编辑 Dockerfile 生成新版本（不覆盖历史版本）
+│   ├── 构建指定版本（后台执行，状态与结论来自服务端）
+│   └── 项目默认环境选择（未交付：待 §7 第 2 项定稿）
+├── 角色管理（四个固定角色，见 ROLE-DESIGN.md）—— 未交付（M1 剩余）
+└── 基础配置查看（只读：数据库路径、监听地址、调度并发、Session 根目录）—— 未交付（M1 剩余）
 ```
 
 规则：
 
-- 环境版本**只追加**，历史版本与构建元数据不被覆盖；已有版本不可编辑，编辑即新建版本。
-- 构建是有副作用的长操作：必须有明确状态（`pending` / `building` / `succeeded` / `failed`）、
-  可下载日志、失败原因，且不阻塞 HTTP 请求线程模型（后台服务由 `internal/lifecycle` 管理）。
+- 环境版本**只追加**，历史版本与构建元数据不被覆盖；已有版本不可编辑，编辑即新建版本。内容与
+  某个已成功构建的版本完全一致时由服务端复用该版本号（`domain.FindReusableVersion`），不产生重复版本。
+- 环境定义与版本属于远程环境管理数据，不重新引入 YAML 业务配置。新建语言环境定义走服务端模板路径
+  （`POST /api/v1/environments/init`），模板之外的内容通过"编辑 Dockerfile 生成新版本"提交。
+- 构建是有副作用的长操作：状态取值为 `pending` / `building` / `succeeded` / `failed` / `uncertain`，
+  可读取日志与失败原因，且不阻塞 HTTP 请求线程模型（后台服务由 `internal/lifecycle` 管理）。
+- 构建并发与取消已定稿：同一节点同一环境同时只允许一个构建，重复请求返回 409；不提供单独取消接口，
+  取消只发生在服务停止时，并在停止前把在途构建收敛为终态。服务重启时把遗留 `building` 记录收敛为
+  `uncertain`（无法确认镜像是否已生成），既不报成功也不伪造失败。
 - 所有写操作经由 `app.EnvironmentService`，Handler 只做协议转换；CLI 与 Web 共用同一套方法。
-- 前端只显示服务端返回的 `usable`，不得由 `version` 或 `image_ref` 自行推断可用性。
+- 前端只显示服务端返回的 `usable` 与 `usable_for_remote_task`，不得由 `version` 或 `image_ref`
+  自行推断可用性；`202`（已受理）不得显示为构建成功。
 
 ## 3. 配置迁移边界
 
@@ -64,21 +76,28 @@
 - 环境变更不影响已创建任务：历史任务使用自己的配置快照，不回写成"最新环境"。
 - 项目环境可用性检查读真实构建状态；不可用时必须阻止启动并说明原因，不得静默降级到其他版本。
 
-## 5. M1 必须交付的 API（方向）
+## 5. 已交付的环境 API（V2-M1-E1）
 
 ```text
-GET    /api/v1/environments                              已有
-GET    /api/v1/environments/{type}/{name}                已有（版本列表）
-GET    /api/v1/environments/{type}/{name}/versions/{v}   已有（含 usable）
-POST   /api/v1/environments                              新建环境定义 / 新版本（请求体显式声明动作）
-POST   /api/v1/environments/{type}/{name}/versions       创建新版本（基于现有版本派生）
-POST   /api/v1/environments/{type}/{name}/build          触发构建（返回真实初始状态）
-GET    /api/v1/environments/{type}/{name}/versions/{v}/build-log  构建日志
+GET    /api/v1/environments                                             环境列表（含 usable）
+GET    /api/v1/environments/{type}/{name}                               环境详情（版本列表）
+GET    /api/v1/environments/{type}/{name}/versions/{v}                  单版本（含 usable）
+GET    /api/v1/environments/{type}/{name}/versions/{v}/dockerfile       Dockerfile 正文
+GET    /api/v1/environments/{type}/{name}/versions/{v}/build-log        构建日志正文
+GET    /api/v1/environments/{type}/{name}/versions/{v}/build-status     构建结论（200/202/500）
+POST   /api/v1/environments/init                                        初始化工作空间
+POST   /api/v1/environments/{type}/{name}/versions                      追加新版本
+POST   /api/v1/environments/{type}/{name}/build                         受理后台构建（202）
 ```
 
-- 具体 DTO 与错误码在 M1 实现前按当时的 `app.EnvironmentService` 方法签名核实后确定，不在此预设。
-- 写入口必须是幂等或显式版本化的：重复提交不能产生重复版本或重复构建。
-- 构建触发失败、节点未通过预检、版本已存在等情形必须返回结构化错误，不得返回 200。
+- 与早期方向的两处差异：不采用 `POST /api/v1/environments` 用请求体区分动作，改为 `POST
+  /api/v1/environments/init`（模板路径）与 `POST .../versions`（显式版本化追加）；构建结论由新增的
+  `GET .../build-status` 表达，`failed` 与 `uncertain` 使用不同错误码（`environment_build_failed` /
+  `environment_build_uncertain`），在途用 `202`。
+- DTO 与错误码以 `docs/http-api.md` §5 与 `internal/httpapi/environments.go` 为准。
+- 写入口幂等性与版本化：内容一致时复用既有成功版本（不产生重复版本号）；同一节点同一环境在途构建
+  期间重复提交返回 409（`environment_build_in_progress`）。
+- 参数、节点、版本与预检失败都返回结构化错误，不使用 200 表示远程操作失败。
 
 ## 6. 明确不做
 
@@ -89,6 +108,10 @@ GET    /api/v1/environments/{type}/{name}/versions/{v}/build-log  构建日志
 
 ## 7. 待决问题
 
-1. 环境构建任务的并发与取消语义（同一环境同一时刻是否只允许一个构建），M1 定稿。
-2. 项目默认环境选择是新建 `projects.env_version` 必填项，还是沿用"空值=当前可用版本"，M1 定稿。
-3. 基础配置查看是否提供"编辑并提供重启提示"，默认倾向：**只读**，修改配置仍由用户改文件并重启。
+1. ~~环境构建任务的并发与取消语义（同一环境同一时刻是否只允许一个构建）~~ **已定稿（V2-M1-E1）**：
+   同一节点同一环境同时只允许一个后台构建，重复请求返回 409；不提供单独取消接口，取消只发生在服务
+   停止时；停止前把在途构建收敛，进程重启时把遗留 `building` 收敛为 `uncertain`（结果无法确认）。
+2. 项目默认环境选择是新建 `projects.env_version` 必填项，还是沿用"空值=当前可用版本"——**仍未定稿**，
+   V2-M1-E1 未实现该功能。
+3. 基础配置查看是否提供"编辑并提供重启提示"，默认倾向：**只读**，修改配置仍由用户改文件并重启——
+   **仍未定稿**，V2-M1-E1 未实现基础配置查看。
