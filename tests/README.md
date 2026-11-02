@@ -223,8 +223,22 @@ go test -race -count=1 -p 4 -parallel 4 ./tests/integration/local/workflow/
 
 ### 真实测试授权与跳过语义
 
-真实外部依赖测试（真实 SSH 设备、真实远程 Docker、容器内真实 Pi、真实远程 Git）的
-执行许可由**一个** GitHub Repository Variable 控制：
+真实外部依赖测试（真实 SSH 设备、真实远程 Docker、容器内真实 Pi、真实远程 Git）的启用有两层门禁，
+两层都必须通过：
+
+1. **CI 授权门禁（只在 GitHub Actions 生效）**：`GITHUB_ACTIONS=true` 时，用例还要求
+   `AGENTFLOW_REAL_TESTS_GRANTED=true`。该标记由授权判定 Job 产出，用户唯一需要维护的输入是 GitHub
+   Repository Variable `AGENTFLOW_REAL_TESTS`（取值见下表）。
+2. **本机配置开关（任何环境都生效）**：`tests/config/{pi,ssh,docker}.yml` 的 `pi.enable`、`ssh.enable`
+   与 `docker.remote_enabled`；文件缺失或开关为 false 时跳过。
+
+本机开发环境没有 `GITHUB_ACTIONS` 标记，**不经过第 1 层**：`tests/internal/testkit` 的
+`RealTestsGateDecision` 直接按"本机运行环境不使用 CI 授权门禁"放行，是否执行只由 `tests/config`
+决定。因此本机把 `tests/config` 里的开关设为 true 后，`make test`（`go test ./tests/...`）会真实连接
+测试设备；`make test-unit` / `make test-race` / `make test-local` 不包含真实测试分组。测试代码不读取
+`AGENTFLOW_REAL_TESTS` 本身，只读取上面两个门禁变量。
+
+`AGENTFLOW_REAL_TESTS` 的取值（CI 内）：
 
 ```text
 Settings → Secrets and variables → Actions → Variables → AGENTFLOW_REAL_TESTS
@@ -290,10 +304,11 @@ tests/integration/remote/workflow/    # remote 分组：真实远程端到端工
 所有真实测试入口在读取配置、建立连接、执行外部命令之前先调用
 `testkit.RequireRealTests`，因此：
 
-- 未授权时用例输出 `WARN [SKIP] 真实测试未获 CI 授权：<套件>；<判定原因>` 并跳过；
+- 在 CI 中未获授权时用例输出 `WARN [SKIP] 真实测试未获 CI 授权：<套件>；<判定原因>` 并跳过；
+  本机运行不会产生这条跳过；
 - 跳过不计为通过，`ci-summary` 与 `real-tests` 的 Job 摘要单独标注这一点；
 - 跳过不会让 `make test` 失败：只要没有真实测试之外的失败，整体 Go CI 仍然成功；
-- 已授权但没有可用配置（配置文件缺失、`enable` 为 false、目标字段不全）时，各套件仍按
+- CI 已获授权（或本机运行）但没有可用配置（配置文件缺失、`enable` 为 false、目标字段不全）时，各套件仍按
   原有 `WARN [SKIP]` 语义跳过并说明缺少哪一项；
 - 配置完整但连接、认证或主机密钥校验失败时必须让测试失败——跳过只来自"未提供配置"或
   "未获授权"，不来自"配置存在但连不上"。
@@ -301,9 +316,7 @@ tests/integration/remote/workflow/    # remote 分组：真实远程端到端工
   `AGENTFLOW_REAL_TESTS_GRANTED=true` 才肯执行：缺少授权标记时脚本直接失败，不会跑出一堆
   SKIP 后把"一个用例都没跑"报告成成功。
 
-本机开发不受 CI 授权门禁影响：没有 `GITHUB_ACTIONS` 标记时，真实测试仍由
-`tests/config/*.yml` 的 `enable` 开关决定。要在本地复现 CI 的跳过行为，可以显式设置 CI
-标记：
+要在本机复现 CI 的跳过行为，可以显式设置 CI 标记（默认本机运行不需要，见上文）：
 
 ```bash
 # 复现"CI 未授权"：真实外部依赖用例全部 WARN [SKIP]，其余测试照常执行

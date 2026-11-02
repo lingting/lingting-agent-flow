@@ -53,6 +53,21 @@
 
 ## 5. 真实外部依赖
 
+真实测试的启用是**两层门禁**，两层都必须通过：
+
+1. **CI 授权门禁（只在 GitHub Actions 生效）**：`GITHUB_ACTIONS=true` 时，用例还要求
+   `AGENTFLOW_REAL_TESTS_GRANTED=true`（由授权判定 Job 依据 GitHub Repository Variable
+   `AGENTFLOW_REAL_TESTS` 与事件身份字段产出，规则只实现一次于 `internal/cigate`）。未获授权时以
+   `WARN [SKIP]` 跳过。该门禁由 `tests/internal/testkit` 的 `RequireRealTests` 统一实施，测试代码不读取
+   `AGENTFLOW_REAL_TESTS` 本身。
+2. **本机配置开关（任何环境都生效）**：`tests/config/*.yml` 中的 `pi.enable`、`ssh.enable` 与
+   `docker.remote_enabled`；文件缺失、开关为 false 或目标字段不全时跳过并说明缺少哪一项。
+
+本机开发环境（没有 `GITHUB_ACTIONS` 标记）不经过第 1 层：`make test`（`go test ./tests/...`）在
+`tests/config` 已启用真实依赖时会真实连接测试设备；`make test-unit` / `make test-race` /
+`make test-local` 只跑不需要真实设备的分组。跳过只能来自"未获授权"或"未提供配置"，配置完整但连接、
+认证或主机密钥校验失败时必须让测试失败。
+
 - 本机没有 `pi` 时，只有依赖真实 Pi CLI 的用例输出 `WARN [SKIP]` 并跳过；Pi Runner 的单元测试使用
   替身，必须继续执行。
 - 真实 Pi 测试由 `tests/config/pi.yml` 的 `pi.enable` 显式开启，默认模型为 `group/free`；每次真实调用

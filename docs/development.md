@@ -51,6 +51,12 @@ make test-packaging  # 单文件打包冒烟测试
 make check        # fmt-check + vet + build
 ```
 
+`make test`（`go test ./tests/...`）包含 `tests/integration/{pi,ssh,remote}` 等真实依赖分组：本机是否
+真的连接真实设备由 `tests/config/*.yml` 的 `pi.enable`、`ssh.enable` 与 `docker.remote_enabled`
+决定（未启用时输出 `WARN [SKIP]`）；CI 中还会额外经过 `AGENTFLOW_REAL_TESTS` 授权门禁，且该门禁
+只在 `GITHUB_ACTIONS` 下生效（见 [testing.md](testing.md) §5）。只想跑不需要真实设备的分组时使用
+`make test-unit` / `make test-local` / `make test-race`。
+
 不依赖 Make 时可以直接使用底层命令：
 
 ```bash

@@ -116,8 +116,10 @@ bash .github/scripts/resolve-release-version.sh --require-tag   # 需要 REF_TYP
 
 ## 安全边界
 
-- 真实测试授权只有 `AGENTFLOW_REAL_TESTS` 一个用户变量，规则只在 `internal/cigate` 实现；
-  `check-real-test-authorization.sh` 只做参数转发，不重新实现身份判断。
+- CI 内的真实测试授权只有 `AGENTFLOW_REAL_TESTS` 一个用户变量，规则只在 `internal/cigate` 实现；
+  `check-real-test-authorization.sh` 只做参数转发，不重新实现身份判断。本机运行不读取该变量：
+  没有 `GITHUB_ACTIONS` 标记时门禁直接放行，真实测试是否执行只由 `tests/config/*.yml` 的
+  enable 开关决定。
 - 授权判断 Job 检出的是 PR 的基础提交或本次运行的提交，判定不执行被审核 PR 的代码。
 - 真实设备凭据只来自 `real-tests` 环境的 Environment Secrets，普通 CI Job 不读取 Secret；
   未获授权时 `run-real-tests.sh` 直接失败，不会把"一个用例都没跑"报告为成功。
