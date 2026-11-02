@@ -146,8 +146,8 @@ CREATE TABLE project_execution_leases (
 ### 固定四角色：不需要新迁移
 
 - `roles.type` 在 `0009` 重建时已去掉 CHECK 白名单，新增取值 `requirement_analyst` 可直接写入。
-- 四角色的"固定身份"由 `domain` 常量与 `RoleConfigService` 保证（不可增删），不是数据库约束。
-- 默认 Prompt / 默认工具策略由应用层在初始化时补齐缺失角色，已存在角色不被启动流程覆盖。
+- 四角色的"固定身份"由 `domain` 常量与 `app.RoleService` 保证（无增删入口），不是数据库约束；已实现于 V2-M1-E2。
+- 默认 Prompt / 默认工具策略由应用层在初始化时按固定 ID 补齐缺失角色，已存在角色不被启动流程覆盖。
 
 ## 3. 历史数据回填规则（`0026` / `0029` 必须遵守）
 

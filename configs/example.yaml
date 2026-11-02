@@ -45,40 +45,8 @@ ssh:
   # TCP 连接与 SSH 认证的超时秒数，0 表示使用默认值
   connect_timeout_seconds: 0
 
-# 角色名称可自由命名，工作流只依据 type 识别职责。
-# type 只能取 planner、developer、validator。
-# tools_policy.mode 与 type 一一对应：
-#   planner -> read_only
-#   developer -> development
-#   validator -> verification
-# 第一版只校验声明，不据此实施实际权限控制。
-roles:
-  - id: planner
-    name: 架构规划师
-    type: planner
-    runner: pi
-    model: "provider/model-id"
-    system_prompt: |
-      分析需求并生成结构化开发计划。
-    tools_policy:
-      mode: read_only
-
-  - id: developer
-    name: 开发工程师
-    type: developer
-    runner: pi
-    model: "provider/model-id"
-    system_prompt: |
-      按照指定开发步骤实现代码。
-    tools_policy:
-      mode: development
-
-  - id: validator
-    name: 验证工程师
-    type: validator
-    runner: pi
-    model: "provider/model-id"
-    system_prompt: |
-      根据验收标准验证代码，并输出结构化验证结果。
-    tools_policy:
-      mode: verification
+# 角色定义不再由配置文件声明。
+#
+# 四个固定角色（需求分析师、方案规划师、开发者、验收者）的默认定义随程序内置，
+# 服务启动时只补齐数据库中缺失的角色，不会覆盖用户已保存的配置。
+# 角色的系统提示词、模型与启用状态请通过设置页修改，修改结果保存在 SQLite 中。

@@ -186,30 +186,12 @@ func TestDeleteUnreferencedRole(t *testing.T) {
 	}
 }
 
-func TestSeedRolesOnlyWhenEmpty(t *testing.T) {
+// TestSeedRolesFillsMissingFixedRoles 校验初始化按固定标识补齐缺失角色。
+func TestSeedRolesFillsMissingFixedRoles(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	ctx := testContext(t)
-	seeds := []storage.RoleSeed{
-		{
-			ID:           domain.ID("planner"),
-			Name:         "架构规划师",
-			Type:         domain.RoleTypePlanner,
-			Runner:       domain.RoleRunnerPi,
-			Model:        "provider/model",
-			SystemPrompt: "规划提示词",
-			ToolsPolicy:  domain.DefaultToolsPolicy(domain.RoleTypePlanner),
-		},
-		{
-			ID:           domain.ID("developer"),
-			Name:         "开发工程师",
-			Type:         domain.RoleTypeDeveloper,
-			Runner:       domain.RoleRunnerPi,
-			Model:        "provider/model",
-			SystemPrompt: "开发提示词",
-			ToolsPolicy:  domain.DefaultToolsPolicy(domain.RoleTypeDeveloper),
-		},
-	}
+	seeds := fixedRoleSeeds()
 	created, err := db.SeedRoles(ctx, seeds)
 	if err != nil {
 		t.Fatalf("初始化角色失败: %v", err)
@@ -223,7 +205,7 @@ func TestSeedRolesOnlyWhenEmpty(t *testing.T) {
 		t.Fatalf("重复初始化应当成功: %v", err)
 	}
 	if again != 0 {
-		t.Fatalf("已有角色时不应再次导入: %d", again)
+		t.Fatalf("角色已存在时不应再次导入: %d", again)
 	}
 	roles, err := db.ListRoles(ctx)
 	if err != nil {
@@ -233,33 +215,78 @@ func TestSeedRolesOnlyWhenEmpty(t *testing.T) {
 		t.Fatalf("角色数量不符: %d", len(roles))
 	}
 	if roles[0].ID != seeds[0].ID {
-		t.Fatalf("角色 ID 应沿用配置: %s", roles[0].ID)
+		t.Fatalf("角色 ID 应沿用固定标识: %s", roles[0].ID)
 	}
 }
 
-func TestSeedRolesDoesNotOverwriteExistingRole(t *testing.T) {
+// TestSeedRolesKeepsExistingRoleConfig 校验已有角色不被默认值覆盖，缺失角色被补齐。
+func TestSeedRolesKeepsExistingRoleConfig(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	ctx := testContext(t)
-	existing := mustRole(t, db, domain.RoleTypePlanner, "已存在角色")
-	created, err := db.SeedRoles(ctx, []storage.RoleSeed{{
-		ID:           domain.ID("planner"),
-		Name:         "覆盖角色",
-		Type:         domain.RoleTypePlanner,
-		Model:        "provider/model",
-		SystemPrompt: "提示词",
-	}})
+	existing, err := domain.NewRole(
+		"用户改过的规划师",
+		domain.RoleTypePlanner,
+		"provider/saved",
+		"用户改过的提示词",
+		domain.DefaultToolsPolicy(domain.RoleTypePlanner),
+		time.Now().UTC(),
+	)
 	if err != nil {
-		t.Fatalf("初始化角色失败: %v", err)
+		t.Fatalf("构造角色失败: %v", err)
 	}
-	if created != 0 {
-		t.Fatalf("已有角色时不应导入: %d", created)
+	existing.ID = domain.RoleIDPlanner
+	existing.Enabled = false
+	if err := db.CreateRole(ctx, existing); err != nil {
+		t.Fatalf("写入角色失败: %v", err)
 	}
-	loaded, err := db.GetRole(ctx, existing.ID)
+
+	seeds := fixedRoleSeeds()
+	created, err := db.SeedRoles(ctx, seeds)
+	if err != nil {
+		t.Fatalf("补齐角色失败: %v", err)
+	}
+	if created != len(seeds)-1 {
+		t.Fatalf("只应补齐缺失角色: %d", created)
+	}
+	loaded, err := db.GetRole(ctx, domain.RoleIDPlanner)
 	if err != nil {
 		t.Fatalf("读取角色失败: %v", err)
 	}
-	if loaded.Name != "已存在角色" {
-		t.Fatalf("已有角色被覆盖: %s", loaded.Name)
+	if loaded.Name != "用户改过的规划师" || loaded.Model != "provider/saved" {
+		t.Fatalf("已有角色被覆盖: %+v", loaded)
 	}
+	if loaded.SystemPrompt != "用户改过的提示词" || loaded.Enabled {
+		t.Fatalf("已有角色的提示词或启用状态被覆盖: %+v", loaded)
+	}
+	if _, err := db.GetRole(ctx, domain.RoleIDRequirementAnalyst); err != nil {
+		t.Fatalf("缺失角色应被补齐: %v", err)
+	}
+}
+
+// fixedRoleSeeds 返回一组固定标识的角色初始化定义，用于覆盖补齐语义。
+func fixedRoleSeeds() []storage.RoleSeed {
+	types := []struct {
+		id       domain.ID
+		name     string
+		roleType domain.RoleType
+	}{
+		{domain.RoleIDRequirementAnalyst, "需求分析师", domain.RoleTypeRequirementAnalyst},
+		{domain.RoleIDPlanner, "方案规划师", domain.RoleTypePlanner},
+		{domain.RoleIDDeveloper, "开发者", domain.RoleTypeDeveloper},
+		{domain.RoleIDValidator, "验收者", domain.RoleTypeValidator},
+	}
+	seeds := make([]storage.RoleSeed, 0, len(types))
+	for _, item := range types {
+		seeds = append(seeds, storage.RoleSeed{
+			ID:           item.id,
+			Name:         item.name,
+			Type:         item.roleType,
+			Runner:       domain.RoleRunnerPi,
+			Model:        "provider/model",
+			SystemPrompt: item.name + "默认提示词",
+			ToolsPolicy:  domain.DefaultToolsPolicy(item.roleType),
+		})
+	}
+	return seeds
 }

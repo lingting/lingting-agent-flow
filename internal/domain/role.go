@@ -10,14 +10,31 @@ const RoleRunnerPi = "pi"
 
 // RoleType 表示编排器识别角色职责时使用的类型。
 //
-// 角色名称由用户自定义，编排器只依据类型决定该角色参与的阶段。
+// 角色标识、名称与类型由固定角色定义确定，编排器只依据类型决定该角色参与的阶段。
 type RoleType string
 
-// 第一版支持的三种角色类型。
+// 支持的角色类型：V2 起角色集合固定为四个，不可新增或删除。
 const (
-	RoleTypePlanner   RoleType = "planner"
+	// RoleTypeRequirementAnalyst 是需求分析师：分析用户需求与项目现状，只读。
+	RoleTypeRequirementAnalyst RoleType = "requirement_analyst"
+	// RoleTypePlanner 是方案规划师：产出实施方案与任务拆分，只读。
+	RoleTypePlanner RoleType = "planner"
+	// RoleTypeDeveloper 是开发者：执行开发步骤，可读写并执行命令。
 	RoleTypeDeveloper RoleType = "developer"
+	// RoleTypeValidator 是验收者：执行验证与验收，只读并执行验证命令。
 	RoleTypeValidator RoleType = "validator"
+)
+
+// 固定角色标识：角色是系统常量，用户只能修改配置内容，不能新增或删除。
+const (
+	// RoleIDRequirementAnalyst 是需求分析师的固定标识。
+	RoleIDRequirementAnalyst ID = "requirement_analyst"
+	// RoleIDPlanner 是方案规划师的固定标识。
+	RoleIDPlanner ID = "planner"
+	// RoleIDDeveloper 是开发者的固定标识。
+	RoleIDDeveloper ID = "developer"
+	// RoleIDValidator 是验收者的固定标识。
+	RoleIDValidator ID = "validator"
 )
 
 // String 返回角色类型的字符串形式。
@@ -28,7 +45,7 @@ func (t RoleType) String() string {
 // Validate 校验角色类型是否受支持。
 func (t RoleType) Validate() error {
 	switch t {
-	case RoleTypePlanner, RoleTypeDeveloper, RoleTypeValidator:
+	case RoleTypeRequirementAnalyst, RoleTypePlanner, RoleTypeDeveloper, RoleTypeValidator:
 		return nil
 	default:
 		return invalidField("Role", "type", "不支持的角色类型 "+string(t))
@@ -66,7 +83,7 @@ type ToolsPolicy struct {
 
 // DefaultToolsPolicy 返回角色类型的默认最小权限策略。
 //
-// Planner 只读；Developer 可读写并执行命令；Validator 只读并执行验证命令。
+// 需求分析师与 Planner 只读；Developer 可读写并执行命令；Validator 只读并执行验证命令。
 func DefaultToolsPolicy(roleType RoleType) ToolsPolicy {
 	switch roleType {
 	case RoleTypeDeveloper:
@@ -77,7 +94,7 @@ func DefaultToolsPolicy(roleType RoleType) ToolsPolicy {
 		return ToolsPolicy{
 			Permissions: []ToolPermission{ToolPermissionRead, ToolPermissionExecute},
 		}
-	case RoleTypePlanner:
+	case RoleTypeRequirementAnalyst, RoleTypePlanner:
 		return ToolsPolicy{Permissions: []ToolPermission{ToolPermissionRead}}
 	default:
 		return ToolsPolicy{Permissions: []ToolPermission{ToolPermissionRead}}
@@ -175,9 +192,10 @@ func (s RoleSnapshot) Validate() error {
 	return s.ToolsPolicy.Validate()
 }
 
-// Role 是用户定义的角色，用于驱动某一阶段的一次 Agent 执行。
+// Role 是固定角色的运行配置，用于驱动某一阶段的一次 Agent 执行。
 //
-// 名称由用户自由命名，工作流只依据类型识别职责。
+// 角色标识、名称与类型由固定定义确定，工作流只依据类型识别职责；用户可修改的只有
+// 系统提示词、模型与启用状态。
 type Role struct {
 	ID           ID          `json:"id"`
 	Name         string      `json:"name"`

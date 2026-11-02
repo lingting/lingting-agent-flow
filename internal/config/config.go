@@ -5,27 +5,12 @@
 package config
 
 import (
-	"fmt"
 	"net"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/logging"
-)
-
-// 第一版支持的 Agent 运行时与工具策略模式取值。
-const (
-	// RunnerPi 是当前唯一支持的 Agent 运行时。
-	RunnerPi = "pi"
-
-	// ToolsModeReadOnly 表示只读模式，对应规划角色。
-	ToolsModeReadOnly = "read_only"
-	// ToolsModeDevelopment 表示开发模式，对应开发角色。
-	ToolsModeDevelopment = "development"
-	// ToolsModeVerification 表示验证模式，对应验证角色。
-	ToolsModeVerification = "verification"
 )
 
 // HTTP 服务默认监听地址与端口。
@@ -51,7 +36,6 @@ type Config struct {
 	Workspace WorkspaceConfig `yaml:"workspace"`
 	Scheduler SchedulerConfig `yaml:"scheduler"`
 	SSH       SSHConfig       `yaml:"ssh"`
-	Roles     []RoleConfig    `yaml:"roles"`
 }
 
 // AppConfig 描述应用自身的标识与日志设置。
@@ -101,26 +85,6 @@ type SSHConfig struct {
 	ConnectTimeoutSeconds int `yaml:"connect_timeout_seconds"`
 }
 
-// RoleConfig 描述一个角色。
-//
-// 名称由用户自由命名，工作流只依据 Type 识别职责。
-type RoleConfig struct {
-	ID           string            `yaml:"id"`
-	Name         string            `yaml:"name"`
-	Type         domain.RoleType   `yaml:"type"`
-	Runner       string            `yaml:"runner"`
-	Model        string            `yaml:"model"`
-	SystemPrompt string            `yaml:"system_prompt"`
-	ToolsPolicy  ToolsPolicyConfig `yaml:"tools_policy"`
-}
-
-// ToolsPolicyConfig 描述角色的工具策略声明。
-//
-// 第一版只定义结构，不据此实施实际权限控制。
-type ToolsPolicyConfig struct {
-	Mode string `yaml:"mode"`
-}
-
 // ValidationError 汇总一份配置中的全部校验问题。
 type ValidationError struct {
 	// Path 是配置来源文件路径。
@@ -165,7 +129,6 @@ func (c *Config) Validate() error {
 	c.Workspace.validate(&problems)
 	c.Scheduler.validate(&problems)
 	c.SSH.validate(&problems)
-	c.validateRoles(&problems)
 	if problems.empty() {
 		return nil
 	}
@@ -262,105 +225,5 @@ func (s SSHConfig) validate(problems *issues) {
 	}
 	if s.ConnectTimeoutSeconds < 0 {
 		problems.add("ssh.connect_timeout_seconds", "不得为负数")
-	}
-}
-
-// validateRoles 校验角色列表与角色 ID 唯一性。
-func (c *Config) validateRoles(problems *issues) {
-	if len(c.Roles) == 0 {
-		problems.add("roles", "角色列表不能为空")
-		return
-	}
-	seen := make(map[string]int, len(c.Roles))
-	for index, role := range c.Roles {
-		role.validate(index, problems)
-		id := strings.TrimSpace(role.ID)
-		if id == "" {
-			continue
-		}
-		if first, duplicated := seen[id]; duplicated {
-			problems.add(
-				fmt.Sprintf("roles[%d].id", index),
-				fmt.Sprintf("角色 ID %q 与 roles[%d] 重复", id, first),
-			)
-			continue
-		}
-		seen[id] = index
-	}
-}
-
-// validate 校验单个角色的字段约束。
-func (r RoleConfig) validate(index int, problems *issues) {
-	prefix := fmt.Sprintf("roles[%d]", index)
-	if strings.TrimSpace(r.ID) == "" {
-		problems.add(prefix+".id", "不能为空")
-	}
-	if strings.TrimSpace(r.Name) == "" {
-		problems.add(prefix+".name", "不能为空")
-	}
-	r.validateType(prefix, problems)
-	r.validateRunner(prefix, problems)
-	if strings.TrimSpace(r.Model) == "" {
-		problems.add(prefix+".model", "不能为空")
-	}
-	if strings.TrimSpace(r.SystemPrompt) == "" {
-		problems.add(prefix+".system_prompt", "不能为空")
-	}
-	r.ToolsPolicy.validate(prefix, r.Type, problems)
-}
-
-// validateType 校验角色类型。
-func (r RoleConfig) validateType(prefix string, problems *issues) {
-	if strings.TrimSpace(r.Type.String()) == "" {
-		problems.add(prefix+".type", "不能为空")
-		return
-	}
-	if err := r.Type.Validate(); err != nil {
-		problems.add(prefix+".type", err.Error())
-	}
-}
-
-// validateRunner 校验 Agent 运行时取值。
-func (r RoleConfig) validateRunner(prefix string, problems *issues) {
-	runner := strings.TrimSpace(r.Runner)
-	if runner == "" {
-		problems.add(prefix+".runner", "不能为空")
-		return
-	}
-	if runner != RunnerPi {
-		problems.add(prefix+".runner", "当前仅支持 "+RunnerPi+"，收到 "+runner)
-	}
-}
-
-// validate 校验工具策略声明。
-func (p ToolsPolicyConfig) validate(prefix string, roleType domain.RoleType, problems *issues) {
-	mode := strings.TrimSpace(p.Mode)
-	if mode == "" {
-		problems.add(prefix+".tools_policy.mode", "不能为空")
-		return
-	}
-	expected, ok := expectedToolsMode(roleType)
-	if !ok {
-		return
-	}
-	if mode != expected {
-		problems.add(
-			prefix+".tools_policy.mode",
-			fmt.Sprintf("角色类型 %s 只允许 %s，收到 %s", roleType, expected, mode),
-		)
-	}
-}
-
-// expectedToolsMode 返回角色类型对应的工具策略模式。
-func expectedToolsMode(roleType domain.RoleType) (string, bool) {
-	switch roleType {
-	case domain.RoleTypePlanner:
-		return ToolsModeReadOnly, true
-	case domain.RoleTypeDeveloper:
-		return ToolsModeDevelopment, true
-	case domain.RoleTypeValidator:
-		return ToolsModeVerification, true
-	default:
-		return "", false
 	}
 }

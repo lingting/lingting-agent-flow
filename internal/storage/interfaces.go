@@ -32,7 +32,7 @@ var (
 	ErrUnsupportedSchema = errors.New("storage: 不支持的数据库版本")
 )
 
-// RoleSeed 是角色初始化的最小定义，由配置层转换后传入。
+// RoleSeed 是角色初始化的最小定义：由内置的固定角色默认值转换为存储定义后传入。
 type RoleSeed struct {
 	ID           domain.ID
 	Name         string
@@ -693,8 +693,8 @@ type EventStore interface {
 
 // RoleSeeder 提供角色初始化所需的最低能力。
 //
-// 初始化只在角色表为空时导入，日常启动不覆盖已有角色；对已有角色的显式同步
-// 必须作为独立操作实现，不能隐含在普通启动流程中。
+// 初始化按固定角色标识补齐缺失记录，已有角色（含用户修改过的配置）不被覆盖；
+// 角色集合固定为四个，不提供新增或删除入口。
 type RoleSeeder interface {
 	SeedRoles(ctx context.Context, seeds []RoleSeed) (int, error)
 }

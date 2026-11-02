@@ -152,9 +152,10 @@ func (s roleStore) ListRoles(ctx context.Context) ([]domain.Role, error) {
 	return roles, nil
 }
 
-// SeedRoles 在角色表为空时导入初始角色，已有记录时不做任何修改。
+// SeedRoles 按固定角色标识补齐缺失的角色，已有记录保持原样。
 //
-// 返回实际写入的角色数量。该操作是显式初始化入口，不会被普通启动流程隐式调用。
+// 已存在的角色（含用户修改过的 Prompt、模型与启用状态）不会被默认值覆盖；逻辑删除的角色
+// 也算已存在，不重新创建。返回实际写入的角色数量；该操作是显式初始化入口，只由服务启动调用。
 func (s roleStore) SeedRoles(ctx context.Context, seeds []storage.RoleSeed) (int, error) {
 	roles, err := buildSeedRoles(seeds)
 	if err != nil {
@@ -171,14 +172,14 @@ func (s roleStore) SeedRoles(ctx context.Context, seeds []storage.RoleSeed) (int
 	created := 0
 	err = withTx.runInTx(ctx, func(tx queryer) error {
 		inner := roleStore{q: tx}
-		existing, err := inner.countRoles(ctx)
-		if err != nil {
-			return err
-		}
-		if existing > 0 {
-			return nil
-		}
 		for _, role := range roles {
+			exists, err := inner.roleExists(ctx, role.ID)
+			if err != nil {
+				return err
+			}
+			if exists {
+				continue
+			}
 			if err := inner.CreateRole(ctx, role); err != nil {
 				return err
 			}
@@ -192,23 +193,24 @@ func (s roleStore) SeedRoles(ctx context.Context, seeds []storage.RoleSeed) (int
 	return created, nil
 }
 
-// countRoles 返回未删除角色的数量。
+// roleExists 判断某个角色标识是否已有记录。
 //
-// 逻辑删除的角色不参与"是否已有角色"的判断，但保留物理行以维持历史引用。
-func (s roleStore) countRoles(ctx context.Context) (int, error) {
+// 逻辑删除的角色也算已存在：它们保留物理行以维持历史引用，初始化不重新创建。
+func (s roleStore) roleExists(ctx context.Context, id domain.ID) (bool, error) {
 	var total int
 	if err := s.q.QueryRowContext(
 		ctx,
-		`SELECT COUNT(*) FROM roles WHERE deleted_at IS NULL`,
+		`SELECT COUNT(*) FROM roles WHERE id = ?`,
+		toIDParam(id),
 	).Scan(&total); err != nil {
-		return 0, wrapError("统计角色", err)
+		return false, wrapError("统计角色", err)
 	}
-	return total, nil
+	return total > 0, nil
 }
 
 // buildSeedRoles 把初始化定义批量转换为可持久化的角色。
 //
-// 时间戳由调用时刻生成；角色 ID 沿用配置中的标识，保证配置与数据库可对照。
+// 时间戳由调用时刻生成；角色 ID 沿用内置固定标识，保证默认定义与数据库记录可对照。
 // 全部定义先完成校验，避免中途失败留下部分角色。
 func buildSeedRoles(seeds []storage.RoleSeed) ([]domain.Role, error) {
 	if len(seeds) == 0 {

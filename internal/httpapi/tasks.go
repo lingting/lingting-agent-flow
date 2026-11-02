@@ -530,7 +530,20 @@ func decodeJSONBody(
 	logger *slog.Logger,
 	target any,
 ) bool {
-	limited := http.MaxBytesReader(w, r.Body, maxTaskRequestBytes)
+	return decodeJSONBodyWithLimit(w, r, logger, target, maxTaskRequestBytes)
+}
+
+// decodeJSONBodyWithLimit 解析请求体 JSON，并把请求体大小限制在 limit 字节内。
+//
+// 未知字段一律拒绝：请求体只允许包含调用方确实可以修改的字段。
+func decodeJSONBodyWithLimit(
+	w http.ResponseWriter,
+	r *http.Request,
+	logger *slog.Logger,
+	target any,
+	limit int64,
+) bool {
+	limited := http.MaxBytesReader(w, r.Body, limit)
 	decoder := json.NewDecoder(limited)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {

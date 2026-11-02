@@ -34,7 +34,9 @@ import type {
   Project,
   ProjectListResponse,
   ResumeWorkflowRequest,
+  RoleDetail,
   RoleListResponse,
+  UpdateRoleRequest,
   StartTaskRequest,
   StartTaskResponse,
   StartWorkflowRequest,
@@ -459,8 +461,21 @@ export function fetchHost(hostID: string, options: ApiRequestOptions = {}) {
   return apiRequest<Host>(hostPath(hostID), options);
 }
 
-/** 角色集合路径；本阶段只提供只读查询，不存在角色 CRUD */
+/** 角色集合路径；角色集合固定为四个，集合路径只支持列表查询 */
 export const ROLES_PATH = `${API_PREFIX}/roles`;
+
+/**
+ * 单个角色的路径。
+ *
+ * 角色标识是固定常量，但这里仍然做空值校验：空标识只会在调用方写错时出现，
+ * 不应该把请求发到集合路径上。
+ */
+export function rolePath(roleID: string): string {
+  if (!roleID.trim()) {
+    throw new Error("角色标识不能为空");
+  }
+  return `${ROLES_PATH}/${encodeURIComponent(roleID)}`;
+}
 
 /**
  * 查询全部角色。
@@ -470,6 +485,28 @@ export const ROLES_PATH = `${API_PREFIX}/roles`;
  */
 export function fetchRoles(options: ApiRequestOptions = {}) {
   return apiRequest<RoleListResponse>(ROLES_PATH, options);
+}
+
+/** 查询单个角色的完整配置（含系统提示词与工具策略） */
+export function fetchRole(roleID: string, options: ApiRequestOptions = {}) {
+  return apiRequest<RoleDetail>(rolePath(roleID), options);
+}
+
+/**
+ * 更新角色的可编辑字段。
+ *
+ * 只提交系统提示词、模型与启用状态；服务端返回重新读取的真实保存结果。
+ */
+export function updateRole(
+  roleID: string,
+  body: UpdateRoleRequest,
+  options: ApiRequestOptions = {},
+) {
+  return apiRequest<RoleDetail>(rolePath(roleID), {
+    body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json", ...options.headers },
+    method: "PUT",
+  });
 }
 
 /** 项目集合路径 */

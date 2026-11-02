@@ -645,12 +645,14 @@ export type EnvironmentBuildLogResponse = {
 };
 
 /**
+/**
  * 角色类型。
  *
- * 取值与 Go 端 `domain.RoleType` 完全一致：`planner` 规划、`developer` 开发、
- * `validator` 验证。创建任务时按类型分别选择对应角色，不得混用。
+ * 取值与 Go 端 `domain.RoleType` 完全一致：`requirement_analyst` 需求分析、
+ * `planner` 规划、`developer` 开发、`validator` 验证。创建任务时按类型分别选择
+ * 对应角色，不得混用；四个角色固定存在，不可新增或删除。
  */
-export type RoleType = "planner" | "developer" | "validator";
+export type RoleType = "requirement_analyst" | "planner" | "developer" | "validator";
 
 /**
  * 角色的对外表示，与 Go 端 `httpapi.RoleResponse` 一一对应。
@@ -675,6 +677,42 @@ export type Role = {
 export type RoleListResponse = {
   records: Role[];
   total: number;
+};
+
+/**
+ * 角色的工具策略，与 Go 端 `httpapi.RoleToolsPolicyResponse` 一一对应。
+ *
+ * 本阶段只读：设置页只展示当前策略，实际执行层限制属于后续任务。
+ */
+export type RoleToolsPolicy = {
+  permissions: string[];
+  allow_tools?: string[];
+  deny_tools?: string[];
+};
+
+/**
+ * 角色的完整配置，与 Go 端 `httpapi.RoleDetailResponse` 一一对应。
+ *
+ * 由 `GET /api/v1/roles/{roleID}` 返回；`system_prompt`、`model` 与 `enabled`
+ * 是唯一可通过 `PUT` 修改的字段。
+ */
+export type RoleDetail = Role & {
+  system_prompt: string;
+  tools_policy: RoleToolsPolicy;
+  created_at: string;
+  updated_at: string;
+};
+
+/**
+ * `PUT /api/v1/roles/{roleID}` 的请求体。
+ *
+ * 只允许这三个字段：角色标识、名称、类型、执行器与工具策略不在可修改范围内，
+ * 携带它们会被服务端按未知字段拒绝。
+ */
+export type UpdateRoleRequest = {
+  system_prompt?: string;
+  model?: string;
+  enabled?: boolean;
 };
 
 /**

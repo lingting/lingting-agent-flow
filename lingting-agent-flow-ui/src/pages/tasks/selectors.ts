@@ -15,6 +15,7 @@ import type { Host, Role, RoleType } from "@/lib/api";
 
 /** 角色类型的展示顺序与中文名称，覆盖 Go 端 `domain.RoleType` 的全部取值 */
 export const ROLE_TYPE_META: Record<RoleType, { label: string; description: string }> = {
+  requirement_analyst: { description: "负责分析需求与项目现状，只读", label: "需求分析角色" },
   planner: { description: "负责生成并持久化计划步骤", label: "规划角色" },
   developer: { description: "负责按步骤实现代码", label: "开发角色" },
   validator: { description: "负责语义审查，只能收紧结论", label: "验证角色" },

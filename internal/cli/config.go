@@ -6,6 +6,7 @@ import (
 
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/config"
+	"github.com/lingting/agentflow/internal/domain"
 	"github.com/spf13/cobra"
 )
 
@@ -43,7 +44,7 @@ func newConfigValidateCommand(a *app.App) *cobra.Command {
 				cfg.SourcePath,
 				cfg.App.Name,
 				a.Logger().Level(),
-				strings.Join(roleSummary(cfg.Roles), "、"),
+				strings.Join(roleSummary(), "、"),
 			)
 			return err
 		},
@@ -57,10 +58,13 @@ func newConfigValidateCommand(a *app.App) *cobra.Command {
 	return command
 }
 
-// roleSummary 生成角色摘要，用于校验成功后的输出。
-func roleSummary(roles []config.RoleConfig) []string {
-	summary := make([]string, 0, len(roles))
-	for _, role := range roles {
+// roleSummary 生成内置固定角色摘要，用于校验成功后的输出。
+//
+// 角色定义随代码内置，不再来自配置文件：这里列出的是数据库初始化时使用的固定角色集合。
+func roleSummary() []string {
+	defaults := domain.DefaultRoles()
+	summary := make([]string, 0, len(defaults))
+	for _, role := range defaults {
 		summary = append(summary, fmt.Sprintf("%s(%s)", role.ID, role.Type))
 	}
 	return summary

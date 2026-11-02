@@ -28,7 +28,7 @@ V2 把用户发起工作的入口从「创建一个任务」升级为「提出�
 | 里程碑 | 主题 | 状态 |
 |---|---|---|
 | [M0](./milestones/M0-v1-closeout-and-v2-design.md) | V1 收口与 V2 设计 | completed（2026-11-02） |
-| [M1](./milestones/M1-settings-and-fixed-roles.md) | 设置中心、环境管理、固定四角色 | pending |
+| [M1](./milestones/M1-settings-and-fixed-roles.md) | 设置中心、环境管理、固定四角色 | pending（E1、E2 已完成） |
 | [M2](./milestones/M2-planning-runtime.md) | 规划运行环境（只读容器 + 多轮会话） | pending |
 | [M3](./milestones/M3-requirement-planning.md) | 需求工作台与需求分析 | pending |
 | [M4](./milestones/M4-requirement-task-generation.md) | 方案确认与任务生成 | pending |

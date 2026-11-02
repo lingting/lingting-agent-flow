@@ -18,9 +18,10 @@ const (
 
 // Deps 是构造 API 处理器所需的依赖。
 type Deps struct {
-	// Roles 是角色查询服务，为空时角色接口返回服务不可用。
+	// Roles 是角色配置服务，为空时角色接口返回服务不可用。
 	//
-	// 角色只在首次初始化时从配置导入，接口本身只读。
+	// 角色集合固定为四个，由服务启动时按内置默认定义补齐；接口只提供查询与可编辑字段
+	// 的更新，不提供新增与删除。
 	Roles *app.RoleService
 	// Projects 是项目管理服务，为空时项目接口返回服务不可用。
 	//
@@ -151,8 +152,10 @@ func NewHandler(deps Deps) http.Handler {
 		logger:            logger,
 	}
 	mux := http.NewServeMux()
-	// 角色接口只有集合路径：本阶段不提供角色 CRUD，/roles 之下的其他路径统一 404。
+	// 角色接口同时注册集合路径与单角色路径：集合只支持列表查询，单角色支持读取完整配置
+	// 与更新可编辑字段。角色集合固定为四个，因此不存在角色新增与删除路径。
 	mux.HandleFunc(PathRoles, router.rolesHandler)
+	mux.HandleFunc(rolePathPrefix, router.rolesHandler)
 	// 项目接口同时注册集合路径与单项目路径：集合支持列表与创建，单项目支持详情、
 	// 整体更新与逻辑删除。
 	mux.HandleFunc(PathProjects, router.projectsHandler)
@@ -175,7 +178,7 @@ func NewHandler(deps Deps) http.Handler {
 
 // router 持有 API 处理器依赖。
 type router struct {
-	// roles 处理角色只读查询；服务未初始化时接口返回 503。
+	// roles 处理角色配置的查询与更新；服务未初始化时接口返回 503。
 	roles *roleHandler
 	// projects 处理项目管理接口；服务未初始化时接口返回 503。
 	projects   *projectHandler
@@ -447,7 +450,7 @@ func (rt *router) healthHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, r, rt.logger, status, health)
 }
 
-// rolesHandler 处理角色列表请求。
+// rolesHandler 处理角色集合路径与单角色路径的请求。
 //
 // 角色服务未初始化时返回 503，而不是伪造空列表。
 func (rt *router) rolesHandler(w http.ResponseWriter, r *http.Request) {

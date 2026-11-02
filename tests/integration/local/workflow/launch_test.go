@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/lingting/agentflow/internal/app"
-	"github.com/lingting/agentflow/internal/config"
 	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/execenv"
@@ -61,30 +60,8 @@ func newLaunchFixture(t *testing.T) *launchFixture {
 		logger: logger,
 		now:    time.Now().UTC(),
 	}
-	seeds, err := app.RoleSeeds(&config.Config{
-		Roles: []config.RoleConfig{
-			{
-				ID:           "planner",
-				Name:         "架构规划师",
-				Type:         domain.RoleTypePlanner,
-				Runner:       config.RunnerPi,
-				Model:        "group/free",
-				SystemPrompt: "规划提示词",
-			},
-			{
-				ID:           "developer",
-				Name:         "开发工程师",
-				Type:         domain.RoleTypeDeveloper,
-				Runner:       config.RunnerPi,
-				Model:        "group/free",
-				SystemPrompt: "开发提示词",
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("转换角色失败: %v", err)
-	}
-	if _, err := db.SeedRoles(ctx, seeds); err != nil {
+	// 固定角色由内置默认定义提供：这里使用真实初始化路径，测试不另外拼装角色定义。
+	if _, err := db.SeedRoles(ctx, app.RoleSeeds()); err != nil {
 		t.Fatalf("初始化角色失败: %v", err)
 	}
 	fixture.host = fixture.createHost(t)

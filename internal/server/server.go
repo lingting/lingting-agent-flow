@@ -566,29 +566,25 @@ func (s *Server) openDatabase(ctx context.Context) error {
 	return nil
 }
 
-// seedRoles 在角色表为空时导入配置中的初始角色。
+// seedRoles 按固定角色标识补齐缺失的角色。
 //
-// 语义由存储层的 RoleSeeder 保证：检查与写入在同一事务内完成，已有角色（含禁用
-// 角色）不会被覆盖，重复启动不会重复导入。普通启动不做任何角色同步，配置变化
-// 也不会隐式改写数据库中的角色。
+// 角色定义随代码内置（domain.DefaultRoles），语义由存储层的 RoleSeeder 保证：检查与
+// 写入在同一事务内完成，已有角色（含用户修改过的配置与禁用状态）不会被覆盖，重复启动
+// 不会重复导入。普通启动不做任何角色同步，因此重启不会用默认值覆盖用户配置。
 //
-// 配置为空或存储不支持角色初始化时直接失败：让服务带着空角色表进入可用状态，
-// 只会在用户创建任务时才暴露问题。
+// 存储不支持角色初始化时直接失败：让服务带着不完整的角色集合进入可用状态，只会在用户
+// 创建任务或打开设置页时才暴露问题。
 func (s *Server) seedRoles(ctx context.Context, store storage.Store) error {
 	seeder, ok := store.(storage.RoleSeeder)
 	if !ok {
 		return fmt.Errorf("初始化角色失败: 存储不支持角色初始化")
 	}
-	seeds, err := app.RoleSeeds(s.cfg)
-	if err != nil {
-		return err
-	}
-	created, err := seeder.SeedRoles(ctx, seeds)
+	created, err := seeder.SeedRoles(ctx, app.RoleSeeds())
 	if err != nil {
 		return fmt.Errorf("初始化角色失败: %w", err)
 	}
 	if created > 0 {
-		s.report(fmt.Sprintf("已从配置导入 %d 个角色", created))
+		s.report(fmt.Sprintf("已补齐 %d 个缺失的固定角色", created))
 	}
 	return nil
 }

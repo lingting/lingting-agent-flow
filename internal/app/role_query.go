@@ -2,25 +2,39 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage"
 )
 
-// RoleService 提供角色配置的只读查询。
+// 角色配置服务的错误类别。
 //
-// 本阶段只有查询能力：角色导入只发生在首次初始化（app.RoleSeeds +
-// storage.RoleSeeder.SeedRoles），普通启动不会同步或覆盖已有角色，
-// 也不存在角色 CRUD 入口。
+// Handler 通过 errors.Is 判断类别并映射 HTTP 状态码，不解析错误文本；面向用户的说明
+// 由错误本身携带，不包含内部实现细节。
+var (
+	// ErrRoleInvalidInput 表示提交的角色配置不合法，例如模型或系统提示词为空。
+	ErrRoleInvalidInput = errors.New("app: 角色配置参数非法")
+	// ErrRoleNotFound 表示角色不存在，或已被逻辑删除。
+	ErrRoleNotFound = errors.New("app: 角色不存在")
+)
+
+// RoleService 提供固定角色配置的查询与编辑。
+//
+// 角色集合固定为四个，由服务启动时按内置默认定义补齐（app.RoleSeeds +
+// storage.RoleSeeder.SeedRoles）；本服务不提供角色新增与删除，只允许修改
+// system_prompt、model 与 enabled 三个字段。工具策略在本阶段只读，实际执行层限制
+// 由后续任务实施。
 type RoleService struct {
 	store storage.Store
 }
 
-// NewRoleService 构造角色查询服务。
+// NewRoleService 构造角色配置服务。
 func NewRoleService(store storage.Store) (*RoleService, error) {
 	if store == nil {
-		return nil, fmt.Errorf("角色查询服务初始化失败: 存储不能为空")
+		return nil, fmt.Errorf("角色服务初始化失败: 存储不能为空")
 	}
 	return &RoleService{store: store}, nil
 }
@@ -35,4 +49,23 @@ func (s *RoleService) List(ctx context.Context) ([]domain.Role, error) {
 		return nil, fmt.Errorf("查询角色失败: %w", err)
 	}
 	return roles, nil
+}
+
+// Get 按角色标识读取单个角色的完整配置。
+//
+// 标识为空属于调用方参数错误；数据库中确实没有该角色时返回 ErrRoleNotFound，由接口层映射为
+// 404，不伪造一份默认配置。
+func (s *RoleService) Get(ctx context.Context, roleID string) (domain.Role, error) {
+	id := domain.ID(strings.TrimSpace(roleID))
+	if err := id.Validate(); err != nil {
+		return domain.Role{}, fmt.Errorf("%w: 角色标识不能为空", ErrRoleInvalidInput)
+	}
+	role, err := s.store.GetRole(ctx, id)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return domain.Role{}, fmt.Errorf("%w: %s", ErrRoleNotFound, id)
+		}
+		return domain.Role{}, fmt.Errorf("读取角色失败: %w", err)
+	}
+	return *role, nil
 }
