@@ -1,6 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 
-/** 规划中的六个一级路由与对应的导航标签、页面标题 */
+/**
+ * 一级路由与对应的导航标签、页面标题。
+ *
+ * 环境管理已经并入设置中心（`V2-M1-E1`），独立的环境导航入口被移除，因此这里只剩
+ * 五个一级路由；设置页正文断言使用与接口状态无关的固定文案。
+ */
 const ROUTES = [
   {
     path: "/overview",
@@ -10,8 +15,7 @@ const ROUTES = [
   { path: "/tasks", label: "任务", text: "创建任务" },
   { path: "/projects", label: "项目", text: "项目的作用" },
   { path: "/machines", label: "机器", text: "执行机器管理将在后续步骤实现。" },
-  { path: "/environments", label: "环境", text: "运行环境管理将在后续步骤实现。" },
-  { path: "/settings", label: "设置", text: "设置项将在后续步骤实现。" },
+  { path: "/settings", label: "设置", text: "环境管理" },
 ] as const;
 
 /**
@@ -129,7 +133,7 @@ test.describe("响应式布局", () => {
 
   test("桌面视口显示完整侧栏与导航", async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto("/environments");
+    await page.goto("/settings");
 
     await expect(page.locator(".sidebar-layout__sidebar")).toBeVisible();
     await expect(page.getByRole("menuitem")).toHaveCount(ROUTES.length);

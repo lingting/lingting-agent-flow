@@ -12,10 +12,18 @@ import type {
   CodeSaveVerifyResponse,
   ContainerDisposalAction,
   ContainerDisposalResponse,
+  CreateEnvironmentVersionRequest,
   CreateHostRequest,
   CreateProjectRequest,
   CreateTaskRequest,
   Environment,
+  EnvironmentBuildAcceptedResponse,
+  EnvironmentBuildLogResponse,
+  EnvironmentBuildRequest,
+  EnvironmentBuildStatusResponse,
+  EnvironmentDockerfileResponse,
+  EnvironmentInitRequest,
+  EnvironmentInitResponse,
   EnvironmentListResponse,
   EnvironmentType,
   EnvironmentVersion,
@@ -654,6 +662,188 @@ export function fetchEnvironmentVersion(
   return apiRequest<EnvironmentVersion>(
     `${environmentVersionPath(type, name, number)}?${params.toString()}`,
     options,
+  );
+}
+
+/**
+ * 环境工作空间初始化路径。
+ *
+ * 它只初始化远程目录结构、默认基础环境与模板语言环境，不删除、不重置任何既有版本。
+ */
+export const ENVIRONMENT_INIT_PATH = `${ENVIRONMENTS_PATH}/init`;
+
+/** 单个环境定义的路径（`{type}/{name}` 两段，与 Go 端路径解析规则一致） */
+export function environmentDefinitionPath(type: EnvironmentType, name: string): string {
+  if (!name.trim()) {
+    throw new Error("环境名称不能为空");
+  }
+  return `${ENVIRONMENTS_PATH}/${encodeURIComponent(type)}/${encodeURIComponent(name)}`;
+}
+
+/** 环境版本集合路径（创建新版本的入口） */
+export function environmentVersionsPath(type: EnvironmentType, name: string): string {
+  return `${environmentDefinitionPath(type, name)}/versions`;
+}
+
+/** 触发环境构建的路径 */
+export function environmentBuildPath(type: EnvironmentType, name: string): string {
+  return `${environmentDefinitionPath(type, name)}/build`;
+}
+
+/** 指定版本构建状态的路径 */
+export function environmentBuildStatusPath(
+  type: EnvironmentType,
+  name: string,
+  number: number,
+): string {
+  return `${environmentVersionPath(type, name, number)}/build-status`;
+}
+
+/** 指定版本 Dockerfile 的路径 */
+export function environmentDockerfilePath(
+  type: EnvironmentType,
+  name: string,
+  number: number,
+): string {
+  return `${environmentVersionPath(type, name, number)}/dockerfile`;
+}
+
+/** 指定版本构建日志的路径 */
+export function environmentBuildLogPath(
+  type: EnvironmentType,
+  name: string,
+  number: number,
+): string {
+  return `${environmentVersionPath(type, name, number)}/build-log`;
+}
+
+/** 把 `host_id` 拼成查询串；调用方必须传入真实节点标识 */
+function environmentHostQuery(hostID: string): string {
+  const trimmed = hostID.trim();
+  if (!trimmed) {
+    throw new Error("执行节点标识不能为空");
+  }
+  return new URLSearchParams({ host_id: trimmed }).toString();
+}
+
+/**
+ * 初始化指定执行节点上的环境工作空间。
+ *
+ * 复用服务端既有初始化流程：预检通过后才创建目录与默认版本，失败时不会留下半成品。
+ * 该操作会建立 SSH 连接并写入远程目录，因此不设客户端超时：客户端提前断开会让
+ * "是否已经初始化"变成未知状态。
+ */
+export function initEnvironment(body: EnvironmentInitRequest, options: ApiRequestOptions = {}) {
+  return apiRequest<EnvironmentInitResponse>(ENVIRONMENT_INIT_PATH, {
+    ...options,
+    body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json", ...options.headers },
+    method: "POST",
+    timeoutMs: options.timeoutMs ?? 0,
+  });
+}
+
+/**
+ * 创建一个新的环境版本。
+ *
+ * 服务端只追加版本、不覆盖历史；内容与已有成功版本一致时复用既有版本号。
+ * 写远程版本目录需要 SSH 传输，可能超过默认超时，因此不设客户端超时。
+ */
+export function createEnvironmentVersion(
+  type: EnvironmentType,
+  name: string,
+  body: CreateEnvironmentVersionRequest,
+  options: ApiRequestOptions = {},
+) {
+  return apiRequest<EnvironmentVersion>(environmentVersionsPath(type, name), {
+    ...options,
+    body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json", ...options.headers },
+    method: "POST",
+    timeoutMs: options.timeoutMs ?? 0,
+  });
+}
+
+/**
+ * 触发一次环境构建。
+ *
+ * 服务端返回 202 与"已受理"，构建在后台执行：`in_progress` 不代表构建成功，
+ * 结论必须通过 `fetchEnvironmentBuildStatus` 读取真实记录。
+ */
+export function startEnvironmentBuild(
+  type: EnvironmentType,
+  name: string,
+  body: EnvironmentBuildRequest,
+  options: ApiRequestOptions = {},
+) {
+  return apiRequest<EnvironmentBuildAcceptedResponse>(environmentBuildPath(type, name), {
+    ...options,
+    body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json", ...options.headers },
+    method: "POST",
+  });
+}
+
+/**
+ * 查询指定版本的构建状态。
+ *
+ * 状态码即结论：`200` 成功、`202` 待构建或构建中、`500` 失败
+ * （`environment_build_failed`）或结果不确定（`environment_build_uncertain`）。
+ * 调用方必须按 `ApiError.code` 区分"失败"与"结果未知"，并展示服务端 `message`。
+ */
+export function fetchEnvironmentBuildStatus(
+  hostID: string,
+  type: EnvironmentType,
+  name: string,
+  number: number,
+  options: ApiRequestOptions = {},
+) {
+  const query = environmentHostQuery(hostID);
+  return apiRequest<EnvironmentBuildStatusResponse>(
+    `${environmentBuildStatusPath(type, name, number)}?${query}`,
+    options,
+  );
+}
+
+/** 读取指定版本的 Dockerfile 正文（远程读取，不修改任何版本） */
+export function fetchEnvironmentDockerfile(
+  hostID: string,
+  type: EnvironmentType,
+  name: string,
+  number: number,
+  options: ApiRequestOptions = {},
+) {
+  const query = environmentHostQuery(hostID);
+  return apiRequest<EnvironmentDockerfileResponse>(
+    `${environmentDockerfilePath(type, name, number)}?${query}`,
+    {
+      ...options,
+      // 读取要建立 SSH 会话与 SFTP 通道，比普通查询慢。
+      timeoutMs: options.timeoutMs ?? 0,
+    },
+  );
+}
+
+/**
+ * 读取指定版本的构建日志。
+ *
+ * 日志位置由服务端从已验证的节点、环境与版本记录推导，请求不接受任何路径参数；
+ * 读取失败（包括日志不存在）会返回错误，不能显示成空日志。
+ */
+export function fetchEnvironmentBuildLog(
+  hostID: string,
+  type: EnvironmentType,
+  name: string,
+  number: number,
+  options: ApiRequestOptions = {},
+) {
+  const query = environmentHostQuery(hostID);
+  return apiRequest<EnvironmentBuildLogResponse>(
+    `${environmentBuildLogPath(type, name, number)}?${query}`,
+    {
+      ...options,
+      timeoutMs: options.timeoutMs ?? 0,
+    },
   );
 }
 

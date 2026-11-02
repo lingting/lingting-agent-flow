@@ -190,6 +190,32 @@ func NextVersionNumber(existing []int) (int, error) {
 	return next, nil
 }
 
+// FindReusableVersion 查找内容完全一致且已成功构建的既有版本。
+//
+// 复用条件必须同时满足：Dockerfile 哈希、构建上下文哈希与父环境版本都未变化，且该版本
+// 已经构建成功。任一条件不满足都不得复用——否则配置变更会被旧版本掩盖，未完成构建的
+// 版本也会被当成可用版本。
+//
+// 调用方在复用前仍需核验镜像是否仍然存在：本函数只依据持久化记录判定，不访问远程镜像。
+func FindReusableVersion(
+	versions []EnvironmentVersion,
+	dockerfileHash, contextHash, parentVersion string,
+) (EnvironmentVersion, bool) {
+	for _, version := range versions {
+		if version.DockerfileSHA256 != dockerfileHash || version.ContextSHA256 != contextHash {
+			continue
+		}
+		if version.ParentVersion != parentVersion {
+			continue
+		}
+		if version.Status != BuildStatusSucceeded {
+			continue
+		}
+		return version, true
+	}
+	return EnvironmentVersion{}, false
+}
+
 // BuildStatus 是环境版本对应的镜像构建状态。
 type BuildStatus string
 
@@ -205,6 +231,12 @@ const (
 	BuildStatusSucceeded BuildStatus = "succeeded"
 	// BuildStatusFailed 表示构建失败或镜像核实失败。
 	BuildStatusFailed BuildStatus = "failed"
+	// BuildStatusUncertain 表示构建结果无法确认。
+	//
+	// 典型来源是进程退出或服务停止导致构建被中断：此时镜像可能已经生成，也可能
+	// 没有，因此既不能记为 succeeded，也不能记为 failed。该状态只能由显式重建
+	// （或人工核验）收敛为确定的结论。
+	BuildStatusUncertain BuildStatus = "uncertain"
 )
 
 // String 返回构建状态的字符串形式。
@@ -215,7 +247,11 @@ func (s BuildStatus) String() string {
 // Validate 校验构建状态是否属于已知取值。
 func (s BuildStatus) Validate() error {
 	switch s {
-	case BuildStatusPending, BuildStatusBuilding, BuildStatusSucceeded, BuildStatusFailed:
+	case BuildStatusPending,
+		BuildStatusBuilding,
+		BuildStatusSucceeded,
+		BuildStatusFailed,
+		BuildStatusUncertain:
 		return nil
 	default:
 		return invalidField("EnvironmentVersion", "build_status", "未知的构建状态 "+string(s))
@@ -386,6 +422,28 @@ func (v *EnvironmentVersion) MarkFailed(summary string) error {
 		return fmt.Errorf("%w: EnvironmentVersion 已成功构建，不能标记为失败", ErrInvalidState)
 	}
 	v.Status = BuildStatusFailed
+	v.ImageID = ""
+	v.BuiltAt = nil
+	v.ErrorSummary = strings.TrimSpace(summary)
+	return nil
+}
+
+// MarkUncertain 记录"构建结果无法确认"。
+//
+// 与 MarkFailed 的区别是语义：失败是"执行发生且确定没有产出可用镜像"，不确定是
+// "执行被中断，无法判断镜像是否已经生成"。两者都不可用，但只有 uncertain 需要
+// 后续核验或显式重建才能得到结论，因此不能合并成一个状态。
+func (v *EnvironmentVersion) MarkUncertain(summary string) error {
+	if v == nil {
+		return invalidField("EnvironmentVersion", "", "实体为空")
+	}
+	if v.Status == BuildStatusSucceeded {
+		return fmt.Errorf(
+			"%w: EnvironmentVersion 已成功构建，不能标记为结果不确定",
+			ErrInvalidState,
+		)
+	}
+	v.Status = BuildStatusUncertain
 	v.ImageID = ""
 	v.BuiltAt = nil
 	v.ErrorSummary = strings.TrimSpace(summary)

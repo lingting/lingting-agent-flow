@@ -5,23 +5,37 @@ import { readProjectFile } from "../internal/project";
 
 printArtifactDir();
 
-/** 规划中的六个一级路由，与导航配置必须完全一致 */
-const PLANNED_PATHS = [
-  "/overview",
-  "/tasks",
-  "/projects",
-  "/machines",
-  "/environments",
-  "/settings",
-] as const;
+/**
+ * 一级路由，与导航配置必须完全一致。
+ *
+ * 环境管理内嵌化之后移除了独立的环境入口：`/environments` 不再是一级路由，
+ * 环境相关的全部操作都在设置页内完成。
+ */
+const PLANNED_PATHS = ["/overview", "/tasks", "/projects", "/machines", "/settings"] as const;
 
 describe("导航与路由元数据", () => {
-  it("导航配置集中定义六个规划路径", () => {
+  it("导航配置集中定义全部一级路径", () => {
     const navigation = readProjectFile("src/app/navigation.tsx");
 
     for (const path of PLANNED_PATHS) {
       expect(navigation).toContain(`path: "${path.slice(1)}"`);
     }
+  });
+
+  it("独立环境导航入口与页面都已移除", () => {
+    const navigation = readProjectFile("src/app/navigation.tsx");
+
+    expect(navigation).not.toContain('path: "environments"');
+    expect(navigation).not.toContain("EnvironmentsPage");
+    // 页面目录本身也必须移除，避免留下第二套环境功能入口。
+    expect(() => readProjectFile("src/pages/environments/EnvironmentsPage.tsx")).toThrow();
+  });
+
+  it("设置页承载环境管理", () => {
+    const settings = readProjectFile("src/pages/settings/SettingsPage.tsx");
+
+    expect(settings).toContain("EnvironmentManagementPanel");
+    expect(settings).toContain("环境管理");
   });
 
   it("根路径由布局重定向到概览页", () => {

@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 
 	"github.com/lingting/agentflow/internal/domain"
@@ -74,6 +75,54 @@ WHERE host_id = ? AND env_type = ? AND env_name = ? AND version_number = ?`
 		return wrapError("更新环境版本", err)
 	}
 	return ensureAffected(result, "环境版本", domain.ID(version.Label()))
+}
+
+// UpdateEnvironmentVersionIfStatus 在库中状态仍属于 expected 时更新构建结果。
+//
+// 状态前置条件写在 SQL 的 WHERE 子句中，因此"读取 → 判断 → 写入"之间不存在空隙：
+// 迟到的构建结果不会把已收敛为 uncertain 或 failed 的记录改写成 succeeded。
+func (s environmentVersionStore) UpdateEnvironmentVersionIfStatus(
+	ctx context.Context,
+	version domain.EnvironmentVersion,
+	expected []domain.BuildStatus,
+) error {
+	if err := version.Validate(); err != nil {
+		return err
+	}
+	statuses := make([]string, 0, len(expected))
+	for _, status := range expected {
+		if err := status.Validate(); err != nil {
+			return err
+		}
+		statuses = append(statuses, status.String())
+	}
+	if len(statuses) == 0 {
+		return fmt.Errorf("%w: 条件更新环境版本缺少状态前置条件", storage.ErrInvalidData)
+	}
+	statement := `
+UPDATE environment_versions SET
+	image_ref = ?, image_id = ?, build_status = ?, error_summary = ?, built_at = ?
+WHERE host_id = ? AND env_type = ? AND env_name = ? AND version_number = ?
+	AND build_status IN (` + placeholders(len(statuses)) + `)`
+	args := []any{
+		version.ImageRef,
+		nullIfBlank(version.ImageID),
+		version.Status.String(),
+		nullIfBlank(version.ErrorSummary),
+		toMillisPtr(version.BuiltAt),
+		toIDParam(version.HostID),
+		version.Ref.Type.String(),
+		version.Ref.Name,
+		version.Number,
+	}
+	for _, status := range statuses {
+		args = append(args, status)
+	}
+	result, err := s.q.ExecContext(ctx, statement, args...)
+	if err != nil {
+		return wrapError("条件更新环境版本", err)
+	}
+	return ensureStatusAffected(result, "环境版本", domain.ID(version.Label()))
 }
 
 // environmentVersionArgs 构造写入环境版本的参数列表。

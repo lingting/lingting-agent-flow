@@ -39,6 +39,16 @@ type Deps struct {
 	//
 	// 它只读取持久化的环境与版本元数据：不建立远程会话，也不会触发构建或初始化。
 	Environments *app.EnvironmentQueryService
+	// EnvironmentWrites 是环境同步写路径，为空时初始化、创建版本、读取远程
+	// Dockerfile 与构建日志的接口返回服务不可用。
+	//
+	// 它由 app.EnvironmentService 实现：远程连接、版本目录与上下文校验都在应用层，
+	// HTTP 层只做协议转换。写路径与只读查询分开注入，使"看环境"不需要远程能力。
+	EnvironmentWrites EnvironmentWriter
+	// EnvironmentBuilds 是后台环境构建入口，为空时构建接口返回服务不可用。
+	//
+	// 构建是长操作：受理后由应用层后台服务执行，接口只返回真实初始状态。
+	EnvironmentBuilds EnvironmentBuilder
 	// ExecutionRecords 是执行记录查询服务，为空时执行记录接口返回服务不可用。
 	ExecutionRecords *app.ExecutionRecordService
 	// StepExecutor 是单步骤执行协调器，为空时步骤执行接口返回服务不可用。
@@ -107,14 +117,19 @@ func NewHandler(deps Deps) http.Handler {
 		logger = slog.Default()
 	}
 	router := &router{
-		roles:        newRoleHandler(deps.Roles, logger),
-		projects:     newProjectHandler(deps.Projects, logger),
-		environments: newEnvironmentHandler(deps.Environments, logger),
-		health:       deps.Health,
-		systemInfo:   deps.SystemInfo,
-		tasks:        newTaskHandler(deps.Tasks, logger),
-		hosts:        newHostHandler(deps.Hosts, logger),
-		executions:   newExecutionHandler(deps.ExecutionRecords, logger),
+		roles:    newRoleHandler(deps.Roles, logger),
+		projects: newProjectHandler(deps.Projects, logger),
+		environments: newEnvironmentHandler(
+			deps.Environments,
+			deps.EnvironmentWrites,
+			deps.EnvironmentBuilds,
+			logger,
+		),
+		health:     deps.Health,
+		systemInfo: deps.SystemInfo,
+		tasks:      newTaskHandler(deps.Tasks, logger),
+		hosts:      newHostHandler(deps.Hosts, logger),
+		executions: newExecutionHandler(deps.ExecutionRecords, logger),
 		stepExec: newStepExecutionHandler(
 			deps.StepExecutor,
 			deps.StepWorkflow,
@@ -142,8 +157,8 @@ func NewHandler(deps Deps) http.Handler {
 	// 整体更新与逻辑删除。
 	mux.HandleFunc(PathProjects, router.projectsHandler)
 	mux.HandleFunc(projectPathPrefix, router.projectsHandler)
-	// 环境查询只有集合路径与 "{type}/{name}/versions/{number}" 子路径：
-	// 本阶段不提供环境 CRUD、构建与 Dockerfile 接口。
+	// 环境接口同时注册集合路径与 "{type}/{name}/…" 子路径：集合路径支持列表，
+	// 子路径按段形状分发到环境详情、版本、Dockerfile、构建与构建日志处理器。
 	mux.HandleFunc(PathEnvironments, router.environmentsHandler)
 	mux.HandleFunc(environmentPathPrefix, router.environmentsHandler)
 	mux.HandleFunc(PathHealth, router.healthHandler)

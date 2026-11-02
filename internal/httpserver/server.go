@@ -51,6 +51,13 @@ type Options struct {
 	//
 	// 它只读取持久化的环境与版本元数据：不建立 SSH / Docker 会话，也不会触发构建。
 	Environments *app.EnvironmentQueryService
+	// EnvironmentWrites 是环境同步写路径，为空时相关接口报告服务不可用。
+	//
+	// 它依赖 SSH 与存储：初始化工作空间、写入新版本、读取远程 Dockerfile 与日志
+	// 都经由 app.EnvironmentService。
+	EnvironmentWrites httpapi.EnvironmentWriter
+	// EnvironmentBuilds 是后台环境构建入口，为空时构建接口报告服务不可用。
+	EnvironmentBuilds httpapi.EnvironmentBuilder
 	// ExecutionRecords 是执行记录查询服务，为空时执行记录接口报告服务不可用。
 	ExecutionRecords *app.ExecutionRecordService
 	// StepExecutor 是单步骤执行协调器，为空时步骤执行接口报告服务不可用。
@@ -132,6 +139,8 @@ func New(options Options) (*Server, error) {
 		Tasks:             options.Tasks,
 		Hosts:             options.Hosts,
 		Environments:      options.Environments,
+		EnvironmentWrites: options.EnvironmentWrites,
+		EnvironmentBuilds: options.EnvironmentBuilds,
 		ExecutionRecords:  options.ExecutionRecords,
 		StepExecutor:      options.StepExecutor,
 		Validation:        options.Validation,

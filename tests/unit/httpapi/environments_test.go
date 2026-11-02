@@ -469,22 +469,40 @@ func TestEnvironmentVersionRejectsMissingHostID(t *testing.T) {
 	}
 }
 
-// TestEnvironmentUnknownSubPathsAreNotFound 校验本阶段未提供的子路径统一 404。
+// TestEnvironmentUnknownSubPathsAreNotFound 校验不存在的子路径统一 404。
+//
+// 环境接口扩展后，`{type}/{name}` 与 `{type}/{name}/versions` 都是真实资源：前者是环境
+// 详情，后者是创建版本的入口。这里只断言"形状不存在"的路径仍然 404，避免把新增接口
+// 误判成未知资源；方法不允许的情形由后面的 405 用例覆盖。
 func TestEnvironmentUnknownSubPathsAreNotFound(t *testing.T) {
 	t.Parallel()
 	fixture := newEnvironmentAPIFixture(t)
 	hostID := fixture.host.ID.String()
 	for _, path := range []string{
+		// 段数不足：环境类型段之后缺少环境名称。
 		httpapi.PathEnvironments + "/base?host_id=" + hostID,
-		httpapi.PathEnvironments + "/base/base?host_id=" + hostID,
-		httpapi.PathEnvironments + "/base/base/versions?host_id=" + hostID,
-		httpapi.PathEnvironments + "/base/base/versions/1/build?host_id=" + hostID,
+		// 未知子资源名。
+		httpapi.PathEnvironments + "/base/base/unknown?host_id=" + hostID,
 		httpapi.PathEnvironments + "/base/base/dockerfile?host_id=" + hostID,
+		// 版本路径下的未知子资源。
+		httpapi.PathEnvironments + "/base/base/versions/1/unknown?host_id=" + hostID,
+		httpapi.PathEnvironments + "/base/base/versions/1/build?host_id=" + hostID,
 	} {
 		recorder := doRequest(t, fixture.handler, http.MethodGet, path, "")
 		if recorder.Code != http.StatusNotFound {
 			t.Fatalf("%s 应返回 404，实际 %d", path, recorder.Code)
 		}
+	}
+	// 版本集合只接受 POST：读取它属于方法错误，不是资源不存在。
+	recorder := doRequest(
+		t,
+		fixture.handler,
+		http.MethodGet,
+		httpapi.PathEnvironments+"/base/base/versions?host_id="+hostID,
+		"",
+	)
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("版本集合的 GET 应返回 405，实际 %d", recorder.Code)
 	}
 }
 

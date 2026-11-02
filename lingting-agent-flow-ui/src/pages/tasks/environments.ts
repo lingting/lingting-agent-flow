@@ -11,12 +11,17 @@
  */
 import type { BuildStatus, Environment, EnvironmentVersion } from "@/lib/api";
 
-/** 构建状态的中文标签，取值与 Go 端 `domain.BuildStatus` 一一对应 */
+/**
+ * 构建状态的中文标签，取值与 Go 端 `domain.BuildStatus` 一一对应。
+ *
+ * `uncertain` 必须单独展示：把它折叠成失败或成功都会让用户误判镜像是否存在。
+ */
 export const BUILD_STATUS_LABEL: Record<BuildStatus, string> = {
   building: "构建中",
   failed: "构建失败",
   pending: "待构建",
   succeeded: "构建成功",
+  uncertain: "结果未知",
 };
 
 /** 读取构建状态标签；未知取值原样展示 */

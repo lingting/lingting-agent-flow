@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path"
@@ -11,6 +12,19 @@ import (
 	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/sshclient"
+)
+
+// 环境构建的错误类别。
+//
+// HTTP 层依据这些类别区分"正在构建（409）"、"服务未装配或已停止（503）"与
+// "没有可读取的构建日志（404）"，不匹配错误文本。
+var (
+	// ErrEnvironmentBuildInProgress 表示该环境版本已有一个后台构建在进行。
+	ErrEnvironmentBuildInProgress = errors.New("app: 该环境版本正在构建")
+	// ErrEnvironmentBuildStopped 表示后台构建服务未启动或已停止。
+	ErrEnvironmentBuildStopped = errors.New("app: 环境构建服务未启动或已停止")
+	// ErrEnvironmentBuildLogMissing 表示该版本没有可读取的构建日志。
+	ErrEnvironmentBuildLogMissing = errors.New("app: 构建日志不存在")
 )
 
 // BuildRequest 是构建环境版本的输入。
@@ -112,7 +126,9 @@ func (s *EnvironmentService) buildLocked(
 	if err != nil {
 		return BuildResult{}, fmt.Errorf("读取远程 Dockerfile 失败: %w", err)
 	}
-	context, err := buildEnvironmentContext(dockerfile, nil)
+	// 局部变量不能命名为 context：遮蔽标准库包会让下面的中断收敛写入无法引用
+	// context.WithoutCancel。
+	buildContext, err := buildEnvironmentContext(dockerfile, nil)
 	if err != nil {
 		return BuildResult{}, fmt.Errorf("构造构建上下文失败: %w", err)
 	}
@@ -120,7 +136,7 @@ func (s *EnvironmentService) buildLocked(
 	spec := docker.BuildSpec{
 		Version:          version,
 		ParentImageRef:   parentImageRef,
-		Context:          context,
+		Context:          buildContext,
 		RemoteContextDir: session.layout.BuildDir(buildID) + "/context",
 		LogPath:          session.layout.BuildLogPath(buildID),
 		BuildID:          buildID,
@@ -135,8 +151,22 @@ func (s *EnvironmentService) buildLocked(
 	build, buildErr := session.runner.BuildImage(ctx, session.transfer, spec)
 	if buildErr != nil {
 		failed := version
-		_ = failed.MarkFailed(buildErr.Error())
-		if updateErr := s.store.UpdateEnvironmentVersion(ctx, failed); updateErr != nil {
+		if interrupted := ctx.Err(); interrupted != nil {
+			// 构建被中断（服务停止或调用方取消）：镜像可能已经生成，也可能没有，
+			// 因此不能记为 failed，只能记为结果不确定，等待显式重建或人工核验。
+			_ = failed.MarkUncertain(
+				"构建被中断，结果无法确认: " + buildErr.Error(),
+			)
+		} else {
+			_ = failed.MarkFailed(buildErr.Error())
+		}
+		// ctx 已被取消时不能用它写库：构建中断的结论必须落库，否则记录会永远
+		// 停在 building，看起来像"仍在构建"。
+		writeCtx := ctx
+		if ctx.Err() != nil {
+			writeCtx = context.WithoutCancel(ctx)
+		}
+		if updateErr := s.store.UpdateEnvironmentVersion(writeCtx, failed); updateErr != nil {
 			s.debug(
 				ctx,
 				"记录构建失败状态失败",
@@ -315,4 +345,77 @@ func (s *EnvironmentService) DownloadBuildLog(
 		return remotePath, err
 	}
 	return remotePath, nil
+}
+
+// ReadBuildLogRequest 是读取构建日志内容的输入。
+//
+// 它不接受任何远程或本机路径：日志位置由服务端根据已验证的节点、环境与版本记录
+// 推导，调用方只能指定"哪个节点上的哪个环境版本"。
+type ReadBuildLogRequest struct {
+	// MachineID 是目标执行节点。
+	MachineID string
+	// Ref 是环境引用。
+	Ref domain.EnvironmentRef
+	// VersionNumber 是版本号，0 表示最新版本。
+	VersionNumber int
+}
+
+// BuildLog 是一次构建日志读取的结果。
+type BuildLog struct {
+	// Version 是版本元数据。
+	Version domain.EnvironmentVersion
+	// Content 是构建日志正文，最多 docker.MaxBuildLogBytes 字节。
+	Content []byte
+	// RemotePath 是日志在远程工作空间中的路径，只用于诊断展示。
+	RemotePath string
+}
+
+// ReadBuildLog 读取指定版本的构建日志内容。
+//
+// 日志路径固定由 docker.Layout 与版本构建配置生成，不接受调用方传入路径；
+// 文件缺失按读取失败返回，不会伪装成"空日志"。
+func (s *EnvironmentService) ReadBuildLog(
+	ctx context.Context,
+	request ReadBuildLogRequest,
+) (BuildLog, error) {
+	var log BuildLog
+	err := s.withRemoteDocker(
+		ctx,
+		request.MachineID,
+		false,
+		func(ctx context.Context, session *remoteDocker) error {
+			version, err := s.resolveVersion(ctx, session.host.ID, request.Ref, request.VersionNumber)
+			if err != nil {
+				return err
+			}
+			if version.Status == domain.BuildStatusPending {
+				return fmt.Errorf(
+					"%w: 环境 %s 的版本 %s 尚未构建，没有构建日志",
+					ErrEnvironmentBuildLogMissing,
+					version.Ref.Label(),
+					version.Label(),
+				)
+			}
+			remotePath := session.layout.BuildLogPath(buildIdentifier(version))
+			content, readErr := session.transfer.ReadFile(ctx, remotePath, docker.MaxBuildLogBytes)
+			if readErr != nil {
+				// 只有"记录存在但日志文件缺失"才是 404 语义；连接中断、文件过大或
+				// 权限问题必须如实报告为读取失败，不能伪装成"日志不存在"。
+				if isRemoteNotExist(readErr) {
+					return fmt.Errorf(
+						"%w: 远程构建日志不存在: %s",
+						ErrEnvironmentBuildLogMissing,
+						remotePath,
+					)
+				}
+				return fmt.Errorf("读取远程构建日志失败: %s: %w", remotePath, readErr)
+			}
+			log = BuildLog{Version: version, Content: content, RemotePath: remotePath}
+			return nil
+		},
+	)
+	if err != nil {
+		return BuildLog{}, err
+	}
+	return log, nil
 }

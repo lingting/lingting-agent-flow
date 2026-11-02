@@ -477,8 +477,13 @@ export type StartTaskResponse = {
  */
 export type EnvironmentType = "base" | "language";
 
-/** 环境版本的构建状态，取值与 Go 端 `domain.BuildStatus` 一致 */
-export type BuildStatus = "pending" | "building" | "succeeded" | "failed";
+/**
+ * 环境版本的构建状态，取值与 Go 端 `domain.BuildStatus` 一一对应。
+ *
+ * `uncertain` 表示构建被中断、结果无法确认：镜像可能已经生成，也可能没有。
+ * 它不等同于失败，前端不得把它显示成失败或成功。
+ */
+export type BuildStatus = "pending" | "building" | "succeeded" | "failed" | "uncertain";
 
 /** 环境版本的对外表示，与 Go 端 `httpapi.EnvironmentVersionResponse` 一一对应 */
 export type EnvironmentVersion = {
@@ -528,6 +533,115 @@ export type Environment = {
 export type EnvironmentListResponse = {
   records: Environment[];
   total: number;
+};
+
+/**
+ * 环境工作空间初始化请求，与 Go 端 `httpapi.EnvironmentInitRequest` 一致。
+ *
+ * `host_id` 必填：环境属于具体执行节点，服务端不会回退到默认节点。
+ */
+export type EnvironmentInitRequest = {
+  host_id: string;
+  /** 同时按模板初始化的语言环境名称 */
+  with_languages?: string[];
+};
+
+/** 远程 Docker 预检结果，与 Go 端 `httpapi.EnvironmentPreflightResponse` 一致 */
+export type EnvironmentPreflight = {
+  ready: boolean;
+  error_code?: string;
+  detail?: string;
+  cli_version?: string;
+  engine_version?: string;
+  api_version?: string;
+  workspace_writable: boolean;
+  free_disk_bytes: number;
+};
+
+/** 环境工作空间初始化结果，与 Go 端 `httpapi.EnvironmentInitResponse` 一致 */
+export type EnvironmentInitResponse = {
+  host_id: string;
+  host_name: string;
+  workspace_root: string;
+  preflight: EnvironmentPreflight;
+  /** 本次新建的远程路径 */
+  created: string[];
+  /** 初始化后存在的环境引用（`type/name`） */
+  environments: string[];
+};
+
+/** 构建上下文中的额外文件，与 Go 端 `httpapi.EnvironmentContextFileRequest` 一致 */
+export type EnvironmentContextFile = {
+  /** 相对构建上下文的路径，服务端会再次规范化与校验 */
+  path: string;
+  content: string;
+  /** 文件权限位，省略时由服务端使用 0644 */
+  mode?: number;
+};
+
+/**
+ * 创建新环境版本的请求，与 Go 端 `httpapi.EnvironmentCreateVersionRequest` 一致。
+ *
+ * 提交的永远是"新版本的内容"：历史版本不会被修改；内容与已有成功版本一致时
+ * 服务端会复用既有版本号，不会产生重复版本。
+ */
+export type CreateEnvironmentVersionRequest = {
+  host_id: string;
+  dockerfile: string;
+  /** 语言环境依赖的父基础环境版本标签 */
+  parent_version?: string;
+  extra_files?: EnvironmentContextFile[];
+};
+
+/** 触发环境构建的请求，与 Go 端 `httpapi.EnvironmentBuildRequest` 一致 */
+export type EnvironmentBuildRequest = {
+  host_id: string;
+  /** 要构建的版本号；必填，不接受"最新版本"的隐式语义 */
+  version: number;
+  no_cache?: boolean;
+};
+
+/**
+ * 受理环境构建的响应，与 Go 端 `httpapi.EnvironmentBuildResponse` 一致。
+ *
+ * `in_progress` 只表示服务端已受理并在后台执行，**不代表构建成功**；
+ * 构建结论必须由构建状态接口返回的真实状态表达。
+ */
+export type EnvironmentBuildAcceptedResponse = {
+  version: EnvironmentVersion;
+  version_number: number;
+  accepted_at: string;
+  in_progress: boolean;
+};
+
+/** 构建状态查询响应，与 Go 端 `httpapi.EnvironmentBuildStatusResponse` 一致 */
+export type EnvironmentBuildStatusResponse = {
+  version: EnvironmentVersion;
+  /** 本服务当前是否确实有在途构建在执行该环境 */
+  in_progress: boolean;
+  accepted_at?: string;
+};
+
+/** Dockerfile 内容，与 Go 端 `httpapi.EnvironmentDockerfileResponse` 一致 */
+export type EnvironmentDockerfileResponse = {
+  type: EnvironmentType;
+  name: string;
+  version: string;
+  version_number: number;
+  content: string;
+  /** Dockerfile 在远程工作空间中的路径，只用于诊断展示 */
+  remote_path: string;
+};
+
+/** 构建日志内容，与 Go 端 `httpapi.EnvironmentBuildLogResponse` 一致 */
+export type EnvironmentBuildLogResponse = {
+  type: EnvironmentType;
+  name: string;
+  version: string;
+  version_number: number;
+  content: string;
+  /** 日志在远程工作空间中的路径，只用于诊断展示 */
+  remote_path: string;
 };
 
 /**

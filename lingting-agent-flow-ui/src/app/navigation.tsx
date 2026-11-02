@@ -1,5 +1,4 @@
 import {
-  ClusterOutlined,
   DashboardOutlined,
   DeploymentUnitOutlined,
   ProjectOutlined,
@@ -8,7 +7,6 @@ import {
 } from "@ant-design/icons";
 import type { MenuRouteDefinition } from "lingting-react-ui";
 
-import { EnvironmentsPage } from "@/pages/environments";
 import { MachinesPage } from "@/pages/machines";
 import { OverviewPage } from "@/pages/overview";
 import { ProjectsPage } from "@/pages/projects";
@@ -40,12 +38,6 @@ export const navigationRoutes: readonly MenuRouteDefinition[] = [
     icon: <DeploymentUnitOutlined />,
     path: "machines",
     title: "机器",
-  },
-  {
-    component: EnvironmentsPage,
-    icon: <ClusterOutlined />,
-    path: "environments",
-    title: "环境",
   },
   {
     component: SettingsPage,

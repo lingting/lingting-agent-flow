@@ -721,7 +721,17 @@ type EnvironmentVersionFilter struct {
 type EnvironmentVersionStore interface {
 	CreateEnvironmentVersion(ctx context.Context, version domain.EnvironmentVersion) error
 	// UpdateEnvironmentVersion 只更新构建状态、镜像 ID、构建时间与错误摘要。
+	// UpdateEnvironmentVersion 只更新构建状态、镜像 ID、构建时间与错误摘要。
 	UpdateEnvironmentVersion(ctx context.Context, version domain.EnvironmentVersion) error
+	// UpdateEnvironmentVersionIfStatus 在库中状态仍属于 expected 时更新构建结果。
+	//
+	// 它用于收敛"没有执行者仍在推进"的构建记录：状态前置条件使迟到的构建结果不会
+	// 覆盖已被收敛的结论。状态不在 expected 中时返回 storage.ErrConflict。
+	UpdateEnvironmentVersionIfStatus(
+		ctx context.Context,
+		version domain.EnvironmentVersion,
+		expected []domain.BuildStatus,
+	) error
 	GetEnvironmentVersion(
 		ctx context.Context,
 		hostID domain.ID,

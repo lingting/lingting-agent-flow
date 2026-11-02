@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
@@ -76,11 +77,31 @@ func (s *EnvironmentQueryService) loadHost(
 	ctx context.Context,
 	hostID string,
 ) (domain.ExecutionHost, error) {
-	id := domain.ID(hostID)
+	return loadEnvironmentHost(ctx, s.store, hostID)
+}
+
+// environmentHostStore 是环境操作读取执行节点所需的最小存储能力。
+//
+// 只读查询服务与后台构建管理器都只需要"按标识读取节点"，因此这里用一个窄接口
+// 而不是完整 storage.Store：两者都不应该被迫依赖无关的存储方法。
+type environmentHostStore interface {
+	GetExecutionHost(ctx context.Context, id domain.ID) (*domain.ExecutionHost, error)
+}
+
+// loadEnvironmentHost 读取环境操作的目标执行节点。
+//
+// 查询服务与环境写路径共用同一份判定：节点标识非法属于参数错误，记录不存在属于
+// 404，读取失败属于服务内部错误。这样 HTTP 层不需要按调用入口重复猜测错误语义。
+func loadEnvironmentHost(
+	ctx context.Context,
+	store environmentHostStore,
+	hostID string,
+) (domain.ExecutionHost, error) {
+	id := domain.ID(strings.TrimSpace(hostID))
 	if err := id.Validate(); err != nil {
 		return domain.ExecutionHost{}, fmt.Errorf("%w: 执行节点标识不能为空", ErrEnvironmentInvalidInput)
 	}
-	host, err := s.store.GetExecutionHost(ctx, id)
+	host, err := store.GetExecutionHost(ctx, id)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return domain.ExecutionHost{}, fmt.Errorf("%w: %s", ErrEnvironmentHostNotFound, hostID)
@@ -278,7 +299,8 @@ func (s *EnvironmentService) resolveVersion(
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
 				return domain.EnvironmentVersion{}, fmt.Errorf(
-					"环境 %s 不存在版本 %s",
+					"%w: 环境 %s 不存在版本 %s",
+					ErrEnvironmentVersionNotFound,
 					ref.Label(),
 					domain.FormatVersionLabel(number),
 				)
@@ -296,7 +318,8 @@ func (s *EnvironmentService) resolveVersion(
 	}
 	if len(versions) == 0 {
 		return domain.EnvironmentVersion{}, fmt.Errorf(
-			"环境 %s 尚未创建版本；请先执行 agentflow docker init",
+			"%w: 环境 %s 尚未创建版本；请先初始化该执行节点上的环境",
+			ErrEnvironmentNotFound,
 			ref.Label(),
 		)
 	}

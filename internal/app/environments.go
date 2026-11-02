@@ -137,8 +137,9 @@ func (s *EnvironmentService) Init(ctx context.Context, options InitOptions) (Ini
 	result := InitResult{}
 	if len(options.WithLanguages) > 0 {
 		for _, name := range options.WithLanguages {
+			// 未知语言模板是调用方的参数问题，而不是服务内部错误：HTTP 层据此返回 400。
 			if _, err := docker.LanguageTemplateFor(name); err != nil {
-				return result, err
+				return result, fmt.Errorf("%w: %w", ErrEnvironmentInvalidInput, err)
 			}
 		}
 	}
@@ -397,7 +398,7 @@ func (s *EnvironmentService) createVersionLocked(
 	if err != nil {
 		return domain.EnvironmentVersion{}, fmt.Errorf("读取环境版本失败: %w", err)
 	}
-	if reuse, ok := findReusableVersion(
+	if reuse, ok := domain.FindReusableVersion(
 		existing,
 		dockerfileHash,
 		contextHash,
@@ -584,29 +585,6 @@ func versionNumbers(versions []domain.EnvironmentVersion) []int {
 		numbers = append(numbers, version.Number)
 	}
 	return numbers
-}
-
-// findReusableVersion 查找内容完全一致且已成功构建的历史版本。
-//
-// 只有在 Dockerfile 哈希、构建上下文哈希与父环境版本都未变化时才复用；
-// 复用前调用方必须再核验镜像仍然存在（在 Build 中完成）。
-func findReusableVersion(
-	versions []domain.EnvironmentVersion,
-	dockerfileHash, contextHash, parentVersion string,
-) (domain.EnvironmentVersion, bool) {
-	for _, version := range versions {
-		if version.DockerfileSHA256 != dockerfileHash || version.ContextSHA256 != contextHash {
-			continue
-		}
-		if version.ParentVersion != parentVersion {
-			continue
-		}
-		if version.Status != domain.BuildStatusSucceeded {
-			continue
-		}
-		return version, true
-	}
-	return domain.EnvironmentVersion{}, false
 }
 
 // currentUsableVersion 返回指定环境当前最新的可用版本。

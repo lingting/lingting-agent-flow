@@ -193,6 +193,16 @@ type Server struct {
 	//
 	// 它只读持久化元数据，因此不需要 SSH 或 Docker：环境查询接口不会产生远程副作用。
 	environments *app.EnvironmentQueryService
+	// environmentService 是环境写路径，为空时不提供环境写接口。
+	//
+	// 它复用 app.EnvironmentService：远程 SSH 会话、版本目录、构建与日志读取都由
+	// 该服务承担，Server 只负责装配与生命周期注册。
+	environmentService *app.EnvironmentService
+	// environmentBuilds 是环境后台构建管理器，为空时不提供构建接口。
+	//
+	// 它注册进统一生命周期：停止时取消并收敛在途构建，启动时把遗留的 building
+	// 记录收敛为 uncertain。
+	environmentBuilds *app.EnvironmentBuildManager
 	// stepExecutor 是单步骤执行协调器，为空时不提供执行接口。
 	stepExecutor *app.StepExecutor
 	// validationEngine 是确定性验证引擎，为空时不提供验证接口。
@@ -621,6 +631,11 @@ func (s *Server) startServices(ctx context.Context) error {
 		return err
 	}
 	s.environments = environments
+	// 环境写路径复用已有 app.EnvironmentService：它需要 SSH 服务与存储，因此只在
+	// 两者都可用时装配；缺少 SSH 能力时写接口返回 503，而不是退化成本机执行。
+	if err := s.environmentManagement(); err != nil {
+		return err
+	}
 	hosts, err := s.hostService()
 	if err != nil {
 		return err
@@ -688,6 +703,11 @@ func (s *Server) startServices(ctx context.Context) error {
 		// 代码保存恢复扫描放在最后注册：它只读记录并追加事件，因此不需要在下层
 		// 服务收敛之前运行，也不会阻止任何在途工作完成。
 		services = append(services, s.codeSaveRecovery)
+	}
+	if s.environmentBuilds != nil {
+		// 环境构建管理器注册在最后：停止顺序因此反转为最先执行，先取消并收敛在途
+		// 构建，再让编排器与调度器停止，避免它们在停止过程中又发起新的构建。
+		services = append(services, s.environmentBuilds)
 	}
 	if len(services) == 0 {
 		return nil
@@ -778,6 +798,36 @@ func (s *Server) environmentQueryService() (*app.EnvironmentQueryService, error)
 		return nil, fmt.Errorf("初始化环境查询服务失败: %w", err)
 	}
 	return environments, nil
+}
+
+// environmentManagement 装配环境写路径与后台构建管理器。
+//
+// 两者都复用已有应用服务：写路径是 app.EnvironmentService（唯一建立 SSH 会话、
+// 写入版本目录与执行 Docker 构建的实现），构建管理器只负责受理、去重与收敛，
+// 不拼接任何 Docker 命令。SSH 服务缺失时两者保持为空，HTTP 写接口返回 503。
+func (s *Server) environmentManagement() error {
+	if s.store == nil || s.ssh == nil {
+		return nil
+	}
+	service, err := app.NewEnvironmentService(app.DockerServiceOptions{
+		SSH:    s.ssh,
+		Store:  s.store,
+		Logger: s.loggerWrapper(),
+	})
+	if err != nil {
+		return fmt.Errorf("初始化环境服务失败: %w", err)
+	}
+	s.environmentService = service
+	builds, err := app.NewEnvironmentBuildManager(app.EnvironmentBuildManagerOptions{
+		Store:  s.store,
+		Runner: service,
+		Logger: s.logger,
+	})
+	if err != nil {
+		return fmt.Errorf("初始化环境构建管理器失败: %w", err)
+	}
+	s.environmentBuilds = builds
+	return nil
 }
 
 // hostService 返回执行节点服务。
@@ -908,6 +958,8 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		Tasks:             tasks,
 		Hosts:             s.hosts,
 		Environments:      s.environments,
+		EnvironmentWrites: s.environmentService,
+		EnvironmentBuilds: s.environmentBuilds,
 		ExecutionRecords:  s.executionRecords,
 		StepExecutor:      s.stepExecutor,
 		Validation:        s.validationEngine,

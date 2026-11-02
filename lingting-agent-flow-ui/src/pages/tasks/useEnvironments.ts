@@ -6,7 +6,7 @@
  *   - 执行节点变化时重新查询，并清空与旧节点关联的环境与版本选择；
  *   - 加载中、查询失败、空列表是三种不同状态，查询失败不会被伪装成空列表。
  */
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError, fetchEnvironments, type Environment } from "@/lib/api";
 
@@ -38,14 +38,35 @@ function describeError(error: unknown): string {
  * 返回值的 `status` 是唯一的状态判据：调用方不得把 `error` 当作空列表，也不得在
  * `idle` / `loading` 时提交一个前端猜测的环境配置。
  */
-export function useEnvironments(hostID?: string): EnvironmentQueryState {
+export function useEnvironments(hostID?: string): EnvironmentQueryState & { reload: () => void } {
   const trimmed = hostID?.trim() ?? "";
   const [state, setState] = useState<EnvironmentQueryState>({
     environments: [],
     status: "idle",
   });
+  const [attempt, setAttempt] = useState(0);
+  /**
+   * 只接受最近一次请求的结果。
+   *
+   * 切换执行节点或重试时，旧请求的结果可能比新请求更晚到达；`AbortController` 处理
+   * 大多数情况，这里的序号保证即使响应已经进入解析阶段，旧结果也不会覆盖新数据。
+   */
+  const requestRef = useRef(0);
+  /**
+   * 上一次查询使用的执行节点。
+   *
+   * 同一节点的刷新（例如构建结束后重新读取真实状态）必须保留上一份数据：清空列表会让
+   * 详情面板与在途构建的结论一起被卸载，用户会看到界面闪断，也可能丢失刚收到的结论。
+   */
+  const hostRef = useRef("");
+
+  const reload = useCallback(() => {
+    setAttempt((value) => value + 1);
+  }, []);
 
   useEffect(() => {
+    const requestID = requestRef.current + 1;
+    requestRef.current = requestID;
     if (!trimmed) {
       // 没有执行节点就没有可查询的环境：不发请求，也不保留上一个节点的数据。
       setState({ environments: [], status: "idle" });
@@ -53,18 +74,29 @@ export function useEnvironments(hostID?: string): EnvironmentQueryState {
     }
     // 执行节点来自选择器，是离散取值，不需要为中间输入做去抖。
     const controller = new AbortController();
-    setState({ environments: [], status: "loading" });
+    const hostChanged = hostRef.current !== trimmed;
+    hostRef.current = trimmed;
+    // 切换节点必须清空旧节点的数据；同一节点的刷新保留上一份真实数据。
+    setState((previous) => ({
+      environments: hostChanged ? [] : previous.environments,
+      status: "loading",
+    }));
     fetchEnvironments(trimmed, { signal: controller.signal })
       .then(({ data }) => {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || requestRef.current !== requestID) return;
         setState({ environments: data.records, status: "ready" });
       })
       .catch((cause: unknown) => {
-        if (controller.signal.aborted) return;
-        setState({ environments: [], error: describeError(cause), status: "error" });
+        if (controller.signal.aborted || requestRef.current !== requestID) return;
+        // 失败时保留上一份真实数据，并由调用方展示错误：刷新失败不等于"没有环境"。
+        setState((previous) => ({
+          environments: previous.environments,
+          error: describeError(cause),
+          status: "error",
+        }));
       });
     return () => controller.abort();
-  }, [trimmed]);
+  }, [attempt, trimmed]);
 
-  return state;
+  return { ...state, reload };
 }

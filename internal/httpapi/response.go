@@ -29,6 +29,18 @@ const (
 	CodeExecutionFailed = "execution_failed"
 	// CodeExecutionNotPersisted 表示执行已结束但最终状态未能完整写入。
 	CodeExecutionNotPersisted = "execution_not_persisted"
+	// CodeEnvironmentUnavailable 表示环境管理或后台构建服务未装配、未启动或已停止。
+	//
+	// 它与"环境不存在"不同：目标对象可能存在，只是本进程没有能力执行该操作。
+	CodeEnvironmentUnavailable = "environment_management_unavailable"
+	// CodeEnvironmentBuildInProgress 表示该环境已有构建在进行中。
+	CodeEnvironmentBuildInProgress = "environment_build_in_progress"
+	// CodeEnvironmentBuildFailed 表示构建已经执行且确定失败。
+	CodeEnvironmentBuildFailed = "environment_build_failed"
+	// CodeEnvironmentBuildUncertain 表示构建被中断，结果无法确认。
+	//
+	// 它不等于失败：镜像可能已经生成。调用方必须显式重建或人工核验后才有结论。
+	CodeEnvironmentBuildUncertain = "environment_build_uncertain"
 )
 
 // ErrorBody 是统一的错误描述。
