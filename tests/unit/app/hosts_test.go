@@ -739,3 +739,9 @@ func writeTestPrivateKey(t *testing.T) string {
 	}
 	return path
 }
+
+// testPrivateKeyPath 返回测试工作空间中的一个私钥文件路径。
+func testPrivateKeyPath(t *testing.T) string {
+	t.Helper()
+	return testkit.PrivateKeyPath(t)
+}

@@ -54,9 +54,10 @@ bash .github/scripts/run-go-group-tests.sh --group unit --artifact-dir .test-art
 bash .github/scripts/resolve-release-version.sh --require-tag   # 需要 REF_TYPE/REF_NAME/COMMIT_SHA
 ```
 
-行为契约由 `tests/unit/release/ci_scripts_test.go` 覆盖：脚本存在性与解释器调用方式、
-`set -euo pipefail` 与文档头部、YAML 参数与脚本声明一致、YAML 无内嵌程序、LF 行尾，以及
-版本解析、结论汇总、门禁汇总、Go 测试分组核验、分组执行守卫与真实测试授权守卫的退出码。
+脚本行为**目前没有自动化契约测试**（原 `tests/unit/release/ci_scripts_test.go` 已随测试精简
+删除）：解释器调用方式、`set -euo pipefail` 与文档头部、YAML 参数与脚本声明一致、LF 行尾，
+以及各脚本的退出码都只能人工核对。分组覆盖仍由 `go-test-groups.sh --check` 在每次 CI 中机械核验。
+
 ## Go 测试分组与 CI 编排
 
 普通 CI 的 Go 测试按职责拆成三个互不依赖的 Job，每个 Job 独享一台 Runner 并行执行。

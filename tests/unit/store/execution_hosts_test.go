@@ -501,3 +501,21 @@ func TestExecutionHostRejectsPlaintextSecretColumns(t *testing.T) {
 		}
 	}
 }
+
+// testPrivateKeyPath 返回测试工作空间中的一个私钥文件路径。
+//
+// 本版本只支持私钥认证，构造执行节点时必须提供该路径。
+func testPrivateKeyPath(t *testing.T) string {
+	t.Helper()
+	return testkit.PrivateKeyPath(t)
+}
+
+// containsString 判断字符串是否存在于切片中。
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}

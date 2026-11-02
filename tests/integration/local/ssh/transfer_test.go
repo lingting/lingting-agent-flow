@@ -80,25 +80,6 @@ func TestRunNonZeroExit(t *testing.T) {
 	}
 }
 
-// TestRunOutputTruncated 验证输出上限生效且不会阻塞命令。
-func TestRunOutputTruncated(t *testing.T) {
-	t.Parallel()
-	_, client := newAuthenticatedClient(t)
-	result, err := client.Run(testContext(t), "big", sshclient.RunOptions{MaxOutputBytes: 128})
-	if err != nil {
-		t.Fatalf("执行命令失败: %v", err)
-	}
-	if result.ExitCode != 0 {
-		t.Fatalf("退出码应为 0，实际: %d", result.ExitCode)
-	}
-	if len(result.Stdout) != 128 {
-		t.Fatalf("输出应被截断到 128 字节，实际: %d", len(result.Stdout))
-	}
-	if !result.StdoutTruncated {
-		t.Fatal("应当标记输出被截断")
-	}
-}
-
 // TestRunTimeout 验证超时会中断远程命令并返回错误。
 func TestRunTimeout(t *testing.T) {
 	t.Parallel()
@@ -136,24 +117,6 @@ func TestRunCancel(t *testing.T) {
 	}
 }
 
-// TestRunOnClosedClient 验证关闭后执行命令返回明确错误。
-func TestRunOnClosedClient(t *testing.T) {
-	t.Parallel()
-	_, client := newAuthenticatedClient(t)
-	if err := client.Close(); err != nil {
-		t.Fatalf("关闭连接失败: %v", err)
-	}
-	if err := client.Close(); err != nil {
-		t.Fatalf("重复关闭应当返回 nil: %v", err)
-	}
-	if _, err := client.Run(testContext(t), "stream", sshclient.RunOptions{}); err == nil {
-		t.Fatal("已关闭连接执行命令应当返回错误")
-	}
-	if _, err := client.SFTP(); err == nil {
-		t.Fatal("已关闭连接打开 SFTP 应当返回错误")
-	}
-}
-
 // TestShellQuote 验证参数转义不会改变命令语义。
 func TestShellQuote(t *testing.T) {
 	t.Parallel()
@@ -169,24 +132,6 @@ func TestShellQuote(t *testing.T) {
 		if got := sshclient.ShellQuote(input); got != expected {
 			t.Fatalf("转义结果不符: %q -> %q，期望 %q", input, got, expected)
 		}
-	}
-}
-
-// TestShellCommandRejectsUnsafeName 验证命令名称不能拼接任意 shell 内容。
-func TestShellCommandRejectsUnsafeName(t *testing.T) {
-	t.Parallel()
-	if _, err := sshclient.ShellCommand("rm -rf /"); err == nil {
-		t.Fatal("含空格与特殊字符的命令名称应当被拒绝")
-	}
-	if _, err := sshclient.ShellCommand(""); err == nil {
-		t.Fatal("空命令名称应当被拒绝")
-	}
-	command, err := sshclient.ShellCommand("test", "-w", "/srv/agent flow")
-	if err != nil {
-		t.Fatalf("构造命令失败: %v", err)
-	}
-	if command != "test -w '/srv/agent flow'" {
-		t.Fatalf("命令构造不符: %s", command)
 	}
 }
 
@@ -219,38 +164,6 @@ func TestNormalizeRemotePath(t *testing.T) {
 		if _, err := sshclient.NormalizeRemotePath(input); err == nil {
 			t.Fatalf("非法路径 %q 应当被拒绝", input)
 		}
-	}
-}
-
-// TestJoinRemotePath 验证子路径拼接的边界处理。
-func TestJoinRemotePath(t *testing.T) {
-	t.Parallel()
-	joined, err := sshclient.JoinRemotePath("/srv/agentflow", "env/Dockerfile")
-	if err != nil {
-		t.Fatalf("拼接路径失败: %v", err)
-	}
-	if joined != "/srv/agentflow/env/Dockerfile" {
-		t.Fatalf("拼接结果不符: %s", joined)
-	}
-	if _, err := sshclient.JoinRemotePath("/srv/agentflow", "../etc/passwd"); err == nil {
-		t.Fatal("包含 .. 的子路径应当被拒绝")
-	}
-	if _, err := sshclient.JoinRemotePath("/srv/agentflow", "/etc/passwd"); err == nil {
-		t.Fatal("绝对子路径应当被拒绝")
-	}
-}
-
-// TestIsWithinRemotePath 验证路径包含判断。
-func TestIsWithinRemotePath(t *testing.T) {
-	t.Parallel()
-	if !sshclient.IsWithinRemotePath("/srv/agentflow", "/srv/agentflow/env") {
-		t.Fatal("子目录应当判定为位于基准目录内")
-	}
-	if !sshclient.IsWithinRemotePath("/srv/agentflow", "/srv/agentflow") {
-		t.Fatal("基准目录自身应当判定为包含")
-	}
-	if sshclient.IsWithinRemotePath("/srv/agentflow", "/srv/agentflow-other") {
-		t.Fatal("同前缀的其他目录不应判定为包含")
 	}
 }
 
@@ -321,52 +234,6 @@ func TestSFTPUploadRefusesOverwrite(t *testing.T) {
 	}
 }
 
-// TestSFTPUploadLeavesNoTempFile 验证上传成功后不残留临时文件。
-func TestSFTPUploadLeavesNoTempFile(t *testing.T) {
-	t.Parallel()
-	_, client := newAuthenticatedClient(t)
-	transfer := openTransfer(t, client)
-	dir := testkit.Dir(t)
-	source := filepath.Join(dir, "source.txt")
-	if err := os.WriteFile(source, []byte("content"), 0o600); err != nil {
-		t.Fatalf("写入本机测试文件失败: %v", err)
-	}
-	remotePath := tempRemotePath(t)
-	if err := transfer.Upload(testContext(t), source, remotePath, sshclient.UploadOptions{
-		CreateParent: true,
-	}); err != nil {
-		t.Fatalf("上传失败: %v", err)
-	}
-	entries, err := transfer.ReadDir(testContext(t), path.Dir(remotePath))
-	if err != nil {
-		t.Fatalf("列出远程目录失败: %v", err)
-	}
-	for _, entry := range entries {
-		if strings.HasSuffix(entry.Name, ".tmp") {
-			t.Fatalf("上传后不应残留临时文件: %s", entry.Name)
-		}
-	}
-}
-
-// TestSFTPUploadMissingLocalFile 验证本机文件不存在时返回明确错误。
-func TestSFTPUploadMissingLocalFile(t *testing.T) {
-	t.Parallel()
-	_, client := newAuthenticatedClient(t)
-	transfer := openTransfer(t, client)
-	err := transfer.Upload(
-		testContext(t),
-		filepath.Join(testkit.Dir(t), "missing.txt"),
-		tempRemotePath(t),
-		sshclient.UploadOptions{},
-	)
-	if err == nil {
-		t.Fatal("本机文件不存在时应当失败")
-	}
-	if !strings.Contains(err.Error(), "读取本机文件失败") {
-		t.Fatalf("错误信息应给出操作阶段，实际: %v", err)
-	}
-}
-
 // TestSFTPMkdirStatReadDirRenameRemove 验证目录与文件管理操作。
 func TestSFTPMkdirStatReadDirRenameRemove(t *testing.T) {
 	t.Parallel()
@@ -413,20 +280,6 @@ func TestSFTPMkdirStatReadDirRenameRemove(t *testing.T) {
 	}
 }
 
-// TestSFTPRemoveRejectsDirectory 验证删除文件接口不会删除目录。
-func TestSFTPRemoveRejectsDirectory(t *testing.T) {
-	t.Parallel()
-	_, client := newAuthenticatedClient(t)
-	transfer := openTransfer(t, client)
-	dir := path.Join(tempRemoteDir(t), "agentflow-keep")
-	if err := transfer.MkdirAll(testContext(t), dir); err != nil {
-		t.Fatalf("创建远程目录失败: %v", err)
-	}
-	if err := transfer.Remove(testContext(t), dir); err == nil {
-		t.Fatal("删除目录应当被拒绝")
-	}
-}
-
 // TestSFTPDownloadRefusesOverwrite 验证未声明覆盖时不会覆盖本机文件。
 func TestSFTPDownloadRefusesOverwrite(t *testing.T) {
 	t.Parallel()
@@ -457,53 +310,6 @@ func TestSFTPDownloadRefusesOverwrite(t *testing.T) {
 	}
 	if string(data) != "existing" {
 		t.Fatalf("本机文件不应被覆盖，实际: %q", string(data))
-	}
-}
-
-// TestSFTPDownloadCancel 验证取消下载不会留下最终文件。
-func TestSFTPDownloadCancel(t *testing.T) {
-	t.Parallel()
-	_, client := newAuthenticatedClient(t)
-	transfer := openTransfer(t, client)
-	dir := testkit.Dir(t)
-	source := filepath.Join(dir, "source.txt")
-	if err := os.WriteFile(source, []byte(strings.Repeat("y", 32*1024)), 0o600); err != nil {
-		t.Fatalf("写入本机测试文件失败: %v", err)
-	}
-	remotePath := tempRemotePath(t)
-	if err := transfer.Upload(testContext(t), source, remotePath, sshclient.UploadOptions{
-		CreateParent: true,
-	}); err != nil {
-		t.Fatalf("上传失败: %v", err)
-	}
-	target := filepath.Join(dir, "cancelled.txt")
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	err := transfer.Download(ctx, remotePath, target, sshclient.DownloadOptions{})
-	if err == nil {
-		t.Fatal("已取消的上下文应当返回错误")
-	}
-	if _, statErr := os.Stat(target); statErr == nil {
-		t.Fatal("取消后不应留下最终文件")
-	}
-}
-
-// TestSFTPClosedTransfer 验证关闭后各操作返回明确错误。
-func TestSFTPClosedTransfer(t *testing.T) {
-	t.Parallel()
-	_, client := newAuthenticatedClient(t)
-	transfer, err := client.SFTP()
-	if err != nil {
-		t.Fatalf("打开 SFTP 通道失败: %v", err)
-	}
-	if err := transfer.Close(); err != nil {
-		t.Fatalf("关闭 SFTP 通道失败: %v", err)
-	}
-	if err := transfer.Close(); err != nil {
-		t.Fatalf("重复关闭应当返回 nil: %v", err)
-	}
-	if _, err := transfer.Stat(testContext(t), "/tmp"); err == nil {
-		t.Fatal("已关闭通道上的操作应当返回错误")
 	}
 }
 

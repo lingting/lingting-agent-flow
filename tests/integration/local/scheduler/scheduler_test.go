@@ -801,3 +801,44 @@ func TestSchedulerStatusReportsLimit(t *testing.T) {
 		t.Fatalf("服务名称不符: %s", scheduler.Name())
 	}
 }
+
+// moveToFailed 把任务推进到 failed 终局。
+func (f *schedulerFixture) moveToFailed(t *testing.T, taskID domain.ID) {
+	t.Helper()
+	task, err := f.db.GetTask(f.ctx, taskID)
+	if err != nil {
+		t.Fatalf("读取任务失败: %v", err)
+	}
+	previous := task.Status
+	if err := task.Transition(domain.TaskStatusFailed, f.now); err != nil {
+		t.Fatalf("迁移任务到 failed 失败: %v", err)
+	}
+	if err := task.Finish(domain.TaskResultFailed, "上一次执行失败", f.now); err != nil {
+		t.Fatalf("写入失败结论失败: %v", err)
+	}
+	if err := f.db.UpdateTaskIfStatus(f.ctx, *task, []domain.TaskStatus{previous}); err != nil {
+		t.Fatalf("写入失败状态失败: %v", err)
+	}
+}
+
+// writeActiveRun 写入一条 running 的执行记录。
+func (f *schedulerFixture) writeActiveRun(
+	t *testing.T,
+	task domain.Task,
+	steps []domain.Step,
+	workerID string,
+	expiresAt time.Time,
+) domain.WorkflowRun {
+	t.Helper()
+	run, err := domain.NewWorkflowRun(task.ID, steps, f.now)
+	if err != nil {
+		t.Fatalf("构造执行记录失败: %v", err)
+	}
+	run.WorkerID = workerID
+	run.LeaseExpiresAt = &expiresAt
+	run.Status = domain.WorkflowRunRunning
+	if err := f.db.CreateWorkflowRun(f.ctx, run); err != nil {
+		t.Fatalf("写入执行记录失败: %v", err)
+	}
+	return run
+}

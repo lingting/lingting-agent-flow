@@ -1,8 +1,8 @@
 # V2 数据模型与迁移方案
 
 > 状态：V2 设计基线（M0 交付物）。
-> 依据：迁移 `0001`–`0025` 的实际结构、`domain/` 实体定义、`tests/integration/local/database`
-> 的 schema 审计与旧库升级测试约定。
+> 依据：迁移 `0001`–`0025` 的实际结构、`domain/` 实体定义，以及迁移脚本与 `tests/unit/store/` 的
+> 存储层用例。
 > **本文件只给设计与迁移顺序，迁移脚本在对应里程碑落地；落地时必须重新核对当时的表结构。**
 
 ## 1. 现有结构事实（V1 结束时）
@@ -183,9 +183,10 @@ CREATE TABLE project_execution_leases (
 1. **`ALTER TABLE ADD COLUMN` 与 CHECK 的组合**：本方案在 `0026` / `0028` / `0029` 只用无 CHECK
    的加列；需要 `json_valid` 的列全部落在**新建表**（`0027`）。若某个迁移必须给历史表加带 CHECK
    的列，必须改为 `0009` 已证明可行的"建新表 → 复制 → 改名 → 重建索引"路径，并保留全部非枚举约束。
-2. **旧库升级测试必须同步扩充**：现有 `tests/integration/local/database/legacy_migration_test.go`
-   与 `schema_audit_test.go` 要在每个新迁移落地时补断言（新表结构、索引、旧库升级后数据保留、
-   未知枚举值写入与读回、迁移幂等）。未执行的测试不得报告为通过。
+2. **旧库升级与 Schema 审计已没有自动化守点**：`tests/integration/local/database/`（
+   `legacy_migration_test.go`、`schema_audit_test.go`）已在测试精简中删除，新增迁移落地时必须人工核对
+   新表结构、索引、非枚举约束、旧库升级后数据保留、未知枚举值写入与读回、迁移幂等。未执行的核对不得
+   报告为已完成。
 3. **`json_extract` 依赖 SQLite JSON1 扩展**：需确认当前驱动与最低 SQLite 版本已内置（`caches_json`
    的 `json_valid` 已在用，仍按实际迁移验证）。
 4. **回填冲突的人工处理入口**：本方案只记录冲突、不提供 UI；若真实库出现冲突，需要在

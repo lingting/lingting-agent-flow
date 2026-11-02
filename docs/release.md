@@ -8,11 +8,11 @@
 
 | 能力 | 状态 | 证据 |
 | --- | --- | --- |
-| 制品构建入口（`make release-dist` / `cmd/agentflow-release`） | 已实现 | `internal/release`、`tests/unit/release`、`tests/e2e/packaging` |
-| 制品核验入口（`verify-release` / `verify-assets` / `notes`） | 已实现 | 同上，规则集中在 `internal/release/publish.go` |
+| 制品构建入口（`make release-dist` / `cmd/agentflow-release`） | 已实现 | `internal/release` |
+| 制品核验入口（`verify-release` / `verify-assets` / `notes`） | 已实现 | 规则集中在 `internal/release/publish.go` |
 | 构建工作流（`.github/workflows/release.yml`） | 已实现 | 可被 `publish.yml` 复用，也可手动预演 |
 | 正式发布工作流（`.github/workflows/publish.yml`） | 已实现 | 标签推送 / 手动触发，门禁 + 来源证明 + 上传后核验 |
-| 工作流本地静态验证（YAML 解析、触发、权限、依赖、步骤顺序、表达式上下文） | 已通过 | `go test ./tests/unit/release/` 的 `TestPublishWorkflow*`、`TestWorkflow*` |
+| 工作流本地静态验证（YAML 解析、触发、权限、依赖、步骤顺序、表达式上下文） | **无自动化核验** | `tests/unit/release/` 已随测试精简删除，工作流结构只靠人工审阅 |
 | GitHub Actions 上的实际运行 | **未执行** | 本轮没有推送版本标签，也没有在远端运行工作流 |
 | 公开的 GitHub Release | **未发布** | 本轮不创建、不推送任何正式版本 |
 
@@ -151,7 +151,7 @@ Linux 与 macOS 使用 `tar.gz`，Windows 使用 `zip`。每个压缩包是**扁
 工作流写入；缺少这些字段的清单不能通过发布核验（`-require-provenance`）。
 
 清单与校验文件都不包含仓库绝对路径、环境变量、令牌、私钥路径或测试配置：字段由
-`internal/release.Manifest` 固定，`tests/unit/release` 会逐项检查这一点。
+`internal/release.Manifest` 固定，`verify-release` 与 `verify-assets` 会逐项检查这一点。
 
 ## 6. 正式发布工作流
 
@@ -169,7 +169,7 @@ Linux 与 macOS 使用 `tar.gz`，Windows 使用 `zip`。每个压缩包是**扁
 | --- | --- | --- |
 | `resolve` | 标签格式 `vMAJOR.MINOR.PATCH`、ref 必须是标签、提交必须是完整 SHA | 后续阶段全部不运行 |
 | `ci`（复用 `ci.yml`） | Go 格式与静态检查、`make test`、竞态检测、前端单元 + Playwright E2E + 格式 + lint + 类型检查 + 生产构建 | 不创建 Release |
-| `build`（复用 `release.yml`） | 五个平台制品、`SHA256SUMS`、`release-manifest.json`、独立 `sha256sum -c`、`verify-release` 核验、目标平台原生 Runner 运行冒烟 | 不创建 Release |
+| `build`（复用 `release.yml`） | 五个平台制品、`SHA256SUMS`、`release-manifest.json`、独立 `sha256sum -c`、`verify-release` 核验 | 不创建 Release |
 | `publish` | 发布前核验 → 生成来源证明 → 复核来源信息 → 拒绝覆盖 → 创建草稿 → 上传 → 重新下载核验 → 核验来源证明 → 转公开 | 不公开 Release |
 | `publish-summary` | 汇总四个阶段的真实结论，任何非 success（含跳过）都让工作流失败 | 工作流失败 |
 
@@ -296,16 +296,15 @@ tar -xzf agentflow_v1.2.3_linux_amd64.tar.gz
 
 | 平台 | 交叉编译 | 运行冒烟 | 证据 |
 | --- | --- | --- | --- |
-| Linux amd64 | 已完成 | **未执行** | 制品已生成并校验；本机无 Linux 环境，等待 CI 原生 Runner |
+| Linux amd64 | 已完成 | **未执行** | 制品已生成并校验；本机无 Linux 环境，运行验收未执行且已无自动化入口 |
 | Linux arm64 | 已完成 | **未执行** | 同上，需要 arm64 运行环境 |
-| macOS amd64 | 已完成 | **未执行** | 制品已生成并校验；本机无 macOS 环境 |
+| macOS amd64 | 已完成 | **未执行** | 制品已生成并校验；本机无 macOS 环境，运行验收未执行且已无自动化入口 |
 | macOS arm64 | 已完成 | **未执行** | 同上 |
 | Windows amd64 | 已完成 | 已完成 | 在本机 Windows 11 解压制品、执行 `version`、启动服务并核验页面、资源与 API |
 
-`.github/workflows/release.yml` 的冒烟 Job 已为五个平台配置对应的原生 Runner
-（`ubuntu-latest`、`ubuntu-24.04-arm`、`macos-13`、`macos-14`、`windows-latest`），但**该工作流
-尚未在真实运行环境执行过**：上表结论都不来自工作流的历史运行记录。首次发布时必须以工作流
-的实际结果为准，在此之前只有 Windows amd64 具备运行验收证据。
+`.github/workflows/release.yml` 的运行冒烟 Job 已随 `tests/e2e/packaging/` 一起移除，五个平台
+**都不再有自动化运行验收**：上表的"已完成"只记录当时的实测证据，不会由 CI 复现，也没有任何
+工作流历史运行记录可以引用。
 
 未进入发布矩阵的平台（Linux 386、Windows arm64、FreeBSD 等）**不支持**：Go 能交叉编译
 不等于产品支持该平台。
@@ -314,8 +313,7 @@ tar -xzf agentflow_v1.2.3_linux_amd64.tar.gz
 
 - 交叉编译成功只证明该目标能产出可执行文件；
 - 运行验收要求解压制品、执行 `version`、启动服务、核验 HTTP API 与前端静态资源；
-- `TestReleaseArchiveSmoke` 在当前运行平台与制品平台不一致时输出 `WARN [SKIP]` 并跳过，
-  不会把跳过报告成通过。
+- 运行验收目前没有任何自动化用例，只能人工执行；跳过与未执行都不会体现在流水线结论里。
 
 ### 已知限制
 
@@ -323,7 +321,7 @@ tar -xzf agentflow_v1.2.3_linux_amd64.tar.gz
   它们的"可运行"目前是推断，不是实测结论。
 - 发布工作流从未在 GitHub Actions 上真实运行：`publish.yml` 的门禁、来源证明、上传后核验
   与草稿转公开都只经过本地静态核验与本地等价命令验证。
-- 即使在原生 Runner 上完成冒烟，验证范围也仅覆盖"制品可解压、可启动、页面与 API 可用"，
+- 运行验收目前没有自动化手段，验证范围也仅覆盖"制品可解压、可启动、页面与 API 可用"，
   不包括完整的业务流程。
 - 远程任务执行需要目标机器具备 SSH 与满足 [docker-compatibility.md](docker-compatibility.md) 基线的
   Docker，这属于运行前提，不是制品的编译依赖。
@@ -350,9 +348,9 @@ tar -xzf agentflow_v1.2.3_linux_amd64.tar.gz
 
 第三方 Action 引用一律用提交 SHA 固定。唯一的例外是来源证明 Action
 （`actions/attest-build-provenance@v3`）。该引用目前使用官方主版本引用、**尚未固定到提交
-SHA**，这是本轮唯一的豁免项，必须在取得可核对的提交 SHA 后立即收紧。豁免被
-`tests/unit/release` 的 `TestWorkflowActionsPinned` 逐条约束：只能是这一条、只能出现在
-`publish.yml`、且豁免清单必须与实际使用保持一致。
+SHA**，这是本轮唯一的豁免项，必须在取得可核对的提交 SHA 后立即收紧。该豁免此前由
+`tests/unit/release` 的 `TestWorkflowActionsPinned` 约束（只能是这一条、只能出现在 `publish.yml`、
+豁免清单必须与实际使用一致），该用例已随测试精简删除，现在只能人工核对。
 
 ## 11. 相关入口
 
@@ -363,7 +361,5 @@ SHA**，这是本轮唯一的豁免项，必须在取得可核对的提交 SHA �
 | 由清单生成 Release 说明 | `make release-notes VERSION=v1.2.3` |
 | 核验远端资产列表与实际下载内容 | `go run ./cmd/agentflow-release verify-assets -dir <目录> -version <版本> -assets-file <列表>` |
 | 只构建当前平台的本机可执行文件 | `make release` |
-| 发布制品规则与工作流结构测试 | `go test -count=1 ./tests/unit/release/...` |
-| 发布制品端到端打包验收 | `make test-release-verify` |
-| 制品运行冒烟（CI 使用） | `TestReleaseArchiveSmoke`，见 [`../tests/README.md`](../tests/README.md) |
+| 发布制品与工作流结构、端到端打包验收、运行冒烟 | 无自动化入口（`tests/unit/release/` 与 `tests/e2e/packaging/` 已删除） |
 | 版本查询 | `agentflow version` 或 `agentflow --version` |

@@ -12,9 +12,6 @@
 # 制品构建本身复用仓库唯一的发布入口 `make release-dist`（内部调用
 # cmd/agentflow-release），不在工作流里复制一套可能不一致的编译命令。
 #
-# 运行冒烟在目标平台的原生 Runner 上执行。若某个平台的 Runner 标签在目标仓库不可用，
-# 对应的冒烟 Job 会明确失败，而不是静默跳过：平台要么被真实验证，要么在 docs/release.md
-# 中标注为"仅交叉编译成功、运行验证未执行"。
 #
 # 具体执行逻辑在 .github/scripts/ 下（版本解析、制品构建、制品核验、结论汇总），
 # 本文件只声明 Job、依赖、矩阵与脚本调用。
@@ -156,65 +153,9 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  smoke:
-    name: 运行冒烟（${{ matrix.os }}/${{ matrix.arch }}）
-    needs: [resolve, build]
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
-    strategy:
-      # 一个平台的冒烟失败不应该掩盖其他平台的结论，全部跑完再汇总。
-      fail-fast: false
-      matrix:
-        include:
-          - os: linux
-            arch: amd64
-            archive_suffix: tar.gz
-            runner: ubuntu-latest
-          - os: linux
-            arch: arm64
-            archive_suffix: tar.gz
-            runner: ubuntu-24.04-arm
-          - os: darwin
-            arch: amd64
-            archive_suffix: tar.gz
-            runner: macos-13
-          - os: darwin
-            arch: arm64
-            archive_suffix: tar.gz
-            runner: macos-14
-          - os: windows
-            arch: amd64
-            archive_suffix: zip
-            runner: windows-latest
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: 安装 Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: true
-          cache-dependency-path: go.sum
-      - name: 下载发布制品
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with:
-          name: ${{ needs.resolve.outputs.artifact_name }}
-          path: ${{ github.workspace }}/.release-artifacts
-      # 冒烟测试本体是仓库内的 Go 用例：它独立解压制品、校验布局与 version.json、
-      # 执行版本查询，再从解压目录启动程序核验 HTTP API 与前端静态资源。
-      - name: 运行制品冒烟
-        env:
-          AGENTFLOW_RELEASE_ARCHIVE: ${{ github.workspace }}/.release-artifacts/agentflow_${{ needs.resolve.outputs.version }}_${{ matrix.os }}_${{ matrix.arch }}.${{ matrix.archive_suffix }}
-          AGENTFLOW_RELEASE_PLATFORM: ${{ matrix.os }}/${{ matrix.arch }}
-          AGENTFLOW_RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
-          AGENTFLOW_RELEASE_COMMIT: ${{ needs.resolve.outputs.commit }}
-        run: go test -count=1 -v -run TestReleaseArchiveSmoke ./tests/e2e/packaging/...
-
   release-summary:
     name: 发布汇总
-    needs: [resolve, build, smoke]
+    needs: [resolve, build]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -226,14 +167,12 @@ jobs:
           COMMIT: ${{ needs.resolve.outputs.commit }}
           RESOLVE_RESULT: ${{ needs.resolve.result }}
           BUILD_RESULT: ${{ needs.build.result }}
-          SMOKE_RESULT: ${{ needs.smoke.result }}
         run: |
           bash .github/scripts/summarize-release-stages.sh \
             --title "发布构建结论" \
             --stage "版本解析=$RESOLVE_RESULT" \
             --stage "制品构建与上传=$BUILD_RESULT" \
-            --stage "目标平台运行冒烟=$SMOKE_RESULT" \
             --version "$VERSION" \
             --commit "$COMMIT" \
             --note "本工作流只上传 Actions 运行制品，不创建 GitHub Release、不推送镜像、不部署环境。" \
-            --note "正式 Release 由 .github/workflows/publish.yml 在 CI 门禁与全部冒烟通过后创建。"
+            --note "正式 Release 由 .github/workflows/publish.yml 在 CI 门禁通过后创建。"

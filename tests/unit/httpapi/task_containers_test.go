@@ -661,3 +661,66 @@ func TestTaskContainerResponseHidesInternalDetails(t *testing.T) {
 		t.Fatal("列表响应必须包含 total")
 	}
 }
+
+// codeSaveTestTaskService 构造任务管理服务。
+//
+// 未知任务子路径最终由任务处理器判定 404，因此真实装配里任务服务总是存在的；
+// 这里注入它与生产装配保持一致，避免用例把“任务服务缺失”误当作“接口不存在”。
+func codeSaveTestTaskService(t *testing.T, db *sqlite.DB) *app.TaskService {
+	t.Helper()
+	tasks, err := app.NewTaskService(app.TaskServiceOptions{Store: db})
+	if err != nil {
+		t.Fatalf("构造任务服务失败: %v", err)
+	}
+	return tasks
+}
+
+// apiTaskWithStep 写入一条带单个步骤的任务，供容器接口用例使用。
+func apiTaskWithStep(
+	t *testing.T,
+	db *sqlite.DB,
+	ctx context.Context,
+	now time.Time,
+	role domain.Role,
+	out *domain.Step,
+	sequence int,
+) domain.Task {
+	t.Helper()
+	requirement, err := domain.NewRequirement(
+		"需求标题",
+		"需求正文",
+		domain.PriorityNormal,
+		now,
+	)
+	if err != nil {
+		t.Fatalf("构造需求失败: %v", err)
+	}
+	if err := db.CreateRequirement(ctx, requirement); err != nil {
+		t.Fatalf("写入需求失败: %v", err)
+	}
+	task, err := domain.NewTask(requirement.ID, "/repo", "main", "", now)
+	if err != nil {
+		t.Fatalf("构造任务失败: %v", err)
+	}
+	if err := db.CreateTask(ctx, task); err != nil {
+		t.Fatalf("写入任务失败: %v", err)
+	}
+	step, err := domain.NewStep(
+		task.ID,
+		sequence,
+		"步骤标题",
+		"步骤目标",
+		"执行要求",
+		role,
+		domain.VerificationSpec{},
+		now,
+	)
+	if err != nil {
+		t.Fatalf("构造步骤失败: %v", err)
+	}
+	if err := db.CreateStep(ctx, step); err != nil {
+		t.Fatalf("写入步骤失败: %v", err)
+	}
+	*out = step
+	return task
+}

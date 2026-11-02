@@ -166,21 +166,22 @@ AgentFlow 会把它作为明确失败上报。不修改远端用户的 Shell 配
 2. 确认命令与参数在 Docker CLI `29.0.0` 上存在；不要使用更高版本才引入的参数。
 3. 同步更新 `docker.RequiredCLICommands`，补充参数选项与代码位置。
 4. 如涉及直接 API 调用，使用 `/v1.52/` 前缀并确认字段在 API `1.52` 中已存在。
-5. 在 `tests/unit/docker/` 增加命令构造断言；确有必要时补充集成测试。
+5. 在 `tests/unit/container/` 增加命令构造与参数断言；确有必要时补充集成测试。
 6. 若基线本身需要提高，见下一节。
 
 ## 10. 如何验证最低基线
 
-- **单元测试**（不依赖真实 Docker）：`tests/unit/docker/` 覆盖版本解析与比较、API 区间判定、
-  `DOCKER_API_VERSION` 的控制策略、命令清单与参数。
-- **本机集成测试**（进程内假 SSH 服务端与假 Engine）：`tests/integration/local/docker/` 与
-  `tests/integration/local/validation/`。
+- **单元测试**（不依赖真实 Docker）：`tests/unit/container/` 覆盖命令构造、参数安全边界与结果解析；
+  `tests/unit/environment/` 与 `tests/unit/image/` 覆盖镜像引用、构建上下文与 Dockerfile 校验。
+- **本机集成测试**：`tests/integration/local/validation/` 覆盖验证执行与检查结论。
 - **真实远程测试**（需真实 Docker）：`tests/integration/remote/docker/` 等目录，通过
   `tests/config/docker.yml` 的 `docker.remote_enabled`（同时需 `tests/config/ssh.yml` 的 `ssh.enable`）
   显式启用。目标环境版本低于基线时预检必然失败，这属于环境不满足基线，不是代码缺陷；必须如实报告，
   不得把未运行的测试记为通过。
 
-真实环境缺少 Docker CLI `29.0.0` 时，帮助信息的最低基线验证只能跳过，且必须在报告中说明跳过原因。
+`tests/unit/docker/`（版本解析与比较、API 区间判定、`RequiredCLICommands` 与 `docker <cmd> --help` 基线核对）
+与 `tests/integration/local/docker/` 已随测试精简删除：最低基线目前**没有自动化守点**，只能靠
+`docker.RequiredCLICommands`、真实远程预检与人工核对 `--help` 输出保证。
 
 ## 11. 如何提出基线升级
 

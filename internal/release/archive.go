@@ -104,8 +104,8 @@ func writeZip(w io.Writer, entries []Entry) error {
 
 // ReadArchiveNames 返回压缩包内的文件名列表（按包内顺序）。
 //
-// 生成端用它自检压缩包确实可读且布局正确；验收端（tests/e2e/packaging）用独立
-// 的标准库代码解压，不复用本函数，避免"用同一段代码验证自己"。
+// 生成端用它自检压缩包确实可读且布局正确；验收端不复用本函数，而是各自
+// 用独立的标准库代码解压，避免"用同一段代码验证自己"。
 func ReadArchiveNames(archivePath string, format string) ([]string, error) {
 	switch format {
 	case FormatTarGz:

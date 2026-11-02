@@ -47,7 +47,6 @@ make release      # 单文件生产构建：前端构建 + Go 编译
 make run          # go run ./cmd/agentflow server
 make web-dev      # 前端开发服务器（另开终端运行 make serve）
 make serve        # 统一服务入口（API + 内嵌页面 + 后台服务）
-make test-packaging  # 单文件打包冒烟测试
 make check        # fmt-check + vet + build
 ```
 
@@ -92,7 +91,6 @@ go run ./cmd/agentflow server --address 127.0.0.1:26380
 make serve                                           # 开发模式后端（--require-web-ui=false）
 make web-build                                       # 前端生产构建（按锁文件安装依赖）
 make release                                         # 单文件生产构建：前端 + Go
-go test -count=1 ./tests/e2e/packaging/...           # 单文件打包冒烟测试
 ```
 
 客户端的实际使用方式见 [cli.md](cli.md)；测试的目录、工作空间与真实依赖开关见 [testing.md](testing.md)。

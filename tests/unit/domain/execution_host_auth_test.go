@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
+	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
 // TestNewExecutionHostRequiresPrivateKey 验证认证方式固定为私钥且必须给出私钥路径。
@@ -215,4 +216,12 @@ func TestTrustHostKey(t *testing.T) {
 	if err := host.TrustHostKey("ssh-ed25519", "abc123", time.Now()); err == nil {
 		t.Fatal("缺少 SHA256: 前缀的指纹应当被拒绝")
 	}
+}
+
+// testPrivateKeyPath 返回测试工作空间中的一个私钥文件路径。
+//
+// 本版本只支持私钥认证，构造执行节点时必须提供该路径。
+func testPrivateKeyPath(t *testing.T) string {
+	t.Helper()
+	return testkit.PrivateKeyPath(t)
 }

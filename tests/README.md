@@ -14,37 +14,30 @@ tests/
 │   ├── testkit/        # 统一测试入口（testkit.Main）、日志落盘、工作空间、known_hosts 快照与测试数据构造
 │   └── fakepi/         # 以测试二进制充当 Pi CLI 的可控替身
 ├── unit/               # 快速单元测试，不依赖真实 Pi、SSH 或网络
-│   ├── release/        # 发布制品元数据、命名规范、清单与校验文件规则、工作流结构检查
 │   ├── agent/          # Agent 事件、结果类型与容器内 Pi Runner（使用替身）
 │   │   └── pi/         # Pi Runner 单元测试（使用 fakepi 替身）
 │   ├── app/            # 应用服务层
-│   ├── config/         # 配置加载与校验
+│   ├── cigate/         # 真实测试授权判定（只读、fail closed）
 │   ├── container/      # 容器状态、生命周期策略与 Docker 命令参数构造
 │   ├── domain/         # 领域模型与状态迁移
 │   ├── environment/    # 环境类型、版本号与镜像引用规则
+│   ├── execenv/        # 执行环境规格、工作区与生命周期策略
+│   ├── httpapi/        # HTTP API 处理器：用户操作路径、错误结构与 API 路径边界
 │   ├── image/          # 构建上下文哈希、Dockerfile 校验与语言模板
-│   ├── process/        # 子进程监管
 │   ├── source/         # Git Clone 代码来源（容器执行替身）
-│   │   └── codesaver/  # 代码保存：提交、推送、合并与状态记录
-│   ├── ssh/            # SSH 主机密钥与类型记录、认证配置、路径与结果状态
-│   ├── httpapi/        # HTTP API 处理器：健康检查、错误结构、API 路径边界与 404
-│   ├── lifecycle/      # 后台服务生命周期：启动顺序、逆序清理、超时与故障传播
-│   ├── server/         # 统一服务编排：启动失败清理、优雅关闭与组件故障
-│   ├── store/          # SQLite 仓储与数据库约束
-│   ├── webui/          # 前端静态资源处理器与 SPA 回退
-│   └── testkit/        # testkit 自身的测试
+│   └── store/          # SQLite 仓储与数据库约束
 ├── integration/
 │   ├── local/          # 本机集成测试，不依赖外部服务
-│   │   ├── database/   # 持久化工作流全链路、Schema 审计、旧库升级
-│   │   ├── httpserver/ # HTTP 服务：请求分发表、静态资源、SPA 回退与关闭
-│   │   ├── docker/     # 远程 Docker 命令构造与结果解析（使用执行替身）
-│   │   ├── environment/# 环境版本文件写入与清单读写（真实文件系统）
-│   │   ├── session/    # Session 提取与持久化边界（真实文件系统）
 │   │   ├── codesaver/  # 真实 Git 提交、推送与合并（本机 bare 仓库）
+│   │   ├── environment/# 环境版本文件写入与清单读写（真实文件系统）
+│   │   ├── execenv/    # 执行环境准备与容器状态（真实 SQLite）
+│   │   ├── fetcher/    # 任务级工作区初始化的真实 Git 代码获取
+│   │   ├── scheduler/  # 项目级调度：准入、排序、领取、名额、租约与并发竞争
+│   │   ├── session/    # Session 提取与持久化边界（真实文件系统）
 │   │   ├── source/     # 容器内 Git Clone 与任务分支（真实 Git）
-│   │   ├── workflow/   # 应用层编排的启动恢复与重启一致性（真实 SQLite）
 │   │   ├── ssh/        # 本地模拟 SSH/SFTP 服务端
-│   │   └── sshprobe/   # 本机 TCP 探测
+│   │   ├── validation/ # 验证执行与检查结论（真实 SQLite）
+│   │   └── workflow/   # 应用层编排、取消与收尾一致性（真实 SQLite）
 │   ├── pi/             # 需要本机真实 Pi CLI
 │   ├── remote/
 │   │   ├── agent/      # 需要真实远程容器与容器内真实 Pi CLI
@@ -53,8 +46,7 @@ tests/
 │   │   └── docker/     # 需要真实远程 Linux 机器与真实 Docker Engine
 │   └── ssh/            # 需要真实远程 Linux 机器
 └── e2e/
-    ├── cli/            # CLI 完整用户操作路径
-    └── packaging/      # 打包验收：单文件程序独立目录启动 + 发布制品布局、元数据与 SHA-256
+    └── cli/            # CLI 完整用户操作路径
 ```
 
 ## 测试入口
@@ -88,24 +80,6 @@ go test -count=1 -v ./tests/integration/remote/workflow/...
 # CLI 端到端测试
 go test -count=1 -v ./tests/e2e/...
 
-# 发布制品与发布流程规则（版本元数据、命名规范、清单、校验文件、来源证明声明、
-# 发布目录与远端资产核验、三个工作流的触发 / 权限 / 依赖 / 步骤顺序）
-go test -count=1 -v ./tests/unit/release/...
-
-# 单文件打包冒烟测试（需要 pnpm 与已安装的前端依赖，否则自行跳过）
-go test -count=1 -v -run TestSingleBinaryPackaging ./tests/e2e/packaging/...
-
-# 发布制品打包验收：真实生成跨平台制品并校验布局、元数据与 SHA-256，
-# 再用 cmd/agentflow-release 的 verify-release / verify-assets 复核目录与资产列表
-# （同样需要 pnpm、node 与已安装的前端依赖，否则自行跳过），失败路径也逐条断言
-go test -count=1 -v -run TestReleaseArtifacts ./tests/e2e/packaging/...
-# 等价入口
-make test-release-verify
-
-# 发布流水线下载到本机后的运行冒烟（由 .github/workflows/release.yml 在目标平台执行）
-# 需要 AGENTFLOW_RELEASE_ARCHIVE 指向制品文件，未设置时输出 WARN [SKIP] 并跳过
-AGENTFLOW_RELEASE_ARCHIVE=/路径/agentflow_v1.2.3_linux_amd64.tar.gz AGENTFLOW_RELEASE_PLATFORM=linux/amd64 go test -count=1 -v -run TestReleaseArchiveSmoke ./tests/e2e/packaging/...
-
 # 完整测试
 go test -count=1 -v -p 8 -parallel 8 ./tests/...
 
@@ -113,17 +87,15 @@ go test -count=1 -v -p 8 -parallel 8 ./tests/...
 go run ./cmd/agentflow-ci real-tests-gate \
   -mode self -event push -actor <账号> -repository-owner <所有者> \
   -github-output "$GITHUB_OUTPUT" -step-summary "$GITHUB_STEP_SUMMARY"
-# 竞态检测
+# 竞态检测（单元测试）
 go test -race -count=1 ./tests/unit/...
-# 数据库约束、Schema 审计与旧库升级
-go test -count=1 -v ./tests/unit/store/ ./tests/integration/local/database/
 
-# 竞态检测（代码保存的并发隔离）
-go test -race -count=1 ./tests/unit/source/codesaver/ ./tests/unit/store/
-# 竞态检测（数据库迁移与并发访问）
-go test -race -count=1 ./tests/integration/local/database/
-# 竞态检测（任务级工作流编排与并发隔离）
-go test -race -count=1 ./tests/unit/app/ ./tests/unit/httpapi/ ./tests/integration/local/workflow/
+# 竞态检测（业务并发写入与条件更新）
+go test -race -count=1 ./tests/unit/store/ ./tests/integration/local/scheduler/
+
+# 竞态检测（任务级工作流编排、调度与并发隔离）
+go test -race -count=1 ./tests/unit/app/ ./tests/unit/httpapi/ ./tests/integration/local/workflow/ ./tests/integration/local/scheduler/
+
 # 竞态检测（SSH 连接管理与并发操作，需要真实协议交互）
 go test -race -count=1 ./tests/integration/local/ssh/...
 ```
@@ -148,8 +120,8 @@ SQLite 迁移与连接建立对并发量敏感，在高核数机器上用默认�
 | `go-inventory` | Go 测试包清单与分组核验：`go list` 得到的真实测试包必须恰好被分组清单覆盖一次（遗漏、重复归属、分组未被任何 Job 执行都会失败） | `bash .github/scripts/go-test-groups.sh --check --declared-groups unit,local,e2e` |
 | `go-unit` | `./tests/unit/...`（不需要任何外部设备） | `make test-unit` |
 | `go-local` | `./tests/integration/local/...`（本机 SQLite / 进程 / 本机 bare 仓库 / 进程内模拟 SSH 服务端） | `make test-local` |
-| `go-e2e` | `./tests/e2e/...`（CLI 端到端与单文件打包冒烟，需要 pnpm 与前端依赖） | `make test-e2e` |
-| `go-race` | `make test-race` 的全部范围 + 数据库迁移 + 任务级工作流编排 | `make test-race`，再执行下文两条补充命令 |
+| `go-e2e` | `./tests/e2e/...`（CLI 完整用户操作路径，不需要 pnpm 与前端依赖） | `make test-e2e` |
+| `go-race` | `make test-race` 的全部范围 + 业务并发写入 + 调度与任务级工作流编排 | `make test-race`，再执行下文两条补充命令 |
 | `ui-test` | 前端单元（`--maxWorkers 4`）、Playwright E2E（`--workers=4`）、格式、lint、类型检查、生产构建 | `cd lingting-agent-flow-ui && pnpm test:all:safe` |
 | `real-tests-gate` | 只读判定真实测试是否获授权，输出 `real_tests_enabled`、`mode` 与 `reason` | `go run ./cmd/agentflow-ci real-tests-gate -mode ... -event ...` |
 | `real-tests` | 仅授权通过时执行真实外部依赖测试包（见下文清单） | `go test -count=1 ./tests/integration/pi/... ./tests/integration/ssh/... ./tests/integration/remote/...` |
@@ -175,31 +147,27 @@ Go 测试的分组与并行策略：
 本地等价入口与全量入口的关系：`make test` 仍是本地全量入口（`tests/...` 全部测试包），
 分组入口是它的子集划分，CI 用三个分组 Job 并行覆盖同一批普通测试包。
 
-脚本清单、参数与退出码见 [`.github/scripts/README.md`](../.github/scripts/README.md)；
-脚本自身的存在性、解释器调用方式、参数一致性与退出码由
-`tests/unit/release/ci_scripts_test.go` 覆盖（含分组核验、分组执行守卫与产物收集白名单），
-本地可用 `go test -count=1 ./tests/unit/release/` 复核。
+脚本清单、参数与退出码见 [`.github/scripts/README.md`](../.github/scripts/README.md)；脚本自身没有
+专门的自动化测试，分组覆盖每次 CI 都由 `go-test-groups.sh --check` 机械核验。
 
 `.github/workflows/release.yml` 是制品构建流水线，只做"构建与制品准备"：它由
 `publish.yml` 复用（`workflow_call`）或手动触发（`workflow_dispatch`）运行，调用
-`make release-dist` 构建五个平台制品，用 `verify-release` 复核目录，再用
-`TestReleaseArchiveSmoke` 在目标平台的原生 Runner 上执行运行冒烟。它只上传 Actions 运行
-制品，不创建 GitHub Release、不推送镜像、不部署环境。**版本标签不再直接触发它**：标签发布
+`make release-dist` 构建五个平台制品，再用 `verify-release` 复核目录与制品元数据。它只上传
+Actions 运行制品，不创建 GitHub Release、不推送镜像、不部署环境。**版本标签不再直接触发它**：标签发布
 统一走 `publish.yml`，避免同一个标签被构建两次、产出两份不同的字节。
 
 `.github/workflows/publish.yml` 是正式发布流水线，由版本标签推送或手动触发运行。它依次复用
-`ci.yml`（全量门禁）与 `release.yml`（制品 + 冒烟），然后在 `publish` Job 里做发布前核验、
+`ci.yml`（全量门禁）与 `release.yml`（制品构建），然后在 `publish` Job 里做发布前核验、
 生成来源证明、创建草稿 Release、上传、重新下载核验、核验来源证明，全部通过后才把草稿转为
 公开 Release。发布权限（`contents: write`、`id-token: write`、`attestations: write`）只授予
 该 Job。
 
 | 发布阶段 | 覆盖范围 | 本地等价入口 |
 |---|---|---|
-| 版本解析 | 标签格式、ref 必须是标签、提交必须是完整 SHA | `go test -count=1 ./tests/unit/release/` |
+| 版本解析 | 标签格式、ref 必须是标签、提交必须是完整 SHA | 无本地等价入口（解析本身由 `release.yml` 的 `resolve` Job 执行） |
 | CI 门禁 | 复用 `ci.yml` 的四个必需 Job | 见上表 |
 | 制品构建 | 前端产物校验 → 交叉编译 → 打包 → `SHA256SUMS` 与清单自检 | `make release-dist VERSION=v1.2.3` |
 | 制品校验 | 用 `sha256sum -c` 与 `verify-release` 独立复核目录 | `cd dist/release && sha256sum -c SHA256SUMS`，`make release-verify VERSION=v1.2.3` |
-| 运行冒烟 | 解压、版本查询、启动服务、HTTP API 与前端静态资源 | `TestReleaseArchiveSmoke`（见上文环境变量） |
 | 发布前核验 | 版本 / 提交 / 平台覆盖 / 摘要 / 目录无多余文件 / 来源信息声明 | `go run ./cmd/agentflow-release verify-release -dir dist/release -version v1.2.3 -commit <sha> -require-provenance` |
 | 来源证明 | 生成与核验只能由 GitHub Actions 完成 | 无本地等价入口（`gh attestation verify` 只能核验已生成的证明） |
 | 上传后核验 | 远端资产列表 + 重新下载 + 摘要 + 来源信息 | `go run ./cmd/agentflow-release verify-assets -dir <下载目录> -version v1.2.3 -assets-file <资产名列表>` |
@@ -207,18 +175,17 @@ Go 测试的分组与并行策略：
 
 **这些工作流尚未在 GitHub Actions 上真实运行**：本轮没有推送版本标签，也没有创建公开
 Release。上表"本地等价入口"一列是可以在本地真实执行并已执行过的部分；远端上传、来源证明
-签发与草稿转公开只经过 YAML 静态核验（`TestPublishWorkflow*`）。
-
+签发与草稿转公开目前没有自动化测试覆盖，只能靠实际发布流程验证。
 `go-race` 的补充范围（`make test-race` 未包含），竞态检测同样按 Runner 的 4 vCPU 显式限制
 并行度（`-race` 下 SQLite 迁移与连接建立对并发量敏感，用机器核数兜底会在高核数机器上超时）：
 
 ```bash
-go test -race -count=1 -p 4 -parallel 4 ./tests/integration/local/database/
 go test -race -count=1 -p 4 -parallel 4 ./tests/integration/local/workflow/
+go test -race -count=1 -p 4 -parallel 4 ./tests/integration/local/scheduler/
 ```
 
 `make test-race` 本身已覆盖 `./tests/unit/...`（含 `unit/store`、`unit/app`、`unit/httpapi`、
-`unit/source/codesaver`）与 `./tests/integration/local/ssh/...`，因此 CI 不再重复执行这些范围，
+`unit/domain`）与 `./tests/integration/local/ssh/...`，因此 CI 不再重复执行这些范围，
 实际覆盖是上表所列范围的超集而不是子集；`make test-race` 的并行度跟随 `PARALLEL`（CI 传 4）。
 
 ### 真实测试授权与跳过语义
@@ -296,8 +263,8 @@ tests/integration/remote/workflow/    # remote 分组：真实远程端到端工
 ```
 
 以下本机模拟测试**不属于**真实测试，继续在普通 CI 的 `go-local` 分组中执行：
-`tests/integration/local/ssh/`、`tests/integration/local/docker/`、使用本机 SQLite 的工作流
-测试、使用 `tests/internal/fakepi` 的 Agent 测试，以及使用本机 bare 仓库的代码保存测试。
+`tests/integration/local/ssh/`、使用本机 SQLite 的调度与工作流测试、使用 `tests/internal/fakepi`
+的 Agent 测试，以及使用本机 bare 仓库的代码保存测试。
 
 #### 跳过规则
 
@@ -399,23 +366,19 @@ TEST_ARTIFACT_DIR=<绝对路径>
 cat "$(os.TempDir)/lingting-agent-flow-tests/latest-run.txt"   # 具体路径按平台解析
 ```
 
-已有 `TestMain` 的包（`tests/integration/pi`、`tests/unit/agent/pi`、`tests/unit/process`）
-在替身分支之后转调 `testkit.Main`，替身行为不受影响。
+已有 `TestMain` 的包（`tests/integration/pi`、`tests/unit/agent/pi`）在替身分支之后转调
+`testkit.Main`，替身行为不受影响。
 
 ## SSH 测试分层
 
 | 目录 | 内容 | 外部依赖 |
 |---|---|---|
-| `tests/unit/ssh/` | 主机密钥指纹与结论、已记录主机密钥类型、认证配置、私钥路径、参数转义、远程路径、结果状态 | 无 |
-| `tests/integration/local/ssh/` | 本机真实 SSH 握手与认证、多主机密钥类型协商、远程命令执行、取消与超时、SFTP 传输、工作空间解析、并发与资源释放 | 无（测试内启动服务端） |
+| `tests/integration/local/ssh/` | 本机真实 SSH 握手与主机密钥校验、私钥认证、远程命令执行与取消、SFTP 传输、并发会话隔离 | 无（测试内启动服务端） |
 | `tests/integration/ssh/` | 真实远程 Linux 机器上的认证、命令状态、超时、SFTP 与工作空间 | tests/config/ssh.yml 指定的 SSH 目标 |
 
 本机集成测试使用 `golang.org/x/crypto/ssh` 启动真实的服务端进程内实例，并配合
 `github.com/pkg/sftp` 的服务端实现，因此主机密钥校验、密码/私钥/Agent 认证、
 SFTP 上传下载与远程命令执行都经过真实协议交互，但不访问外网。
-
-SSH Agent 用例在测试工作空间中创建 Unix 套接字并提供 Agent 协议服务；平台不支持
-Unix 套接字时该用例输出 `WARN [SKIP]` 并跳过，其余用例仍会执行。
 
 所有 SSH 测试都禁止关闭主机密钥校验，禁止自动接受未知主机密钥。
 
@@ -430,32 +393,18 @@ Unix 套接字时该用例输出 `WARN [SKIP]` 并跳过，其余用例仍会执
 取消与认证失败会立即返回，避免换类型掩盖真实原因。全部已记录类型都不可用时返回第一个
 失败类型对应的结论。
 
-测试覆盖：
-
-- `tests/unit/ssh/hostkey_algorithms_test.go`：已记录类型按文件顺序去重返回、无记录返回
-  空、主机字段的多种写法（带端口、逗号多主机、通配符、哈希主机名）、注释与 `@revoked`、
-  `@cert-authority` 行的忽略规则。
-- `tests/integration/local/ssh/hostkey_retry_test.go`：进程内多主机密钥服务端，验证旧记录
-  失效时回落到下一条记录、记录顺序决定优先类型、全部类型失败时返回首个结论。
-
+测试覆盖：`tests/integration/local/ssh/dialer_test.go` 与 `hostkey_port_test.go` 验证未知主机密钥
+被拒绝、已信任主机密钥可完成私钥认证、主机密钥变化被拒绝，以及带端口与哈希主机名的记录形式。
+逐类型重试本身目前没有独立用例。
 ## 发布制品测试
 
-发布流水线的规则与验收分成两层：规则层是纯函数与静态检查，制品层真实生成并解压制品。
+发布制品与发布流程目前**没有自动化测试**：`tests/unit/release/`（版本元数据、发布矩阵、制品
+命名、压缩包布局、清单与工作流结构）与 `tests/e2e/packaging/`（端到端打包验收、目标平台运行冒烟）
+已在测试精简中删除，`release.yml` 的运行冒烟 Job 一并移除。
 
-| 目录 | 内容 | 外部依赖 |
-|---|---|---|
-| `tests/unit/release/` | 版本元数据校验、发布矩阵、制品命名、压缩包布局与权限、`SHA256SUMS` 排序、清单一致性、前端产物完整性、工作流触发条件/权限/阶段顺序/矩阵/Action 固定 | 无（构建制品时使用当前平台与占位前端产物） |
-| `tests/e2e/packaging/` | 真实执行一次发布构建并逐平台校验压缩包内容、`version.json`、清单与 SHA-256；当前平台制品解压后执行 `version` | pnpm 与已安装的前端依赖，否则 `WARN [SKIP]` |
-| `tests/e2e/packaging/`（`TestReleaseArchiveSmoke`） | 校验并启动流水线下载到本机的单个制品：布局、元数据、版本查询、HTTP API、前端静态资源、停止后端口释放 | `AGENTFLOW_RELEASE_ARCHIVE` 等环境变量，未设置时 `WARN [SKIP]` |
-
-平台支持边界的判定依据是构建矩阵与真实运行验证两件事，二者不互相替代：
-
-- 五个目标平台都用本仓库工具链真实交叉编译成功（`CGO_ENABLED=0`，纯 Go 依赖）。
-- 运行冒烟只在目标平台的原生 Runner 上执行；当前运行平台与制品平台不一致时，
-  `TestReleaseArchiveSmoke` 输出 `WARN [SKIP]` 并跳过，不会把"交叉编译成功"报告成
-  "该平台已完成运行验收"。
-- `internal/release.SupportedPlatforms` 是发布矩阵的唯一来源；不在矩阵内的平台会在
-  构建时被拒绝，也不会进入工作流的冒烟矩阵。
+`internal/release.SupportedPlatforms` 仍是发布矩阵的唯一来源，不在矩阵内的平台会在构建时被拒绝；
+制品布局、`SHA256SUMS`、清单与来源信息声明只能靠 `make release-dist` / `make release-verify` 与
+发布流程本身校验。平台的"交叉编译成功"与"已完成运行验收"因此不再有自动化区分手段。
 
 ## Docker 测试分层
 
@@ -464,12 +413,11 @@ Unix 套接字时该用例输出 `WARN [SKIP]` 并跳过，其余用例仍会执
 | `tests/unit/environment/` | 环境类型、版本号递增与复用判定、构建状态迁移（含 `uncertain`）、镜像引用与 ID 校验 | 无 |
 | `tests/unit/image/` | 构建上下文确定性哈希、Dockerfile 静态校验、语言模板、构建配置哈希 | 无 |
 | `tests/unit/container/` | 容器状态迁移、detached 语义、生命周期策略、缓存卷命名、创建参数安全边界、JSON 解析 | 无 |
-| `tests/integration/local/docker/` | 预检错误分类、命令构造与转义、幂等删除、状态不确定分类、清单读写 | 无（使用 SSH 执行替身） |
 | `tests/integration/local/environment/` | 版本文件不可覆盖、清单落盘一致性、构建上下文上传与清理 | 无（远程路径映射到本机目录） |
 | `tests/integration/remote/docker/` | 真实远程预检、镜像构建、容器创建/启动/执行/停止/删除 | tests/config/ssh.yml 指定的 SSH 目标与真实 Docker |
 
-本机 Docker 测试使用可控的 SSH 执行替身：替身记录收到的远程命令并返回预设输出，
-因此命令构造、参数转义、结果解析与错误分类都经过真实代码路径，但不需要 Docker Engine。
+容器命令构造与参数安全边界、结果解析与错误分类由 `tests/unit/container/` 覆盖（不依赖 Docker
+Engine），远程预检与真实容器流程由 `tests/integration/remote/docker/` 覆盖。
 本机环境测试把远程绝对路径映射到测试工作空间中的目录，因此文件写入、原子替换与
 "历史版本不可覆盖"都在真实文件系统上验证。
 
@@ -510,8 +458,7 @@ Unix 套接字时该用例输出 `WARN [SKIP]` 并跳过，其余用例仍会执
 | `tests/unit/app/` | 后台构建管理器：受理返回真实版本快照、重复提交拒绝、节点/版本非法时不启动构建、未启动时拒绝受理、启动时把遗留 `building` 收敛为 `uncertain`、停止时取消在途构建并等其收敛、条件更新拒绝迟到的构建结果 |
 | `tests/unit/store/` | `environment_versions` 的只追加约束：重复版本号被唯一约束拒绝，历史版本内容与哈希不被覆盖 |
 | `tests/unit/httpapi/` | 环境写接口的参数校验（缺失 `host_id`、Dockerfile 非法、未知字段、非法类型/名称、方法不允许、未知子路径）、错误类别映射（400/404/409/412/503）、请求透传、构建受理返回 `202` 且不声称成功、构建状态查询区分成功/在途/失败/不确定、日志接口不接受路径参数且缺失时 404、只读查询回归 |
-| `tests/unit/server/` | 统一服务装配：注入 SSH 工厂后构建入口返回 404（而不是 503），且启动时把遗留 `building` 收敛为 `uncertain`（证明构建管理器注册进了 `lifecycle`） |
-| `lingting-agent-flow-ui/tests/unit/` | 前端展示与判定规则：状态标签、可用性只认服务端字段、构建结论归一（失败与不确定分别保留服务端原因）、节点选项与阻断原因 |
+| `lingting-agent-flow-ui/tests/unit/` | 前端业务判定（`settings-environments.test.ts`）：环境状态标签、可用性只认服务端字段、构建结论归一（失败与不确定分别保留服务端原因）、节点选项与阻断原因 |
 | `lingting-agent-flow-ui/tests/e2e/` | 浏览器用例：设置页承载环境管理、独立环境导航已移除、不自动选中默认节点、真实状态展示、构建失败原因、结果不确定、在途构建禁止重复提交、日志读取失败不显示为空、Dockerfile 编辑为新版本、切换节点丢弃迟到响应、不可用节点只读可看 |
 
 环境相关用例的关键约束：
@@ -637,14 +584,13 @@ go test -count=1 -v ./tests/integration/remote/docker/...
 
 | 目录 | 内容 | 外部依赖 |
 |---|---|---|
-| `tests/unit/source/codesaver/` | 容器登记与实际 ID 不一致、detached 容器、任务分支不匹配、非 Git 工作区、无变更、既有冲突、提交身份缺失、提交信息与作者参数传递、提交成功与 SHA 读取、提交异常但 HEAD 已变化、既有暂存内容不被重置、只推送任务分支、禁止强制推送、远程缺失、内嵌凭据拒绝、认证失败、非快进冲突、推送超时但远程已收到、远程与本地不一致、无法核验远程、合并默认关闭、推送失败禁止合并、基础分支识别失败、合并冲突、主分支推送失败、合并结果不确定、记录先于远程操作落盘、并发隔离、取消不影响其他任务、**提交成功但记录写入失败（`state_unconfirmed` 与内存结论并存）**、**数据库停留在 pending 且基线可支撑恢复判定**、**短暂写入故障后重新执行可完整落盘**、**`fail` 使用未取消上下文**、**提交与合并基线在副作用之前落盘**、**只读核验确认三种结论且不写记录/不产生副作用**、**重复核验幂等**、**核验失败保留不确定性** | 无（使用容器执行替身） |
-| `tests/unit/domain/` | `DecideCodeSaveRecovery` 判定表：提交/推送/合并三个窗口的"已发生/未发生/不确定"，缺少基线与核验失败一律转人工核验，仅"确认未发生"才可安全重试、**合并父关系无法匹配时不得判定已合并**、**`RecoveryConverged` 收敛判定** | 无（纯函数） |
+| `tests/unit/domain/` | 代码保存记录的终态与"必须转人工核验"语义 | 无（纯函数） |
 | `tests/unit/store/` | `code_saves` 写入与更新、状态字段约束（成功必须带 SHA）、未请求合并不能记录合并结果、按任务查询、并发写入独立、恢复字段读写（基线/落盘状态/恢复结论）、历史记录（新列为 NULL）可读且不被误判、未知恢复状态原样读回、**核验结论条件写入（读取后结论被改写返回 `ErrConflict` 且不覆盖）、核验只写 `recovery_status` 不覆盖提交/推送状态、记录不存在返回 `ErrNotFound`** | 无 |
-| `tests/integration/local/codesaver/` | 真实 Git 提交、任务分支真实 Push 到 bare 仓库、远程引用核验、默认不合并、显式合并后基础分支包含任务提交、推送失败不误报成功、合并冲突保留现场、无变更不制造空提交、并发仓库隔离、**真实 Git 已提交但记录写入失败时基线与真实 HEAD 一起确认"提交已发生"**、**远程与预期提交不一致时转人工核验**、**远程不可达时保留不确定性**、**真实合并后依据第一父/第二父确认合并已发生** | 本机 `git` |
+| `tests/integration/local/codesaver/` | 真实 Git 提交、任务分支真实 Push 到 bare 仓库、默认不合并、显式合并后基础分支包含任务提交、推送失败不误报成功、合并冲突保留现场、无变更不制造空提交、并发仓库隔离、提交成功但记录写入失败后可核验、远程不一致与不可达时的核验结论 | 本机 `git` |
 | `tests/integration/remote/codesaver/` | 真实远程容器内提交、推送与合并，远程任务分支与基础分支 commit 核验 | tests/config/ssh.yml 指定的 SSH 目标、真实 Docker 与容器内 Git |
 
 本机 Git 缺失时，`tests/integration/local/codesaver/` 的用例输出 `WARN [SKIP]` 并跳过，
-`tests/unit/source/codesaver/` 与 `tests/unit/store/` 的用例仍然执行。
+`tests/unit/domain/` 与 `tests/unit/store/` 的用例仍然执行。
 
 ### 代码保存测试的配置
 
@@ -774,43 +720,27 @@ go test -count=1 -v ./tests/integration/local/workflow/
 go test -race -count=1 ./tests/integration/local/workflow/
 ```
 
-## 数据库约束与迁移测试
+## 数据库约束测试
 
-数据库结构遵循两条长期规则：**枚举字段不受数据库级封闭取值限制**，**业务 Schema
-不声明外键**。相关测试负责守住这两条规则，并验证旧数据库升级不丢数据。
+数据库结构遵循两条长期规则：**枚举字段不受数据库级封闭取值限制**，**业务 Schema 不声明外键**。
+这两条规则当前只在存储层有守点：
 
 | 目录 | 内容 | 外部依赖 |
 |---|---|---|
-| `tests/unit/store/` | 仓储读写、未知枚举值原样保留、逻辑删除、唯一约束与非枚举 `CHECK` 仍生效、并发写入与事务 | 无 |
-| `tests/integration/local/database/` | 迁移后完整 Schema 审计（外键、触发器、枚举白名单、索引、必需约束）、未知枚举值可写入、旧版本数据库升级与数据保留、自增主键续号、迁移失败不留半成品、并发打开只迁移一次 | 无 |
+| `tests/unit/store/` | 仓储读写、未知枚举值原样保留、逻辑删除、唯一约束与非枚举 `CHECK` 仍生效、条件更新拒绝迟到结果、并发写入与事务原子性 | 无 |
 
 ```bash
-# 数据库约束与 Schema 审计
-go test -count=1 -v ./tests/unit/store/ ./tests/integration/local/database/
-
-# 竞态检测（迁移与并发访问）
-go test -race -count=1 ./tests/integration/local/database/
+go test -count=1 -v ./tests/unit/store/
+go test -race -count=1 ./tests/unit/store/ ./tests/integration/local/scheduler/
 ```
 
-### 旧版本数据库样本
-
-旧库样本由 `tests/internal/testkit.CreateLegacySchema` 在测试工作空间中直接执行仓库里
-真实的 `0001…0008` 迁移脚本生成，不维护第二份 DDL，也不读取开发者本机的真实数据库。
-样本随后写入完整的 Task / Step / Attempt / Session / 验证结果 / 事件 / 容器 / 环境版本
-/ 代码保存 / 执行节点 / 角色记录，用于验证迁移前后记录数量与关键字段一致。
-
-### Schema 审计范围
-
-- 每张业务表的 `PRAGMA foreign_key_list` 必须返回零条记录。
-- 建表语句不得包含 `REFERENCES` 与 `FOREIGN KEY`。
-- 触发器只允许存在"私钥认证必须给出私钥路径"这一跨字段要求，不得模拟外键或枚举白名单。
-- 枚举字段不得残留 `CHECK (... IN (...))` 形式的封闭取值集合。
-- 主键、`NOT NULL`、`UNIQUE`、非枚举 `CHECK` 与关联索引必须保留。
-- 全新数据库与"旧库迁移后"的建表语句必须逐表一致。
+`tests/integration/local/database/`（迁移后全量 Schema 审计、旧库升级与数据保留、自增主键续号、
+迁移失败不留半成品、并发打开只迁移一次）已在测试精简中删除。Schema 审计与旧库升级因此**目前没有
+自动化守点**：新增迁移、修改表结构或调整约束都不会被测试发现，只能靠迁移脚本自身、`make vet` 与
+人工核对。
 
 ### 查看测试结果
 
-每个测试入口输出 `TEST_ARTIFACT_DIR=<绝对路径>`，旧库样本、迁移后的数据库与 WAL 文件
-都保留在该目录内。测试结束只关闭连接，不删除任何产物，便于直接打开 SQLite 文件核对
-迁移结果。同一目录下的 `test.log` 记录本次运行的逐用例结论与日志（见「运行日志」），
-复核时不需要重跑测试。
+每个测试入口输出 `TEST_ARTIFACT_DIR=<绝对路径>`，数据库、WAL/SHM 文件与测试产物都保留在该目录
+内。测试结束只关闭连接，不删除任何产物，便于直接打开 SQLite 文件核对结果。同一目录下的
+`test.log` 记录本次运行的逐用例结论与日志（见「运行日志」），复核时不需要重跑测试。

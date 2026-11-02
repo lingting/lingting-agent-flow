@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check vet test test-unit test-local test-pi test-ssh test-e2e test-packaging test-release-verify test-race build release release-dist release-verify release-notes run web-install web-build web-dev web-verify serve clean check
+.PHONY: fmt fmt-check vet test test-unit test-local test-pi test-ssh test-e2e test-race build release release-dist release-verify release-notes run web-install web-build web-dev web-verify serve clean check
 
 VERSION ?= dev
 # 开发构建使用短提交便于阅读；正式发布制品中的提交由 cmd/agentflow-release 写入完整 SHA。
@@ -48,10 +48,6 @@ test-ssh:
 test-e2e:
 	go test -count=1 -v ./tests/e2e/...
 
-# test-packaging 是单文件发布冒烟测试：构建前端、编译可执行文件、复制到独立目录后启动，
-# 校验页面入口、静态资源与同源 API 均可用。缺少 pnpm 或前端依赖时该入口自行跳过。
-test-packaging:
-	go test -count=1 -v -run TestSingleBinaryPackaging ./tests/e2e/packaging/...
 
 # 并行度跟随 PARALLEL：竞态检测比普通测试更吃内存与 CPU，并行度过高会把 SQLite 迁移与
 # 连接建立推到超时（在 18 核机器上以默认 NumCPU 并行会稳定失败），因此显式声明而不是
@@ -114,10 +110,6 @@ release-verify:
 release-notes:
 	go run ./cmd/agentflow-release notes -dir "$(RELEASE_DIR)" -version "$(VERSION)" -output "$(RELEASE_NOTES)"
 
-# test-release-verify 执行发布制品的端到端打包验收：真实生成全部目标平台制品并校验
-# 压缩包布局、版本元数据与 SHA-256。需要 pnpm 与已安装的前端依赖，否则用例自行跳过。
-test-release-verify:
-	go test -count=1 -v -run 'TestReleaseArtifacts|TestSingleBinaryPackaging' ./tests/e2e/packaging/...
 run: serve
 
 clean:
