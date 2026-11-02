@@ -1,163 +1,8 @@
 # 架构说明
 
-本文件描述 AgentFlow 的架构边界与依赖方向，用于判断“新代码应该放在哪里”以及“哪些依赖不允许出现”。
-
-> 下文的架构图为**目标架构**，仅说明分层意图。当前代码实现了 CLI 骨架、配置加载与校验、
-> 日志封装、SQLite 数据层、执行节点管理与环境预检、SSH 服务探测与 SSH 连接层（主机密钥校验、
-> 私钥认证、远程命令执行、SFTP 传输与远端 Unix 套接字通道）、统一 Pi Runner（本机与容器内）、
-> **单步骤执行协调器与开发步骤顺序执行**、**确定性验证引擎**、**统一执行环境（远程 Linux +
-> Docker）**、**代码获取（CodeFetcher）与代码初始化协调器**、**任务级工作区初始化**、
-> **单步骤开发—验证闭环**、**任务级工作流编排器**与任务管理 HTTP 接口。
-> 图中调度、计划自动生成与 UI 的完整形态尚未实现。
-
-## 目标架构
-
-```text
-CLI / Web UI
-      |
-Application Services
-      |
-Scheduler / Workflow Engine
-      |
-Container Agent Runner / Docker Exec
-      |
-Pi CLI（容器内）/ Git Worktree
-      |
-SQLite
-```
-
-- **CLI / Web UI**：只负责发起操作与展示结果。
-- **Application Services**：CLI 与 HTTP 的共同入口，编排各领域能力；执行与多步骤编排分别由
-  `app.StepExecutor` / `app.StepWorkflowService` / `app.TaskWorkflowService` 承担，任务领取与
-  并发调度（`internal/scheduler`）尚未实现。
-- **Container Agent Runner / Docker Exec**：在受管理的任务容器内以独立子进程方式驱动 Pi，
-  并管理远程命令的生命周期。本版本只支持远程 SSH + Docker 容器执行，不存在本机 Pi 调用路径。
-- **Pi CLI / 任务容器**：非交互 `pi --print --session` 调用与任务工作区隔离。
-- **SQLite**：唯一真相来源。
-
-## 目录地图
-
-```text
-cmd/agentflow/            CLI 入口，只做构建信息注入与启动
-internal/app/             应用服务，CLI 与 HTTP 的共同调用入口；
-                          含单步骤执行协调器 step_executor*.go（校验、占用、调用与终态写入）、
-                          单步骤闭环 step_workflow*.go、任务级编排器 task_workflow*.go
-                          与执行环境实现 execenv*.go（准备、状态、执行、释放）
-internal/cli/             Cobra 命令实现
-internal/config/          配置结构与 YAML 加载、校验
-internal/logging/         结构化日志封装
-internal/domain/          核心实体、状态与业务规则（含单步骤执行准入规则）
-internal/source/          代码获取抽象（Fetcher）与 Git Clone 实现：容器内 Clone、基础分支识别、
-                          任务分支初始化与错误分类
-internal/execenv/         统一执行环境契约：Kind、Workspace、Environment、ExecSpec/Result、
-                          PrepareSpec/Prepared、ReleaseRequest/Result、Provider 与 ExecPort
-internal/scheduler/       任务领取、并发控制、Worker 与恢复（未实现）
-internal/agent/           统一 Agent 接口：Runner、RunRequest、RunResult、Event
-internal/agent/pi/        Pi CLI 适配器：容器 Runner、CLI 能力检查、Session 路径与日志落盘
-internal/process/         外部进程生命周期管理：启动、输出读取、超时、取消与回收
-internal/gitworktree/     任务工作区创建、检查与清理（未实现）
-internal/storage/         存储接口与统一存储错误（含步骤占用的原子事务接口）
-internal/storage/sqlite/  数据库连接、迁移与仓储实现
-internal/sshprobe/        SSH 端点探测：TCP 可达性与协议标识校验
-internal/sshclient/        SSH 连接层：主机密钥校验与算法协商、身份认证、远程执行与 SFTP 传输
-internal/events/          内部事件定义与事件总线（未实现）
-internal/lifecycle/       后台服务注册、启动、故障传播与逆序停止
-internal/httpapi/         HTTP 路由与处理器（SSE 未实现）
-lingting-agent-flow-ui/   React + TypeScript 前端（独立 pnpm 工程）
-configs/                  示例配置
-migrations/               迁移说明（实际迁移脚本在 internal/storage/sqlite/migrations/）
-docs/                     架构与开发文档
-tests/unit/               快速单元测试（不依赖真实 Pi、SSH 或网络）
-tests/unit/ssh/           SSH 连接层单元测试（主机密钥与类型记录、认证配置、路径与结果状态）
-tests/unit/app/           应用服务单元测试（会话、Runner 生命周期、单步骤执行编排）
-tests/integration/local/  本机集成测试（数据库全链路、进程内 SSH/SFTP 服务端、TCP 探测、
-                          执行环境生命周期与工作区隔离）
-tests/integration/pi/     需要本机真实 Pi CLI 的集成测试
-tests/integration/ssh/    需要真实远程机器的集成测试
-tests/e2e/                端到端测试（CLI 完整操作路径）
-tests/internal/testkit/   测试工作空间与通用辅助组件
-tests/internal/fakepi/    以测试二进制充当 Pi CLI 的可控替身
-```
-
-标为“未实现”的目录在对应能力落地前不创建，避免留下只有接口没有使用场景的抽象。
-
-测试代码不放在生产源码目录，全部集中在根目录 `tests/` 下，按测试类型与领域分层，
-每个子目录都是独立的 Go 测试包。`tests/internal/testkit` 提供统一的测试工作空间：
-在系统临时目录的 `lingting-agent-flow-tests` 下创建随机根目录，为每个用例分配独立子目录，
-并保证测试产物不被自动删除。`tests/internal/fakepi` 让测试二进制充当 Pi CLI 替身，
-使 Pi Runner 的单元测试不依赖本机是否安装 Pi。
-
-## 依赖方向
-
-```text
-cmd
- └── cli / httpapi
-      └── app
-           ├── storage
-           └── events
-                └── agent / process / gitworktree / config
-                     └── domain
-```
-
-约束：
-
-- `domain` 处于最底层，只依赖 Go 标准库，禁止 import 本项目其他内部包。
-- 单步骤执行准入规则（任务/步骤状态、角色类型、占用检查）只在 `domain` 中定义一次，
-  `app` 只调用它，`httpapi` 与前端不得复制第二份判断。
-- `domain` 不得感知数据库、HTTP、JSONL RPC、子进程与文件系统。
-- `config` 可以把角色类型映射到 `domain.RoleType` 以复用取值校验，但配置结构自身保持独立，不把 YAML 细节泄漏进 `domain`。
-- `app` 之上的层不得直接访问 SQLite；所有持久化经由仓储接口。
-- `app.TaskWorkflowService` 与 `app.StepWorkflowService` 不得直接创建 Pi 进程，只能通过
-  容器执行端口（`app.ContainerService.RunAgent`），且不得构造 Docker 或 Git 命令。
-- `httpapi` 与 `cli` 不得包含状态迁移逻辑，只调用 `app`。
-- `httpapi` 不得自行拼接 Pi 命令、创建 Attempt 或直接赋值执行状态；单步骤执行只能调用
-  `app.StepExecutor`。
-- `app.StepExecutor` 只通过容器执行端口发起 Pi 调用，不直接构造命令行，也不创建或接管容器。
-- 前端不得复制工作流规则，只消费 HTTP API。
-
-## 当前实现的分层
-
-```text
-cmd/agentflow → cli / httpapi / server → app → config / logging / storage / sshclient / docker
-                                              ↘ lifecycle
-                                                   ↘ domain
-```
-
-- `main.go` 只注入构建信息、处理信号并返回退出码。
-- `cli` 只做参数解析、结果输出与退出码转换，不包含校验规则。SSH 认证只使用节点配置中的
-  本机私钥文件，命令层不收集任何凭据，也不存在隐藏输入或标准输入读取路径。
-- `app` 组装配置与日志，并把配置校验编排成一次应用服务调用；同时负责把配置中的角色转换为存储层的初始化定义，以及把节点配置转换为 SSH 连接目标与认证配置。
-- `config` 负责 YAML 解析、未知字段拒绝与字段级校验。
-- `logging` 封装 `log/slog`，日志统一输出到标准错误流。
-- `storage` 只定义接口与存储错误，不依赖具体驱动；`storage/sqlite` 实现连接、迁移与各实体仓储。
-- `sshprobe` 只做网络与协议标识探测，不进行身份认证，不依赖 `cli` 或 `storage`。
-- `sshclient` 提供 SSH 连接层，内部按职责分为：私钥认证（`AuthConfig` 与
-  `buildAuthMethods`）、主机密钥校验（`HostKeyStore` / `KnownHostsStore`，只读解析
-  known_hosts，含按记录提供的主机密钥类型 `HostKeyTypeProvider`）、连接管理（`Dialer` / `Client`）、
-  远程执行（`Run` 与 `CommandResult`）、SFTP 传输（`FileTransfer`）、远程工作空间
-  （`ResolveHome` / `ResolveWorkspace` / `EnsureWorkspace`）与远端 Unix 套接字通道
-  （`DialUnixSocket`）。它不依赖 `cli`、`storage` 或 `app`，业务代码通过接口注入依赖，
-  不在各处直接创建 SSH 客户端。
-- `dockerfile` 只做 Dockerfile 静态解析（多阶段、`AS` 别名、`ARG` 替换、`--platform`），
-  不访问网络也不调用 Docker；`docker` 负责远程 Docker 命令构造、帮助信息核对与镜像元数据
-  查询，并集中定义校验超时。
-- `app` 中的 `HostValidator` 编排三项必需检查，`HostValidationService` 作为后台服务接入
-  `internal/lifecycle`，两者都不在 HTTP Handler 内创建长期 goroutine。
-- `app.StepExecutor` 是单步骤执行协调器（`internal/app/step_executor*.go`），按职责拆分为
-  校验与占用、提示词构造、执行与终态写入、Git 状态采集、生命周期五部分。它是所有执行入口里
-  唯一负责"创建 Attempt → 调用 Pi → 写终态"的组件，同时实现 `lifecycle.Service`，因此
-  Server 停止时能取消在途执行并等待收敛。
-- `app.StepExecutor.ExecuteSteps`（`internal/app/step_sequence.go`）是显式的顺序执行入口：
-  它按 `steps.sequence` 逐个调用 `Execute`，不生成计划、不自动重试、不串联验证与代码保存，
-  遇到失败、超时、取消或中断立即停止。顺序执行不新增调度器，也不复制状态迁移规则。
-- Git 工作区状态采集经由 `StepExecutionGitPort`，默认实现是
-  `ContainerService.InspectWorktree`（`internal/app/code_inspect.go`），它复用
-  `codesaver.Inspector` 的只读核验：不提交、不推送、不合并，也不写入 `code_saves`。
-- `httpapi` 只做协议转换：解析执行参数、把错误类别映射为状态码、序列化结果。它不判断任务
-  是否可执行，也不读数据库。
-- `app.TaskWorkflowService`（`internal/app/task_workflow*.go`）是唯一的多步骤编排实现，作为
-  后台服务注册在 `agentflow server` 中，只通过 HTTP 接口驱动。CLI 不再在进程内装配执行栈：
-  `agentflow task run` 走 `POST /api/v1/tasks/{taskID}/execute-workflow` 并轮询真实进度。
+本文件描述各条执行链路的边界、状态规则与数据事实，用于判断「某个行为应该由谁负责」以及
+「哪些实现不允许出现」。目录布局、包职责与依赖方向见 [workspace.md](workspace.md)；
+HTTP 接口契约见 [http-api.md](http-api.md)；测试规范见 [testing.md](testing.md)。
 
 ## 领域模型边界
 
@@ -188,6 +33,18 @@ cmd/agentflow → cli / httpapi / server → app → config / logging / storage 
 - `ValidationStatus`（`checking` / `normal` / `abnormal`）表达总体预检状态，
   `CheckStatus`（`passed` / `failed` / `timed_out` / `skipped` / `not_run`）只用于单项结果；
   两者不得合并，也不得新增第二套总体状态名。
+- 实体字段校验失败返回 `*ValidationError`，可用 `errors.Is(err, ErrInvalidValue)` 判断；非法状态迁移
+  返回 `ErrInvalidTransition`。
+- `TaskStatus.IsTerminal` 只包含 `completed` 与 `cancelled`（允许显式重试的 `failed` 不是终态）；
+  删除判定使用 `TaskStatus.IsFinished`，它额外包含 `failed`。
+- 逻辑删除使用 `deleted_at`：读取层默认过滤已删除记录，只有显式 `IncludeDeleted` 才纳入查询；
+  历史记录一律保留。
+- 四层关联（Task → Step → Attempt → Session）由应用层校验：Attempt 的 Task 必须与其 Step 的 Task
+  一致，Session 的 Task / Step / Attempt 必须属于同一条任务链。数据库不声明外键，孤立关联 ID
+  可以被写入，但不得被当作合法关系。
+- Session 的执行状态、原始 JSONL 归档状态与 HTML 导出状态必须分别记录，不得合并为一个字段。
+- 不得伪造执行结果：未调用真实执行器时不得把 Step / Attempt / Session 标记为 `running`、
+  `completed` 或 `succeeded`，也不得把测试夹具数据写入真实开发数据库冒充执行历史。
 
 ## 配置与领域的关系
 
@@ -199,24 +56,43 @@ cmd/agentflow → cli / httpapi / server → app → config / logging / storage 
 
 - 数据库是唯一真相来源，关键状态迁移必须落库后再继续执行。
 - 任务领取使用事务与原子状态迁移，禁止“先查询、后更新”。
-- schema 变更必须在 `internal/storage/sqlite/migrations/` 追加新迁移脚本，不修改已发布的迁移。
-- 迁移脚本通过 `embed` 嵌入程序，运行时按版本顺序自动执行；已应用版本记录在 `schema_migrations`。
 - 跨实体的关键状态更新必须在 `storage.Tx` 内完成，不能在应用层分多次调用独立方法后假定原子性。
-- 外键统一为 `ON DELETE RESTRICT`：角色、需求、任务、步骤等被历史记录引用时不可删除，避免历史丢失。
+- 尝试序号由存储层在事务内分配（`storage.AttemptStore.StartAttempt`），禁止"先查最大值再无条件插入"；
+  `NextAttemptNumber` 只用于展示与预估。
+- 依赖条件的更新必须检查影响行数并返回 `storage.ErrConflict`：迟到的结果不得覆盖已确认的终态，
+  重复完成不得重新打开终态记录。
 - 完整 Agent 会话历史不能作为唯一业务记录，业务结论必须写入结构化字段。
-- 单步骤执行的步骤占用必须在单个事务内完成：以状态为前置条件创建 Attempt，再条件更新
-  Step 与 Task。禁止"先查询、后无条件更新"，也不得只依赖进程内互斥锁保证一致性。
-- `ON DELETE RESTRICT` 是早期设计；当前 Schema 不声明外键，引用完整性由应用层承担（见
-  `AGENTS.md` 的数据库约束规范）。
+- 单步骤执行的步骤占用必须在单个事务内完成：以状态为前置条件创建 Attempt，再条件更新 Step 与
+  Task。禁止"先查询、后无条件更新"，也不得只依赖进程内互斥锁保证一致性。
+- 迁移脚本、schema 与引用完整性的长期约束见 `AGENTS.md` 的「数据库约束规范」；本文件不重复列出。
 
-## 外部进程边界
+## Pi Runner 与 Session 生命周期边界
 
-- Pi 只使用非交互调用方式 `pi --print --session <path> --model <id>`，Prompt 通过标准输入写入
-  并立即关闭；不使用 RPC 模式、不使用 `--no-session`、不依赖伪终端。
-- 必须处理启动失败、非零退出码、超时、取消、意外退出、输出流关闭与子进程未退出。
-- 子进程的终止与回收统一由 `process` 负责，其他包不直接管理进程。
-- 取消与服务关闭必须传播到实际 Pi 进程；两者必须能区分：调用方取消记为 `cancelled`，
-  服务关闭导致的记为 `interrupted`。
+- 所有 Planner、Developer、Validator 调用都必须经由统一 Runner（`app.ContainerService.RunAgent`）
+  发起，各自对应一条独立的 Session 记录；禁止在 CLI、HTTP Handler 或工作流代码里自行拼接
+  Pi 命令行。本机 Runner 收到容器目标时必须直接失败，不得静默回退到本机执行。
+- Pi 只使用非交互调用方式 `pi --print --session <path> --model <id>`，Prompt 通过标准输入写入并
+  立即关闭；不使用 RPC 模式、不使用 `--no-session`、不依赖伪终端，也不默认追加
+  `--no-extensions` / `--no-skills`（扩展阻塞在交互输入时由超时或取消结束并给出诊断）。
+- 必须处理启动失败、非零退出码、输出解析失败、超时、取消、意外退出、输出流关闭与子进程未退出。
+  子进程的启动、终止与回收统一由 `process` 负责，其他包不直接管理进程。
+- 每次调用使用独立且唯一的 Session 文件路径：由服务端按任务 / 步骤 / 尝试 / 会话 / 调用标识分层
+  生成，并校验落在 Session 根目录之内；调用方不得指定任意本地路径。
+- Session 记录必须在 Pi 进程启动之前写入数据库并推进到 `running`；启动失败、工作目录不可用等路径
+  必须把该记录收敛为 `failed`，不得残留 `running`。
+- stdout、stderr 与退出状态分别处理：两个流分别写入 `stdout.log` 与 `stderr.log`，日志有字节上限，
+  截断时在文件末尾留下明确标记；数据库只保存路径、状态与摘要。
+- 取消与服务关闭必须传播到实际进程，并在宽限期后强制终止仍不退出者；两者必须能区分：调用方取消
+  记为 `cancelled`，服务关闭导致的记为 `interrupted`。Server 停止时取消在途调用并等待收敛。
+- 原始 JSONL 必须复制到本机持久化数据目录（默认 `<数据库目录>/sessions`），或在清理远程环境前
+  完成可靠回传；不得只保存在容器内部、远程配置目录或项目代码目录，也不得写入本机真实项目目录。
+- 归档只有在本机确实拿到可读原始文件时才记为成功；HTML 导出只能使用 Pi 官方 `--export`，导出失败
+  只降级导出状态，不得删除或覆盖原始 JSONL，也不得把成功的执行改写为失败。
+- 会话内容默认只在本机持久化，不打印完整内容到日志或控制台，也不上传到外部存储服务。
+- Runner 不负责工作流重试决策，也不决定任务的成功清理策略；Provider 只负责获取代码与初始化任务
+  分支，不负责 Push、Merge 或删除容器。
+- 容器生命周期状态与任务执行状态分别记录：不得仅凭 Task 状态推断容器一定存在，也不得用容器状态
+  推断任务是否成功。
 
 ## 单步骤执行边界
 
@@ -241,6 +117,21 @@ HTTP Handler
 - 终态写入失败必须如实报告（`Finalized=false` / `execution_not_persisted`），不得因响应
   写入失败而跳过 Session 保存与状态更新。
 - 本层不创建、启动、停止或接管容器，也不执行 Commit / Push / Merge。
+- 执行入口固定为 `app.StepExecutor`（`internal/app/step_executor*.go`），按职责拆分为校验与占用、
+  提示词构造、执行与终态写入、Git 状态采集、生命周期五部分。它是唯一负责「创建 Attempt → 调用
+  Pi → 写终态」的组件，并实现 `lifecycle.Service`，Server 停止时能取消在途执行并等待收敛。
+- 任务准入状态固定为可合法迁移到 `developing` 的集合（`preparing`、`planned`、`developing`、
+  `retrying`、`paused`、`recovery_required`）；`queued` 必须先完成环境准备与计划，`cancelling`
+  与已结束状态一律拒绝。该规则只在 `domain` 中定义一次。
+- 超时、取消与中断分别映射为 `timed_out`、`cancelled`、`interrupted`，不得把任何一种当作成功；
+  用户取消按状态机把 Step 收敛为 `cancelled`，并把任务经 `cancelling` 收敛为 `cancelled`。
+- 单个步骤失败不得覆盖其他步骤的历史结果。
+- 终态写入使用未取消的上下文并分别执行：Attempt、Step、Task 三条写入互不阻断，任一失败都要记录到
+  结果的 `FinalizationErrors`，接口不得把写入失败报告为成功。
+- 迟到结果不得覆盖已确认的终态：所有终态写入都必须带状态前置条件，冲突时读取数据库真实值。
+- 执行事件（开始、完成、失败、中断）写入任务时间线；事件写入失败只记录日志，不回滚执行状态。
+- `httpapi` 只做协议转换：解析执行参数、把错误类别映射为状态码、序列化结果。接口契约见
+  [http-api.md](http-api.md)。
 
 ### 开发步骤顺序执行
 
@@ -262,6 +153,15 @@ HTTP Handler（POST /api/v1/tasks/{taskID}/execute-steps）
   否则返回 409。该规则只在 `domain` 中定义一次。
 - 失败、超时、取消与中断都会立即停止，不自动重试，也不自动执行验证与代码保存。
 - 同一任务的顺序执行在进程内以任务为键串行化，跨进程仍由步骤占用的事务条件更新拒绝。
+- 入口固定为 `app.StepExecutor.ExecuteSteps`（`internal/app/step_sequence*.go`）：HTTP Handler 与 CLI
+  不得自行串联步骤、自行判断"下一步该执行谁"，也不得跳过未完成的步骤。
+- 顺序执行按 `steps.sequence` 推进，不依赖数据库默认返回顺序；每次只执行一个 Step。
+- `recovery_required` 的步骤与已被占用的步骤（`running` / `developing` / `verifying`）一律阻止自动
+  推进，必须先人工核验现场。
+- Developer 执行成功只代表本次 Agent 调用按协议正常结束，不代表编译、测试或验证通过；Developer
+  不得改写 `verification_verdict` 等由验证阶段写入的字段，也不得通过修改状态宣告验收通过。
+- 不允许静默退回宿主机执行 Pi 或 Git：容器缺失、未运行、已 detached 或节点未通过预检时一律返回
+  前置条件错误。
 
 ### 代码状态记录
 
@@ -312,18 +212,37 @@ HTTP Handler（POST .../attempts/{attemptID}/validate）
 - 单项检查状态（`validation_check_results.status`：`pending` / `running` / `passed` /
   `failed` / `skipped` / `timed_out` / `cancelled` / `error`）必须区分"命令以非零码正常结束"
   与"命令没能正常执行"，否则失败证据会被压平成一个布尔值。
-- 结论规则由 `domain.DecideValidation` 计算，不可被 Agent 结论覆盖（见 `AGENTS.md`）。
+- 结论规则由 `domain.DecideValidation` 计算，不可被 Agent 结论覆盖；规则至少包含：验证流程必须处于
+  `completed`；至少存在一项启用的必需检查；每一项启用的必需检查都有结果且状态为 `passed`；必需检查
+  非零退出码、超时、取消、跳过、启动失败与结果缺失都判 `failed`；可选检查失败不影响结论但必须保留
+  结果；全部检查被跳过或没有启用的必需检查时不得判通过。
 
 ### 当前能力边界
 
-- 检查执行环境固定为受管理的任务容器，通过 `docker exec` 在容器内工作区执行；容器缺失、
-  未运行或节点未通过预检时返回前置条件错误，不回退到本机执行。
-- 只支持命令型检查（`command`）：可执行文件 + 参数数组，不经过 shell。
-- 不发起 Validator Agent 辅助评估：结论函数已支持 `AgentAssessment` 输入并按"只能收紧、
-  不能放宽"实现，但本阶段不创建 Validator Session。
+- 验证入口固定为 `app.ValidationService`（`internal/app/validation*.go`）：HTTP Handler、CLI 与工作流
+  都不得自行执行检查命令、自行创建 Validation Run 或直接写验证结论。
+- 检查执行环境固定为受管理的任务容器，通过 `docker exec` 在容器内工作区执行；容器缺失、未运行、
+  已 detached 或节点未通过预检时返回前置条件错误，不回退到本机执行。
+- 命令检查以可执行文件 + 参数数组表达，禁止拼接 shell 字符串，也不得把所有命令交给 `sh -c` /
+  `bash -c`。
+- 检查执行必须设置超时、响应 context 取消、限制输出字节数，并分别捕获标准输出与标准错误；结果必须
+  区分"命令以非零码正常结束"与"启动失败、超时、取消、结果无法确认"，不得压缩成单个布尔值。
+- 检查结果逐项写入（`storage.ValidationStore.AppendValidationCheckResult`）：部分检查完成后发生错误
+  时，已产生的证据仍必须可追溯，不得因最后一项失败而整体丢失。
+- 同一 Attempt 同一时刻只允许一个有效验证：占用通过 `storage.ValidationStore.BeginValidationRun`
+  在单个事务内以状态为条件完成，冲突返回 `storage.ErrConflict` 并映射为 409；禁止只依赖进程内互斥锁。
+- 验证结论写回 Attempt 必须使用带状态前置条件的更新；迟到结果不得覆盖已确认的终态。
+- 结论或检查结果写入失败时不得报告验证成功：结果必须携带 `Persisted=false` 与 `PersistenceErrors`，
+  HTTP 映射为 `execution_not_persisted`（500）。
+- 检查输出落盘失败（`output_archive_error`）与检查判定相互独立：归档失败不得改写退出码或检查状态，
+  必须单独记录。
+- 检查覆盖配置不得放宽门槛：覆盖后仍要求存在启用的必需检查，并执行同一套结论规则。
+- Agent 语义审查只作为附加输入：Agent 声称通过不得覆盖必需检查的失败，也不得替代缺失的必需检查。
+- 验证服务作为 `agentflow server` 的后台服务注册进 `internal/lifecycle`：Server 停止时取消在途验证
+  并等待收敛，把记录推进到失败终态，不留 `running` 残留。
 - 检查输出落在数据库目录下的 `validations/` 子目录，属于本机持久化数据，不写入项目目录。
-- 单步骤的开发—验证衔接见"单步骤开发—验证闭环边界"：验证引擎本身仍只负责执行检查与计算
-  结论，收口决策由 `domain.DecideStepCloseout` 承担。
+- 单步骤的开发—验证衔接见"单步骤开发—验证闭环边界"：验证引擎本身只负责执行检查与计算结论，收口
+  决策由 `domain.DecideStepCloseout` 承担。接口契约见 [http-api.md](http-api.md)。
 
 ## 单步骤开发—验证闭环边界
 
@@ -371,6 +290,27 @@ HTTP Handler（POST /api/v1/tasks/{taskID}/steps/{stepID}/execute-and-validate�
 - 规则只在 `domain.DecideStepCloseout` 中定义一次，不得在 Handler 或前端复制。
 - 单个步骤通过验证**不会**把任务推进到 `completed`：任务保持 `developing`，终态由后续代码
   保存与任务级编排决定。只有"需要人工核验"的结论才把任务推进到 `recovery_required`。
+
+- 入口固定为 `app.StepWorkflowService.ExecuteAndValidate`（`internal/app/step_workflow*.go`）：HTTP
+  Handler、CLI 与工作流不得自行串联开发与验证，也不得自行判断"开发成功了就该验证"。
+- 开发阶段必须复用 `app.StepExecutor`，验证阶段必须复用 `app.ValidationService`：禁止新建第二套
+  Validator，也禁止把验证逻辑塞进 Handler。
+- 只有以下条件全部成立时才启动验证：开发结论为 `completed`、执行记录已完整写入、验证配置存在启用的
+  必需检查、任务容器仍受管理且运行中、上下文未被取消。
+- 验证配置缺失或无效时必须在开发之前返回明确错误（`ErrStepWorkflowInvalidConfig`），不得跑完开发后
+  把配置问题伪装成"验证未通过"。
+- Developer 与 Validator 必须针对同一份任务容器工作区：中间不得重新 Clone、不得重置或清理已有代码
+  改动，也不得在验证结束前删除容器与必要临时资源。
+- 修复循环只能是显式的、有上限的领域流程（`domain` 的修复循环规则），默认停止并等待用户决定：
+  不自动删除容器，也不自动开始下一步骤。
+- 收口写入必须使用状态前置条件：步骤只在仍处于 `verifying` 时被改写，迟到的结果不得覆盖已确认的
+  终态；收口为可再次执行或终态时必须释放 `current_attempt_id`。
+- 闭环协调器作为 `agentflow server` 的后台服务注册进 `internal/lifecycle`，注册顺序在步骤执行与验证
+  引擎之后，停止顺序因此反过来：先停止新请求入口，再让下层服务收敛。
+- 同一 Step 同一时刻只允许一条闭环：进程内以步骤为键拒绝重复请求，跨进程由步骤占用的事务条件更新
+  拒绝；重复与并发请求返回 409，不得启动第二个 Pi 进程。
+- 未验证通过不得返回 200：响应必须如实区分开发结论、验证是否发起、验证结论与最终状态。接口契约见
+  [http-api.md](http-api.md)。
 
 ### 执行失败、验证失败与基础设施异常的区别
 
@@ -474,6 +414,27 @@ HTTP Handler（POST /api/v1/tasks/{taskID}/execute-workflow → 202 + 真实初�
 `workflow_runs.status` 与 `tasks.status` 是不同层次的概念，**不得合并为同一个字段**，也不得用
 工作流状态推断任务业务状态。
 
+### 持久化与并发
+
+- 编排进度只持久化在 `workflow_runs`（迁移 `0018_workflow_runs.sql`）：任务状态表达业务阶段，工作流
+  执行状态表达"这一次编排是否在推进"，两者不得合并为同一个字段。
+- 同一任务同一时刻最多一条未结束的执行记录：唯一性由 `idx_workflow_runs_active_task` 部分唯一索引
+  保证，进程内以任务为键串行化只是第一道防线，不是一致性保证。
+- 状态写入必须以版本号为前置条件（`UpdateWorkflowRun` 的 `revision` 条件）：迟到的结果不得覆盖已
+  确认的终态，冲突时读取数据库真实值，而不是用本地对象覆盖。
+- 有副作用的阶段之前必须先持久化状态与游标：启动先写 `running`，每个步骤先写 `step_execution` 与
+  `current_step_id`，代码保存先写 `code_save`。阶段写入失败时不得执行远程操作。
+- 每个开发步骤必须复用 `app.StepWorkflowService.ExecuteAndValidate`：编排器不得自行创建 Attempt、
+  不得自行拼接 Pi 命令、不得自行执行检查命令或计算验证结论。
+- 只有当前步骤验证通过（`Verified && StepStatus == completed`）才允许推进下一步；其余结论一律停止
+  自动推进。
+- 编排器不创建、启动、删除或接管容器，也不构造 Docker / Git 命令：容器只被核验与使用，代码保存复用
+  `app.ContainerService.SaveCode`。
+- 启动与恢复前必须核验容器受管理且运行中、执行节点通过环境预检（`app.EnsureHostUsableForRemoteTask`）；
+  不满足时返回前置条件错误，不得绕过 SSHConfig 校验。
+- 编排器作为 `agentflow server` 的后台服务注册进 `internal/lifecycle`，注册顺序在步骤闭环之后；不得
+  创建不受 Server 管理的长期 goroutine。
+
 ### 停止分类
 
 | 触发条件 | 工作流状态 | `error_class` |
@@ -501,6 +462,19 @@ HTTP Handler（POST /api/v1/tasks/{taskID}/execute-workflow → 202 + 真实初�
   `blocked` 与 `recovery_required` 保持原状等待用户显式恢复。启动恢复**不重放 Pi 调用**。
 - **取消**：请求先写入 `cancel_requested`，再向在途执行传播取消信号，最终状态由真实收敛结果
   决定；重复取消幂等。不得因 HTTP 请求成功就把仍在执行的工作流标记为已取消。
+- **重启顺序**：服务重启后的处理严格依据数据库事实，顺序固定为：未结束的执行记录 → 计划生成现场 →
+  取消现场。取消现场最后收敛，因为"是否还有未结束执行"只有在执行记录收敛完毕后才可靠。
+- **计划生成现场**：停留在 `planning` 的任务按 `domain.DecidePlanGenerationRecovery` 收敛——已有步骤 →
+  `planned`，没有任何步骤 → `recovery_required`。
+- **取消现场**：停留在 `cancelling` 的任务按 `domain.DecideCancellationRecovery` 收敛——存在未结束的
+  执行记录 → `recovery_required`；没有取消请求记录 → `recovery_required`；已记录取消请求且没有未结束
+  执行 → `cancelled`（收敛前先写入 `TaskResultCancelled` 结论）。
+- **不使用尽力而为语义**：任一记录读取、状态迁移或写入失败都必须让启动恢复返回错误，由
+  `internal/lifecycle` 逆序清理已启动服务；不得只记日志后继续启动。恢复是幂等的：`UpdateTaskIfStatus`
+  返回冲突且数据库状态已等于目标值时视为其他进程已完成同一次收敛，其余冲突仍然报错。
+- **中断与取消区分**：`isServiceStop` 必须同时识别 `ErrStepExecutorStopped` 与 `ErrWorkflowStopped`，
+  否则计划生成被服务关闭中断会被误判为用户取消并收敛为 `cancelled`。
+- **取消幂等**：重复取消不改写 `cancel_requested_at`。
 
 ### 与 CodeSaver 的关系
 
@@ -565,13 +539,27 @@ CodeSaver 缺失时编排器仍会按顺序执行并验证全部步骤，但收�
   缺少时返回 412 前置条件错误。容器由 `agentflow execenv prepare-task`
   （`app.ExecutionEnvironmentService.PrepareForTask`）单独准备，或由统一启动入口
   `agentflow task start` 在需要时自动准备。
-- 不自动重试、不自动修复代码、不自动删除容器；失败后等待用户显式决定。
-- 不实现多任务并发调度队列：`agentflow server` 中同一任务串行、不同任务之间相互独立。
-- CLI 的执行入口只是 HTTP 客户端：`agentflow task start` 与 `agentflow task run` 发起请求并
-  轮询进度，不装配 SSH、容器、Pi 或代码保存能力，也不会在服务不可达时退回本机执行。
-- 完整执行链路有两个入口：`agentflow task start <task-id>` 一个入口完成「准备容器 → 初始化
-  工作区 → 生成计划 → 启动编排」；需要分步排查时仍可依次执行 `execenv prepare-task`、
-  `code init`、`task plan`、`task run`。
+- 不自动删除容器、不自动接手下一步骤：修复循环与重试都必须由显式请求触发，失败后等待用户决定。
+- 任务之间由调度器按配置的并发上限领取 `queued` 任务；同一任务内的步骤串行推进。
+- CLI 的执行入口只是 HTTP 客户端，命令索引与边界见 [cli.md](cli.md)。
+
+## 代码保存（CodeSaver）边界
+
+- 只操作当前受管理容器内、经过核验的任务 Git 工作区；不得把容器内代码复制到宿主机或本机目录后再
+  提交。
+- 任务分支统一由 `domain.TaskBranchName` 生成并校验，固定为 `agent/<task-id>`；代码获取与代码保存
+  不得各自拼接分支名。
+- 容器已停止、已删除或已 detached 时直接报错，不得为保存代码而启动或重新接管容器。
+- 工作区没有变更时记录 `no_changes`，禁止创建空提交。
+- 提交、推送与合并状态分别持久化到 `code_saves`，不得用单一 `saved` 布尔字段代替。
+- 禁止默认 Force Push（`--force`、`--force-with-lease`）；远程历史冲突一律作为 `conflict` 返回，
+  不得覆盖他人提交。推送结果不确定时必须先核验远程分支实际 commit，再决定状态；状态确认前禁止重试。
+- 合并默认关闭（`merge_after_push = false`），只有任务配置或调用参数显式授权时才执行；合并出现冲突
+  时不得自动选择 ours 或 theirs，不得伪造成功合并，也不得重置整个仓库。
+- Push 成功而 Merge 失败时，任务分支的保存状态仍为成功。
+- 禁止把 Git Token、密码、私钥写入日志、SQLite 普通字段、仓库 URL、Dockerfile 或镜像层；凭据只允许
+  在单次操作期间以内存形式存在。
+- CodeSaver 不负责容器生命周期、任务调度与重试决策，也不包含模型调用。
 
 ## 统一任务启动边界
 
@@ -654,33 +642,18 @@ CodeSaver 缺失时编排器仍会按顺序执行并验证全部步骤，但收�
 
 - 不提供 `uncertain` 记录的只读核验入口：当前只能由人工在容器内确认后显式处理。
 - 不自动重试任一阶段，也不在失败后自动删除容器或重放外部操作。
-- 不实现多任务并发调度：同一任务进程内以任务为键串行，跨进程仍由各阶段自身的条件更新与
-  `workflow_runs` 的部分唯一索引拒绝。
-## SSH 边界
+- 同一任务在进程内以任务为键串行；跨任务并发由调度器按 `scheduler.max_concurrent_tasks` 领取 `queued`
+  任务，跨进程仍由各阶段自身的条件更新与 `workflow_runs` 的部分唯一索引拒绝。
 
-- SSH 探测（`sshprobe`）只验证 TCP 可达性与 SSH 协议标识，属于网络层检查。
-- SSH 认证与远程操作（`sshclient`）属于另一个边界：只有完成认证后才能执行远程命令、
-  传输文件或管理远程 Docker。
-- 两者不得合并：探测成功不得被当作认证成功，也不得据此开放远程操作路径。
-- 探测结果中的 `Authenticated` 恒为 `false`，用于阻止调用方误判。
-- 主机密钥校验不得被关闭：`NewDialer` 未收到 `HostKeyStore` 时直接拒绝构造，不存在
-  "跳过校验"的开关，也不允许用 `ssh.InsecureIgnoreHostKey()` 作为产品默认策略。
-- `known_hosts` 全程只读：`KnownHostsStore` 只实现 `Check`，不创建、不追加、不加锁、
-  不写临时文件，因此并发校验无需互斥，也不会与用户编辑 `known_hosts` 互相干扰。
-  信任记录由用户在 AgentFlow 之外维护（例如用 OpenSSH 追加已核验的密钥）；
-  `host trust` 只把核验过的指纹写进执行节点，并提示用户自行写入 `known_hosts`。
-- 凭据边界：只支持无口令私钥，连接过程不接收任何凭据输入。私钥文件只被读取，其路径
-  可以进入节点记录，但私钥原文、密码与口令一律不得进入数据库、配置文件、命令行参数或日志。
-- 私钥边界：不得把私钥复制到工作空间或远程机器，也不得修改其权限或内容；遇到加密私钥
-  必须返回明确的不支持错误，而不是要求交互输入口令。
-- 远程命令执行以结构化命令描述（程序名 + 参数数组）构造，参数统一经过 POSIX Shell 转义，
-  禁止把用户输入直接拼接进命令字符串。
-- 超时与取消只关闭对应的远程会话，不关闭整条连接，避免一个命令影响同连接上的其他操作。
-- 日志中不得出现私钥内容、认证头或其他凭据材料。
-- 环境预检边界：Docker 兼容性只基于 CLI 帮助信息，不执行容器创建、启动或镜像层下载；
-  镜像预检只查询 `FROM` 元数据。`normal` 不得被表述为"远端 Docker Engine 已验证可用"。
-- 执行节点准入边界：任何使用持久化执行节点执行真实远程操作的入口都必须先确认
-  `validation_status` 为 `normal`；该限制由后端强制实施，不能只依赖界面禁用。
+## SSH 与执行节点边界
+
+SSH 探测、SSH 连接层（主机密钥校验、私钥认证、远程执行、SFTP、远端套接字）、执行节点环境预检与
+远程工作空间规则集中在 [ssh-hosts.md](ssh-hosts.md)。本文件只约定其上下游关系：
+
+- Agent 调用、容器管理与代码获取都经由已认证的 SSH 执行层访问远端 Docker，不开放 Docker TCP 端口，
+  也不要求本机访问远端 Docker Socket。
+- 任何使用持久化执行节点执行真实远程操作的入口都必须先确认 `validation_status` 为 `normal`；该限制
+  由后端强制实施，不能只依赖界面禁用。
 
 ## 执行环境边界
 
@@ -723,13 +696,13 @@ Environment  Container   docker.Runner
   （`ContainerAgentRequest.WorkDir` / `SessionDir`），不在 Runner 内硬编码第二套路径。
 - 验证引擎通过 `execenv.ExecPort` 在对应 Attempt 的容器工作区执行检查命令，验证记录中的
   `execution_env` 为 `remote_container`。
+- Docker 版本与 API 基线、命令清单与容器管理约束集中在 [docker-compatibility.md](docker-compatibility.md)；
+  新增 Docker 调用必须同步 `docker.RequiredCLICommands`，否则环境预检会漏检。
 
 ### 当前能力边界
 
 - 只实现远程 Linux + Docker 容器执行环境；本机 Windows / macOS / Linux 执行环境尚未实现。
 - 项目代码只通过 Git Clone 进入容器（`source.GitFetcher`）；wget、curl、SCP 等获取方式未实现。
-- 不实现多步骤自动编排、自动重试与任务级调度队列。
-- 不实现多步骤自动编排、自动重试与任务级调度队列。
 
 ## 代码获取边界
 
@@ -776,13 +749,13 @@ HTTP Handler / CLI
 - 代码获取不负责 Push、Merge、容器生命周期与重试决策；失败不会删除容器或工作区。
 - 后续接入 HTTP 下载、wget、curl 与 SCP 时只需新增 `source.Fetcher` 实现，并在
   `app.newContainerFetcher` 注册；服务层、持久化模型与调用方都不必改动。
-- 接口固定为 `POST /api/v1/tasks/{taskID}/steps/{stepID}/attempts/{attemptID}/initialize-code`，
-  只接受执行参数（可选目标目录与超时）。错误映射：参数错误 400、目标不存在或归属不符 404、
-  状态冲突 409、前置条件缺失 412、执行未成功 500。
-- 该入口是尝试级的：它要求 `step_id` / `attempt_id`，并核验容器登记的 `attempt_id` 与本请求
-  一致。任务级工作区准备由 `app.TaskWorkspaceService` 承担（见「任务级工作区初始化边界」），
-  两者复用同一套 `source.Fetcher` 实现，但记录表与幂等边界不同。
-- 代码初始化成功不等于 Agent 开发流程已打通：Developer 逐步执行仍由后续阶段实现。
+- 初始化记录必须先于容器内命令写入：`pending` → `running` → 终态；成功记录必须带可核验的
+  `commit_sha`，没有 commit 的"成功"不得落库。
+- 归属校验：任务、步骤、尝试、容器与执行节点必须属于同一条任务链，并严格要求容器记录的
+  `attempt_id` 与本请求一致；容器未登记尝试归属时返回前置条件错误，由环境准备阶段补写。
+- 不新增 `source.GitCredentialProvider`、`codesaver.GitCredentialProvider` 的产品级凭据管理实现；这两个
+  接口只是既有空占位，不得作为"待实现能力"的立项依据。
+- 接口契约（请求参数与错误映射）见 [http-api.md](http-api.md)。
 
 ## 工作区边界
 
@@ -800,19 +773,11 @@ HTTP Handler / CLI
 - 单步骤执行不会克隆代码、不会初始化仓库，也不会修改工作区路径：它只在已就绪的容器内
   执行 Agent 调用。
 - 未经明确配置，不得自动删除包含未提交代码的工作区。
-- 执行节点的远程工作空间默认 `~/.lingting/agentflow`，`~` 指远程 SSH 登录用户的 Home；
-  路径遵循 POSIX 语义。SFTP 不会展开 `~`，因此必须先通过已认证连接取得远程 Home，再把
-  配置解析为远程绝对路径；目录创建只在解析出的工作空间路径内进行，且必须显式授权。
-- 容器生命周期状态与任务执行状态分别记录：不得仅凭 Task 状态推断 Docker 容器一定存在。
+- 远程管理工作空间（默认 `~/.lingting/agentflow`）的解析与创建规则见 [ssh-hosts.md](ssh-hosts.md)。
 - Session 文件、检查输出与执行记录一律落在本机持久化目录，容器删除后仍然可读。
 
 ## 安全边界
 
-- HTTP 服务默认只监听 `127.0.0.1`，不开放任意来源 CORS。
+- HTTP 服务默认只监听 `127.0.0.1`，未实现远程访问认证前不得默认监听所有网卡，不开放任意来源 CORS。
 - 不存储模型 API 密钥，凭据由 Pi 及其 Provider 管理。
-- 角色权限采用最小化原则，实际权限通过 Agent 配置与执行环境实施。
-
-## 文档边界
-
-- 文档只描述已实现的能力，不提前声明可用命令或接口。
-- 代码编辑期间不同步文档，仅在明确要求时更新。
+- 角色权限采用最小化原则，实际权限通过 Agent 配置与执行环境实施，不能只靠提示词。

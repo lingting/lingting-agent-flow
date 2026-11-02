@@ -325,8 +325,8 @@ tar -xzf agentflow_v1.2.3_linux_amd64.tar.gz
   与草稿转公开都只经过本地静态核验与本地等价命令验证。
 - 即使在原生 Runner 上完成冒烟，验证范围也仅覆盖"制品可解压、可启动、页面与 API 可用"，
   不包括完整的业务流程。
-- 远程任务执行需要目标机器具备 SSH 与 Docker CLI/Engine 29.0.0 及以上，这属于运行前提，
-  不是制品的编译依赖。
+- 远程任务执行需要目标机器具备 SSH 与满足 [docker-compatibility.md](docker-compatibility.md) 基线的
+  Docker，这属于运行前提，不是制品的编译依赖。
 - 真实 Pi Agent 运行在任务容器内，宿主机不需要安装 Pi。
 
 ## 10. 发布安全与权限边界
