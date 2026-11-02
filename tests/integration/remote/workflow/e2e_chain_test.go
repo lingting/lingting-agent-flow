@@ -517,6 +517,9 @@ func TestRemoteE2EFullChain(t *testing.T) {
 	}
 	t.Logf("FINAL_TASK status=%s result=%s failure=%s",
 		finalTask.Status, finalTask.FinalResult, finalTask.FailureSummary)
+	// 分阶段证据必须先于终局分支核对：无论终局是 completed 还是停在交付阶段，
+	// 规划、开发、确定性验证与语义审查都必须真实留下记录。
+	fixture.assertStageEvidence(t, container.ID.String())
 	if storedRun.Status == domain.WorkflowRunCompleted {
 		if finalTask.Status != domain.TaskStatusCompleted {
 			t.Fatalf("工作流完成时任务必须为 completed，实际 %s", finalTask.Status)
@@ -542,8 +545,13 @@ func TestRemoteE2EFullChain(t *testing.T) {
 		if record.CommitSHA == "" {
 			t.Fatal("代码保存记录必须带有真实 commit SHA")
 		}
-		t.Logf("CODE_SAVE commit=%s push=%s branch=%s",
-			record.CommitSHA, record.PushStatus, record.TaskBranch)
+		t.Logf("CODE_SAVE commit=%s push=%s remote=%s branch=%s",
+			record.CommitSHA, record.PushStatus, record.RemoteCommitSHA, record.TaskBranch)
+		assertDeliveryRecord(t, record, fixture.task.ID)
+		if record.RemoteCommitSHA == "" || record.RemoteCommitSHA != record.CommitSHA {
+			t.Fatalf("推送成功后远程任务分支必须指向本次提交: remote=%q commit=%q",
+				record.RemoteCommitSHA, record.CommitSHA)
+		}
 		sessions, err := fixture.db.ListSessionsByTask(fixture.ctx, fixture.task.ID)
 		if err != nil {
 			t.Fatalf("读取会话失败: %v", err)
@@ -591,6 +599,7 @@ func TestRemoteE2EFullChain(t *testing.T) {
 		t.Fatalf("代码保存的提交必须真实成功，实际 %s（%s）",
 			record.CommitStatus, record.ErrorSummary)
 	}
+	assertDeliveryRecord(t, record, fixture.task.ID)
 	// 推送未成功时必须给出可解释的原因，且不得伪造成成功。
 	if record.PushStatus != domain.PushStatusSucceeded &&
 		strings.TrimSpace(record.ErrorSummary) == "" {
@@ -921,4 +930,365 @@ func e2eSettled(status domain.WorkflowRunStatus) bool {
 		return true
 	}
 	return status == domain.WorkflowRunBlocked || status == domain.WorkflowRunRecoveryRequired
+}
+
+// e2eRequiredCheckName 是任务级必需验证命令的名称，用于核对它真的执行过。
+const e2eRequiredCheckName = "notes-exists"
+
+// e2eReadOnlyForbiddenTools 是只读角色不得获得的 Pi 内置工具。
+var e2eReadOnlyForbiddenTools = []string{
+	domain.PiToolEdit,
+	domain.PiToolWrite,
+	domain.PiToolBash,
+}
+
+// assertStageEvidence 核对 M1 退出条件要求的分阶段真实证据。
+//
+// 断言只依赖已经持久化的事实，不依赖模型文本：规划、开发、确定性验证与语义审查必须
+// 各自留下真实执行记录，角色工具策略不得突破能力上限。终局是 completed 还是停在交付
+// 阶段都不改变这些要求：只有开发与验证真实通过，才可能进入交付阶段。
+func (f *e2eFixture) assertStageEvidence(t *testing.T, containerID string) {
+	t.Helper()
+	sessions, err := f.db.ListSessionsByTask(f.ctx, f.task.ID)
+	if err != nil {
+		t.Fatalf("读取任务会话失败: %v", err)
+	}
+	// 规划会话必须由任务配置的方案规划角色真实发起，且只读。
+	planner := requireRoleSession(
+		t, sessions, domain.RoleTypePlanner, f.task.Config.PlannerRoleID, "规划",
+	)
+	assertReadOnlyTools(t, planner)
+	run, attempt := f.requireDeveloperEvidence(t, containerID)
+	developer := requireAttemptSession(t, sessions, attempt)
+	// 开发会话使用的仍然是任务配置的开发者角色，工具必须覆盖写入与命令执行。
+	if developer.RoleID != f.task.Config.DeveloperRoleID {
+		t.Fatalf("开发会话必须由任务配置的开发者角色发起: %s != %s",
+			developer.RoleID, f.task.Config.DeveloperRoleID)
+	}
+	assertDeveloperTools(t, developer)
+	validator := requireReviewSession(t, sessions, run, f.task.Config.ValidatorRoleID)
+	assertReadOnlyTools(t, validator)
+	assertReviewEvidence(t, run, validator)
+}
+
+// requireRoleSession 返回指定角色类型中真实完成的那次会话。
+//
+// 会话状态必须是 completed 且运行结果为 completed：没有完成痕迹的会话不能当作
+// "该阶段真实执行过"的证据。
+func requireRoleSession(
+	t *testing.T,
+	sessions []domain.Session,
+	roleType domain.RoleType,
+	roleID domain.ID,
+	label string,
+) domain.Session {
+	t.Helper()
+	candidates := make([]domain.Session, 0, 1)
+	for _, session := range sessions {
+		if session.RoleSnapshot.Type == roleType {
+			candidates = append(candidates, session)
+		}
+	}
+	if len(candidates) == 0 {
+		t.Fatalf("%s阶段必须留下 %s 角色的会话记录", label, roleType)
+	}
+	for index := len(candidates) - 1; index >= 0; index-- {
+		session := candidates[index]
+		if session.Status != domain.SessionStatusCompleted ||
+			session.RunStatus != domain.SessionRunCompleted {
+			continue
+		}
+		if session.RoleID != roleID {
+			t.Fatalf("%s会话必须由任务配置的角色发起: %s != %s", label, session.RoleID, roleID)
+		}
+		return session
+	}
+	t.Fatalf("%s阶段没有真实完成的 %s 会话记录", label, roleType)
+	return domain.Session{}
+}
+
+// assertReadOnlyTools 校验会话的角色策略落在只读上限内，且实际生效工具不含写入与执行。
+func assertReadOnlyTools(t *testing.T, session domain.Session) {
+	t.Helper()
+	roleType := session.RoleSnapshot.Type
+	if err := domain.ValidateToolsPolicyForRole(roleType, session.RoleSnapshot.ToolsPolicy); err != nil {
+		t.Fatalf("%s 会话 %s 的工具策略超出角色能力上限: %v", roleType, session.ID, err)
+	}
+	tools, err := domain.EffectivePiTools(roleType, session.RoleSnapshot.ToolsPolicy)
+	if err != nil {
+		t.Fatalf("计算 %s 会话 %s 的生效工具失败: %v", roleType, session.ID, err)
+	}
+	for _, forbidden := range e2eReadOnlyForbiddenTools {
+		if e2eContainsTool(tools, forbidden) {
+			t.Fatalf("%s 会话 %s 不得获得工具 %s，实际工具 %v",
+				roleType, session.ID, forbidden, tools)
+		}
+	}
+	if !e2eContainsTool(tools, domain.PiToolRead) {
+		t.Fatalf("%s 会话 %s 必须能读取代码与验证证据，实际工具 %v", roleType, session.ID, tools)
+	}
+	t.Logf("READONLY_SESSION=%s role=%s model=%s tools=%s",
+		session.ID, roleType, session.RoleSnapshot.Model, strings.Join(tools, ","))
+}
+
+// assertDeveloperTools 校验开发会话的工具确实覆盖读取、写入与命令执行。
+func assertDeveloperTools(t *testing.T, session domain.Session) {
+	t.Helper()
+	roleType := domain.RoleTypeDeveloper
+	if err := domain.ValidateToolsPolicyForRole(roleType, session.RoleSnapshot.ToolsPolicy); err != nil {
+		t.Fatalf("开发会话 %s 的工具策略超出开发者能力上限: %v", session.ID, err)
+	}
+	tools, err := domain.EffectivePiTools(roleType, session.RoleSnapshot.ToolsPolicy)
+	if err != nil {
+		t.Fatalf("计算开发会话 %s 的生效工具失败: %v", session.ID, err)
+	}
+	for _, required := range []string{
+		domain.PiToolRead,
+		domain.PiToolEdit,
+		domain.PiToolWrite,
+		domain.PiToolBash,
+	} {
+		if !e2eContainsTool(tools, required) {
+			t.Fatalf("开发会话 %s 缺少工具 %s，实际工具 %v", session.ID, required, tools)
+		}
+	}
+	t.Logf("DEVELOPER_SESSION=%s role=%s model=%s tools=%s",
+		session.ID, roleType, session.RoleSnapshot.Model, strings.Join(tools, ","))
+}
+
+// requireDeveloperEvidence 找出一个真实完成开发的步骤，并核对确定性验证证据。
+//
+// 只有"验证结论为 passed 且关联到真实执行尝试"的开发步骤才算走过链路：计划里的
+// 步骤、模型文本里的"已完成"都不构成证据。
+func (f *e2eFixture) requireDeveloperEvidence(
+	t *testing.T,
+	containerID string,
+) (domain.ValidationRun, domain.Attempt) {
+	t.Helper()
+	for _, step := range f.steps(t) {
+		if step.Type != domain.StepTypeDevelop {
+			continue
+		}
+		attempts, err := f.db.ListAttemptsByStep(f.ctx, step.ID)
+		if err != nil {
+			t.Fatalf("读取步骤 %d 的执行尝试失败: %v", step.Sequence, err)
+		}
+		if len(attempts) == 0 {
+			continue
+		}
+		runs, err := f.db.ListValidationRunsByStep(f.ctx, step.ID)
+		if err != nil {
+			t.Fatalf("读取步骤 %d 的验证记录失败: %v", step.Sequence, err)
+		}
+		for _, run := range runs {
+			if run.Verdict != domain.VerificationVerdictPassed {
+				continue
+			}
+			attempt, found := findAttempt(attempts, run.AttemptID)
+			if !found {
+				t.Fatalf("验证记录 %s 关联的执行尝试 %s 不属于步骤 %d",
+					run.ID, run.AttemptID, step.Sequence)
+			}
+			f.assertValidationEvidence(t, step, run, attempt, containerID)
+			return run, attempt
+		}
+	}
+	t.Fatal("没有任何开发步骤留下结论为 passed 的确定性验证记录")
+	return domain.ValidationRun{}, domain.Attempt{}
+}
+
+// assertValidationEvidence 校验确定性验证记录与必需检查结果的真实性。
+func (f *e2eFixture) assertValidationEvidence(
+	t *testing.T,
+	step domain.Step,
+	run domain.ValidationRun,
+	attempt domain.Attempt,
+	containerID string,
+) {
+	t.Helper()
+	if run.Status != domain.ValidationRunStatusCompleted {
+		t.Fatalf("验证记录 %s 的流程状态必须为 completed，实际 %s", run.ID, run.Status)
+	}
+	if run.ContainerID == "" || run.ContainerID != containerID {
+		t.Fatalf("验证必须在本次任务容器内执行: 记录 %q，任务容器 %q", run.ContainerID, containerID)
+	}
+	if attempt.Status != domain.AttemptStatusCompleted {
+		t.Fatalf("通过验证的执行尝试必须已完成，实际 %s（%s）", attempt.Status, attempt.FailureSummary)
+	}
+	results, err := f.db.ListValidationCheckResults(f.ctx, run.ID)
+	if err != nil {
+		t.Fatalf("读取验证检查结果失败: %v", err)
+	}
+	result, found := findCheckResult(results, e2eRequiredCheckName)
+	if !found {
+		t.Fatalf("验证记录 %s 缺少必需检查 %s 的执行结果", run.ID, e2eRequiredCheckName)
+	}
+	if !result.Required {
+		t.Fatalf("检查 %s 必须是必需检查", e2eRequiredCheckName)
+	}
+	if result.Status != domain.ValidationCheckStatusPassed {
+		t.Fatalf("检查 %s 必须真实通过，实际 %s（%s）",
+			e2eRequiredCheckName, result.Status, result.FailureReason)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("检查 %s 通过时退出码必须为 0，实际 %d", e2eRequiredCheckName, result.ExitCode)
+	}
+	// 开发必须真实发生在容器内工作区：Git 快照可核验时要求确有未提交变更。
+	if attempt.GitAfter != nil && attempt.GitAfter.StatusRead {
+		if !attempt.GitAfter.Dirty {
+			t.Fatalf("开发步骤必须真实修改容器内工作区，实际 %s", attempt.GitAfter.Summary())
+		}
+		t.Logf("DEVELOP_GIT branch=%s head=%s summary=%s",
+			attempt.GitAfter.Branch, attempt.GitAfter.Head, attempt.GitAfter.Summary())
+	}
+	t.Logf("DEVELOP_STEP=%d ATTEMPT=%s ATTEMPT_STATUS=%s VALIDATION_RUN=%s CHECKS=%d/%d CHECK=%s exit=%d map=%s spec=%s",
+		step.Sequence, attempt.ID, attempt.Status, run.ID,
+		run.PassedChecks, run.TotalChecks, e2eRequiredCheckName, result.ExitCode,
+		run.ExecutionEnv, run.Workspace)
+}
+
+// requireAttemptSession 返回与执行尝试对应的开发会话，并校验归属关系一致。
+func requireAttemptSession(
+	t *testing.T,
+	sessions []domain.Session,
+	attempt domain.Attempt,
+) domain.Session {
+	t.Helper()
+	for _, session := range sessions {
+		if session.AttemptID == nil || *session.AttemptID != attempt.ID {
+			continue
+		}
+		if session.RoleSnapshot.Type != domain.RoleTypeDeveloper {
+			continue
+		}
+		if session.Status != domain.SessionStatusCompleted ||
+			session.RunStatus != domain.SessionRunCompleted {
+			t.Fatalf("开发会话 %s 必须真实完成，实际状态 %s/%s",
+				session.ID, session.Status, session.RunStatus)
+		}
+		if session.StepID == nil || *session.StepID != attempt.StepID {
+			t.Fatalf("开发会话 %s 的步骤与执行尝试 %s 不一致", session.ID, attempt.ID)
+		}
+		if !e2eContainsID(attempt.SessionIDs, session.ID) {
+			t.Fatalf("执行尝试 %s 必须关联开发会话 %s", attempt.ID, session.ID)
+		}
+		return session
+	}
+	t.Fatalf("执行尝试 %s 必须留下真实完成的开发会话", attempt.ID)
+	return domain.Session{}
+}
+
+// requireReviewSession 返回验证记录关联的语义审查会话，并校验角色类型与归属。
+func requireReviewSession(
+	t *testing.T,
+	sessions []domain.Session,
+	run domain.ValidationRun,
+	roleID domain.ID,
+) domain.Session {
+	t.Helper()
+	if run.ValidatorSessionID == nil {
+		t.Fatalf("验证记录 %s 没有记录语义审查会话", run.ID)
+	}
+	sessionID := *run.ValidatorSessionID
+	if sessionID.IsEmpty() {
+		t.Fatalf("验证记录 %s 的语义审查会话标识为空", run.ID)
+	}
+	for _, session := range sessions {
+		if session.ID != sessionID {
+			continue
+		}
+		if session.RoleSnapshot.Type != domain.RoleTypeValidator {
+			t.Fatalf("语义审查会话 %s 的角色类型必须是 validator，实际 %s",
+				session.ID, session.RoleSnapshot.Type)
+		}
+		if session.RoleID != roleID {
+			t.Fatalf("语义审查会话必须由任务配置的验证角色发起: %s != %s",
+				session.RoleID, roleID)
+		}
+		if session.Status != domain.SessionStatusCompleted ||
+			session.RunStatus != domain.SessionRunCompleted {
+			t.Fatalf("语义审查会话 %s 必须真实完成，实际状态 %s/%s",
+				session.ID, session.Status, session.RunStatus)
+		}
+		return session
+	}
+	t.Fatalf("语义审查会话 %s 必须是本任务的会话", sessionID)
+	return domain.Session{}
+}
+
+// assertReviewEvidence 校验语义审查真的给出了可解释的通过结论。
+func assertReviewEvidence(t *testing.T, run domain.ValidationRun, validator domain.Session) {
+	t.Helper()
+	if run.ReviewStatus != domain.ReviewStatusPassed {
+		t.Fatalf("语义审查必须真实给出 passed，实际 %s（%s）", run.ReviewStatus, run.ReviewSummary)
+	}
+	if run.Assessment == nil || !run.Assessment.Passed {
+		t.Fatalf("语义审查通过必须带有可解释的评估结果，实际 %+v", run.Assessment)
+	}
+	if validator.AttemptID == nil || *validator.AttemptID != run.AttemptID {
+		t.Fatalf("语义审查会话 %s 必须关联验证记录 %s 的执行尝试", validator.ID, run.ID)
+	}
+	if strings.TrimSpace(run.ReviewSummary) == "" {
+		t.Fatal("语义审查必须留下可复核的说明")
+	}
+	t.Logf("VALIDATOR_SESSION=%s review=%s evidence=%v summary=%s",
+		validator.ID, run.ReviewStatus, run.Assessment.Evidence, run.ReviewSummary)
+}
+
+// assertDeliveryRecord 核对交付记录的分支唯一性与"不自动合并"约束。
+func assertDeliveryRecord(t *testing.T, record domain.CodeSaveRecord, taskID domain.ID) {
+	t.Helper()
+	expected := domain.TaskBranchPrefix + taskID.String()
+	if record.TaskBranch != expected {
+		t.Fatalf("任务分支必须是本任务专属的唯一分支: %q != %q", record.TaskBranch, expected)
+	}
+	if record.MergeEnabled {
+		t.Fatalf("本次交付不得请求合并基础分支: %s", record.TaskBranch)
+	}
+	if record.MergeStatus != domain.MergeStatusNotRequested {
+		t.Fatalf("本次交付不得合并基础分支，实际 %s", record.MergeStatus)
+	}
+}
+
+// findAttempt 按标识查找执行尝试。
+func findAttempt(attempts []domain.Attempt, attemptID domain.ID) (domain.Attempt, bool) {
+	for _, attempt := range attempts {
+		if attempt.ID == attemptID {
+			return attempt, true
+		}
+	}
+	return domain.Attempt{}, false
+}
+
+// findCheckResult 按检查标识查找检查结果。
+func findCheckResult(
+	results []domain.ValidationCheckResult,
+	checkID string,
+) (domain.ValidationCheckResult, bool) {
+	for _, result := range results {
+		if result.CheckID == checkID {
+			return result, true
+		}
+	}
+	return domain.ValidationCheckResult{}, false
+}
+
+// e2eContainsTool 判断工具列表是否包含指定工具。
+func e2eContainsTool(tools []string, target string) bool {
+	for _, tool := range tools {
+		if tool == target {
+			return true
+		}
+	}
+	return false
+}
+
+// e2eContainsID 判断标识列表是否包含指定标识。
+func e2eContainsID(ids []domain.ID, target domain.ID) bool {
+	for _, id := range ids {
+		if id == target {
+			return true
+		}
+	}
+	return false
 }

@@ -7,7 +7,7 @@
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
 | M0 V1 收口与 V2 设计 | **completed**（2026-11-02） | `V1-final.md` + V2 文档体系；未修改生产代码 |
-| M1 设置中心、环境管理、固定四角色 | pending | 子任务 V2-M1-E1（环境管理内嵌化）、V2-M1-E2（固定四角色与角色配置管理）、V2-M1-E3（角色工具策略执行与 Settings 编辑）与 V2-M1-E4（基础配置只读查看，`GET /api/v1/settings/config` + Settings 只读区域，2026-11-02）已完成；仍待真实跑一轮计划→开发→验证确认 V1 任务工作流不回归 |
+| M1 设置中心、环境管理、固定四角色 | pending | 子任务 V2-M1-E1（环境管理内嵌化）、V2-M1-E2（固定四角色与角色配置管理）、V2-M1-E3（角色工具策略执行与 Settings 编辑）与 V2-M1-E4（基础配置只读查看，`GET /api/v1/settings/config` + Settings 只读区域，2026-11-02）已完成；2026-11-02 真实远程端到端运行（`TestRemoteE2EFullChain`，一次、无重试）**失败于规划阶段步骤**：任务级必需验证命令被合并进序号 1 的 `plan` 步骤并判 `failed`，工作流 `blocked`、任务 `recovery_required`，开发步骤未执行；M1 保持 pending，证据与待解决事项见里程碑 §7 |
 | M2 规划运行环境 | pending | 依赖 M1 的角色配置快照 |
 | M3 需求工作台与需求分析 | pending | 依赖 M2 |
 | M4 方案确认与任务生成 | pending | 依赖 M3 |

@@ -1,6 +1,8 @@
 # M1：设置中心、环境管理与固定角色
 
-> 状态：**pending**（子任务 V2-M1-E1～V2-M1-E4 已完成；退出条件「现有 V1 任务工作流不回归失败」仍待人工确认）。
+> 状态：**pending**（子任务 V2-M1-E1～V2-M1-E4 已完成；退出条件「现有 V1 任务工作流不回归失败」于
+> 2026-11-02 真实远程端到端运行中**未通过**：工作流在规划阶段步骤被判验证失败后 `blocked`，未进入开发阶段。
+> 详见 §7）。
 > 前置：M0 completed。参考：[`../ROLE-DESIGN.md`](../ROLE-DESIGN.md)、
 > [`../ENVIRONMENT-MANAGEMENT.md`](../ENVIRONMENT-MANAGEMENT.md)、[`../ARCHITECTURE.md`](../ARCHITECTURE.md) §8。
 
@@ -150,7 +152,7 @@ M1 整体状态仍为 **pending**：E1～E4 已交付，但退出条件「现有
 | 角色配置修改能持久化（**已满足**，E2 + E3） | `PUT /api/v1/roles/{roleID}` 只更新 `roles` 行的 `system_prompt` / `tools_policy_json` / `model` / `enabled`，响应取重新读取结果；启动补齐不覆盖已有行；越出角色能力上限的工具策略返回 400，不落库 |
 | 历史 Session 保留原角色快照（**已满足**，E2 未改动该路径） | 快照只在会话创建时由 `Role.Snapshot()` 写入；没有任何代码在会话创建后回写 `role_snapshot_json` |
 | 规划角色不能写入项目代码（**工具层已满足**，E3） | 规划角色能力上限只读，Pi 调用只收到 `read`/`grep`/`find`/`ls`，并固定 `--no-mcp` / `--no-extensions`；文件系统级的只读边界仍属 M2 |
-| 现有 V1 任务工作流不回归失败（**待人工确认**） | E2 只改角色定义来源、角色种子与角色接口，E3 只在三条调用路径上增加 `ToolsPolicy` 透传与 Pi 工具参数，未改动状态机与收尾逻辑；默认策略仍允许 Developer 读写执行、Planner 只读，需真实跑一轮计划→开发→验证确认 |
+| 现有 V1 任务工作流不回归失败（**未满足**，2026-11-02 真实运行） | 真实远程端到端运行在规划阶段即失败：任务级必需验证命令被合并进序号 1 的 `plan` 步骤，该命令只能在开发步骤完成后成立，确定性验证判 `failed`（退出码 1），修复循环对 `plan` 类型判 `unsupported_step`，工作流 `blocked`、任务 `recovery_required`，开发步骤从未执行。证据与待解决事项见 §7 |
 | 环境版本只追加（**已满足**，E1） | 提交不同内容产生新版本号，旧版本内容、哈希与构建元数据不变；提交内容与某个成功版本完全一致时复用该版本号，不产生重复版本 |
 | Settings 展示真实运行配置且不泄露无关信息（**已满足**，E4） | `GET /api/v1/settings/config` 只返回四项运行参数，取值来自启动快照；不返回 SSH known_hosts 路径、凭据、私钥、模型或仓库凭据与完整配置对象；`/api/v1/system/info` 字段与语义不变 |
 
@@ -185,3 +187,34 @@ M1 整体状态仍为 **pending**：E1～E4 已交付，但退出条件「现有
 - 不做需求工作台（M3）。
 - 不提供角色增删、权限体系、用户管理。
 - 不在 Settings 中管理任何凭据。
+
+## 7. 真实端到端回归验收记录（2026-11-02）
+
+M1 退出条件「现有 V1 任务工作流不回归失败」以一次真实远程端到端运行判定，结论为 **未满足**，
+M1 保持 **pending**。
+
+- 用例与命令：`TestRemoteE2EFullChain`，
+  `go test -count=1 -run '^TestRemoteE2EFullChain$' -v ./tests/integration/remote/workflow`（只执行一次，未重试）。
+- 结果：**FAIL**（199s）。终局 `WorkflowRun=blocked` / `stage=stopped` /
+  `error_class=step_not_repairable`，任务 `recovery_required`，未进入开发阶段，也未进入交付阶段。
+- 执行环境：远程 `127.0.0.1:22`（私钥认证，主机密钥校验未关闭）；基础镜像
+  `agentflow-base-base:v0001-a253a6178fe7`，语言镜像 `agentflow-language-node:v0001-f02408055e30`；
+  容器内 Pi provider `agentflow-test`、模型 `group/free`、thinking `low`（`docker.pi` 覆盖）。
+- 可追溯标识：Task `0b4eb524fc2ea3fe01778618dd8275a1`；WorkflowRun
+  `723e6f6adfeda469571a5ead8cc3825f`；Attempt `8bb7fe12018acbaed1eac832a3b0abdb`（步骤 1，completed / exit 0）；
+  ValidationRun `340e9bd4155623be91538c870ba250b2`（completed / verdict failed / 1 项检查失败）；
+  会话 `d4cb5af733905c3eba8e85c7b9fe39f9`（计划生成）、`5350b2a989cbcf4f9dd3beabbfb63bac`（规划阶段步骤），
+  两者角色快照均为 `planner`、策略 `{"permissions":["read"]}`、归档成功。
+- 测试产物：`C:\Users\lingting\AppData\Local\Temp\lingting-agent-flow-tests\workflow-1488447157`
+  （`test.log`、`case-4095252777/agentflow.db`、`sessions/`、`validations/`）；远程工作区与容器按既有
+  清理机制处置（容器 finalizer `PASS`，无新增残留）。
+- 阻塞事实：持久化的计划为 2 个步骤——序号 1 `plan`「生成开发计划」、序号 2 `develop`「创建 NOTES.md 文件」，
+  任务级必需命令 `notes-exists`（`sh -c "test -f NOTES.md"`）被合并进**两个**步骤。编排器执行并验证了
+  序号 1 的 `plan` 步骤，该命令只能在开发步骤产出文件后成立，因此验证结论为 `failed`（退出码 1）；
+  修复循环对 `plan` 类型判 `unsupported_step`，工作流 `blocked`，序号 2 的 `develop` 步骤始终保持 `pending`。
+  `code_saves` 表为空，说明既未提交也未推送，交付阶段从未开始；据此判定 Push 结果与本次失败无关。
+- 待解决：规划阶段步骤不应承载「只能在开发完成后成立」的必需验证命令（或规划步骤不应进入确定性验证与
+  自动修复循环），需先在产品侧确定归属并修复，再次真实运行必须获得新的明确授权。
+- 本次未修改生产代码中的角色工具上限、默认策略或 Pi CLI 参数；仅在同一既有测试文件中补充了本次验收
+  所需的阶段证据断言（Planner / Developer / Validator 角色快照与工具、ValidationRun 与 `notes-exists`
+  退出码、`ReviewStatus`、Attempt 与容器归属、任务分支唯一性与「不自动合并」），未新增测试文件或测试函数。
