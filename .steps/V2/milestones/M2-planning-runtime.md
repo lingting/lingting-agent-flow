@@ -31,7 +31,8 @@
 
 ### 2.3 持久化
 
-- 迁移 `0027_planning_sessions.sql`（`planning_sessions` / `planning_messages` / `planning_revisions`）。
+- 迁移 `0026_planning_sessions.sql`（`planning_sessions` / `planning_messages` / `planning_revisions`）：
+  已实现（M2 第二阶段），实际表结构与索引见 [`../DATA-MODEL.md`](../DATA-MODEL.md) §2。
 - 迁移 `0028_projects_default_host.sql`（项目默认执行节点）。
 
 ### 2.4 生命周期
@@ -99,21 +100,56 @@
 - 未引入 privileged、Docker Socket、host network、host PID、宿主机目录挂载与额外提权参数；
   Docker CLI / Engine / API 基线未变（CLI 29.0.0 / Engine 29.0.0 / API 1.52）。
 
-### 7.2 仍未完成
+### 7.2 已交付：规划会话领域模型与持久化（M2 第二阶段）
+
+规划会话的三类对象及其存储能力已落地，**暂无业务调用方**：
+
+- `internal/domain/planning_session.go`：`PlanningSessionStatus`（`active` / `analyzing` /
+  `preview_ready` / `confirmed` / `abandoned` / `failed`）与状态机、`PlanningSession` 实体、
+  `Transition` 与语义迁移方法（`BeginAnalysis` / `RetryAnalysis` / `MarkPreviewReady` /
+  `Confirm` / `Abandon` / `Fail`）、运行期绑定（执行节点、容器、固定代码 commit、两个角色的
+  Pi 会话标识）。
+- `internal/domain/planning_message.go`：`PlanningSenderType`（`user` / `requirement_analyst` /
+  `planner` / `system`）与 `PlanningMessage`。
+- `internal/domain/planning_revision.go`：`PlanningRevision`；分析与方案以 JSON 快照保存，只做结构
+  校验，不解析内部字段，也不定义任务拆分规则。
+- `internal/storage`：`PlanningSessionStore`（创建、更新、按 ID 查询、按项目列表、追加与查询消息、
+  追加与查询方案版本），已并入 `Tx` 与 `Store`。
+- `internal/storage/sqlite`：迁移 `0026_planning_sessions.sql`（三张表与四个索引）与仓储实现；消息
+  序号与方案版本号在写入事务内分配。
+
+约束与语义：
+
+- 状态迁移只在 `domain` 定义：`confirmed` / `abandoned` 不可重新打开，`failed` 只能经显式
+  `RetryAnalysis` 回到 `analyzing`，追加消息不得隐式重置失败结论。
+- 规划会话独立于 Task / Step / Attempt / Session 执行记录：不写执行记录表，也不进入代码保存路径。
+- 表不声明外键、不设枚举取值白名单；`status` 与 `sender_type` 的未知取值必须能写入并原样读回。
+- 消息序号与方案版本号分别由会话 ID + 序号唯一索引兜底；序号分配与插入在同一事务内完成，不
+  "先查最大值再插入"。
+- 会话记录保存执行节点、规划容器、固定代码 commit 与两个角色的 Pi 会话标识，供后续运行时恢复。
+
+本阶段不包含：`PlanningRuntimeService`、`PlanningSessionService` 业务编排、规划容器与快照卷准备、
+Pi Session 路径生成、`internal/lifecycle` 注册、HTTP API 与前端工作台。规划运行时仍不可用。
+
+### 7.3 仍未完成
 
 以下能力尚未实现，M2 状态保持 `pending`：
 
 - `PlanningRuntimeService`：快照卷准备（准备容器按固定 commit SHA 克隆到命名卷）、规划容器启动、
   多轮复用与释放。
-- `PlanningSessionService`、`PlanningSession` / `PlanningMessage` / `PlanningRevision` 领域类型与
-  迁移 `0027` / `0028`。
+- `PlanningSessionService`：会话创建、消息追加、Revision 追加、确认与放弃、状态收敛的业务编排
+  （领域类型与 `0026` 持久化已在 §7.2 交付，尚无调用方）。
+- 迁移 `0028_projects_default_host.sql`（项目默认执行节点）与后续项目级调度的迁移。
 - 两个规划角色的 Pi Session 路径生成与根目录校验、多轮 Pi Session 上下文复用。
 - 规划运行时在 `internal/lifecycle` 中的注册与收敛。
 - HTTP API 与前端需求规划工作台。
 - 真实环境下的只读验证（文件工具与 `sh -c` 写入是否真的被文件系统拒绝）尚未执行：本阶段只确认
   参数构造正确，**不代表只读规划环境已经可用**。
 
-### 7.3 本阶段验证方式
+### 7.4 验证方式
 
-只做非测试验证：阅读代码核对调用链、`gofmt`、`go vet ./...`、`git diff --check`。未运行任何测试，
-未连接真实 Docker / SSH / Pi，也未修改任何测试文件。
+第一阶段与第二阶段都只做非测试验证：阅读代码核对调用链、`gofmt`、`go vet ./...`、`git diff --check`；
+第二阶段另加人工核对迁移的表、索引、字段、非枚举约束与版本顺序，以及 `dbStore` / `txStore` 的接口
+组合。两个阶段都未运行任何测试（含迁移升级与 SQLite 读写测试），未创建测试文件，未连接真实
+Docker / SSH / Pi / 远程主机。因此旧库升级后的数据保留、未知枚举值写入与读回、序号分配在并发下的
+实际行为均未验证，不得报告为通过。

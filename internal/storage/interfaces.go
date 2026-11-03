@@ -7,6 +7,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -127,6 +128,85 @@ type ProjectStore interface {
 	DeleteProject(ctx context.Context, id domain.ID) error
 	GetProject(ctx context.Context, id domain.ID) (*domain.Project, error)
 	ListProjects(ctx context.Context, filter ProjectFilter) ([]domain.Project, error)
+}
+
+// PlanningSessionStore 保存需求规划会话及其消息与方案版本。
+//
+// 规划会话与 Task / Step / Attempt / Session 执行记录是两套模型：规划阶段只产生
+// 消息、分析与方案草案，不产生正式任务，因此不复用执行记录表，也不写入它们。
+//
+// 消息序号与方案版本号由存储层在写入事务内分配：调用方不能自带序号覆盖历史记录，
+// 返回的实体带有实际分配的序号。
+type PlanningSessionStore interface {
+	CreatePlanningSession(ctx context.Context, session domain.PlanningSession) error
+	// UpdatePlanningSession 按主键更新规划会话，所属项目不可修改。
+	UpdatePlanningSession(ctx context.Context, session domain.PlanningSession) error
+	// UpdatePlanningSessionIfStatus 在数据库中的状态仍属于 expected 时写入规划会话。
+	//
+	// 状态不匹配时返回 storage.ErrConflict：迟到的规划结果不能覆盖已确认、已放弃或
+	// 已失败的会话结论。
+	UpdatePlanningSessionIfStatus(
+		ctx context.Context,
+		session domain.PlanningSession,
+		expected []domain.PlanningSessionStatus,
+	) error
+	// GetPlanningSession 读取单个规划会话，不存在时返回 storage.ErrNotFound。
+	GetPlanningSession(ctx context.Context, id domain.ID) (*domain.PlanningSession, error)
+	// ListPlanningSessionsByProject 按项目列出规划会话，最近的在前。
+	ListPlanningSessionsByProject(
+		ctx context.Context,
+		projectID string,
+	) ([]domain.PlanningSession, error)
+	// AppendPlanningMessage 在一个事务内分配消息序号并追加一条消息。
+	AppendPlanningMessage(
+		ctx context.Context,
+		request AppendPlanningMessageRequest,
+	) (domain.PlanningMessage, error)
+	// ListPlanningMessages 按序号升序返回会话的全部消息。
+	ListPlanningMessages(ctx context.Context, sessionID domain.ID) ([]domain.PlanningMessage, error)
+	// AppendPlanningRevision 在一个事务内分配版本号并追加一个方案版本。
+	AppendPlanningRevision(
+		ctx context.Context,
+		request AppendPlanningRevisionRequest,
+	) (domain.PlanningRevision, error)
+	// ListPlanningRevisions 按版本号升序返回会话的全部方案版本。
+	ListPlanningRevisions(
+		ctx context.Context,
+		sessionID domain.ID,
+	) ([]domain.PlanningRevision, error)
+}
+
+// AppendPlanningMessageRequest 是一次"追加规划消息"的输入。
+//
+// 它不包含序号与标识：序号由存储层在事务内分配，标识由领域层构造，从而保证调用方
+// 无法用自带序号覆盖已经写给用户的历史消息。
+type AppendPlanningMessageRequest struct {
+	// PlanningSessionID 是消息所属规划会话。
+	PlanningSessionID domain.ID
+	// SenderType 是消息发送方类型。
+	SenderType domain.PlanningSenderType
+	// RoleID 是发送消息的角色配置标识；用户与系统消息为空。
+	RoleID *domain.ID
+	// Content 是消息正文，按原样保存。
+	Content string
+	// At 是消息创建时间，零值使用当前时间。
+	At time.Time
+}
+
+// AppendPlanningRevisionRequest 是一次"追加规划版本"的输入。
+//
+// 与消息一样不包含版本号与标识：版本号由存储层在事务内分配，历史版本只追加不覆盖。
+type AppendPlanningRevisionRequest struct {
+	// PlanningSessionID 是版本所属规划会话。
+	PlanningSessionID domain.ID
+	// RequirementAnalysisJSON 是需求分析师的结构化分析快照。
+	RequirementAnalysisJSON json.RawMessage
+	// ImplementationPlanJSON 是方案规划师的结构化方案快照。
+	ImplementationPlanJSON json.RawMessage
+	// ValidationResultJSON 是本轮方案校验结果，为空表示尚未校验。
+	ValidationResultJSON json.RawMessage
+	// At 是版本生成时间，零值使用当前时间。
+	At time.Time
 }
 
 // TaskFilter 约束任务查询条件，零值表示不限制。
@@ -896,6 +976,9 @@ type Tx interface {
 	TaskStore
 	// ProjectStore 提供项目登记信息的读写；项目是任务必填的关联对象。
 	ProjectStore
+	// PlanningSessionStore 提供规划会话、消息与方案版本的读写；规划会话不进入
+	// Task 执行记录。
+	PlanningSessionStore
 	StepStore
 	AttemptStore
 	SessionStore

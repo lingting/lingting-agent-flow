@@ -17,6 +17,12 @@ type dbStore struct {
 	requirementStore
 	// projectStore 提供项目登记信息的读写；项目是任务必填的关联对象。
 	projectStore
+	// planningSessionStore 提供规划会话的读写；规划会话不进入任务执行记录。
+	planningSessionStore
+	// planningMessageStore 提供规划消息的追加与查询，序号在写入事务内分配。
+	planningMessageStore
+	// planningRevisionStore 提供规划方案版本的追加与查询，版本号在写入事务内分配。
+	planningRevisionStore
 	taskStore
 	stepStore
 	attemptStore
@@ -45,6 +51,12 @@ type txStore struct {
 	requirementStore
 	// projectStore 提供项目登记信息的读写；项目是任务必填的关联对象。
 	projectStore
+	// planningSessionStore 提供规划会话的读写；规划会话不进入任务执行记录。
+	planningSessionStore
+	// planningMessageStore 提供规划消息的追加与查询，序号在写入事务内分配。
+	planningMessageStore
+	// planningRevisionStore 提供规划方案版本的追加与查询，版本号在写入事务内分配。
+	planningRevisionStore
 	taskStore
 	stepStore
 	attemptStore
@@ -74,6 +86,9 @@ func newDBStore(db *sql.DB) *dbStore {
 		executionHostStore:      executionHostStore{q: pool},
 		requirementStore:        requirementStore{q: pool},
 		projectStore:            projectStore{q: pool},
+		planningSessionStore:    planningSessionStore{q: pool},
+		planningMessageStore:    planningMessageStore{q: pool},
+		planningRevisionStore:   planningRevisionStore{q: pool},
 		taskStore:               taskStore{q: pool},
 		stepStore:               stepStore{q: pool},
 		attemptStore:            attemptStore{q: pool},
@@ -99,6 +114,9 @@ func newTxStore(tx *sql.Tx) *txStore {
 		executionHostStore:      executionHostStore{q: tx},
 		requirementStore:        requirementStore{q: tx},
 		projectStore:            projectStore{q: tx},
+		planningSessionStore:    planningSessionStore{q: tx},
+		planningMessageStore:    planningMessageStore{q: tx},
+		planningRevisionStore:   planningRevisionStore{q: tx},
 		taskStore:               taskStore{q: tx},
 		stepStore:               stepStore{q: tx},
 		attemptStore:            attemptStore{q: tx},
