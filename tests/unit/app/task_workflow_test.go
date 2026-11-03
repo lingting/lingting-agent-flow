@@ -200,6 +200,14 @@ func (r *taskWorkflowRunner) callCount() int {
 	return r.calls
 }
 
+// ExecutePlanning 不在本文件的场景内使用：这里的夹具只构造开发步骤。
+func (r *taskWorkflowRunner) ExecutePlanning(
+	ctx context.Context,
+	request app.ExecutePlanningRequest,
+) (app.ExecutePlanningResult, error) {
+	return app.ExecutePlanningResult{}, fmt.Errorf("替身未实现规划执行: %s", request.StepID)
+}
+
 // receivedRequests 返回收到的闭环请求。
 func (r *taskWorkflowRunner) receivedRequests() []app.ExecuteAndValidateRequest {
 	r.mu.Lock()

@@ -368,7 +368,10 @@ func (s *TaskWorkflowService) advance(
 	}
 }
 
-// runStep 执行一个开发步骤并依据真实结果推进游标。
+// runStep 执行一个计划步骤并依据真实结果推进游标。
+//
+// 步骤类型决定执行路径：规划阶段只做真实的规划执行，开发步骤走开发—验证闭环。
+// 两条路径的成功条件不同，不能互相替代。
 //
 // 返回值 stop 为 true 表示工作流已经收敛或停止，调用方不再继续推进。
 func (s *TaskWorkflowService) runStep(
@@ -394,7 +397,9 @@ func (s *TaskWorkflowService) runStep(
 		"phase":    "step_started",
 		"title":    step.Title,
 	})
-
+	if step.Type == domain.StepTypePlan {
+		return s.runPlanStep(ctx, writeCtx, run, step, exec)
+	}
 	result, runErr := s.steps.ExecuteAndValidate(ctx, ExecuteAndValidateRequest{
 		TaskID:            run.TaskID.String(),
 		StepID:            stepID.String(),
@@ -414,26 +419,131 @@ func (s *TaskWorkflowService) runStep(
 		return s.stopRun(writeCtx, run, domain.WorkflowRunBlocked, "step_not_executed", runErr), true
 	}
 	if result.Verified && result.StepStatus == domain.StepStatusCompleted {
-		if err := run.RecordStepCompleted(step, s.now()); err != nil {
-			return s.failRun(writeCtx, run, "record_step", err), true
-		}
-		persisted, persistErr := s.persistRun(writeCtx, run)
-		if persistErr != nil {
-			// 数据库状态写入失败时即使开发与验证都成功也不能推进后续步骤。
-			return s.failRun(writeCtx, run, "record_step", persistErr), true
-		}
-		s.appendEvent(writeCtx, run.TaskID, &stepID, idPtr(result.AttemptID),
-			domain.EventTypeWorkflowStepPassed, map[string]any{
-				"run_id":          persisted.ID.String(),
-				"step_id":         stepID.String(),
-				"sequence":        step.Sequence,
-				"attempt_id":      result.AttemptID.String(),
-				"completed_steps": persisted.CompletedSteps,
-				"total_steps":     persisted.TotalSteps,
-			})
-		return persisted, false
+		return s.recordStepPassed(writeCtx, run, step, result.AttemptID, nil)
 	}
 	return s.stopForStepResult(writeCtx, run, step, result, ctx), true
+}
+
+// runPlanStep 执行规划阶段步骤，并依据真实 Planner 执行结论推进游标。
+//
+// 规划阶段不做确定性代码验证：任务级必需命令依赖 Developer 的产出，只能在开发步骤
+// 之后成立。因此这里的成功条件是"Planner 真实执行完成且执行记录已写入"，而不是
+// "验证通过"——不会凭空产生 ValidationRun，也不会把执行成功说成验证通过。
+func (s *TaskWorkflowService) runPlanStep(
+	ctx context.Context,
+	writeCtx context.Context,
+	run domain.WorkflowRun,
+	step domain.Step,
+	exec workflowExecution,
+) (domain.WorkflowRun, bool) {
+	result, runErr := s.steps.ExecutePlanning(ctx, ExecutePlanningRequest{
+		TaskID:  run.TaskID.String(),
+		StepID:  step.ID.String(),
+		Prompt:  exec.prompt,
+		Timeout: exec.timeout,
+		// 任务执行权随工作流传入：规划阶段的任务终态写入同样附带 owner + epoch 栅栏。
+		Grant: &exec.grant,
+	})
+	if runErr != nil {
+		// 协调器返回错误意味着本次没有产生真实执行：错误必须如实记录。
+		if ctx.Err() != nil || run.CancelRequested || errors.Is(runErr, ErrWorkflowStopped) {
+			return s.stopForInterruption(writeCtx, run, ctx), true
+		}
+		return s.stopRun(writeCtx, run, domain.WorkflowRunBlocked, "step_not_executed", runErr), true
+	}
+	if result.Outcome == domain.StepExecutionCompleted &&
+		result.StepStatus == domain.StepStatusCompleted &&
+		result.Finalized {
+		return s.recordStepPassed(writeCtx, run, step, result.AttemptID, map[string]any{
+			"phase": "plan",
+		})
+	}
+	return s.stopForPlanResult(writeCtx, run, step, result, ctx), true
+}
+
+// recordStepPassed 记录一个步骤真实通过，并推进执行记录游标。
+//
+// 调用方必须先依据真实执行证据确认通过；本函数只负责写入这一事实并追加事件。
+// extra 用于补充该阶段特有的追溯字段。
+func (s *TaskWorkflowService) recordStepPassed(
+	writeCtx context.Context,
+	run domain.WorkflowRun,
+	step domain.Step,
+	attemptID domain.ID,
+	extra map[string]any,
+) (domain.WorkflowRun, bool) {
+	stepID := step.ID
+	if err := run.RecordStepCompleted(step, s.now()); err != nil {
+		return s.failRun(writeCtx, run, "record_step", err), true
+	}
+	persisted, persistErr := s.persistRun(writeCtx, run)
+	if persistErr != nil {
+		// 数据库状态写入失败时即使步骤真实通过也不能推进后续步骤。
+		return s.failRun(writeCtx, run, "record_step", persistErr), true
+	}
+	payload := map[string]any{
+		"run_id":          persisted.ID.String(),
+		"step_id":         stepID.String(),
+		"sequence":        step.Sequence,
+		"attempt_id":      attemptID.String(),
+		"completed_steps": persisted.CompletedSteps,
+		"total_steps":     persisted.TotalSteps,
+	}
+	for key, value := range extra {
+		payload[key] = value
+	}
+	s.appendEvent(writeCtx, run.TaskID, &stepID, idPtr(attemptID),
+		domain.EventTypeWorkflowStepPassed, payload)
+	return persisted, false
+}
+
+// stopForPlanResult 依据规划阶段的真实执行结果收敛工作流状态。
+//
+// 只有真实执行完成才可能继续推进；其余结论都必须停止，并按结论区分可恢复停止与需要
+// 人工核验的现场。规划阶段不自动重试，也不进入开发步骤的自动修复循环。
+func (s *TaskWorkflowService) stopForPlanResult(
+	writeCtx context.Context,
+	run domain.WorkflowRun,
+	step domain.Step,
+	result ExecutePlanningResult,
+	ctx context.Context,
+) domain.WorkflowRun {
+	stepID := step.ID
+	payload := map[string]any{
+		"run_id":     run.ID.String(),
+		"step_id":    stepID.String(),
+		"sequence":   step.Sequence,
+		"phase":      "plan",
+		"attempt_id": result.AttemptID.String(),
+		"outcome":    string(result.Outcome),
+		// 规划阶段没有验证记录：事件里不写 validation_run_id，避免被读成"验证未通过"。
+		"step_status": string(result.StepStatus),
+		"finalized":   result.Finalized,
+	}
+	switch {
+	case ctx.Err() != nil || run.CancelRequested ||
+		result.Outcome == domain.StepExecutionCancelled:
+		if run.CancelRequested || result.Outcome == domain.StepExecutionCancelled ||
+			errors.Is(context.Cause(ctx), errWorkflowCancelRequested) {
+			s.appendEvent(writeCtx, run.TaskID, &stepID, idPtr(result.AttemptID),
+				domain.EventTypeWorkflowCanceled, payload)
+		}
+		return s.stopForInterruption(writeCtx, run, ctx)
+	case !result.Finalized:
+		// 执行记录没有可靠写入：结果无法确认，既不判定失败也不判定通过。
+		return s.stopWithEvent(writeCtx, run, domain.WorkflowRunRecoveryRequired,
+			"execution_unconfirmed", planningStopSummary(result),
+			domain.EventTypeWorkflowRecovery, payload)
+	case result.Outcome == domain.StepExecutionInterrupted ||
+		result.Outcome == domain.StepExecutionTimedOut:
+		return s.stopWithEvent(writeCtx, run, domain.WorkflowRunRecoveryRequired,
+			"plan_interrupted", planningStopSummary(result),
+			domain.EventTypeWorkflowBlocked, payload)
+	default:
+		return s.stopWithEvent(writeCtx, run, domain.WorkflowRunBlocked,
+			"plan_failed", planningStopSummary(result),
+			domain.EventTypeWorkflowBlocked, payload)
+	}
 }
 
 // stopForStepResult 依据步骤闭环的真实结果收敛工作流状态。
@@ -1179,6 +1289,21 @@ func codeSaveIndeterminate(
 		return false
 	}
 	return record.HasUnresolvedSideEffect()
+}
+
+// planningStopSummary 生成规划阶段停止的说明。
+//
+// 规划阶段没有验证记录：说明里只描述 Planner 的真实执行结论，不引用并不存在的
+// 验证结果。
+func planningStopSummary(result ExecutePlanningResult) string {
+	detail := strings.TrimSpace(result.Failure)
+	if detail == "" {
+		detail = strings.TrimSpace(result.Summary)
+	}
+	if detail == "" {
+		detail = "规划阶段未成功"
+	}
+	return "规划阶段执行结论为 " + string(result.Outcome) + ": " + detail
 }
 
 // developerStopSummary 生成开发阶段停止的说明。

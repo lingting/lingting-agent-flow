@@ -115,8 +115,9 @@ func CheckPlanGenerationStart(task Task, steps []Step) error {
 // 规则集中在这里，不分散到调用方：
 //   - 步骤数量必须在 1 到任务配置的步骤数上限之间；
 //   - 每步的标识、标题、目标与验收条件都必须非空且有长度上限；
-//   - 任务级必需验证命令与验收条件合并进每个步骤：Planner 不能通过省略命令
-//     来取消任务级的必需检查；
+//   - 任务级必需验证命令与验收条件只合并进开发步骤：Planner 不能通过省略命令
+//     来取消任务级的必需检查，规划阶段步骤则只承载规划职责，不承载只能在开发
+//     产出之后成立的代码验收条件与验证命令；
 //   - 序号 1 是规划阶段步骤（plan），其余为开发步骤（develop）：计划以规划阶段
 //     开头，任务级编排器据此支持"从 plan 启动"。
 func BuildPlan(
@@ -151,6 +152,10 @@ func BuildPlan(
 	retry := task.Config.Retry
 	// 计划固定以规划阶段步骤开头：任务级编排器据此支持"从 plan 启动"，
 	// 且规划阶段本身可追溯（角色快照、执行结论）。
+	//
+	// 规划阶段只负责规划：它不承载任务级的代码验收条件与代码验证命令。那些检查
+	// 只能在 Developer 产出代码后成立，提前放进规划阶段会让"依赖开发产出的必需
+	// 命令"在开发之前被执行并判为不通过。
 	planStep, err := NewAgentStep(
 		task.ID,
 		1,
@@ -159,7 +164,7 @@ func BuildPlan(
 		"依据任务目标与仓库上下文生成结构化开发计划",
 		draft.Summary,
 		plannerRole,
-		taskVerification,
+		VerificationSpec{},
 		retry,
 		at,
 	)

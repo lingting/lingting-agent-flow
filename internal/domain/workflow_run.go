@@ -714,7 +714,23 @@ func checkWorkflowStepState(steps []Step) error {
 }
 
 // checkStepHasRequiredCheck 校验步骤是否具备可用于判定的必需检查。
+//
+// 只有开发步骤必须承载必需检查：开发步骤的完成由确定性的代码验证决定，缺少必需
+// 检查时无法判定是否通过。规划阶段步骤是 Planner 的真实执行，只对"计划是否生成"
+// 负责，不跑依赖开发产出的代码验证，因此它既不需要也不应该携带代码验证命令。
 func checkStepHasRequiredCheck(step Step) error {
+	switch step.Type {
+	case StepTypePlan:
+		return nil
+	case StepTypeDevelop:
+	default:
+		return fmt.Errorf(
+			"%w: 步骤 %s 的类型 %s 不参与必需检查判定",
+			ErrInvalidState,
+			step.ID,
+			step.Type,
+		)
+	}
 	for _, command := range step.VerificationSpec.Commands {
 		if command.IsRequired() {
 			return nil

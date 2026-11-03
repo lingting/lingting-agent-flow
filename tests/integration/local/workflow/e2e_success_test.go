@@ -105,8 +105,12 @@ func TestE2EHappyPathPersistsPlanAndWorkspace(t *testing.T) {
 		if step.CurrentAttemptID != nil {
 			t.Fatalf("步骤 %d 完成后必须释放执行占用", step.Sequence)
 		}
+		// 规划阶段只负责规划，不承载任务级代码验证命令。
+		if step.Type == domain.StepTypePlan {
+			continue
+		}
 		if !step.VerificationSpec.HasCommands() {
-			t.Fatalf("步骤 %d 缺少任务级必需命令", step.Sequence)
+			t.Fatalf("开发步骤 %d 缺少任务级必需命令", step.Sequence)
 		}
 	}
 	// 工作区初始化必须留下成功记录，并关联当前容器与可核验 commit。

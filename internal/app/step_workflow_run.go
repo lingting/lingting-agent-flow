@@ -495,10 +495,13 @@ func (s *StepWorkflowService) appendCloseoutEvent(
 	}
 }
 
-// requireStepVerificationSpec 校验步骤的验证配置是否可用于判定。
+// requireStepVerificationSpec 校验开发步骤的验证配置是否可用于判定。
 //
 // 规则与确定性验证引擎一致：至少存在一项启用的必需检查。没有必需检查时拒绝进入
 // 闭环，而不是跑完开发后得到一条注定失败的验证记录。
+//
+// 该准入只作用于开发—验证闭环：规划阶段步骤走规划专用执行路径，不跑确定性验证，
+// 因此它既不要求、也不允许用"全局跳过验证"的开关绕过这里的检查。
 func requireStepVerificationSpec(step domain.Step) error {
 	spec := ValidationSpecFromStep(step)
 	if err := spec.Validate(); err != nil {

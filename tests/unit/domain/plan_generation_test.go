@@ -114,6 +114,14 @@ func TestBuildPlanAcceptsValidDraft(t *testing.T) {
 	if plan.Steps[0].RoleID != fixture.planner.ID {
 		t.Fatalf("规划阶段步骤必须绑定规划角色: %s", plan.Steps[0].RoleID)
 	}
+	// 规划阶段只负责规划：任务级代码验收条件与验证命令只能在开发产出之后成立，
+	// 因此不得合并进规划阶段步骤。
+	if plan.Steps[0].VerificationSpec.HasCommands() {
+		t.Fatalf("规划阶段步骤不得携带代码验证命令: %v", plan.Steps[0].VerificationSpec.Commands)
+	}
+	if criteria := plan.Steps[0].VerificationSpec.AcceptanceCriteria; len(criteria) != 0 {
+		t.Fatalf("规划阶段步骤不得携带任务级验收条件: %v", criteria)
+	}
 	for index, step := range plan.Steps {
 		if step.Sequence != index+1 {
 			t.Fatalf("步骤序号不连续: %d", step.Sequence)

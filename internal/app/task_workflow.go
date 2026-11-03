@@ -147,15 +147,27 @@ type WorkflowCodeSaverPort interface {
 	SaveCode(ctx context.Context, request CodeSaveRequest) (CodeSaveResult, error)
 }
 
-// WorkflowStepRunner 是编排器对单步骤开发—验证闭环的需求。
+// WorkflowStepRunner 是编排器对单步骤执行的需求。
 //
 // 该接口由 app.StepWorkflowService 实现：编排器不自行创建 Attempt、不自行拼接
 // Pi 命令、不自行判定验证结论。
+//
+// 两类步骤走不同路径，职责不重叠：
+//   - ExecuteAndValidate 是开发步骤的开发—验证闭环（确定性验证 + 领域修复判定）；
+//   - ExecutePlanning 是规划阶段步骤的规划执行（真实 Planner 调用，不跑代码验证，
+//     也不进入修复循环）。
+//
+// 两者都不能被对方替代：开发步骤缺少确定性验证会伪造"通过"，规划阶段跑代码验证则
+// 会执行只能在开发产出之后成立的必需命令。
 type WorkflowStepRunner interface {
 	ExecuteAndValidate(
 		ctx context.Context,
 		request ExecuteAndValidateRequest,
 	) (ExecuteAndValidateResult, error)
+	ExecutePlanning(
+		ctx context.Context,
+		request ExecutePlanningRequest,
+	) (ExecutePlanningResult, error)
 }
 
 // TaskWorkflowStore 是编排器依赖的存储能力组合。

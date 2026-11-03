@@ -165,6 +165,17 @@ func (r *fakeRunner) ExecuteAndValidate(
 	return app.ExecuteAndValidateResult{}, errUnexpectedStepRun
 }
 
+// ExecutePlanning 记录调用并返回失败：恢复流程不应走到这里。
+func (r *fakeRunner) ExecutePlanning(
+	ctx context.Context,
+	request app.ExecutePlanningRequest,
+) (app.ExecutePlanningResult, error) {
+	r.mu.Lock()
+	r.calls++
+	r.mu.Unlock()
+	return app.ExecutePlanningResult{}, errUnexpectedStepRun
+}
+
 // callCount 返回闭环调用次数。
 func (r *fakeRunner) callCount() int {
 	r.mu.Lock()

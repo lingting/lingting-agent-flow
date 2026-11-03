@@ -463,8 +463,24 @@ func TestRemoteE2EFullChain(t *testing.T) {
 		if step.Sequence != index+1 {
 			t.Fatalf("步骤序号不连续: %d", step.Sequence)
 		}
-		if !step.VerificationSpec.HasCommands() {
-			t.Fatalf("步骤 %d 缺少任务级必需命令", step.Sequence)
+		// 规划阶段只负责规划：任务级代码验收命令只能在 Developer 产出之后成立，
+		// 因此它不得出现在规划阶段步骤上。
+		if step.Type == domain.StepTypePlan {
+			if step.VerificationSpec.HasCommands() {
+				t.Fatalf("规划阶段步骤不得携带代码验证命令: %v", step.VerificationSpec.Commands)
+			}
+			continue
+		}
+		// 任务级必需检查必须完整合并进每一个开发步骤：Planner 不能通过省略命令取消它。
+		command, ok := findVerificationCommand(step, e2eRequiredCheckName)
+		if !ok {
+			t.Fatalf("开发步骤 %d 缺少任务级必需命令 %s", step.Sequence, e2eRequiredCheckName)
+		}
+		if !command.Required {
+			t.Fatalf("开发步骤 %d 的 %s 检查必须是必需检查", step.Sequence, e2eRequiredCheckName)
+		}
+		if !hasRequiredVerificationCommand(step) {
+			t.Fatalf("开发步骤 %d 缺少可执行的必需检查", step.Sequence)
 		}
 	}
 	// 容器必须真实创建并关联到任务。
@@ -1271,6 +1287,29 @@ func findCheckResult(
 		}
 	}
 	return domain.ValidationCheckResult{}, false
+}
+
+// findVerificationCommand 按名称查找步骤上的验证命令。
+func findVerificationCommand(
+	step domain.Step,
+	name string,
+) (domain.VerificationCommand, bool) {
+	for _, command := range step.VerificationSpec.Commands {
+		if command.Name == name {
+			return command, true
+		}
+	}
+	return domain.VerificationCommand{}, false
+}
+
+// hasRequiredVerificationCommand 判断步骤是否带有可执行的必需检查。
+func hasRequiredVerificationCommand(step domain.Step) bool {
+	for _, command := range step.VerificationSpec.Commands {
+		if command.IsRequired() {
+			return true
+		}
+	}
+	return false
 }
 
 // e2eContainsTool 判断工具列表是否包含指定工具。

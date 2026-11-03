@@ -1,8 +1,8 @@
 # M1：设置中心、环境管理与固定角色
 
-> 状态：**pending**（子任务 V2-M1-E1～V2-M1-E4 已完成；退出条件「现有 V1 任务工作流不回归失败」于
-> 2026-11-02 真实远程端到端运行中**未通过**：工作流在规划阶段步骤被判验证失败后 `blocked`，未进入开发阶段。
-> 详见 §7）。
+> 状态：**completed**（2026-11-03）。子任务 V2-M1-E1～V2-M1-E4 已完成；退出条件「现有 V1 任务工作流不
+> 回归失败」先于 2026-11-02 真实远程端到端运行中**未通过**（工作流在规划阶段步骤被判验证失败后 `blocked`，
+> 未进入开发阶段，详见 §7），修复后于 2026-11-03 真实远程端到端运行中**通过**（详见 §8）。
 > 前置：M0 completed。参考：[`../ROLE-DESIGN.md`](../ROLE-DESIGN.md)、
 > [`../ENVIRONMENT-MANAGEMENT.md`](../ENVIRONMENT-MANAGEMENT.md)、[`../ARCHITECTURE.md`](../ARCHITECTURE.md) §8。
 
@@ -75,8 +75,9 @@ E4 的退出条件与证据：
 - 本次**未运行**测试（用户未授权），只完成 `gofmt`、`go vet ./...`、前端 `pnpm lint`（fmt / lint / tsc）、
   前端生产构建与 `git diff --check`。
 
-M1 整体状态仍为 **pending**：E1～E4 已交付，但退出条件「现有 V1 任务工作流不回归失败」需要真实跑一轮
-计划→开发→验证确认，因此不得把 M1 标记为 completed，也不得据 E4 的完成把 M2 标记为已开始。
+M1 整体状态为 **completed**（2026-11-03）：E1～E4 已交付，退出条件「现有 V1 任务工作流不回归失败」由
+2026-11-03 的真实远程端到端运行确认（规划→开发→确定性验证→语义审查→交付全部真实完成，见 §8）。
+修复前的失败现场保留在 §7，不因最终通过而改写。
 工具策略自 E3 起在真实调用链路上生效，但"项目代码只读"的最终文件系统边界仍由 M2 的只读容器承担。
 
 ## 1. 目标
@@ -152,7 +153,7 @@ M1 整体状态仍为 **pending**：E1～E4 已交付，但退出条件「现有
 | 角色配置修改能持久化（**已满足**，E2 + E3） | `PUT /api/v1/roles/{roleID}` 只更新 `roles` 行的 `system_prompt` / `tools_policy_json` / `model` / `enabled`，响应取重新读取结果；启动补齐不覆盖已有行；越出角色能力上限的工具策略返回 400，不落库 |
 | 历史 Session 保留原角色快照（**已满足**，E2 未改动该路径） | 快照只在会话创建时由 `Role.Snapshot()` 写入；没有任何代码在会话创建后回写 `role_snapshot_json` |
 | 规划角色不能写入项目代码（**工具层已满足**，E3） | 规划角色能力上限只读，Pi 调用只收到 `read`/`grep`/`find`/`ls`，并固定 `--no-mcp` / `--no-extensions`；文件系统级的只读边界仍属 M2 |
-| 现有 V1 任务工作流不回归失败（**未满足**，2026-11-02 真实运行） | 真实远程端到端运行在规划阶段即失败：任务级必需验证命令被合并进序号 1 的 `plan` 步骤，该命令只能在开发步骤完成后成立，确定性验证判 `failed`（退出码 1），修复循环对 `plan` 类型判 `unsupported_step`，工作流 `blocked`、任务 `recovery_required`，开发步骤从未执行。证据与待解决事项见 §7 |
+| 现有 V1 任务工作流不回归失败（**已满足**，2026-11-03 真实运行） | 2026-11-02 曾失败：任务级必需验证命令被合并进序号 1 的 `plan` 步骤，确定性验证判 `failed`（退出码 1），修复循环对 `plan` 类型判 `unsupported_step`，工作流 `blocked`（§7）。业务语义修正后，规划阶段只做真实 Planner 执行、不跑确定性验证，任务级必需命令只进入开发步骤；2026-11-03 真实远程端到端运行 `TestRemoteE2EFullChain` 通过：`plan` 步骤真实完成、`develop` 步骤执行 `notes-exists`（退出码 0）并通过语义审查，工作流 `completed`（§8） |
 | 环境版本只追加（**已满足**，E1） | 提交不同内容产生新版本号，旧版本内容、哈希与构建元数据不变；提交内容与某个成功版本完全一致时复用该版本号，不产生重复版本 |
 | Settings 展示真实运行配置且不泄露无关信息（**已满足**，E4） | `GET /api/v1/settings/config` 只返回四项运行参数，取值来自启动快照；不返回 SSH known_hosts 路径、凭据、私钥、模型或仓库凭据与完整配置对象；`/api/v1/system/info` 字段与语义不变 |
 
@@ -218,3 +219,95 @@ M1 保持 **pending**。
 - 本次未修改生产代码中的角色工具上限、默认策略或 Pi CLI 参数；仅在同一既有测试文件中补充了本次验收
   所需的阶段证据断言（Planner / Developer / Validator 角色快照与工具、ValidationRun 与 `notes-exists`
   退出码、`ReviewStatus`、Attempt 与容器归属、任务分支唯一性与「不自动合并」），未新增测试文件或测试函数。
+
+## 8. 修复记录与最终真实通过（2026-11-03）
+
+§7 的失败不是模型自述失败，而是确定性的业务语义缺陷：任务级代码验收命令被同时分配给规划阶段与开发阶段。
+本轮按「规划只规划、开发只验收」重新划分职责，并用同一条真实远程端到端用例验证通过。
+
+### 8.1 首次失败根因（生产代码位置）
+
+1. `internal/domain/plan_generation.go` 的 `BuildPlan` 把完整 `taskVerification` 传给序号 1 的 `StepTypePlan`，
+   同时又把同一份规格合并进每个 `StepTypeDevelop`。同一条任务级必需命令因此出现在两个阶段。
+2. `internal/domain/workflow_run.go` 的 `checkStepHasRequiredCheck` 对**所有**待推进步骤要求「启用的必需检查」，
+   所以只删除规划步骤的验证配置并不足以通过启动准入。
+3. `internal/app/task_workflow_exec.go` 的 `runStep` 把工作流里的每个步骤统一交给
+   `StepWorkflowService.ExecuteAndValidate`，规划阶段因此走开发—验证闭环。
+4. `internal/app/step_workflow_repair.go` 的 `ExecuteAndValidate` 在调用 Planner **之前**执行
+   `requireStepVerificationSpec`，并让验证失败进入通用自动修复循环；而领域规则
+   （`domain.DecideRepairLoop`）明确不允许修复非开发步骤，于是落入 `unsupported_step`。
+
+### 8.2 实际修改的业务规则
+
+- 规划阶段步骤（`StepTypePlan`）只承载规划职责：`BuildPlan` 不再把任务级验收条件与验证命令合并给它，
+  它也不再要求「启用的必需检查」（`checkStepHasRequiredCheck` 按步骤类型分流）。
+- 新增规划专用执行路径 `StepWorkflowService.ExecutePlanning`（真实 `StepExecutor.Execute`，Planner 角色、
+  只读工具、真实 Attempt / Session / 角色快照 / 归档），**不校验验证配置、不产生 ValidationRun、不进入自动
+  修复循环**；步骤终态只由真实执行结论决定，成功即 `completed`，失败/超时/取消/中断如实写入。
+- `TaskWorkflowService.runStep` 按步骤类型分流：`plan` 走 `ExecutePlanning`，`develop` 继续走
+  `ExecuteAndValidate`（`requireStepVerificationSpec`、确定性验证、领域修复判定、失败反馈持久化全部保留）。
+- 规划阶段成功判定为「Planner 真实执行完成 + 执行记录已写入（`Finalized`）」，没有把 `Verified` 或验证结果
+  字段硬编码为 true；规划失败不自动重试，也不改动 `Retry.MaxAttempts`。
+- 开发步骤语义不变：任务级必需验收条件与命令、Planner 输出的步骤级验收条件与命令继续合并（任务级优先），
+  每轮开发后仍执行真实确定性验证，`notes-exists` 在 Developer 创建 `NOTES.md` 之后执行为退出码 0。
+
+### 8.3 测试断言的同步（只调整与业务语义不一致的断言）
+
+- `tests/integration/remote/workflow/e2e_chain_test.go`：改为分别核对「`plan` 步骤不得携带代码验证命令」
+  与「每个 `develop` 步骤必须包含任务级 `notes-exists` 且为 Required」。
+- `tests/unit/httpapi/plan_test.go`、`tests/integration/local/workflow/e2e_success_test.go`：同一语义修正。
+- `tests/unit/domain/plan_generation_test.go`：补充「规划阶段步骤不得携带任务级验收条件与验证命令」。
+- 未新增测试文件，未新增测试函数；`assertStageEvidence`、Attempt / Session / ValidationRun 真实性断言、
+  角色工具上限断言、交付分支唯一性断言全部保留。
+
+### 8.4 每轮真实测试结果
+
+| 轮次 | 命令 | 结果 | 说明 |
+|---|---|---|---|
+| 第 1 轮 | `go test -count=1 -run '^TestRemoteE2EFullChain$' -v ./tests/integration/remote/workflow` | **未执行到业务链路** | 真实依赖前置失败：远端 SSH 目标（本机 WSL Ubuntu 内的 sshd）已停止，`127.0.0.1:22` TCP 层拒绝连接。判定为环境前置条件缺失，不是代码问题；启动该测试虚拟机后重跑 |
+| 第 2 轮 | 同上 | **PASS**（257.51s） | 计划→开发→确定性验证→语义审查→交付全部真实完成 |
+
+第 1 轮属于测试环境前置（远端主机未运行），未产生 Task / WorkflowRun 记录；环境恢复后未改动任何 SSH 目标、
+凭据、known_hosts、主机密钥校验或模型配置。
+
+### 8.5 最终成功现场（第 2 轮）
+
+- 用例：`TestRemoteE2EFullChain`，退出码 **0**。
+- `TEST_ARTIFACT_DIR`：`C:\Users\lingting\AppData\Local\Temp\lingting-agent-flow-tests\workflow-3637537598`
+  （`test.log`、`case-3321517040/agentflow.db`、`sessions/`、`validations/`）。
+- 执行环境：远程 `127.0.0.1:22`（私钥认证，主机密钥校验未关闭，`known_hosts` 未修改）；基础镜像
+  `agentflow-base-base:v0001-a253a6178fe7`，语言镜像 `agentflow-language-node:v0001-f02408055e30`；
+  容器内 Pi provider `agentflow-test`、模型 `group/free`。
+- 标识：
+  - Task `978c33738acf5cb9bc7faef88dee6fab` → `completed` / `succeeded`；
+  - WorkflowRun `90c00e4c7c5491b26bd192fbefa48369` → `completed` / `stage=finalize` / `2 of 2` 步骤完成；
+  - 计划生成会话 `bee42fc17280060139379debfd0cc981`（`planner`，2 个步骤，未关联 Attempt）；
+  - 规划阶段步骤 `a860a5e682d525583e00a2c2cd0f3980`、Attempt `45b5f8e7a6f47aa2a6a182bfb904a36e`
+    （`completed`，exit 0）、会话 `4f998a6d7834ff379f60611582a24e8e`（`planner`，工具 `read,grep,find,ls`）；
+  - 开发步骤 `87de6b93e019f180db304482c0cf75f3`、Attempt `862e1a2641ff5bf8d54c82bd1e717481`
+    （`completed`，`git_after` 记录到真实未提交变更）、会话 `b027d4d836c4af7fb9a171b9b6be28ee`
+    （`developer`，工具 `read,grep,find,ls,edit,write,bash`）；
+  - ValidationRun `7dc84200da067d213662d9773e31a68b` → `completed` / `verdict=passed`，
+    检查 `notes-exists`（Required）`passed`，退出码 **0**，在本次任务容器内执行；
+  - 语义审查会话 `d16da4c841cebe5df19a9a9945b067c6`（`validator`，工具 `read,grep,find,ls`），
+    `ReviewStatus=passed`，评估证据引用 `/workspace/project/NOTES.md`；
+  - 任务容器 `d77d996162ba2ca8f65190df558c25c2`（Docker `3e78fd632d00eba707e7b59869e2fcc99f10fd346bc4f40be507ec2d341be9d4`），
+    finalizer 核验容器已清理（`PASS`，无其他容器变动，基线 `pgsql-server` 保持不变）；
+  - 会话归档：4 条会话全部 `complete` / `archive=succeeded`。
+- 持久化的步骤验证规格（数据库实读）：
+  - 序号 1 `plan`：`{}`（无验收条件、无命令）；
+  - 序号 2 `develop`：任务级 `notes-exists`（`sh -c "test -f NOTES.md"`，`required=true`）与步骤级验收条件合并结果。
+- 交付：`code_saves` 记录 commit `744fd81adb57c27ca7dcbae40802856891220ebd`、`push=succeeded`、
+  远程分支 `agent/978c33738acf5cb9bc7faef88dee6fab` 指向同一提交、`merge_status=not_requested`（未合并基础分支，
+  未删除或改写历史测试分支，目标仓库仍是专用测试仓库 `lingting/lingting-agent-flow-test`）。
+- 非测试验证：改动文件 `gofmt`、`go vet ./...`（含 `./tests/...` 编译）、`git diff --check` 均无问题。
+
+### 8.6 规划阶段与开发阶段的最终执行规则
+
+| 阶段 | 执行路径 | 成功判定 | 禁止 |
+|---|---|---|---|
+| `plan` | `StepWorkflowService.ExecutePlanning` → 真实 `StepExecutor.Execute`（Planner 角色） | Planner 真实执行完成且执行记录完整写入（`completed` + `Finalized`） | 不跑确定性代码验证、不生成 ValidationRun、不进入自动修复、不自动重试、不伪造 `Verified` |
+| `develop` | `StepWorkflowService.ExecuteAndValidate` → 开发 + 确定性验证 + 语义审查 + 领域修复判定 | 必需检查全部通过且语义审查通过，步骤进入 `completed` 且 `Verified=true` | 缺少启用的必需检查时在开发前直接拒绝；验证失败按 `domain.DecideRepairLoop` 处理 |
+| `validator` | `ValidatorReviewer`（Validator 角色，只读） | 结构化评估被真实解析并持久化，不覆盖确定性结论 | 无 Bash / 写入 / 编辑能力，不取代 `ValidationService` |
+
+M2 状态保持 **pending**：本轮未开始 M2 的规划容器、只读挂载或 PlanningSession。

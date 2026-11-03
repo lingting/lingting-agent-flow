@@ -282,15 +282,22 @@ func TestPlanAPIPersistsPlan(t *testing.T) {
 		t.Fatalf("必须返回规划会话标识")
 	}
 	for index, step := range response.Steps {
-		if len(step.RequiredChecks) == 0 {
-			t.Fatalf("步骤 %d 缺少生效的必需检查", step.Sequence)
-		}
 		expectedType := domain.StepTypeDevelop
 		if index == 0 {
 			expectedType = domain.StepTypePlan
 		}
 		if step.Type != string(expectedType) {
 			t.Fatalf("步骤 %d 类型不符: %s", step.Sequence, step.Type)
+		}
+		// 规划阶段不承载任务级代码验证命令：那些命令只能在开发产出之后成立。
+		if expectedType == domain.StepTypePlan {
+			if len(step.RequiredChecks) != 0 {
+				t.Fatalf("规划阶段步骤不得携带必需检查: %+v", step.RequiredChecks)
+			}
+			continue
+		}
+		if len(step.RequiredChecks) == 0 {
+			t.Fatalf("开发步骤 %d 缺少生效的必需检查", step.Sequence)
 		}
 	}
 }

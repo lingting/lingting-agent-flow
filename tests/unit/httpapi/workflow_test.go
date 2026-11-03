@@ -68,6 +68,37 @@ func (r *taskWorkflowAPIRunner) ExecuteAndValidate(
 	}, nil
 }
 
+// ExecutePlanning 返回受控的规划执行结果并把步骤收口为已完成。
+//
+// 规划阶段不产生 ValidationRun：它只表达 Planner 的真实执行结论。
+func (r *taskWorkflowAPIRunner) ExecutePlanning(
+	ctx context.Context,
+	request app.ExecutePlanningRequest,
+) (app.ExecutePlanningResult, error) {
+	r.mu.Lock()
+	r.calls++
+	blocked := r.blocked
+	db := r.db
+	r.mu.Unlock()
+	if blocked != nil {
+		select {
+		case <-blocked:
+		case <-ctx.Done():
+			return app.ExecutePlanningResult{}, ctx.Err()
+		}
+	}
+	stepID := domain.ID(request.StepID)
+	completeWorkflowAPIStep(ctx, db, stepID)
+	return app.ExecutePlanningResult{
+		TaskID:     domain.ID(request.TaskID),
+		StepID:     stepID,
+		AttemptID:  domain.NewID(),
+		Outcome:    domain.StepExecutionCompleted,
+		StepStatus: domain.StepStatusCompleted,
+		Finalized:  true,
+	}, nil
+}
+
 // completeWorkflowAPIStep 按真实闭环的迁移路径把步骤收口为已完成。
 //
 // 收口写入必须带状态前置条件：编排器在同一任务上并发读取步骤，无条件写入会覆盖
