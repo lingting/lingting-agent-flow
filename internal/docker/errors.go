@@ -48,6 +48,8 @@ const (
 	CodeRunContractUnsupported ErrorCode = "run_contract_unsupported"
 	// CodeContainerNotFound 表示目标容器不存在。
 	CodeContainerNotFound ErrorCode = "container_not_found"
+	// CodeVolumeNotFound 表示目标命名卷不存在。
+	CodeVolumeNotFound ErrorCode = "volume_not_found"
 	// CodeContainerConflict 表示容器名称冲突或容器已存在。
 	CodeContainerConflict ErrorCode = "container_conflict"
 	// CodeOwnershipMismatch 表示容器标签与登记记录不一致。
@@ -138,6 +140,8 @@ func ClassifyDockerMessage(output string) ErrorCode {
 		strings.Contains(message, "error during connect"),
 		strings.Contains(message, "docker.sock: connect"):
 		return CodeDaemonUnavailable
+	case strings.Contains(message, "no such volume"):
+		return CodeVolumeNotFound
 	case strings.Contains(message, "no such container"),
 		strings.Contains(message, "no such object"),
 		strings.Contains(message, "no such image"):

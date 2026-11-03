@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/lingting/agentflow/internal/docker"
+	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/execenv"
 )
 
@@ -18,6 +19,11 @@ type PlanningContainerSpec struct {
 	CodeVolumeName string
 	// Workspace 是只读工作区语义：项目代码目录只读，可写目录显式声明。
 	Workspace execenv.Workspace
+	// SessionID 是规划会话标识，写入只读规划容器的归属标签。
+	//
+	// 它使复用已登记容器时能核验该容器确实属于当前规划会话，而不是其他会话
+	// 或其他项目遗留的容器。
+	SessionID string
 }
 
 // Validate 校验规划容器参数。
@@ -34,6 +40,9 @@ func (p PlanningContainerSpec) Validate(caches []string) error {
 	if strings.TrimSpace(p.CodeVolumeName) == "" {
 		return fmt.Errorf("%w: 规划容器必须声明项目代码快照卷", execenv.ErrInvalidValue)
 	}
+	if err := domain.ID(strings.TrimSpace(p.SessionID)).Validate(); err != nil {
+		return fmt.Errorf("%w: 规划容器必须声明合法的规划会话标识: %w", execenv.ErrInvalidValue, err)
+	}
 	if len(caches) != 0 {
 		return fmt.Errorf(
 			"%w: 规划容器不能挂载可写缓存卷，否则会绕过项目代码只读限制",
@@ -49,6 +58,7 @@ func (p PlanningContainerSpec) Validate(caches []string) error {
 // 声明的可写目录转换为临时目录。调用方必须先执行 Validate，这里不再重复校验。
 func (p PlanningContainerSpec) apply(spec *docker.CreateContainerSpec) {
 	spec.WorkDir = p.Workspace.Project
+	spec.PlanningSessionID = strings.TrimSpace(p.SessionID)
 	spec.ReadOnlyRootFS = true
 	spec.CodeVolumes = []docker.ReadOnlyVolumeSpec{
 		{

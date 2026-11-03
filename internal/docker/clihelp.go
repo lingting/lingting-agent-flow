@@ -127,10 +127,15 @@ func RequiredCLICommands() []CLICommand {
 		{
 			Subcommand: "run",
 			Options: []CLIOption{
-				{Name: "--rm", Source: "CheckRunContract"},
+				{Name: "--rm", Source: "CheckRunContract/RunOneShotContainer"},
 				{Name: "--entrypoint", Source: "CheckRunContract"},
+				{Name: "--detach", Source: "StartTemporaryContainer"},
+				{Name: "--name", Source: "StartTemporaryContainer"},
+				{Name: "--workdir", Source: "runContainerArgs"},
+				{Name: "--label", Source: "runContainerArgs"},
+				{Name: "--mount", Source: "runContainerArgs"},
 			},
-			Source: "CheckRunContract",
+			Source: "CheckRunContract/StartTemporaryContainer/RunOneShotContainer",
 		},
 		{
 			Subcommand: "ps",
@@ -148,6 +153,16 @@ func RequiredCLICommands() []CLICommand {
 				{Name: "--label", Source: "EnsureVolume"},
 			},
 			Source: "EnsureVolume",
+		},
+		{
+			Subcommand: "volume",
+			Args:       []string{"inspect"},
+			Source:     "InspectVolume",
+		},
+		{
+			Subcommand: "volume",
+			Args:       []string{"rm"},
+			Source:     "RemoveVolume",
 		},
 		{
 			Subcommand: "build",

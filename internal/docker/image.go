@@ -36,6 +36,11 @@ const (
 	TaskLabelKey = "agentflow.task_id"
 	// AttemptLabelKey 是标识尝试 ID 的标签键。
 	AttemptLabelKey = "agentflow.attempt_id"
+	// PlanningSessionLabelKey 是标识规划会话的标签键。
+	//
+	// 规划快照卷与只读规划容器都带该标签，用于核验资源确实属于某个规划会话；
+	// 普通任务容器不会带该标签。
+	PlanningSessionLabelKey = "agentflow.planning_session_id"
 )
 
 // BuildSpec 描述一次镜像构建。

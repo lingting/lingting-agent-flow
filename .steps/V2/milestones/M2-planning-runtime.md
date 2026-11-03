@@ -128,28 +128,66 @@
   "先查最大值再插入"。
 - 会话记录保存执行节点、规划容器、固定代码 commit 与两个角色的 Pi 会话标识，供后续运行时恢复。
 
-本阶段不包含：`PlanningRuntimeService`、`PlanningSessionService` 业务编排、规划容器与快照卷准备、
-Pi Session 路径生成、`internal/lifecycle` 注册、HTTP API 与前端工作台。规划运行时仍不可用。
+本阶段只交付持久化模型：当时的规划运行时、会话业务编排、Pi Session 路径与 HTTP API 均未实现，后续
+阶段的交付见 §7.3。
 
-### 7.3 仍未完成
+### 7.3 已交付：规划运行时服务（M2 第三阶段）
+
+`app.PlanningRuntimeService` 已把规划会话与只读 Docker 底座连接起来，提供 `Prepare` 与 `Release` 两个操作。
+它仍没有 HTTP / CLI 入口，也不执行任何 AI 对话：
+
+- **固定 commit 快照**：按 `Project.RepositoryURL` 与 `BaseBranch` 在一次性准备容器内 `git clone`，把
+  基础分支解析为完整 commit SHA，`checkout --detach` 到该 SHA，并在可写卷上核验 `rev-parse HEAD`、
+  detached HEAD 与干净工作区；持久化的是核验后的 SHA，不是分支名、标签或调用方输入。
+- **快照卷**：名称由服务端按 `agentflow-plan-<规划会话 ID>-<执行节点 ID>` 生成，挂载到项目工作目录。
+  卷带 `agentflow.managed`、`agentflow.host_id`、`agentflow.planning_session_id` 标签；复用与删除前
+  都必须核验名称与这三个标签，不共享不同会话的卷，也不删除名称相似但不属于本会话的卷。
+- **一次性容器**：准备容器以可写方式挂载快照卷，按需启动、执行、删除，不登记为受管理容器，也不写入
+  `planning_sessions.container_id`；只读复核使用 `docker run --rm` 的一次性容器，只读挂载同一个卷。
+- **正式规划容器**：经 `ContainerService.CreateContainer` 与 `PlanningContainerSpec` 创建，使用
+  `--read-only`、代码卷只读挂载、`/tmp` 作为唯一显式可写 tmpfs（覆盖 `/tmp/agentflow/sessions`），
+  不挂缓存卷、不挂 Docker Socket、不使用特权 / host PID / host network 参数；容器额外带规划会话标签，
+  复用时核验标签与登记记录。
+- **持久化顺序**：产生远程副作用前先写入 `HostID`；快照核验通过后写入 `SourceCommit`；容器启动并通过
+  所有权核验后才写入 `ContainerID`。任何一步失败都不会写入假的容器 ID，也不改变规划会话状态。
+- **复用与现场一致性**：已记录 `SourceCommit` 的会话只使用同一 SHA；快照卷缺失、实际 SHA 不一致或
+  登记的容器在远程已不存在时返回明确冲突，不重新 Clone、不创建第二个容器覆盖记录；只有在容器已停止且
+  仍受管理时才重新启动。
+- **释放**：先删除并确认规划容器，再按标签删除本会话快照卷，最后清空运行时绑定。容器已删除、卷已不
+  存在时重复释放是幂等的；删除失败或归属不成立时保留 `HostID` / `ContainerID` / `SourceCommit`。
+- **不确定结果**：远程命令超时、取消或连接中断时保留快照卷与准备容器现场，返回带阶段的
+  `ErrPlanningRuntimeUncertain`，不自动重试，也不盲目删除可能仍在使用的资源。
+- **Docker 能力**：`internal/docker` 新增 `docker run --detach` 一次性容器、`docker run --rm` 一次性
+  执行、`docker volume inspect` / `docker volume rm` 与规划会话标签，并同步 `RequiredCLICommands`。
+
+本阶段仍未提供 `PlanningSessionService` 业务编排、两个角色的 Pi Session 路径与多轮上下文、生命周期
+注册、HTTP API、前端工作台与需求 / 方案结构化解析；真实 Docker / SSH 环境下的资源创建、只读挂载与释放
+均未执行。
+
+### 7.4 仍未完成
 
 以下能力尚未实现，M2 状态保持 `pending`：
 
-- `PlanningRuntimeService`：快照卷准备（准备容器按固定 commit SHA 克隆到命名卷）、规划容器启动、
-  多轮复用与释放。
 - `PlanningSessionService`：会话创建、消息追加、Revision 追加、确认与放弃、状态收敛的业务编排
   （领域类型与 `0026` 持久化已在 §7.2 交付，尚无调用方）。
 - 迁移 `0028_projects_default_host.sql`（项目默认执行节点）与后续项目级调度的迁移。
 - 两个规划角色的 Pi Session 路径生成与根目录校验、多轮 Pi Session 上下文复用。
-- 规划运行时在 `internal/lifecycle` 中的注册与收敛。
+- 规划运行时在 `internal/lifecycle` 中的注册与收敛，以及 `agentflow server` 的服务装配。
 - HTTP API 与前端需求规划工作台。
-- 真实环境下的只读验证（文件工具与 `sh -c` 写入是否真的被文件系统拒绝）尚未执行：本阶段只确认
-  参数构造正确，**不代表只读规划环境已经可用**。
+- 规划运行时的失败恢复入口：结果不确定的现场目前只能通过再次 `Prepare` 做只读核验；残留的一次性
+  准备容器没有专门清理路径，也没有跨进程会话锁。
+- `Release` 不检查是否存在在途规划调用：本阶段不执行 AI 调用，M3 接入角色调用后必须先确认没有在途分析
+  才能释放。
+- 真实环境下的只读验证（文件工具与 `sh -c` 写入是否真的被文件系统拒绝）尚未执行：本阶段只确认参数
+  构造正确，**不代表只读规划环境已经可用**。
 
-### 7.4 验证方式
+### 7.5 验证方式
 
-第一阶段与第二阶段都只做非测试验证：阅读代码核对调用链、`gofmt`、`go vet ./...`、`git diff --check`；
-第二阶段另加人工核对迁移的表、索引、字段、非枚举约束与版本顺序，以及 `dbStore` / `txStore` 的接口
-组合。两个阶段都未运行任何测试（含迁移升级与 SQLite 读写测试），未创建测试文件，未连接真实
-Docker / SSH / Pi / 远程主机。因此旧库升级后的数据保留、未知枚举值写入与读回、序号分配在并发下的
-实际行为均未验证，不得报告为通过。
+三个阶段都只做非测试验证：阅读代码核对调用链、`gofmt`、`go vet ./...`、`git diff --check`。第二阶段另加
+人工核对迁移的表、索引、字段、非枚举约束与版本顺序；第三阶段人工核对快照卷命名与标签、准备 / 只读复核
+容器、`--read-only` 与只读代码卷、tmpfs 可写目录、容器所有权校验、释放顺序与 `RequiredCLICommands`
+新增参数，并确认普通任务容器的创建参数未改变。
+
+三个阶段都未运行任何测试（含迁移升级与 SQLite 读写测试），未创建测试文件，未连接真实 Docker / SSH / Pi /
+远程主机。因此旧库升级后的数据保留、未知枚举值写入与读回、序号分配在并发下的实际行为、真实快照克隆、
+只读挂载与容器释放均未验证，不得报告为通过。

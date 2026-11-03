@@ -53,6 +53,54 @@ type TmpfsSpec struct {
 	Target string
 }
 
+// VolumeMountSpec 是一个命名卷挂载定义。
+//
+// 它只用于规划快照的一次性容器：准备容器以可写方式挂载快照卷，核验容器以只读
+// 方式挂载同一个卷。与缓存卷不同，这里的卷属于单个规划会话，不能跨会话复用。
+type VolumeMountSpec struct {
+	// VolumeName 是 Docker Named Volume 名称。
+	VolumeName string
+	// ContainerPath 是容器内挂载路径，必须是 /workspace 之下的安全绝对路径。
+	ContainerPath string
+	// ReadOnly 表示以只读方式挂载。
+	ReadOnly bool
+}
+
+// TemporaryContainerSpec 描述一个后台运行的一次性容器（docker run --detach）。
+//
+// 该容器只用于把项目代码写入快照卷：它有确定的名称与 AgentFlow 标签，但不会被
+// 登记为受管理的执行容器，也不能被当作正式规划容器。
+type TemporaryContainerSpec struct {
+	// Name 是容器名称，由调用方生成，便于失败后按名称核验现场。
+	Name string
+	// ImageRef 是使用的镜像引用。
+	ImageRef string
+	// WorkDir 是容器内工作目录。
+	WorkDir string
+	// Mounts 是命名卷挂载。
+	Mounts []VolumeMountSpec
+	// Labels 是可追溯标签，所有权标签由本包自动追加。
+	Labels map[string]string
+	// Command 是容器启动命令，空值使用常驻命令。
+	Command []string
+}
+
+// OneShotContainerSpec 描述一个前台运行的一次性容器（docker run --rm）。
+//
+// 它只用于只读核验：容器随命令结束自动删除，不留在远程机器上，也不写入任何卷。
+type OneShotContainerSpec struct {
+	// ImageRef 是使用的镜像引用。
+	ImageRef string
+	// WorkDir 是容器内工作目录。
+	WorkDir string
+	// Mounts 是命名卷挂载；核验路径只允许只读挂载。
+	Mounts []VolumeMountSpec
+	// Labels 是可追溯标签，所有权标签由本包自动追加。
+	Labels map[string]string
+	// Command 是容器内命令，空值使用常驻命令。
+	Command []string
+}
+
 // CreateContainerSpec 描述一次容器创建。
 type CreateContainerSpec struct {
 	// Container 是容器登记记录。
@@ -73,6 +121,11 @@ type CreateContainerSpec struct {
 	CodeVolumes []ReadOnlyVolumeSpec
 	// Tmpfs 是容器内临时可写目录，只有 ReadOnlyRootFS 为 true 时才允许声明。
 	Tmpfs []TmpfsSpec
+	// PlanningSessionID 是规划会话标识，只由 PlanningContainerSpec 设置。
+	//
+	// 它写入 PlanningSessionLabelKey 标签，使规划容器可以被核验为某个会话的
+	// 资源；普通任务容器不会带该字段。
+	PlanningSessionID string
 }
 
 // CreateContainer 在远程机器上创建容器并核验实际容器 ID。
@@ -162,6 +215,12 @@ func ContainerCreateArgs(spec CreateContainerSpec) ([]string, error) {
 	if spec.Container.AttemptID != nil {
 		args = append(args, "--label", AttemptLabelKey+"="+spec.Container.AttemptID.String())
 	}
+	if sessionID := strings.TrimSpace(spec.PlanningSessionID); sessionID != "" {
+		if err := domain.ID(sessionID).Validate(); err != nil {
+			return nil, newError(CodeInvalidArgument, "docker create", "规划会话标签非法: "+err.Error(), nil)
+		}
+		args = append(args, "--label", PlanningSessionLabelKey+"="+sessionID)
+	}
 	if spec.ReadOnlyRootFS {
 		// --read-only 只在明确选择只读容器模式时出现：普通任务容器保持可写 rootfs。
 		args = append(args, "--read-only")
@@ -194,7 +253,16 @@ func ContainerCreateArgs(spec CreateContainerSpec) ([]string, error) {
 //
 // 使用 volume 类型而不是 bind，避免把宿主机目录暴露给容器。
 func cacheMountOption(cache CacheVolumeSpec) string {
-	return fmt.Sprintf("type=volume,source=%s,target=%s", cache.VolumeName, cache.ContainerPath)
+	return volumeMountOption(cache.VolumeName, cache.ContainerPath, false)
+}
+
+// volumeMountOption 构造命名卷挂载参数（volume 类型，可选 readonly）。
+func volumeMountOption(volumeName, containerPath string, readOnly bool) string {
+	option := fmt.Sprintf("type=volume,source=%s,target=%s", volumeName, containerPath)
+	if readOnly {
+		option += ",readonly"
+	}
+	return option
 }
 
 // readOnlyVolumeMountOption 构造只读命名卷挂载参数。
@@ -202,10 +270,10 @@ func cacheMountOption(cache CacheVolumeSpec) string {
 // 使用 volume 类型加 readonly，使项目代码快照无法被容器内进程改写；
 // 这里不接受宿主机 bind mount，也不允许省略 readonly。
 func readOnlyVolumeMountOption(volume ReadOnlyVolumeSpec) string {
-	return fmt.Sprintf(
-		"type=volume,source=%s,target=%s,readonly",
+	return volumeMountOption(
 		strings.TrimSpace(volume.VolumeName),
 		strings.TrimSpace(volume.ContainerPath),
+		true,
 	)
 }
 
@@ -325,6 +393,167 @@ func validateTmpfsTarget(value string) (string, error) {
 // isNestedContainerPath 判断 target 是否位于 base 之内（不含 base 本身）。
 func isNestedContainerPath(target, base string) bool {
 	return strings.HasPrefix(path.Clean(target), path.Clean(base)+"/")
+}
+
+// StartTemporaryContainer 后台启动一个一次性容器并返回 Docker 容器 ID。
+//
+// 它只用于快照准备：容器有确定名称与 AgentFlow 标签，但不登记为受管理的执行容器。
+// 启动结果不确定时返回 CodeStateUncertain，调用方必须先按名称核验现场。
+func (r *Runner) StartTemporaryContainer(
+	ctx context.Context,
+	spec TemporaryContainerSpec,
+) (string, error) {
+	args, err := temporaryContainerArgs(spec)
+	if err != nil {
+		return "", err
+	}
+	command, err := dockerCommand("run", args...)
+	if err != nil {
+		return "", err
+	}
+	run, runErr := r.RunMutate(ctx, "docker run", command)
+	if runErr != nil {
+		if run.Uncertain() {
+			return "", newError(
+				CodeStateUncertain,
+				"docker run",
+				"启动结果不确定，请先按名称核验容器是否存在: "+spec.Name,
+				runErr,
+			)
+		}
+		return "", runErr
+	}
+	dockerID := strings.TrimSpace(run.Stdout)
+	if dockerID == "" {
+		return "", newError(
+			CodeStateUncertain,
+			"docker run",
+			"启动命令未返回容器 ID，请先按名称核验容器是否存在: "+spec.Name,
+			nil,
+		)
+	}
+	return dockerID, nil
+}
+
+// RunOneShotContainer 在前台运行一个一次性容器并返回命令结果。
+//
+// 容器使用 --rm：命令结束后自动删除，不会留下未受管理的常驻容器。非零退出码
+// 通过错误返回，但调用方仍可读取 CommandResult 判断真实退出状态。
+func (r *Runner) RunOneShotContainer(
+	ctx context.Context,
+	spec OneShotContainerSpec,
+	timeout time.Duration,
+) (CommandResult, error) {
+	args, err := oneShotContainerArgs(spec)
+	if err != nil {
+		return CommandResult{}, err
+	}
+	command, err := dockerCommand("run", args...)
+	if err != nil {
+		return CommandResult{}, err
+	}
+	if timeout <= 0 {
+		timeout = r.queryTimeout
+	}
+	return r.Run(ctx, "docker run", command, timeout)
+}
+
+// temporaryContainerArgs 构造一次性后台容器的 docker run 参数。
+func temporaryContainerArgs(spec TemporaryContainerSpec) ([]string, error) {
+	args, err := runContainerArgs(
+		spec.Name,
+		spec.ImageRef,
+		spec.WorkDir,
+		spec.Mounts,
+		spec.Labels,
+		spec.Command,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return append([]string{"--detach"}, args...), nil
+}
+
+// oneShotContainerArgs 构造一次性前台容器的 docker run 参数。
+func oneShotContainerArgs(spec OneShotContainerSpec) ([]string, error) {
+	args, err := runContainerArgs(
+		"",
+		spec.ImageRef,
+		spec.WorkDir,
+		spec.Mounts,
+		spec.Labels,
+		spec.Command,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return append([]string{"--rm"}, args...), nil
+}
+
+// runContainerArgs 构造 docker run 的公共参数。
+//
+// 参数顺序固定；名称、镜像引用、工作目录与挂载路径全部经过校验，所有值都由
+// dockerCommand 统一转义。
+func runContainerArgs(
+	name, imageRef, workDir string,
+	mounts []VolumeMountSpec,
+	labels map[string]string,
+	command []string,
+) ([]string, error) {
+	image := strings.TrimSpace(imageRef)
+	if err := domain.ValidateImageRef(image); err != nil {
+		return nil, newError(CodeInvalidArgument, "docker run", err.Error(), err)
+	}
+	target := strings.TrimSpace(workDir)
+	if target == "" {
+		target = domain.DefaultContainerWorkDir
+	}
+	if err := domain.ValidateContainerWorkDir(target); err != nil {
+		return nil, newError(CodeInvalidArgument, "docker run", err.Error(), err)
+	}
+	args := make([]string, 0, 12+2*len(mounts)+2*len(labels))
+	if trimmed := strings.TrimSpace(name); trimmed != "" {
+		if err := domain.ValidateContainerName(trimmed); err != nil {
+			return nil, newError(CodeInvalidArgument, "docker run", err.Error(), err)
+		}
+		args = append(args, "--name", trimmed)
+	}
+	args = append(args, "--workdir", target)
+	args = append(args, "--label", OwnershipLabelKey+"=true")
+	for _, pair := range sortedLabelPairs(labels) {
+		args = append(args, "--label", pair)
+	}
+	for _, mount := range mounts {
+		option, err := containerVolumeMountOption(mount)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, "--mount", option)
+	}
+	args = append(args, image)
+	if len(command) == 0 {
+		command = []string{"sh", "-c", DefaultRunContractCommand}
+	}
+	args = append(args, command...)
+	return args, nil
+}
+
+// containerVolumeMountOption 校验并构造命名卷挂载参数。
+func containerVolumeMountOption(mount VolumeMountSpec) (string, error) {
+	name := strings.TrimSpace(mount.VolumeName)
+	if !dockerVolumeNamePattern.MatchString(name) {
+		return "", newError(
+			CodeInvalidArgument,
+			"docker run",
+			fmt.Sprintf("命名卷名 %q 不合法", mount.VolumeName),
+			nil,
+		)
+	}
+	target := strings.TrimSpace(mount.ContainerPath)
+	if err := domain.ValidateContainerWorkDir(target); err != nil {
+		return "", newError(CodeInvalidArgument, "docker run", "命名卷挂载路径非法: "+err.Error(), nil)
+	}
+	return volumeMountOption(name, target, mount.ReadOnly), nil
 }
 
 // sortedLabelPairs 把标签映射展开为按键排序的 key=value 列表，保证命令可复现。
@@ -903,6 +1132,112 @@ func (r *Runner) EnsureVolume(
 	}
 	_ = run
 	return nil
+}
+
+// VolumeInspect 是 docker volume inspect 的关键字段。
+type VolumeInspect struct {
+	// Name 是卷名。
+	Name string
+	// Labels 是卷标签。
+	Labels map[string]string
+}
+
+// volumeInspectEntry 是 docker volume inspect JSON 数组的元素。
+type volumeInspectEntry struct {
+	Name   string            `json:"Name"`
+	Labels map[string]string `json:"Labels"`
+}
+
+// InspectVolume 检查命名卷是否存在并返回标签。
+//
+// 卷不存在时返回 CodeVolumeNotFound：调用方据此区分"从未创建"与"读取失败"。
+func (r *Runner) InspectVolume(ctx context.Context, volumeName string) (VolumeInspect, error) {
+	name := strings.TrimSpace(volumeName)
+	if !dockerVolumeNamePattern.MatchString(name) {
+		return VolumeInspect{}, newError(
+			CodeInvalidArgument,
+			"docker volume inspect",
+			fmt.Sprintf("卷名 %q 不合法", volumeName),
+			nil,
+		)
+	}
+	command, err := dockerCommand("volume", "inspect", name)
+	if err != nil {
+		return VolumeInspect{}, err
+	}
+	run, runErr := r.RunQuery(ctx, "docker volume inspect", command)
+	if runErr != nil {
+		return VolumeInspect{}, runErr
+	}
+	return ParseVolumeInspect(run.Stdout)
+}
+
+// ParseVolumeInspect 解析 docker volume inspect 的 JSON 输出。
+func ParseVolumeInspect(output string) (VolumeInspect, error) {
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" {
+		return VolumeInspect{}, newError(
+			CodeStateUncertain,
+			"docker volume inspect",
+			"卷检查输出为空",
+			nil,
+		)
+	}
+	var entries []volumeInspectEntry
+	if err := json.Unmarshal([]byte(trimmed), &entries); err != nil {
+		return VolumeInspect{}, newError(
+			CodeStateUncertain,
+			"docker volume inspect",
+			"解析卷检查结果失败",
+			err,
+		)
+	}
+	if len(entries) == 0 {
+		return VolumeInspect{}, newError(
+			CodeVolumeNotFound,
+			"docker volume inspect",
+			"卷检查结果为空",
+			nil,
+		)
+	}
+	entry := entries[0]
+	return VolumeInspect{Name: entry.Name, Labels: entry.Labels}, nil
+}
+
+// RemoveVolume 删除命名卷。
+//
+// 卷已不存在时返回 existed=false 与 nil，使清理操作具备幂等性；卷仍被容器使用时
+// Docker 会拒绝删除，错误原样返回，调用方必须保留资源定位信息。
+func (r *Runner) RemoveVolume(ctx context.Context, volumeName string) (bool, error) {
+	name := strings.TrimSpace(volumeName)
+	if !dockerVolumeNamePattern.MatchString(name) {
+		return false, newError(
+			CodeInvalidArgument,
+			"docker volume rm",
+			fmt.Sprintf("卷名 %q 不合法", volumeName),
+			nil,
+		)
+	}
+	command, err := dockerCommand("volume", "rm", name)
+	if err != nil {
+		return false, err
+	}
+	run, runErr := r.RunMutate(ctx, "docker volume rm", command)
+	if runErr != nil {
+		if run.Uncertain() {
+			return false, newError(
+				CodeStateUncertain,
+				"docker volume rm",
+				"删除结果不确定，请先核验卷是否仍存在: "+name,
+				runErr,
+			)
+		}
+		if ErrorCodeOf(runErr) == CodeVolumeNotFound {
+			return false, nil
+		}
+		return false, runErr
+	}
+	return true, nil
 }
 
 // CacheVolumeName 生成缓存卷名称。
