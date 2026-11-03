@@ -56,6 +56,11 @@ type CreateContainerRequest struct {
 	Command []string
 	// SkipRunContractCheck 跳过运行契约预检，仅用于已知镜像已满足契约的场景。
 	SkipRunContractCheck bool
+	// Planning 是只读规划容器的创建参数，为空表示普通任务容器。
+	//
+	// 该字段只由内部受控调用方（规划运行时）设置：HTTP 与 CLI 都不解析它，
+	// 因此普通任务容器不会意外获得只读 rootfs 或只读项目目录。
+	Planning *PlanningContainerSpec
 }
 
 // ContainerDetail 是容器记录与远程观测结果的组合。
@@ -116,6 +121,12 @@ func (s *ContainerService) createLocked(
 	session *remoteDocker,
 	request CreateContainerRequest,
 ) (ContainerDetail, error) {
+	if request.Planning != nil {
+		// 只读规划容器参数在创建任何资源之前校验：非法参数不得先创建缓存卷。
+		if err := request.Planning.Validate(request.Caches); err != nil {
+			return ContainerDetail{}, err
+		}
+	}
 	version, err := s.resolveUsableVersion(ctx, session.host.ID, request.Ref, request.VersionNumber)
 	if err != nil {
 		return ContainerDetail{}, err
@@ -159,13 +170,18 @@ func (s *ContainerService) createLocked(
 	if err := s.store.CreateContainer(ctx, container); err != nil {
 		return ContainerDetail{}, fmt.Errorf("写入容器登记记录失败: %w", err)
 	}
-	dockerID, createErr := session.runner.CreateContainer(ctx, docker.CreateContainerSpec{
+	spec := docker.CreateContainerSpec{
 		Container: container,
 		ImageRef:  version.ImageRef,
 		WorkDir:   workDir,
 		Command:   request.Command,
 		Caches:    caches,
-	})
+	}
+	if request.Planning != nil {
+		// 只读规划容器参数只在内部调用方显式声明时生效；普通任务容器保持原有参数。
+		request.Planning.apply(&spec)
+	}
+	dockerID, createErr := session.runner.CreateContainer(ctx, spec)
 	if createErr != nil {
 		// 创建结果不确定时按名称核验，避免重复创建同名容器。
 		recovered, recoverErr := s.recoverByName(ctx, session, container)

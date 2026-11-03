@@ -81,6 +81,8 @@ func RequiredCLICommands() []CLICommand {
 				{Name: "--workdir", Source: "ContainerCreateArgs"},
 				{Name: "--label", Source: "ContainerCreateArgs"},
 				{Name: "--mount", Source: "ContainerCreateArgs"},
+				{Name: "--read-only", Source: "ContainerCreateArgs"},
+				{Name: "--tmpfs", Source: "ContainerCreateArgs"},
 			},
 			Source: "CreateContainer",
 		},

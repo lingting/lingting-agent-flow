@@ -71,3 +71,49 @@
 - 不创建正式 Requirement / Task（M4）。
 - 不实现"用 Prompt 让模型别写代码"作为唯一限制。
 - 不把规划会话写进 Task 的 Step / Attempt 执行记录。
+
+## 7. 阶段进展
+
+### 7.1 已交付：只读容器底层能力（M2 第一阶段）
+
+只读执行环境的**底层表达与 Docker 创建参数**已落地，暂无业务调用方：
+
+- `execenv`（`internal/execenv/workspace.go`）：项目代码访问模式 `ProjectAccess`
+  （`read_write` / `read_only`）、只读工作区构造函数、显式可写目录与路径关系校验。
+- `docker`（`internal/docker/container.go`）：`CreateContainerSpec.ReadOnlyRootFS`
+  （`--read-only`）、`CodeVolumes`（`--mount type=volume,...,readonly`）、`Tmpfs`（`--tmpfs`）
+  与对应的参数校验。
+- `app`（`internal/app/containers.go`、`internal/app/containers_planning.go`）：
+  `CreateContainerRequest.Planning` 只读规划容器参数，把只读工作区语义转换为 Docker 创建参数。
+- 预检（`internal/docker/clihelp.go`）：`docker create` 必需参数清单新增 `--read-only` 与 `--tmpfs`。
+
+约束与语义：
+
+- 项目代码目录只读由结构化字段表达，不依赖 Prompt 或 Agent 工具白名单。
+- 只读工作区只允许显式声明的可写目录，且该目录不得与项目代码目录互相包含；Session 目录必须
+  由声明的可写目录覆盖，否则校验失败。
+- 只读工作区不接受缓存卷；只读容器创建参数同样拒绝可写缓存卷，因此规划容器无法通过缓存挂载
+  获得项目代码写权限。
+- 只读参数只在 `CreateContainerRequest.Planning` 非空时生效：普通任务容器仍是可写 rootfs、可写
+  项目目录与既有缓存卷参数，命令行与 HTTP 接口都不暴露该字段。
+- 未引入 privileged、Docker Socket、host network、host PID、宿主机目录挂载与额外提权参数；
+  Docker CLI / Engine / API 基线未变（CLI 29.0.0 / Engine 29.0.0 / API 1.52）。
+
+### 7.2 仍未完成
+
+以下能力尚未实现，M2 状态保持 `pending`：
+
+- `PlanningRuntimeService`：快照卷准备（准备容器按固定 commit SHA 克隆到命名卷）、规划容器启动、
+  多轮复用与释放。
+- `PlanningSessionService`、`PlanningSession` / `PlanningMessage` / `PlanningRevision` 领域类型与
+  迁移 `0027` / `0028`。
+- 两个规划角色的 Pi Session 路径生成与根目录校验、多轮 Pi Session 上下文复用。
+- 规划运行时在 `internal/lifecycle` 中的注册与收敛。
+- HTTP API 与前端需求规划工作台。
+- 真实环境下的只读验证（文件工具与 `sh -c` 写入是否真的被文件系统拒绝）尚未执行：本阶段只确认
+  参数构造正确，**不代表只读规划环境已经可用**。
+
+### 7.3 本阶段验证方式
+
+只做非测试验证：阅读代码核对调用链、`gofmt`、`go vet ./...`、`git diff --check`。未运行任何测试，
+未连接真实 Docker / SSH / Pi，也未修改任何测试文件。

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -23,12 +25,32 @@ const (
 	RunContractCheckTimeout = 30 * time.Second
 )
 
-// CacheVolumeSpec 是一个缓存卷的挂载定义。
+// CacheVolumeSpec 是一个可写缓存卷的挂载定义。
 type CacheVolumeSpec struct {
 	// VolumeName 是 Docker Named Volume 名称。
 	VolumeName string
 	// ContainerPath 是容器内挂载路径。
 	ContainerPath string
+}
+
+// ReadOnlyVolumeSpec 是一个只读命名卷的挂载定义。
+//
+// 它只用于规划容器：项目代码快照以 Docker Named Volume 承载并以只读方式挂载，
+// 不使用宿主机 bind mount，也不复用普通任务容器的可写缓存卷。
+type ReadOnlyVolumeSpec struct {
+	// VolumeName 是 Docker Named Volume 名称。
+	VolumeName string
+	// ContainerPath 是容器内挂载路径，必须是 /workspace 之下的安全绝对路径。
+	ContainerPath string
+}
+
+// TmpfsSpec 是一个容器内临时可写目录的定义。
+//
+// 只读 rootfs 的容器只能用临时目录提供写入能力：目录内容随容器消失，
+// 不落在任何宿主机目录，也不影响只读挂载的项目代码。
+type TmpfsSpec struct {
+	// Target 是容器内挂载路径。
+	Target string
 }
 
 // CreateContainerSpec 描述一次容器创建。
@@ -41,8 +63,16 @@ type CreateContainerSpec struct {
 	WorkDir string
 	// Command 是容器启动命令，空值使用 DefaultRunContractCommand。
 	Command []string
-	// Caches 是允许挂载的缓存卷。
+	// Caches 是允许挂载的可写缓存卷。
 	Caches []CacheVolumeSpec
+	// ReadOnlyRootFS 表示容器 root 文件系统以只读方式挂载（docker create --read-only）。
+	//
+	// 它只用于规划容器：普通任务容器保持可写 rootfs，因此该字段默认为 false。
+	ReadOnlyRootFS bool
+	// CodeVolumes 是只读挂载的项目代码卷，只有 ReadOnlyRootFS 为 true 时才允许声明。
+	CodeVolumes []ReadOnlyVolumeSpec
+	// Tmpfs 是容器内临时可写目录，只有 ReadOnlyRootFS 为 true 时才允许声明。
+	Tmpfs []TmpfsSpec
 }
 
 // CreateContainer 在远程机器上创建容器并核验实际容器 ID。
@@ -51,7 +81,8 @@ type CreateContainerSpec struct {
 //   - 不使用 --privileged；
 //   - 不使用 --pid=host 或 --network=host；
 //   - 不挂载宿主机 Docker Socket、用户 Home 或远程项目配置目录；
-//   - 只挂载显式声明的缓存卷，项目代码只存在于容器内部可写层。
+//   - 普通任务容器只挂载显式声明的缓存卷，项目代码只存在于容器内部可写层；
+//   - 只有明确声明只读容器模式时才追加 --read-only、只读代码卷与 --tmpfs。
 func (r *Runner) CreateContainer(
 	ctx context.Context,
 	spec CreateContainerSpec,
@@ -110,6 +141,9 @@ func ContainerCreateArgs(spec CreateContainerSpec) ([]string, error) {
 	if err := domain.ValidateContainerWorkDir(workDir); err != nil {
 		return nil, newError(CodeInvalidArgument, "docker create", err.Error(), err)
 	}
+	if err := validateReadOnlyContainer(spec); err != nil {
+		return nil, err
+	}
 	args := []string{
 		"--name", name,
 		// docker create 只创建容器，不启动工作负载，因此不接受 --detach：
@@ -128,6 +162,10 @@ func ContainerCreateArgs(spec CreateContainerSpec) ([]string, error) {
 	if spec.Container.AttemptID != nil {
 		args = append(args, "--label", AttemptLabelKey+"="+spec.Container.AttemptID.String())
 	}
+	if spec.ReadOnlyRootFS {
+		// --read-only 只在明确选择只读容器模式时出现：普通任务容器保持可写 rootfs。
+		args = append(args, "--read-only")
+	}
 	for _, cache := range spec.Caches {
 		if strings.TrimSpace(cache.VolumeName) == "" {
 			return nil, newError(CodeInvalidArgument, "docker create", "缓存卷名不能为空", nil)
@@ -136,6 +174,12 @@ func ContainerCreateArgs(spec CreateContainerSpec) ([]string, error) {
 			return nil, newError(CodeInvalidArgument, "docker create", "缓存挂载路径不能为空", nil)
 		}
 		args = append(args, "--mount", cacheMountOption(cache))
+	}
+	for _, volume := range spec.CodeVolumes {
+		args = append(args, "--mount", readOnlyVolumeMountOption(volume))
+	}
+	for _, tmpfs := range spec.Tmpfs {
+		args = append(args, "--tmpfs", strings.TrimSpace(tmpfs.Target))
 	}
 	args = append(args, imageRef)
 	command := spec.Command
@@ -151,6 +195,136 @@ func ContainerCreateArgs(spec CreateContainerSpec) ([]string, error) {
 // 使用 volume 类型而不是 bind，避免把宿主机目录暴露给容器。
 func cacheMountOption(cache CacheVolumeSpec) string {
 	return fmt.Sprintf("type=volume,source=%s,target=%s", cache.VolumeName, cache.ContainerPath)
+}
+
+// readOnlyVolumeMountOption 构造只读命名卷挂载参数。
+//
+// 使用 volume 类型加 readonly，使项目代码快照无法被容器内进程改写；
+// 这里不接受宿主机 bind mount，也不允许省略 readonly。
+func readOnlyVolumeMountOption(volume ReadOnlyVolumeSpec) string {
+	return fmt.Sprintf(
+		"type=volume,source=%s,target=%s,readonly",
+		strings.TrimSpace(volume.VolumeName),
+		strings.TrimSpace(volume.ContainerPath),
+	)
+}
+
+// dockerVolumeNamePattern 约束命名卷名称的书写形式。
+//
+// Docker 命名卷名称只允许字母、数字、下划线、点与连字符，且必须字母或数字开头。
+var dockerVolumeNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$`)
+
+// validateReadOnlyContainer 校验只读容器的挂载参数。
+//
+// 只读容器是规划容器专用模式：rootfs 只读、项目代码卷只读、可写目录只能是显式声明的
+// 临时目录。可写缓存卷、与只读代码卷重叠的临时目录、非只读模式下的只读挂载都会拒绝，
+// 避免出现"标称只读但仍能改写项目代码"的组合。
+func validateReadOnlyContainer(spec CreateContainerSpec) error {
+	if !spec.ReadOnlyRootFS {
+		if len(spec.CodeVolumes) > 0 || len(spec.Tmpfs) > 0 {
+			return newError(
+				CodeInvalidArgument,
+				"docker create",
+				"只读代码卷与临时目录只能用于只读 rootfs 容器",
+				nil,
+			)
+		}
+		return nil
+	}
+	if len(spec.Caches) > 0 {
+		return newError(CodeInvalidArgument, "docker create", "只读容器不能挂载可写缓存卷", nil)
+	}
+	if len(spec.CodeVolumes) == 0 {
+		return newError(CodeInvalidArgument, "docker create", "只读容器必须声明只读项目代码卷", nil)
+	}
+	if len(spec.Tmpfs) == 0 {
+		return newError(CodeInvalidArgument, "docker create", "只读容器必须声明可写的临时目录", nil)
+	}
+	codeTargets := make([]string, 0, len(spec.CodeVolumes))
+	for _, volume := range spec.CodeVolumes {
+		name := strings.TrimSpace(volume.VolumeName)
+		if !dockerVolumeNamePattern.MatchString(name) {
+			return newError(
+				CodeInvalidArgument,
+				"docker create",
+				fmt.Sprintf("只读代码卷名 %q 不合法", volume.VolumeName),
+				nil,
+			)
+		}
+		target := strings.TrimSpace(volume.ContainerPath)
+		if err := domain.ValidateContainerWorkDir(target); err != nil {
+			return newError(CodeInvalidArgument, "docker create", "只读代码卷挂载路径非法: "+err.Error(), nil)
+		}
+		cleaned := path.Clean(target)
+		for _, existing := range codeTargets {
+			if existing == cleaned {
+				return newError(
+					CodeInvalidArgument,
+					"docker create",
+					"只读代码卷挂载路径重复: "+cleaned,
+					nil,
+				)
+			}
+		}
+		codeTargets = append(codeTargets, cleaned)
+	}
+	seen := make(map[string]struct{}, len(spec.Tmpfs))
+	for _, tmpfs := range spec.Tmpfs {
+		target, err := validateTmpfsTarget(tmpfs.Target)
+		if err != nil {
+			return err
+		}
+		if _, exists := seen[target]; exists {
+			return newError(CodeInvalidArgument, "docker create", "临时目录重复声明: "+target, nil)
+		}
+		seen[target] = struct{}{}
+		for _, codeTarget := range codeTargets {
+			if target == codeTarget ||
+				isNestedContainerPath(target, codeTarget) ||
+				isNestedContainerPath(codeTarget, target) {
+				return newError(
+					CodeInvalidArgument,
+					"docker create",
+					"临时目录 "+target+" 不能与只读代码卷挂载路径 "+codeTarget+" 重叠",
+					nil,
+				)
+			}
+		}
+	}
+	return nil
+}
+
+// validateTmpfsTarget 校验临时可写目录的容器内路径。
+func validateTmpfsTarget(value string) (string, error) {
+	target := strings.TrimSpace(value)
+	if target == "" {
+		return "", newError(CodeInvalidArgument, "docker create", "临时目录路径不能为空", nil)
+	}
+	if strings.ContainsRune(target, '\\') || !strings.HasPrefix(target, "/") {
+		return "", newError(
+			CodeInvalidArgument,
+			"docker create",
+			"临时目录必须是使用 POSIX 分隔符的绝对路径: "+target,
+			nil,
+		)
+	}
+	for _, char := range target {
+		if char == 0 || char == '\n' || char == '\r' || char == '\t' {
+			return "", newError(CodeInvalidArgument, "docker create", "临时目录不能包含控制字符: "+target, nil)
+		}
+	}
+	if path.Clean(target) != target {
+		return "", newError(CodeInvalidArgument, "docker create", "临时目录必须已经规范化: "+target, nil)
+	}
+	if domain.IsReservedContainerPath(target) {
+		return "", newError(CodeInvalidArgument, "docker create", "临时目录不能使用保留路径: "+target, nil)
+	}
+	return target, nil
+}
+
+// isNestedContainerPath 判断 target 是否位于 base 之内（不含 base 本身）。
+func isNestedContainerPath(target, base string) bool {
+	return strings.HasPrefix(path.Clean(target), path.Clean(base)+"/")
 }
 
 // sortedLabelPairs 把标签映射展开为按键排序的 key=value 列表，保证命令可复现。
