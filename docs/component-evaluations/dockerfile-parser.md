@@ -4,6 +4,10 @@
 > 本项目当前**没有**引入 `github.com/moby/buildkit` 或 `github.com/distribution/reference`：
 > `go.mod` / `go.sum` 未修改，`internal/dockerfile/`、`internal/docker/templates.go` 以及其余生产代码未修改，
 > 当前仍使用自研的 `dockerfile.Parse`。本文是替换前的可行性审计记录，结论见第 11 节。
+>
+> **第二轮补充（2026-11-04）**：第 13–17 节补充四项内容——统一 `Parse` 与 `ValidateDockerfile` 的解析依据、
+> `--privileged` 的现状与缺口、预定义 `ARG` 取值策略、BuildKit `v0.26.3` 安全核查；§11 结论同步修订。
+> 第二轮同样**只改本文件**，未改生产代码、`go.mod` / `go.sum` 与测试。
 
 - 审计对象（仓库侧）：`internal/dockerfile/dockerfile.go`、`internal/docker/templates.go`（`ValidateDockerfile`）、
   `internal/docker/context.go`（`ValidateContent`）、`internal/app/host_validation.go`（`checkBaseImages`）
@@ -392,7 +396,7 @@ type Node struct {
 
 未确认事项（不作断言）：
 
-1. 上游 parser 是否发生过与其语法解析相关的安全公告/CVE——本轮**未**核查安全公告数据库，仅确认了依赖闭包与发布节奏。
+1. 上游 parser 是否发生过与其语法解析相关的安全公告/CVE——本轮**未**核查安全公告数据库，仅确认了依赖闭包与发布节奏。（第二轮已核查，见第 16 节。）
 2. `v0.26.3` 之后到 `v0.34.2` 之间 heredoc / directive 行为是否有**语义**变化（本次只做了导出符号比较与
    diff 抽查：`parser.go`、`directives.go` 的差异看起来是重构性质，未逐版本核对全部中间版本）。
 3. 本项目是否有近期升 Go 版本（≥ 1.25 / 1.26）的计划——若有，方案 C 的版本天花板会自然消失，评估结论会更强。
@@ -427,6 +431,22 @@ type Node struct {
 `instructions` / `dockerfile2llb`，不使用 `shell.EnvsFromSlice`，`Result` / `BaseImage` 的对外语义与
 `ErrorCode` 保持不变。**本轮不实施。**
 
+### 11.1 第二轮修订（2026-11-04）
+
+本节结论不变（**部分值得替换**，范围仍是"语法层 + 变量展开 + 引用规范化"，策略层留在本项目），
+但有四处需要按第二轮证据收紧或更正：
+
+1. **`ValidateDockerfile` 必须与 `dockerfile.Parse` 共用同一份 AST 事实**，不得保留第二套 `FROM`
+   字符串解析；两条路径共用"事实层"，但"策略层"分别定义（§13）。
+2. **`--privileged` 不是 Dockerfile 指令**，第一轮把它记为"校验缺失"不准确：真实情况是
+   `ValidateDockerfile` 的注释写了不存在的能力，容器创建层从不使用 `--privileged`（§15）。
+   该项**不纳入**本次替换的实施范围。
+3. **预定义构建参数一个都不能注入**：上游 v0.26.3 实际有 11 个预定义名（第一轮只列了 8 个），
+   其取值全部依赖构建上下文，本项目没有任何可靠来源，注入即等于伪造事实（§14）。
+4. **`v0.26.3` 的安全核查已完成**（第一轮未做）：没有任何已知漏洞影响 `parser` / `shell` /
+   `util/stack`，但 0.26 版本线在 `v0.26.3` 之后**再无补丁发布**，因此"固定 v0.26.3"只在
+   "不导入 `parser`/`shell` 之外的任何 buildkit 包"这一硬边界下成立（§16、§17）。
+
 ## 12. 未来重新评估的触发条件
 
 满足任一条再重新评估，不要凭"上游更知名"引入：
@@ -441,3 +461,423 @@ type Node struct {
    自研解析的维护成本才会超过 6 个模块的依赖成本。
 5. 上游把 `util/stack` 从 `parser/errors.go` 中移除（protobuf 依赖链消失），或提供独立的、无 protobuf 依赖的
    Dockerfile 语法解析模块——这是当前依赖代价的主要来源。
+
+## 13. 第二轮补充：统一 `Parse` 与 `ValidateDockerfile` 的解析依据
+
+### 13.1 结论
+
+三条判定线必须分别定义，但**只能有一条语法解析路径**：
+
+1. **语法有效性**：`frontend/dockerfile/parser` 是唯一语法来源，`dockerfile.Parse` 与
+   `docker.ValidateDockerfile` 共用同一份 AST。`parser` 只保证"文件能被解析"，不保证"存在 `FROM`"、
+   也不保证 `FROM` 参数个数正确——这两条必须由本项目补齐。
+2. **基础镜像提取**：在 AST 之上做变量展开（`shell.Lex`）与引用规范化（`distribution/reference`），
+   产出 `Images` / `Skipped` / `Unresolved`，供 `checkBaseImages` 使用。
+3. **项目安全策略**：`ValidateDockerfile` 与 `ValidateContent` 只消费上述事实，不再自己解析文本；
+   `latest` 判定、私钥特征、Docker Socket 检测仍属本项目策略。
+
+关键取舍：`ValidateDockerfile` 改为复用同一份事实，**不再保留第二套 `FROM` 字符串解析**；
+`fail-closed` 仍然只在 `checkBaseImages` 生效，`ValidateDockerfile` 对动态引用保持"不判定、不阻断"，
+否则内置语言模板 `FROM ${AGENTFLOW_BASE_IMAGE}` 会被自己的校验拒绝。
+
+### 13.2 三条判定线的定义
+
+| 判定线 | 输入 | 判定内容 | 失败语义 | 归属 |
+|---|---|---|---|---|
+| 语法有效性 | Dockerfile 字节 | 指令、续行、heredoc、parser directive、`FROM` 参数形状 | 带行号的解析错误 | `parser` + 本项目补齐的 `FROM` 形状校验 |
+| 基础镜像提取 | 同一份 AST | 变量展开、引用规范化、别名 / `scratch` 跳过、去重 | `Unresolved` 非空即检查失败 | `internal/dockerfile` |
+| 项目安全策略 | 同一份 AST 的事实 | 必须存在 `FROM`、禁止 `latest`、禁止凭据与 Docker Socket 文本 | 返回可读错误，调用方拒绝保存 | `internal/docker` |
+
+**语法有效不等于满足项目要求**，三个方向都要有明确判定，不能"能解析就算通过"：
+
+- `RUN echo hi`：语法有效，但没有 `FROM` → 项目必须拒绝（`parser` 只对"没有任何指令"报
+  `file with no instructions`）。
+- `FROM node:latest # 说明`：语法**无效**（3 个参数且第二个不是 `AS`）→ 解析错误。
+- `FROM node`：语法有效、引用合法，但违反 `latest` 策略 → 策略拒绝。
+
+### 13.3 目标输入的逐条判定
+
+上游依据均取自本机模块缓存中的 `github.com/moby/buildkit@v0.26.3`，行号可直接复核。
+
+| 输入 | `parser` 结果 | 引用规范化 | `dockerfile.Parse` | `ValidateDockerfile` | 依据 |
+|---|---|---|---|---|---|
+| `FROM node` | `from` 节点，`Children=[node]` | `TagNameOnly` → `docker.io/library/node:latest`，原引用 `IsNameOnly` | 查询 `docker.io/library/node:latest` | **拒绝**：隐式 `latest` | `reference/normalize.go:56-80`、`:230`、`helpers.go:6` |
+| `FROM node:latest` | `Children=[node:latest]` | tag=`latest` | 查询同一引用 | **拒绝**：显式 `latest` | 同上 |
+| `FROM node:22` | `Children=[node:22]` | tag=`22` | 查询 `docker.io/library/node:22` | **通过**（进入元数据检查） | 同上 |
+| `FROM node:latest AS build` | `Children=[node:latest, AS, build]` | tag=`latest`，阶段名 `build` | 查询同一引用 | **拒绝** | `instructions/parse.go:419-431` |
+| `FROM node:latest as build` | 同上（`as` 小写） | `EqualFold(args[1],"as")` 成立 | 同上 | **拒绝**：别名写法不影响判定 | `instructions/parse.go:421` |
+| `FROM node:latest # 注释` | `Children=[node:latest, #, 注释]` | 不需要规范化（形状先失败） | 不提取，报 `FROM` 参数不合法 | **拒绝**：3 个参数且第二个不是 `AS` | `parser/parser.go:205`、`parser/parser.go:516-519`、`instructions/parse.go:426` |
+| `FROM    node:latest` | 与单空格等价 | tag=`latest` | 查询同一引用 | **拒绝** | `parser/parser.go:205`（`parseStringsWhitespaceDelimited`） |
+| `FROM --platform=$BUILDPLATFORM node` | `Flags=[--platform=$BUILDPLATFORM]`，`Children=[node]` | `node` → 隐式 `latest` | 查询 `docker.io/library/node:latest` | **拒绝**：隐式 `latest`；`--platform` 未展开不影响判定 | `parser/split_command.go:28`、§14.3 |
+
+结论：D7 的四条绕过路径在新结构下全部关闭——前三条由语法层自然修好（大小写 `as`、Tab / 多空格、
+行尾注释变为语法错误），第四条（隐式 `latest`）由引用规范化判定 `TagNameOnly` 后的 tag 关闭。
+
+### 13.4 其他形态
+
+- **`FROM scratch`**：`Children=[scratch]`（1 个参数，形状合法）；引用规范化会得到
+  `docker.io/library/scratch:latest`，所以必须在规范化**之前**先按 `scratch` 跳过，否则会去查询一个
+  不存在的镜像。现状已是先判断后规范化，替换后保持这个顺序（比较用 `EqualFold`，与现状一致）。
+- **`FROM` 引用前序阶段别名**：`parser` 不判断（属 builder 职责）。本项目继续用 `stageAliases` 跳过，
+  别名比较大小写不敏感；上游把 `AS <name>` 转小写（`instructions/parse.go:421-422`），所以 `FROM Build`
+  引用 `AS Build` 是合法的。
+- **动态 `FROM`**（`FROM ${AGENTFLOW_BASE_IMAGE}`，`ARG` 无默认值）：展开后仍未知 → `Unresolved` →
+  `checkBaseImages` 失败。这条 fail-closed 必须原样保留；`ValidateDockerfile` 则必须继续**接受**这类
+  文件（内置语言模板就是这个形态），否则模板无法保存。
+- **多阶段**：逐个 `from` 节点处理；别名先登记再判断；同一 `Resolved` 只保留首次出现。
+- **`FROM` 缺失**：`parser` 不报错（`RUN echo hi` 能解析成功），本项目必须自己补"必须存在 `FROM`"。
+- **非法引用**：`FROM Node:LATEST`（仓库名含大写）→ `ParseNormalizedNamed` 报
+  `repository name (Node) must be lowercase`；`FROM node:`（空 tag）→ `Parse` 报引用格式错误。
+  两者都能在本地给出可读错误，不再把无效引用送进 Registry 查询（修 D8 的一部分）。
+- **更正第一轮 D8 的一处结论**：`FROM localhost:5000` **不是**非法引用。`splitDockerDomain` 的单段
+  快路径把整串当作 familiar name，最终解析为 `docker.io/library/localhost:5000`（`5000` 是 tag），
+  引用合法且 tag 不是 `latest` → 通过校验并查询该引用。第一轮把它列为"上游会报错"的三例之一是错的
+  （依据 `reference/normalize.go:126-137` 与 `reference/reference.go:186-231`）。
+- **HEREDOC**：`RUN <<EOF` 内的 `FROM ...` 文本进入 `Node.Heredocs`，不产生 `from` 节点 → 不再误报（修 D2）。
+- **BOM**：`discardBOM` 只作用于首个扫描 token（`parser/parser.go:294`、`directives.go:186-188`），修 D1。
+- **`# escape=` / `# syntax=` / `# check=`**：`Result.EscapeToken` 反映实际生效的转义符，续行与引号
+  解析随之变化（修 D9）；重复 directive 会报错。
+- **单行长度**：`scanLines` 在超过 `bufio.MaxScanTokenSize-1` 时直接报错（`parser/parser.go:561`），
+  比现状更严格。
+- **边界保留：`COPY --from=<image>`**：`parser` 把它放进 `Node.Flags`，但它不是 `FROM`。现状与替换后
+  都不参与基础镜像检查。需要指出这属于**策略覆盖缺口**：`COPY --from=nginx:latest` 会在构建时拉取
+  latest 镜像，绕过"禁止 latest"策略。这不是解析器问题，本轮只登记，不扩大实施范围。
+
+### 13.5 统一后的结构（事实层与策略层分离）
+
+```text
+internal/dockerfile（事实层：唯一解析路径）
+  analyze(content []byte) (analysis, error)
+    ├─ parser.Parse(bytes.NewReader(content))          // 语法层
+    ├─ FROM 形状校验：1 或 3 个参数；3 个时第二参数 EqualFold "AS"；阶段名正则
+    └─ 每个 FROM：RawImage / RawPlatform / Alias / Args / Line
+  Parse(content []byte) (Result, error)                // 语义层，签名与对外语义不变
+    ├─ analyze
+    ├─ shell.NewLex(escapeToken)；SkipUnsetEnv = true；自实现大小写敏感 EnvGetter
+    ├─ reference.ParseNormalizedNamed + TagNameOnly（显示可用 FamiliarString）
+    └─ 阶段别名 / scratch / 去重 / Unresolved（策略骨架保留在本项目）
+
+internal/docker（策略层：唯一消费者）
+  ValidateDockerfile(content []byte) error             // 签名不变，3 个调用点不变
+    ├─ 复用同一份 analyze 事实（不再逐行字符串匹配）
+    ├─ 空内容 / 必须存在 FROM / 非法引用 / latest 判定
+    └─ ValidateContent（凭据特征与 Docker Socket，独立的文本安全策略，保持不动）
+```
+
+- 依赖新增一条边：`internal/docker` → `internal/dockerfile`（单向，反向不存在，无环）。
+  实施时必须在 `docs/workspace.md` 的依赖表登记这条边。
+- `Result` / `BaseImage` / `SkippedFrom` / `UnresolvedFrom` 的字段语义与 `dockerfile_unparsable` /
+  `dockerfile_unresolved` / `dockerfile_no_external_image` 三个 `ErrorCode` 保持不变。
+- 错误文案可以重写（空文件、缺 `FROM`、`FROM` 形状、非法引用、heredoc 未终止），但必须能取到行号
+  （`*parser.LocationError` + `errors.As`）。
+
+### 13.6 必须由本项目补齐的 `FROM` 形状校验
+
+`parser` 对 `FROM` 只做空白切分（`parser/parser.go:205`），参数个数与阶段名合法性在
+`instructions` 里（`instructions/parse.go:393-431`）。既然本项目不引入 `instructions`，就必须把这几行
+语义实现成自己的代码，否则 §13.3 第 6 行（行尾注释）会退化成"把 `#` 当成别名"，重新打开 D7：
+
+1. 参数个数必须为 1 或 3（`len(args) != 1` 且不是 `len(args) == 3 && EqualFold(args[1], "as")` → 错误）；
+2. 阶段名必须匹配 `^[a-z][a-z0-9-_.]*$`，且比较前转小写（`instructions/parse.go:417-431`）；
+3. 展开后基础镜像为空时必须报错，语义对齐上游 `base name (%s) should not be blank`
+   （`dockerfile2llb/convert.go:310-312`）；
+4. 这些错误都要带 `FROM` 节点行号。
+
+### 13.7 本轮明确不做
+
+- 不引入 `instructions` / `dockerfile2llb`（理由见第 8 节：12 模块 / 49 模块，代价与本项目现状不匹配）。
+- 不新增第二套 Dockerfile 解析器，不保留旧字符串解析作为回退。
+- 不把 `ValidateContent` 的文本策略迁移到 AST（它检查的是凭据与 Socket 路径，与指令语法无关）。
+- 不在本轮实现 `COPY --from` 检查、`--platform` 参与元数据查询。
+
+## 14. 预定义 `ARG` 的取值策略
+
+### 14.1 上游名单（`v0.26.3` 实测，11 个）
+
+`dockerfile2llb/platform.go:39-65` 的 `defaultArgs()` 注入以下参数，且**允许被 `--build-arg` 覆盖**
+（`overrides` 来自 `opt.BuildArgs`）：
+
+`BUILDPLATFORM`、`BUILDOS`、`BUILDOSVERSION`、`BUILDARCH`、`BUILDVARIANT`、
+`TARGETPLATFORM`、`TARGETOS`、`TARGETOSVERSION`、`TARGETARCH`、`TARGETVARIANT`、`TARGETSTAGE`。
+
+第一轮只提到 8 个，遗漏了 `BUILDOSVERSION`、`TARGETOSVERSION`、`TARGETSTAGE`——这属于补充而非更正，
+但结论更严：注入时必须按完整名单判断，否则会漏掉三个"看起来不像平台"的参数。
+
+### 14.2 逐项判定
+
+| 参数 | 含义 | 值依赖 | 本项目现有信息能否确定 | 远端 Docker 检查能否确定 | 建议 |
+|---|---|---|---|---|---|
+| `BUILDPLATFORM` | 构建机平台（`platforms.Format`：`os/arch[/variant]`） | buildkitd worker 平台、`--platform`、`DOCKER_DEFAULT_PLATFORM`、`--build-arg` 覆盖 | 否（未采集任何平台信息） | 否（`docker info` 只能给出 daemon 主平台，且不等于 worker 选定的 build platform） | 不注入 → 使用即 `Unresolved` |
+| `BUILDOS` | 构建机 OS | 同上 | 否 | 否 | 不注入 |
+| `BUILDOSVERSION` | 构建机 OS 版本 | worker 内核 / 镜像版本 | 否 | 否 | 不注入 |
+| `BUILDARCH` | 构建机架构 | 同上 | 否 | 否 | 不注入 |
+| `BUILDVARIANT` | 构建机 variant（如 `v8`） | 同上 | 否 | 否 | 不注入 |
+| `TARGETPLATFORM` | 目标平台（`platforms.FormatAll`） | 未指定 `--platform` 时等于 build platform（`implicitTarget`） | 否 | 否 | 不注入 |
+| `TARGETOS` | 目标 OS | 由 `TARGETPLATFORM` 派生 | 否 | 否 | 不注入 |
+| `TARGETOSVERSION` | 目标 OS 版本 | 同上 | 否 | 否 | 不注入 |
+| `TARGETARCH` | 目标架构 | 同上 | 否 | 否 | 不注入 |
+| `TARGETVARIANT` | 目标 variant | 同上 | 否 | 否 | 不注入 |
+| `TARGETSTAGE` | 目标阶段名（无别名时为 `default`） | 构建请求的 `--target` | 静态可知（本项目 `docker build` 不传 `--target`） | 是 | 仍不注入：与 `FROM` 判定无关，注入无收益 |
+
+结论三条：
+
+1. **变量名已知不等于值已知**。11 个名字里没有一个是常量，全部由构建上下文推导。
+2. **不允许把名字映射成"看起来合理"的默认值**（例如 `linux/amd64`）。那会在 arm 节点、
+   `DOCKER_DEFAULT_PLATFORM`、多 worker 场景下给出错误结论，本质是伪造事实。
+3. 因此 `EnvGetter` 只装载"全局 `ARG` 有默认值"的项（`collectArg` 的既有规则不变），预定义参数一律缺失：
+   引用中出现即被记为未匹配 → `Unresolved` → `checkBaseImages` 失败。
+   **这与现状完全一致，fail-closed 未被弱化。**
+
+### 14.3 `--platform` 是否参与变量展开
+
+- 上游用**同一个** `Lex` 与 `globalArgs` 展开 `FROM --platform=...` 的值，再 `platforms.Parse`，
+  空值报 `empty platform value from expression`（`dockerfile2llb/convert.go:325-345`）。
+- 本项目的元数据检查是只读 `GET /distribution/{name}/json`，与平台无关；`BaseImage.Platform` 至今
+  **没有消费方**。
+- 建议：`--platform` **不参与 fail-closed 判定**，保留展开前原文（与现状一致）。理由：若把平台变量
+  的未知也算作"无法解析"，`FROM --platform=$BUILDPLATFORM node:22` 这类完全合法且基础镜像确定的
+  Dockerfile 会被误杀，而平台值对本检查没有任何影响。
+- 若将来确实要按平台查元数据，前提是先在 `HostValidator` 采集可靠平台上下文（并明确它与 buildkitd
+  worker 平台的关系），届时再把平台值注入 `Lex`。本轮不实现，也不预留半成品抽象。
+
+### 14.4 与 `SkipUnsetEnv` 的关系（实现细节，必须写死）
+
+- 默认 `Lex`（`SkipUnsetEnv=false`）把未定义变量**展开为空串**（`shell/lex.go:348, 371, 396, 466`）。
+  直接使用默认行为会静默改变引用：`FROM ${IMAGE}` 变成空串、`FROM node${SUFFIX}` 退化成 `node`，
+  与 fail-closed 冲突。
+- 所以必须 `SkipUnsetEnv = true`：未定义变量原样保留在结果里并记入 `Unmatched`，由调用方判定 `Unresolved`。
+- 已知代价：`FROM ${BASE:-node:22}` 在 `SkipUnsetEnv=true` 下同样会被判 `Unresolved`，而 BuildKit 能
+  确定地展开成 `node:22`。这是"更严"的方向，符合 fail-closed；若要放行，需要额外实现"变量未知时
+  `:-` 默认值仍可静态确定"的语义，属新增能力，本轮不建议。
+- 跨平台风险（第一轮已提，本轮复核成立）：`shell.EnvsFromSlice` 在 `GOOS=windows` 下把变量名大写归一
+  （`shell/equal_env_windows.go` 的 `NormalizeEnvKey` / `EqualEnvKeys`，`GOOS=linux` 下为恒等），
+  同一份 Dockerfile 在两个平台上会得到不同结果。必须自实现 `EnvGetter`（`Get` / `Keys`）保持大小写敏感。
+
+## 15. `--privileged` 与构建期提权指令
+
+### 15.1 现状核实（三类事实分开陈述）
+
+| 层面 | 实际实现 | 证据 |
+|---|---|---|
+| 容器创建参数 | **从不出现 `--privileged`**：参数由 `ContainerCreateArgs` 逐项构造（`--name` / `--workdir` / `--label` / 显式声明的 `--mount` / `--tmpfs` / `--read-only`） | `internal/docker/container.go`（`CreateContainer` / `ContainerCreateArgs`）；`tests/unit/container/docker_args_test.go`、`tests/integration/local/execenv/docker_test.go` 都在断言参数中不得包含 `--privileged` |
+| Dockerfile 校验 | **没有任何 `--privileged` 判定**。`ValidateDockerfile` 只做四件事：非空、包含 `FROM ` 字样、`:latest` 后缀、转调 `ValidateContent` | `internal/docker/templates.go:305-344`；`ValidateContent` 只匹配私钥特征、`file:///`、`/var/run/docker.sock`（`internal/docker/context.go:188-216`） |
+| 构建命令 | 只传 `--tag` / `--label` / `--file` / `--build-arg AGENTFLOW_BASE_IMAGE` / `--no-cache` / `--progress` / 上下文路径；**不传 `--allow`、不传 `--platform`**，也不设置 `DOCKER_BUILDKIT` / `DOCKER_DEFAULT_PLATFORM` | `internal/docker/image.go` 的 `BuildImage` |
+
+注释层面的声称有两处，且只有一处与实现一致：
+
+- `container.go` 的"不使用 `--privileged`"——与实现一致（守点在参数构造与测试）。
+- `templates.go:311` 的"禁止 `--privileged` 与 Docker Socket 挂载"——前半句**不成立**：代码里没有这条
+  检查；后半句成立，但由 `ValidateContent` 通过匹配 `/var/run/docker.sock` 完成。
+
+### 15.2 为什么"补一条 `--privileged` 字符串检查"是错的
+
+1. Dockerfile 语法里**不存在** `--privileged` 指令，它是 `docker create` / `docker run` 的参数。
+   用户写不出"让容器变成特权容器"的 Dockerfile，因此这条"缺失的检查"没有对应的攻击面。
+2. 若真的按字符串实现，必然同时命中注释与 HEREDOC 文本（模板注释、`RUN cat <<EOF` 正文），
+   误伤合法文件——这正是 D2 类问题的镜像。
+3. 因此正确修复是**改注释措辞**，不是新增检查：把"禁止在 Dockerfile 中写 `--privileged`"改成
+   "容器创建参数不使用 `--privileged` / host 网络 / host PID / 宿主目录挂载；Dockerfile 中的提权指令
+   受 BuildKit entitlement 约束，本项目不授予任何 entitlement"。
+
+### 15.3 Dockerfile 里真实存在的构建期特权面
+
+| 指令 | 生效条件 | 本项目现状 | 结论 |
+|---|---|---|---|
+| `RUN --security=insecure` | buildkitd 开启 `security.insecure` entitlement **且** 客户端传 `--allow security.insecure` | `docker build` 从不传 `--allow` | 构建**失败**，不产生提权；不是本次阻塞项 |
+| `RUN --network=host` | `network.host` entitlement | 同上 | 同上 |
+| `RUN --device=...` | `device` entitlement | 同上 | 同上 |
+| `RUN --mount=type=bind` | 源必须在构建上下文中（`from=` 只能引用阶段或镜像） | 无宿主路径直通能力 | 不构成宿主逃逸 |
+| `COPY --from=<image>` | 构建期拉取任意镜像 | 不参与基础镜像检查 | 策略覆盖缺口（§13.4），与解析器无关 |
+| 经典 builder（`DOCKER_BUILDKIT=0`）下的 `RUN --security=insecure` | 该 flag 不被识别 | — | 只会在容器内当成 shell 参数，不产生提权 |
+
+上游依据：`--security` 的取值校验与 llb 映射在 `instructions/commands_runsecurity.go` 与
+`dockerfile2llb/convert_runsecurity.go`；entitlement 白名单在 `solver/llbsolver/solver.go:527`
+（`entitlements.WhiteList`），即**守护进程侧**判定，客户端不申请就不可能获得。
+
+不要把"构建期 `--security=insecure`"与"容器运行时 `--privileged`"等同：前者是 BuildKit 的构建沙箱
+开关，受双重 entitlement 约束；后者是容器运行时参数，由本项目的创建参数构造决定。两者都不需要
+"Dockerfile 文本检查"来兜底。
+
+### 15.4 建议归属
+
+- `--privileged` 的守点留在**容器创建层**（`ContainerCreateArgs` + 现有两处测试），不新增 Dockerfile
+  文本检查，**不纳入**本次解析器替换的实施范围。
+- 若要拦构建期提权，正确做法是读 `RUN` 节点的 `Node.Flags`（`--security=` / `--network=` / `--device=`），
+  而不是匹配文本；但该需求的输入是"本次构建会授予哪些 entitlement"，而本项目当前恒为空集，
+  因此应单独立项，不作为替换的附带项。
+- 本轮**只记录建议**，未修改任何安全代码。第一轮的"独立缺陷"方向不变，性质更正为
+  **注释与实现不一致（且该检查本身不成立）**，编号记为 D12。
+
+## 16. BuildKit `v0.26.3` 安全核查
+
+核查日期：**2026-11-04**。本节所有结论都标注了可追溯来源；官方资料无法确认的内容一律标为未确认。
+
+### 16.1 检索范围与来源
+
+| 来源 | 用法 | 结果 |
+|---|---|---|
+| NVD CVE API 2.0，`keywordSearch=buildkit` | 全量列举相关 CVE | 31 条，其中 7 条与 BuildKit（Moby）本体无关（见 §16.3 末段） |
+| OSV.dev API（按 CVE / GHSA / GO 编号取记录） | 受影响版本区间、修复提交、Go 漏洞库的 import 级信息 | 18 条 CVE 记录与 5 条 Go 记录，其余条目以 NVD 描述为准 |
+| Go 漏洞库 | `GO-2026-4858`、`GO-2026-4859`、`GO-2026-6255`、`GO-2026-6256`、`GO-2024-2492` | 其中仅 `GO-2026-6256` 带 import 级受影响包信息 |
+| 模块代理版本列表（`go list -m -versions`） | 确认 0.26 版本线是否还有补丁版本 | 0.26 线止于 `v0.26.3` |
+| 上游源码（本机模块缓存 `v0.26.3` / `v0.31.2` / `v0.32.0` / `v0.32.2` / `v0.33.1` / `v0.34.0` / `v0.34.2`） | `go` 指令、目录级 diff、修复文件是否存在 | 见 §16.2、§16.4 |
+
+**本轮受限项（必须记录）**：
+
+- `api.github.com` 的 Advisory 查询在匿名配额下返回空数组或 403（`ecosystem=go&affects=moby/buildkit`
+  与 `affects=github.com/moby/buildkit` 都为空），因此**没有**取得 GitHub Security Advisories 的完整列表；
+- `github.com` 与 `patch-diff.githubusercontent.com` 在本机解析到私有地址，被工具拒绝，**未能**逐条
+  取得修复提交的 diff；
+- 上述缺口用"NVD + OSV（GHSA/GO）+ 本地文件级比对"交叉覆盖，残余不确定项列入 §16.5。
+
+**官方来源 URL（核查日期 2026-11-04）**：
+
+- NVD CVE API：`https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=buildkit`（及按 `cveId=` 取单条）
+- OSV 记录：`https://api.osv.dev/v1/vulns/<编号>`（本轮用到 `CVE-*`、`GHSA-*`、`GO-*` 三类编号）
+- BuildKit 安全公告（编号索引）：`https://github.com/moby/buildkit/security/advisories`
+- 本轮引用到的公告编号：`GHSA-4c29-8rgm-jvjj`、`GHSA-4vrq-3vrq-g6gg`、`GHSA-7236-3392-c5c6`、
+  `GHSA-72x6-4j93-7w86`、`GHSA-g2h8-426c-7976`、`GHSA-388v-wmr2-g2v2`、`GHSA-32pv-7hq5-qhwq`、
+  `GHSA-qx3x-mv6r-52p6`、`GHSA-hw3h-2gp9-cxpv`、`GHSA-f2v9-hprr-32q3`、`GHSA-4hgw-qrhw-fhg8`、
+  `GHSA-9728-qjrv-2xh2`、`GHSA-fjj4-h6vf-m9hj`、`GHSA-cv6p-7w7g-xjwq`、`GHSA-mgqf-486f-49vp`、
+  `GHSA-w26x-xg27-7qjc`、`GHSA-2fqp-xg6f-v7gj`、`GHSA-r456-g3gm-cvxf`
+- 修复版本发布页：`https://github.com/moby/buildkit/releases/tag/v0.28.1`、`.../v0.31.1`、
+  `.../v0.31.2`、`.../v0.33.1`、`.../v0.34.1`、`.../v0.34.2`
+- Go 漏洞库条目（OSV 记录里给出原始地址）：`https://vuln.go.dev/ID/GO-2026-4858.json`、
+  `GO-2026-4859`、`GO-2026-6255`、`GO-2026-6256`、`GO-2024-2492`
+- 版本列表与 `go` 指令：`go list -m -versions github.com/moby/buildkit` 与各版本 `go.mod`
+  （`https://proxy.golang.org/github.com/moby/buildkit/@v/list` 在本机不可直接访问，因此改用模块工具查询）
+
+### 16.2 核心结论：没有任何已知漏洞落在 `parser` / `shell` / `util/stack`
+
+文件级证据（`v0.26.3` → `v0.34.2` 目录 diff，本机模块缓存）：
+
+- `frontend/dockerfile/parser/`：只有 3 个文件变化——`parser.go`（`Node.Dump` 改用 `strings.Builder`、
+  heredoc 内容改用 `strings.Builder` 拼接）、`directives.go`（`setComment` → `SetComment` 导出）、
+  `dumper/main.go`。**没有安全修复，也没有行为收紧**。
+- `frontend/dockerfile/shell/`：只有 `lex.go`——`processStopOn` 增加 `preservePatternEscapes`，修正
+  `${var#pat}` / `${var%pat}` / `${var/pat/rep}` 在引号内的转义保留。属正确性修复，未被任何安全公告引用。
+- `util/stack/`（`parser/errors.go` 无条件引用，protobuf 依赖链的来源）：只有 `stack.pb.go`（生成代码）
+  与一个测试文件变化。
+
+因此可以回答分类问题：**"明确影响 Parser / Shell 的漏洞"为零条**，而不是"没有查到"。
+
+### 16.3 逐条核查（BuildKit 相关部分）
+
+| 编号 | 受影响版本 | 修复版本 | 影响组件（依据） | v0.26.3 是否受影响 | 是否影响本次引入 | 阻止引入 |
+|---|---|---|---|---|---|---|
+| CVE-2023-26054 | 0.10.0–0.11.3 | 0.11.4 | provenance 中的 Git 凭据泄漏（守护进程） | 否 | 否 | 否 |
+| CVE-2024-23650 / 23651 / 23652 / 23653 | < 0.12.5 | 0.12.5 | 守护进程 panic、cache mount 竞态、`RUN --mount` 越界删除、insecure 容器 API | 否 | 否 | 否 |
+| CVE-2026-33747（`GO-2026-4858`） | < 0.28.1 | 0.28.1 | 自定义 frontend 使文件写到 state 目录之外（solver / worker） | 是 | 否（Go 记录无 import 级信息，按整模块计） | 否 |
+| CVE-2026-33748（`GO-2026-4859`） | < 0.28.1 | 0.28.1 | Git URL `subdir` 越过检出根（Git 源解析） | 是 | 否（同上） | 否 |
+| CVE-2026-61711（`GO-2026-6255`） | ≤ 0.31.0 | 0.31.1 | 伪造 `SecurityMode` 绕过 Seccomp / AppArmor（`executor/oci/spec_linux.go`） | 是 | 否（同上；与 `--security=insecure` 相关，见 §15.3） | 否 |
+| CVE-2026-61712（`GO-2026-6256`） | < 0.31.1 | 0.31.1 | 无上限解析 `/etc/passwd`、`/etc/group`；Go 记录明确列出 `solver/llbsolver/ops`、`executor/oci` | 是 | 否（import 级信息明确排除 parser / shell） | 否 |
+| CVE-2026-75593 / CVE-2026-15789 | < 0.31.2 | 0.31.2 | 上传请求绕过目标目录校验（daemon） | 是 | 否 | 否 |
+| CVE-2026-15788 | < 0.31.2 | 0.31.2 | WCOW 缓存卷目录联接越界（worker） | 是 | 否 | 否 |
+| CVE-2026-15791 | 0.30.0–0.31.1 | 0.31.2 | LLB file op 删除宿主 `/tmp`（solver） | 是 | 否 | 否 |
+| CVE-2026-15792 | < 0.31.2 | 0.31.2 | 构造请求导致守护进程 panic | 是 | 否 | 否 |
+| CVE-2026-15793 | 0.30.0–0.31.1 | 0.31.2 | Git bundle 检出命令注入（Git 源） | 是 | 否 | 否 |
+| CVE-2026-93318 | < 0.33.1 | 0.33.1 | 未校验 DiffID 导致缓存投毒（solver / worker） | 是 | 否 | 否 |
+| CVE-2026-93319 | < 0.33.1 | 0.33.1 | 外部 frontend 触发数据竞争 panic（gateway） | 是 | 否 | 否 |
+| CVE-2026-93320 | < 0.33.1 | 0.33.1 | 特殊文件 inode 处理（worker） | 是 | 否 | 否 |
+| CVE-2026-93316（`GHSA-r456-g3gm-cvxf`） | < 0.33.1 | 0.33.1 | 以 `--cdi-disabled` 启动时，使用 CDI 设备的构建可导致守护进程 panic | 是 | 否 | 否 |
+| CVE-2026-93321 / CVE-2026-93322 | < 0.33.1 | 0.33.1 | 畸形 LLB file op / MergeOp 导致 panic（solver） | 是 | 否 | 否 |
+| CVE-2026-93323 | < 0.33.1 | 0.33.1 | Dockerfile 前端**读取** Dockerfile 与 `.dockerignore` 无大小上限；修复文件为 `frontend/dockerui/readfile.go`（本机比对：`v0.32.2` 无、`v0.33.1` 有） | 是 | 否（不在 parser / shell；本项目读取 Dockerfile 的上限是 `docker.MaxContextFileBytes` = 4 MiB） | 否 |
+| CVE-2026-121520 | < 0.34.1 | 0.34.1 | 在 state 目录之外设置扩展属性（daemon） | 是 | 否 | 否 |
+| CVE-2026-121522 | 0.26.0–0.34.1 | 0.34.2 | Git 源解析 panic（daemon） | 是 | 否 | 否 |
+
+误命中，与 BuildKit（Moby）无关，仅登记以说明检索噪声：`CVE-2023-43116`、`CVE-2023-43741`
+（Buildkite Elastic CI）、`CVE-2026-102379`、`CVE-2026-94298`、`CVE-2026-97275`（WordPress 插件
+"BuildKit – Product Builder"）；`CVE-2024-24557` 属 Moby 经典 builder，`CVE-2025-0495` 属 buildx CLI，
+均不在本次引入范围。
+
+### 16.4 `v0.26.3` 是否仍适合长期固定
+
+- **0.26 版本线事实上已停止维护**：模块代理的版本列表里 0.26 线止于 `v0.26.3`（2025-12-16），
+  之后没有任何 `v0.26.4`。2026-01 之后的所有安全修复都发布在 `0.28.1` / `0.31.1` / `0.31.2` /
+  `0.33.1` / `0.34.1` / `0.34.2`，**没有回补 0.26 线**。这是"可观察到的事实"，不是官方 EOL 声明。
+- Go 版本门槛（从各版本 `go.mod` 的 `go` 指令读取）：`v0.26.3`=1.24.3、`v0.27.0`=1.25.0、
+  `v0.28.1`=1.25.5、`v0.30.0`=1.25.5、`v0.31.2`=1.25.9、`v0.32.0`=1.26.3、`v0.33.1`=1.26.8、
+  `v0.34.2`=1.26.8。本项目 `go 1.24.5`，因此**能用的最高版本就是 `v0.26.3`**。
+- 综合判断：`v0.26.3` 对"只编译 `parser` + `shell`"的用法**没有已知可利用漏洞**，但它是一个"永久不会
+  再收到补丁"的版本，且 Go 漏洞库会因三条模块级记录（无 import 级信息）把整个模块判为受影响。
+
+### 16.5 未确认事项
+
+1. 未取得修复提交 diff（§16.1 受限项）。表中"影响组件"的依据是公告文本 + `GO-2026-6256` 的 import 级
+   信息 + `CVE-2026-93323` 的本地文件存在性比对；**其余条目的组件归属未经 diff 复核**。部分条目的修复版本
+   也是按"同一修复批次"归入（`CVE-2026-15788` / `15791` / `15792` / `15793` 与已明确指向 `v0.31.2` 的
+   `CVE-2026-15789` 共用同一修复提交）。
+2. `CVE-2026-121520` / `CVE-2026-121522` 于 2026-11-03 发布，NVD 状态仍为 `Received`（未经二次分析），
+   CVSS 与修复细节可能变化。
+3. 未取得 GitHub Advisory 完整列表，可能存在尚未分配编号或未进入 NVD / OSV 的公告。
+   **"未查到"不等于"不存在"。**
+4. `CVE-2026-93323` 的 `v0.33.1` 归属由 NVD 引用与本机文件比对共同支持，但同批修复是否还改动了
+   `frontend/dockerfile` 下的其它文件，未经 diff 确认。
+5. 未验证"`v0.26.3` 的 `parser` 在恶意输入下的健壮性"（fuzz 级别），本轮只做公告与代码比对。
+
+## 17. 修订后的实施方案与准入结论
+
+### 17.1 决策表
+
+| 问题 | 结论 |
+|---|---|
+| 是否引入 `frontend/dockerfile/parser` | **是**（唯一语法来源） |
+| 是否引入 `frontend/dockerfile/shell` | **是**（同模块，零额外模块成本；禁用 `EnvsFromSlice`） |
+| 是否引入 `distribution/reference` | **是**（连带 `opencontainers/go-digest`，共 2 个模块） |
+| `ValidateDockerfile` 是否复用统一解析结果 | **是**；不得保留字符串 `FROM` 解析，必须补齐 §13.6 的形状校验 |
+| `--privileged` 是否纳入实施范围 | **否**。Dockerfile 无此指令；改为修正注释，守点留在容器创建层（§15） |
+| 预定义 `ARG` 注入哪些值 | **一个都不注入**；11 个名字全部保持未知 → `Unresolved`；`--platform` 不参与判定 |
+| `v0.26.3` 是否可接受 | **有条件接受**，但首选"先升 Go 再引最新版"（§17.3） |
+
+### 17.2 实施范围
+
+- 删除（按符号）：`logicalLines`、`logicalLine`、`splitInstruction`、`parseFrom`、`fromInstruction`、
+  `unquote`、`variablePattern`、`expandVariables`、`ResolveReference`。
+- 新增：`analyze`（AST 事实层）、`FROM` 形状校验（1 或 3 参数 / `AS` / 阶段名正则 / 空引用）、
+  自实现大小写敏感 `EnvGetter`、`reference` 规范化、`ValidateDockerfile` 改为消费事实。
+- 保留：`Result` / `BaseImage` / `SkippedFrom` / `UnresolvedFrom` 的对外语义、三个 `ErrorCode`、
+  `ValidateContent` 文本策略、容器创建参数构造。
+- 依赖边：新增 `internal/docker` → `internal/dockerfile`，须在 `docs/workspace.md` 登记。
+- 依赖规模（本轮实测，探针模块在仓库之外）：`parser`（v0.26.3）6 个模块 / 114 个包（含探针 main 包，与 §4.3 的 113 差 1）；
+  `parser + shell + reference`（v0.34.2）为 2 个直接 + 5 个间接 require / 121 个包。
+  附带收益：v0.34.2 不再需要 `gogo/protobuf`（已迁移到 `google.golang.org/protobuf`）。
+
+### 17.3 两个分支与阻塞条件
+
+**分支 A（推荐）：先升 Go，再引最新版。**
+
+把 `go.mod` 的 `go` 指令升到 ≥ 1.26.8（核查时工具链可自动取到 `go1.26.10`），再引入 buildkit `≥ v0.34.2`。
+
+- 收益：版本天花板消失；不再有"永久不会修的模块级安全告警"；间接依赖更少。
+- 前置：Go 升级对 `modernc.org/sqlite`、CI 镜像与发布流程的影响需要单独评估（本轮不评估）。
+
+**分支 B（不升 Go）：固定 `v0.26.3`。** 必须先接受三条硬条件：
+
+1. 只允许导入 `frontend/dockerfile/parser` 与 `frontend/dockerfile/shell`（及其传递依赖 `util/stack`）；
+   禁止导入 `instructions`、`dockerfile2llb`、`solver/*`、`executor/*`、`frontend/dockerui`。
+2. 若 CI 启用 govulncheck：`GO-2026-4858`、`GO-2026-4859`、`GO-2026-6255` 会按整模块命中，
+   必须留一份显式豁免记录，并注明"只有升 Go + 升 buildkit 才能消除"。
+3. 在 `go.mod` 与 `docs/docker-compatibility.md` 记录固定版本的原因与上游 Go 版本门槛。
+
+**阻塞条件**（任一触发就必须转分支 A，不得继续在 v0.26.3 上加功能）：
+
+- 需要用到 `parser` / `shell` 之外的任何 buildkit 包；
+- 出现针对 `parser` / `shell` 的新安全公告并被要求升级；
+- 需要 `--platform` 参与元数据查询、或需要 `instructions` 级别的指令语义。
+
+### 17.4 尚未确认的风险
+
+1. Go 升级路径（分支 A）的成本未评估，可能牵动 SQLite 驱动与 CI。
+2. `SkipUnsetEnv=true` 会把 `FROM ${BASE:-node:22}` 判为 `Unresolved`（偏严），用户可感知的行为变化。
+3. 引用规范化后 `Resolved` 变成全限定名（`node` → `docker.io/library/node:latest`），
+   `ValidationCheck.Images` 中的 `Reference` / `Resolved` 文本会变化（契约不变，展示需确认）。
+4. 远端 Engine 的 `docker build` 与本项目固定的 buildkit 版本不同源，仍可能"本地通过、远端失败"。
+5. `COPY --from=<image>` 不在检查范围（策略覆盖缺口，需单独立项）。
+6. §13.6 的 `FROM` 形状校验如果漏实现任何一条，D7 会重新打开——这是实施方案里最容易被"简化"掉、
+   也最危险的一处。
+
+### 17.5 本轮改动说明
+
+- **只修改了本文件**。生产代码、`go.mod` / `go.sum`、测试、Schema、Docker / SSH 基线均未改动。
+- 未运行任何测试、未连接 Docker / SSH / Registry、未执行任何写入型 Git 操作。
+- 报告状态仍为：**审计结论，未实施。**
