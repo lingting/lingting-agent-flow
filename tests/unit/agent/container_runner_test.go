@@ -58,6 +58,26 @@ type fakeExecutor struct {
 	downloadFailures int
 	// copyFailures 让接下来的若干次容器导出失败。
 	copyFailures int
+	// operations 按发生顺序记录执行与文件传输，用于验证恢复先于主调用。
+	operations []string
+	// uploads 记录本机文件到远程宿主机临时文件的传输。
+	uploads []fileTransfer
+	// containerCopies 记录远程宿主机临时文件到容器内路径的传输。
+	containerCopies []fileTransfer
+}
+
+// fileTransfer 是一次文件传输的起止路径。
+type fileTransfer struct {
+	source string
+	target string
+}
+
+// readerOnlyExecutor 只实现 agent.ContainerExecutor，不提供容器文件写入能力。
+//
+// 它用于验证"执行器不支持把本机文件写入容器"时 Runner 明确失败，而不是静默丢弃
+// 历史上下文后创建新的空 Session。
+type readerOnlyExecutor struct {
+	agent.ContainerExecutor
 }
 
 // Exec 记录请求并返回预设结果。
@@ -67,6 +87,7 @@ func (e *fakeExecutor) Exec(
 ) (agent.ContainerExecResult, error) {
 	e.mu.Lock()
 	e.commands = append(e.commands, request)
+	e.operations = append(e.operations, "exec:"+strings.Join(request.Command, " "))
 	responder := e.responder
 	e.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -133,6 +154,54 @@ func (e *fakeExecutor) DownloadToLocal(
 		return 0, err
 	}
 	return int64(len(content)), nil
+}
+
+// UploadFromLocal 把本机文件上传到"远程宿主机"临时路径。
+func (e *fakeExecutor) UploadFromLocal(ctx context.Context, localPath, hostPath string) error {
+	content, err := os.ReadFile(localPath)
+	if err != nil {
+		return err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.operations = append(e.operations, "upload:"+hostPath)
+	e.uploads = append(e.uploads, fileTransfer{source: localPath, target: hostPath})
+	e.hostFiles[hostPath] = string(content)
+	return nil
+}
+
+// CopyToContainer 把"远程宿主机"文件复制到"容器内"路径。
+func (e *fakeExecutor) CopyToContainer(
+	ctx context.Context,
+	dockerID, hostPath, containerPath string,
+) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	content, ok := e.hostFiles[hostPath]
+	if !ok {
+		return errors.New("宿主机临时文件不存在: " + hostPath)
+	}
+	e.operations = append(e.operations, "copy-to-container:"+containerPath)
+	e.containerCopies = append(e.containerCopies, fileTransfer{source: hostPath, target: containerPath})
+	e.containerFiles[containerPath] = content
+	return nil
+}
+
+// operationsSince 返回从指定下标开始的操作记录副本。
+func (e *fakeExecutor) operationsSince(index int) []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if index < 0 || index > len(e.operations) {
+		return nil
+	}
+	return append([]string(nil), e.operations[index:]...)
+}
+
+// operationCount 返回已记录的操作数量。
+func (e *fakeExecutor) operationCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.operations)
 }
 
 // RemoveHostFile 删除宿主机临时文件。
@@ -803,5 +872,357 @@ func TestDockerIDMismatchRejected(t *testing.T) {
 	}
 	if len(h.executor.requests()) != 0 {
 		t.Fatalf("Docker ID 不一致时不应执行任何命令")
+	}
+}
+
+// 稳定 Session 用例使用的固定标识。
+const (
+	// testPlanningSessionID 是稳定 Session 用例的规划会话标识。
+	testPlanningSessionID = "planning-session-1"
+	// testAnalystSessionID 是需求分析师角色的会话标识。
+	testAnalystSessionID = "analyst-session-1"
+)
+
+// stableContainerPath 返回容器内固定的 Session 文件路径。
+//
+// 结构与规划运行时生成的路径一致：<规划会话标识>/<角色会话标识>/session.jsonl，
+// 位于容器 Session 根目录之内。
+func stableContainerPath() string {
+	return pi.DefaultContainerSessionDir + "/" + testPlanningSessionID + "/" +
+		testAnalystSessionID + "/session.jsonl"
+}
+
+// stableTarget 返回一次稳定 Session 调用的两个路径。
+func (h *harness) stableTarget() *agent.StableSessionTarget {
+	return &agent.StableSessionTarget{
+		ContainerPath: stableContainerPath(),
+		ArchiveDir: filepath.Join(
+			h.sessionRoot,
+			"planning",
+			testPlanningSessionID,
+			testAnalystSessionID,
+		),
+	}
+}
+
+// stableRequest 构造一次使用稳定 Session 的调用请求。
+func (h *harness) stableRequest(invocationID string) agent.RunRequest {
+	request := h.request
+	request.InvocationID = invocationID
+	request.StableSession = h.stableTarget()
+	return request
+}
+
+// archivePath 返回稳定 Session 的本机归档路径。
+func (h *harness) archivePath() string {
+	return filepath.Join(h.stableTarget().ArchiveDir, "session.jsonl")
+}
+
+// writeArchive 写入本机稳定归档内容。
+func (h *harness) writeArchive(t *testing.T, content string) {
+	t.Helper()
+	dir := h.stableTarget().ArchiveDir
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("创建本机归档目录失败: %v", err)
+	}
+	if err := os.WriteFile(h.archivePath(), []byte(content), 0o600); err != nil {
+		t.Fatalf("写入本机归档失败: %v", err)
+	}
+}
+
+// readArchive 读取本机稳定归档内容。
+func (h *harness) readArchive(t *testing.T) string {
+	t.Helper()
+	content, err := os.ReadFile(h.archivePath())
+	if err != nil {
+		t.Fatalf("读取本机归档失败: %v", err)
+	}
+	return string(content)
+}
+
+// operationIndex 返回第一条匹配前缀的操作下标，缺失时返回 -1。
+func operationIndex(operations []string, prefix string) int {
+	for index, operation := range operations {
+		if strings.HasPrefix(operation, prefix) {
+			return index
+		}
+	}
+	return -1
+}
+
+// mainCallIndex 返回第一次 --print 主调用的操作下标，缺失时返回 -1。
+func mainCallIndex(operations []string) int {
+	for index, operation := range operations {
+		if strings.HasPrefix(operation, "exec:") && strings.Contains(operation, "--print") {
+			return index
+		}
+	}
+	return -1
+}
+
+// TestStableSessionFirstRunCreatesArchive 校验首轮调用建立本机稳定归档。
+func TestStableSessionFirstRunCreatesArchive(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, successResponder)
+	if _, err := os.Stat(h.archivePath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("首轮调用前不应存在本机归档，实际 %v", err)
+	}
+	result, err := h.runner.Run(context.Background(), h.stableRequest("invoke-1"), nil)
+	if err != nil {
+		t.Fatalf("首轮执行失败: %v", err)
+	}
+	// 没有历史归档时不进行恢复：既不上传本机文件，也不写入容器内路径。
+	operations := h.executor.operationsSince(0)
+	if index := operationIndex(operations, "upload:"); index >= 0 {
+		t.Fatalf("首轮调用不应上传历史归档: %v", operations)
+	}
+	if index := operationIndex(operations, "copy-to-container:"); index >= 0 {
+		t.Fatalf("首轮调用不应恢复历史归档: %v", operations)
+	}
+	main := mainCallOf(h.executor.requests())
+	if main == nil {
+		t.Fatal("没有收到 --print 主调用")
+	}
+	if path := sessionPathOf(main.Command); path != stableContainerPath() {
+		t.Fatalf("Pi 必须使用服务端提供的固定容器 Session 路径，实际 %s", path)
+	}
+	if result.StableSession.ContainerPath != stableContainerPath() {
+		t.Fatalf("结果中的容器路径不符: %s", result.StableSession.ContainerPath)
+	}
+	if result.StableSession.Restored {
+		t.Fatal("首轮调用不应报告已恢复历史 Session")
+	}
+	if !result.StableSession.Archived {
+		t.Fatalf("首轮调用应建立稳定归档: %+v", result.StableSession)
+	}
+	if result.StableSession.ArchivePath != h.archivePath() {
+		t.Fatalf("归档路径不符: %s", result.StableSession.ArchivePath)
+	}
+	if result.StableSession.Bytes != int64(len(testSessionJSONL)) {
+		t.Fatalf("归档字节数不符: %d", result.StableSession.Bytes)
+	}
+	if content := h.readArchive(t); content != testSessionJSONL {
+		t.Fatalf("归档内容与完整 Session 不一致: %q", content)
+	}
+	if result.Session.Completeness != agent.SessionComplete {
+		t.Fatalf("单轮 Session 应完整，实际 %s", result.Session.Completeness)
+	}
+}
+
+// TestStableSessionSecondRunRestoresBeforePi 校验第二轮先恢复历史再启动 Pi。
+func TestStableSessionSecondRunRestoresBeforePi(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, successResponder)
+	first := h.stableRequest("invoke-1")
+	firstResult, err := h.runner.Run(context.Background(), first, nil)
+	if err != nil {
+		t.Fatalf("首轮执行失败: %v", err)
+	}
+	if content := h.readArchive(t); content != testSessionJSONL {
+		t.Fatalf("首轮结束后应存在完整稳定归档: %q", content)
+	}
+
+	// 第二轮使用新的调用标识，但必须复用同一个容器 Session 路径与本机归档。
+	baseline := h.executor.operationCount()
+	second := h.stableRequest("invoke-2")
+	result, err := h.runner.Run(context.Background(), second, nil)
+	if err != nil {
+		t.Fatalf("第二轮执行失败: %v", err)
+	}
+	if result.InvocationID == firstResult.InvocationID {
+		t.Fatalf("每轮的调用标识必须不同: %s", result.InvocationID)
+	}
+	if !result.StableSession.Restored {
+		t.Fatalf("第二轮应恢复历史 Session: %+v", result.StableSession)
+	}
+	if !result.StableSession.Archived {
+		t.Fatalf("第二轮应更新稳定归档: %+v", result.StableSession)
+	}
+	operations := h.executor.operationsSince(baseline)
+	uploadIndex := operationIndex(operations, "upload:")
+	mkdirIndex := -1
+	for index, operation := range operations {
+		if strings.HasPrefix(operation, "exec:") && strings.Contains(operation, "mkdir") {
+			mkdirIndex = index
+			break
+		}
+	}
+	copyIndex := operationIndex(operations, "copy-to-container:")
+	promptIndex := mainCallIndex(operations)
+	if uploadIndex < 0 || mkdirIndex < 0 || copyIndex < 0 || promptIndex < 0 {
+		t.Fatalf("缺少恢复或执行操作: %v", operations)
+	}
+	// 顺序固定为：本机文件 → 远程宿主机临时文件 → 容器固定 Session 路径 → 启动 Pi。
+	if !(uploadIndex < mkdirIndex && mkdirIndex < copyIndex && copyIndex < promptIndex) {
+		t.Fatalf("恢复必须先于主 Pi 调用完成: %v", operations)
+	}
+	if len(h.executor.uploads) == 0 || len(h.executor.containerCopies) == 0 {
+		t.Fatal("应记录上传与写入容器的实际传输")
+	}
+	upload := h.executor.uploads[len(h.executor.uploads)-1]
+	if upload.source != h.archivePath() {
+		t.Fatalf("上传来源应是本机归档，实际 %s", upload.source)
+	}
+	if !strings.Contains(upload.target, "/restore/") {
+		t.Fatalf("上传目标应位于远程宿主机受控临时目录，实际 %s", upload.target)
+	}
+	copied := h.executor.containerCopies[len(h.executor.containerCopies)-1]
+	if copied.target != stableContainerPath() {
+		t.Fatalf("写入容器的目标应是固定 Session 路径，实际 %s", copied.target)
+	}
+	if copied.source != upload.target {
+		t.Fatalf("写入容器应使用刚上传的远程临时文件: %s", copied.source)
+	}
+	// 第二轮仍然使用同一个固定容器 Session 路径。
+	requests := h.executor.requests()
+	main := mainCallOf(requests[len(requests)-4:])
+	if main == nil {
+		t.Fatal("没有收到第二轮的 --print 主调用")
+	}
+	if path := sessionPathOf(main.Command); path != stableContainerPath() {
+		t.Fatalf("第二轮必须复用同一个容器 Session 路径，实际 %s", path)
+	}
+	if content := h.readArchive(t); content != testSessionJSONL {
+		t.Fatalf("第二轮结束后归档应是最新完整快照: %q", content)
+	}
+}
+
+// TestStableSessionFailedRunKeepsLastKnownGoodArchive 校验失败轮不覆盖最后一份完整归档。
+func TestStableSessionFailedRunKeepsLastKnownGoodArchive(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, func(executor *fakeExecutor, request agent.ContainerExecRequest) (agent.ContainerExecResult, error) {
+		if isVersionProbe(request.Command) {
+			return succeeded("9.9.9\n"), nil
+		}
+		if isExportCall(request.Command) {
+			return succeeded(""), nil
+		}
+		// 恢复历史 Session 时 Runner 会先在容器内创建目录，该命令不属于主调用。
+		if sessionPathOf(request.Command) == "" {
+			return succeeded(""), nil
+		}
+		executor.writeContainerFile(sessionPathOf(request.Command), partialSessionJSONL)
+		return agent.ContainerExecResult{ExitCode: 3, Stderr: "模型不可用", Certain: true}, nil
+	})
+	h.writeArchive(t, testSessionJSONL)
+	result, err := h.runner.Run(context.Background(), h.stableRequest("invoke-1"), nil)
+	if err == nil {
+		t.Fatal("非零退出码应返回错误")
+	}
+	if result.Status != agent.RunFailed {
+		t.Fatalf("期望状态 %s，实际 %s", agent.RunFailed, result.Status)
+	}
+	if result.StableSession.Archived {
+		t.Fatalf("失败的轮次不得报告已归档: %+v", result.StableSession)
+	}
+	if result.StableSession.Error == "" {
+		t.Fatal("应说明本轮未更新稳定归档")
+	}
+	if content := h.readArchive(t); content != testSessionJSONL {
+		t.Fatalf("失败轮次不得覆盖最后一次完整归档: %q", content)
+	}
+	// 单轮 Session 仍按既有规则保存，供诊断使用。
+	if result.Session.JSONLPath == "" {
+		t.Fatal("失败轮次仍应保留单轮 Session 文件")
+	}
+	content, readErr := os.ReadFile(result.Session.JSONLPath)
+	if readErr != nil {
+		t.Fatalf("读取单轮 Session 失败: %v", readErr)
+	}
+	if string(content) != partialSessionJSONL {
+		t.Fatalf("单轮 Session 内容不符: %q", string(content))
+	}
+}
+
+// TestStableSessionCorruptArchiveRejectsBeforePi 校验损坏归档在恢复阶段被拒绝。
+func TestStableSessionCorruptArchiveRejectsBeforePi(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, successResponder)
+	h.writeArchive(t, partialSessionJSONL)
+	result, err := h.runner.Run(context.Background(), h.stableRequest("invoke-1"), nil)
+	if err == nil {
+		t.Fatal("损坏的本机归档应让本轮失败")
+	}
+	if mainCallOf(h.executor.requests()) != nil {
+		t.Fatal("恢复失败时不得启动主 Pi 调用")
+	}
+	if result.StableSession.Restored {
+		t.Fatal("恢复失败不应报告已恢复")
+	}
+	if result.StableSession.Error == "" {
+		t.Fatal("恢复失败应给出可诊断说明")
+	}
+	if !strings.Contains(result.StableSession.Error, "归档") {
+		t.Fatalf("错误说明应指明 Session 归档不可用: %q", result.StableSession.Error)
+	}
+	if content := h.readArchive(t); content != partialSessionJSONL {
+		t.Fatalf("恢复失败不得删除或改写原归档: %q", content)
+	}
+}
+
+// TestStableSessionArchiveFailureIsReported 校验归档失败与执行结论分别上报。
+func TestStableSessionArchiveFailureIsReported(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, successResponder)
+	h.writeArchive(t, testSessionJSONL)
+	// 受控文件系统故障：归档临时路径被一个非空目录占据，原子替换无法完成。
+	tempPath := filepath.Join(h.stableTarget().ArchiveDir, ".invoke-1.tmp")
+	if err := os.MkdirAll(tempPath, 0o700); err != nil {
+		t.Fatalf("创建故障目录失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tempPath, "blocker"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("写入故障文件失败: %v", err)
+	}
+	result, err := h.runner.Run(context.Background(), h.stableRequest("invoke-1"), nil)
+	if err == nil {
+		t.Fatal("归档失败必须作为错误上报")
+	}
+	if !errors.Is(err, agent.ErrSessionArchive) {
+		t.Fatalf("归档失败应返回 agent.ErrSessionArchive，实际 %v", err)
+	}
+	// Pi 本身执行正常，执行结论不得被归档失败改写。
+	if result.Status != agent.RunCompleted {
+		t.Fatalf("归档失败不应把执行状态改为 %s", result.Status)
+	}
+	if result.StableSession.Archived {
+		t.Fatalf("归档失败不得报告已归档: %+v", result.StableSession)
+	}
+	if result.StableSession.Error == "" {
+		t.Fatal("StableSession.Error 应说明归档失败")
+	}
+	if content := h.readArchive(t); content != testSessionJSONL {
+		t.Fatalf("归档失败不得破坏已有完整归档: %q", content)
+	}
+}
+
+// TestStableSessionRestoreRejectsUnsupportedWriter 校验缺少容器写入能力时明确失败。
+func TestStableSessionRestoreRejectsUnsupportedWriter(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, successResponder)
+	h.writeArchive(t, testSessionJSONL)
+	// 只暴露 agent.ContainerExecutor：执行器不实现 agent.ContainerFileWriter。
+	runner, err := pi.NewContainerRunner(
+		pi.Options{Timeout: 30 * time.Second, GraceTimeout: 2 * time.Second},
+		readerOnlyExecutor{ContainerExecutor: h.executor},
+		&fakeGuard{container: newContainer()},
+	)
+	if err != nil {
+		t.Fatalf("构造容器内 Runner 失败: %v", err)
+	}
+	result, runErr := runner.Run(context.Background(), h.stableRequest("invoke-1"), nil)
+	if runErr == nil {
+		t.Fatal("缺少容器写入能力时应明确失败，不能静默忽略历史上下文")
+	}
+	if mainCallOf(h.executor.requests()) != nil {
+		t.Fatal("无法恢复历史上下文时不得启动主 Pi 调用")
+	}
+	if result.StableSession.Restored {
+		t.Fatal("未恢复历史上下文时不应报告已恢复")
+	}
+	if !strings.Contains(result.StableSession.Error, "不支持") {
+		t.Fatalf("错误说明应指明执行器不支持写入容器: %q", result.StableSession.Error)
+	}
+	if content := h.readArchive(t); content != testSessionJSONL {
+		t.Fatalf("执行器能力不足时不得删除历史归档: %q", content)
 	}
 }

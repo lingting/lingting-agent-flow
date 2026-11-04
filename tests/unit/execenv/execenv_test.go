@@ -450,3 +450,170 @@ func TestPreparedFailedStep(t *testing.T) {
 		t.Fatalf("全部成功时不应返回失败阶段: %s", allOK.FailedStep())
 	}
 }
+
+// TestReadOnlyWorkspaceSetsReadOnlyProjectAccess 校验只读工作区的项目代码访问模式。
+func TestReadOnlyWorkspaceSetsReadOnlyProjectAccess(t *testing.T) {
+	t.Parallel()
+	workspace, err := execenv.NewReadOnlyWorkspace(
+		"",
+		"",
+		[]string{execenv.DefaultSessionDir, "/tmp"},
+	)
+	if err != nil {
+		t.Fatalf("构造只读工作区失败: %v", err)
+	}
+	if workspace.ProjectAccess != execenv.ProjectAccessReadOnly {
+		t.Fatalf("项目代码访问模式应为只读，实际 %s", workspace.ProjectAccess)
+	}
+	if !workspace.ReadOnly() {
+		t.Fatal("只读工作区应报告项目代码只读")
+	}
+	if workspace.Project != execenv.DefaultProjectDir {
+		t.Fatalf("空项目目录应使用默认值，实际 %s", workspace.Project)
+	}
+	if workspace.SessionDir != execenv.DefaultSessionDir {
+		t.Fatalf("空 Session 目录应使用默认值，实际 %s", workspace.SessionDir)
+	}
+	if len(workspace.Caches) != 0 {
+		t.Fatalf("只读工作区不应携带缓存卷，实际 %v", workspace.Caches)
+	}
+	writable := workspace.WritableDirs
+	if len(writable) != 2 || writable[0] != execenv.DefaultSessionDir || writable[1] != "/tmp" {
+		t.Fatalf("可写目录应按声明顺序保留，实际 %v", writable)
+	}
+}
+
+// TestReadOnlyWorkspaceRequiresWritableSessionDir 校验 Session 目录必须由显式可写目录覆盖。
+func TestReadOnlyWorkspaceRequiresWritableSessionDir(t *testing.T) {
+	t.Parallel()
+	if _, err := execenv.NewReadOnlyWorkspace("", "", nil); !errors.Is(
+		err,
+		execenv.ErrInvalidValue,
+	) {
+		t.Fatalf("未声明可写目录时应返回字段校验错误，实际 %v", err)
+	}
+	// 可写目录存在但没有覆盖 Session 目录：写入能力仍不完整。
+	if _, err := execenv.NewReadOnlyWorkspace("", "", []string{"/tmp/scratch"}); !errors.Is(
+		err,
+		execenv.ErrInvalidValue,
+	) {
+		t.Fatalf("未覆盖 Session 目录时应返回字段校验错误，实际 %v", err)
+	}
+	// 父目录覆盖 Session 目录时允许，写入能力由父目录提供。
+	workspace, err := execenv.NewReadOnlyWorkspace(
+		"",
+		execenv.DefaultSessionDir,
+		[]string{"/tmp"},
+	)
+	if err != nil {
+		t.Fatalf("父目录覆盖 Session 目录时应通过校验: %v", err)
+	}
+	if !workspace.ReadOnly() {
+		t.Fatal("项目代码仍必须只读")
+	}
+	// 空白声明会被忽略，等同于未声明。
+	if _, err := execenv.NewReadOnlyWorkspace("", "", []string{"   "}); !errors.Is(
+		err,
+		execenv.ErrInvalidValue,
+	) {
+		t.Fatalf("空白可写目录应被忽略并拒绝，实际 %v", err)
+	}
+}
+
+// TestReadOnlyWorkspaceRejectsOverlappingProjectDir 校验可写目录不得与项目代码目录重叠。
+func TestReadOnlyWorkspaceRejectsOverlappingProjectDir(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name         string
+		project      string
+		writableDirs []string
+	}{
+		{
+			name:         "可写目录位于项目代码目录之内",
+			writableDirs: []string{execenv.DefaultProjectDir + "/cache"},
+		},
+		{
+			name:         "可写目录包含项目代码目录",
+			project:      execenv.DefaultProjectDir,
+			writableDirs: []string{"/workspace"},
+		},
+		{
+			name:         "可写目录等于项目代码目录",
+			writableDirs: []string{execenv.DefaultProjectDir},
+		},
+	}
+	for _, testCase := range cases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := execenv.NewReadOnlyWorkspace(
+				testCase.project,
+				execenv.DefaultSessionDir,
+				testCase.writableDirs,
+			); !errors.Is(err, execenv.ErrInvalidValue) {
+				t.Fatalf("重叠的可写目录应被拒绝，实际 %v", err)
+			}
+		})
+	}
+}
+
+// TestReadOnlyWorkspaceRejectsCaches 校验只读工作区不接受可写缓存卷。
+func TestReadOnlyWorkspaceRejectsCaches(t *testing.T) {
+	t.Parallel()
+	caches := []domain.CacheMount{
+		{
+			Type:          "go-mod",
+			ContainerPath: "/var/cache/agentflow/go/pkg/mod",
+			Scope:         domain.CacheScopeMachine,
+		},
+	}
+	workspace := execenv.Workspace{
+		Project:       execenv.DefaultProjectDir,
+		SessionDir:    execenv.DefaultSessionDir,
+		Caches:        caches,
+		ProjectAccess: execenv.ProjectAccessReadOnly,
+		WritableDirs:  []string{"/tmp"},
+	}
+	if err := workspace.Validate(); !errors.Is(err, execenv.ErrInvalidValue) {
+		t.Fatalf("只读工作区挂载缓存卷应被拒绝，实际 %v", err)
+	}
+}
+
+// TestReadOnlyWorkspaceKeepsWorkspaceWritable 校验普通任务工作区保持可写语义。
+func TestReadOnlyWorkspaceKeepsWorkspaceWritable(t *testing.T) {
+	t.Parallel()
+	workspace, err := execenv.NewWorkspace("", "", nil)
+	if err != nil {
+		t.Fatalf("构造可写工作区失败: %v", err)
+	}
+	if workspace.ProjectAccess != execenv.ProjectAccessReadWrite {
+		t.Fatalf("普通任务的项目代码目录应可写，实际 %s", workspace.ProjectAccess)
+	}
+	if workspace.ReadOnly() {
+		t.Fatal("普通任务不应被标记为只读")
+	}
+	if len(workspace.WritableDirs) != 0 {
+		t.Fatalf("普通任务不应声明额外可写目录，实际 %v", workspace.WritableDirs)
+	}
+	// 可写语义下声明可写目录属于语义冲突，必须拒绝。
+	invalid := execenv.Workspace{
+		Project:       execenv.DefaultProjectDir,
+		SessionDir:    execenv.DefaultSessionDir,
+		ProjectAccess: execenv.ProjectAccessReadWrite,
+		WritableDirs:  []string{"/tmp"},
+	}
+	if err := invalid.Validate(); !errors.Is(err, execenv.ErrInvalidValue) {
+		t.Fatalf("可写工作区声明可写目录应被拒绝，实际 %v", err)
+	}
+	// 结构体字面量省略访问模式时仍按可写处理。
+	legacy := execenv.Workspace{
+		Project:    execenv.DefaultProjectDir,
+		SessionDir: execenv.DefaultSessionDir,
+	}
+	if err := legacy.Validate(); err != nil {
+		t.Fatalf("省略访问模式应按可写处理: %v", err)
+	}
+	if legacy.ReadOnly() {
+		t.Fatal("省略访问模式不应被当作只读")
+	}
+}

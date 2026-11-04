@@ -459,9 +459,11 @@ fencing 边界（必须保留的风险）：
   由调用方再次核验，不自动重试。
 - 真实环境下的只读验证（文件工具与 `sh -c` 写入是否真的被文件系统拒绝）尚未执行：本阶段只确认参数
   构造正确，**不代表只读规划环境已经可用**。
-- 自动化测试守点仍不完整：第七阶段的生命周期用例与第九阶段的租约用例已覆盖准入、取消传播、停止等待、跨实例
-  互斥、续期与租约丢失后的收敛；会话事务、条件更新、角色会话绑定、稳定 Session 恢复与归档逻辑仍没有自动化
-  测试守点，也未在真实数据库、真实 Docker / SSH 与真实 Pi 上验证并发行为、恢复与归档结果。
+- 自动化测试守点仍不完整：第七阶段的生命周期用例、第九阶段的租约用例与第十阶段的规划会话 / 稳定 Session /
+  只读参数用例已覆盖准入、取消传播、停止等待、跨实例互斥、续期与租约丢失后的收敛、会话状态机与事务边界、状态
+  与两个绑定的条件更新、稳定 Session 首轮归档 / 多轮恢复 / 归档失败上报，以及规划只读工作区与 Docker 参数
+  （见 §7.12）。仍未自动化覆盖的是这些行为在真实环境中的结果：真实数据库上的旧库升级与数据保留、真实 Docker /
+  SSH 的资源创建与释放，以及真实 Pi 的多轮上下文恢复。
 - 未验证的真实外部能力：真实只读环境（文件工具与 `sh -c` 写入是否真的被文件系统拒绝）、真实多轮 Pi Session
   跨容器重建恢复、真实远程容器释放、远端 Pi 进程在取消后是否真的终止，都没有执行，不得报告为通过。`0028` 的
   旧库增量升级已由第八阶段定向测试在测试数据库中执行（见 §7.8），`0031` 的表结构与条件写入已由第九阶段定向
@@ -595,3 +597,83 @@ Session 文件的续写语义，都需要在真实只读规划环境中验证后
   执行；未设置或修改 `AGENTFLOW_REAL_TESTS` 等真实测试开关，未连接真实 Docker / SSH / Pi / 远程主机，未启动
   真实 AgentFlow Server。因此第九阶段只证明租约在 SQLite 与受控替身下成立：不代表真实多 Server 部署已验证，
   也不代表远端 Pi 进程会在租约丢失后真正终止（见 §7.9 的 fencing 边界）。
+
+### 7.12 已交付：规划会话与稳定 Session 自动化测试守点（M2 第十阶段）
+
+第十阶段只做一件事：为 M2 已经实现的业务补齐可重复的定向自动化测试守点，范围收敛在规划会话状态机、存储层事务
+与条件更新、应用层业务流程、稳定 Pi Session 的恢复与归档，以及规划只读工作区与 Docker 创建参数。本阶段不新增
+生产代码能力，也没有发现需要修复的本阶段缺陷；除 `tests/` 下的测试文件外未改动其他文件。
+
+- **Domain（`tests/unit/domain/planning_session_test.go`）**：全部断言调用真实领域方法，不复制状态机规则。覆盖
+  `active → analyzing → preview_ready` 与 `preview_ready → analyzing` 多轮继续分析、`analyzing → failed` 后
+  普通入口不得重置结论且 `RetryAnalysis` 清空失败摘要与结束时间、非失败状态拒绝重试、确认必须关联有效版本且
+  状态与结束时间/采纳版本一致、未确认会话不得带采纳版本、`active` / `preview_ready` 的放弃、`analyzing` 期间
+  放弃被状态机拒绝、`confirmed` / `abandoned` 不能被 `BeginAnalysis` / `RetryAnalysis` / `Transition` 重新打开，
+  以及两个角色会话标识不能相同、重复绑定相同取值幂等且不改变业务状态。
+- **Store（`tests/unit/store/planning_sessions_test.go`）**：全部使用真实 SQLite，并用独立连接读取原始列或重新
+  读取记录断言持久化事实。覆盖会话字段完整往返与可空字段的 NULL 语义（未绑定列的原始值为 NULL，而非空串）、
+  按项目列出会话的过滤与倒序、消息序号与版本号从 1 开始且不同会话使用独立序号空间、非法消息 / 非法 JSON / 不
+  存在的会话不留下半成品记录与记录数不变、两个独立数据库连接并发追加后序号与版本号连续且不重复、状态条件更新
+  的成功、返回 `storage.ErrConflict` 与冲突后数据库保留最新状态（含迟到结果不能覆盖 `confirmed` / `abandoned` /
+  `failed` 结论）、运行时绑定首次写入 NULL 绑定、旧 expected 冲突、成功时只更新运行时四列且 `status` /
+  `finished_at` / `adopted_revision_id` / `error_summary` / 角色会话标识不变、会话不存在返回 `storage.ErrNotFound`，
+  以及角色绑定成对写入、旧 expected 冲突、两个角色标识相同或单边写入按 `storage.ErrInvalidData` 拒绝、角色绑定
+  不改变业务状态与运行时绑定、两个独立连接基于同一 expected 并发写入恰好一成功一冲突。
+- **App（`tests/unit/app/planning_session_test.go`）**：使用真实 SQLite、真实 `PlanningSessionService` 与
+  `testkit`。覆盖创建只允许关联存在且未逻辑删除的项目、初始状态与时间/运行期字段由服务端生成、消息与版本查询
+  返回真实持久化记录、项目逻辑删除后创建与列表返回 `ErrPlanningSessionNotFound`；提交消息的准入（`active` 与
+  `preview_ready` 允许，`analyzing` / `failed` / `confirmed` / `abandoned` 拒绝且不留下消息）、并发提交恰好一成功
+  一冲突且数据库只有 1 条消息；完成分析追加版本与两条角色消息并进入 `preview_ready`、第二轮版本号为 2、非规划
+  角色与非法 JSON 分别返回 `ErrPlanningSessionInvalidInput` 且不留下版本、角色消息或成功状态、非 `analyzing` 状态
+  返回冲突；失败只允许 `analyzing`、失败摘要经既有脱敏与裁剪（凭据替换为占位符、超长摘要带截断标记）、失败不写
+  版本与角色成功消息、`failed` 必须经显式 `RetryAnalysis` 才能回到 `analyzing` 且补充消息与状态迁移同事务落库、
+  无补充消息时不追加消息；跨会话版本确认返回 `ErrPlanningSessionRevisionNotFound`、确认后 `adopted_revision_id` 与
+  `confirmed` 同时落库、重复确认返回冲突且采纳版本不变、`analyzing` 放弃返回冲突、`preview_ready` 放弃保留消息 /
+  版本 / 运行时绑定、确认规划不创建正式 Requirement 与 Task。
+- **稳定 Pi Session（`tests/unit/agent/container_runner_test.go`）**：复用既有 `fakeExecutor`，只按真实接口需要
+  为它补上 `agent.ContainerFileWriter` 能力（`UploadFromLocal` / `CopyToContainer`）与按发生顺序记录的操作日志，
+  没有第二套容器执行器模拟框架。覆盖首轮无归档时不恢复、Pi 使用服务端固定容器 Session 路径、完整 Session 被提升
+  为本机稳定归档且 `Archived` / 路径 / 字节数反映真实结果；第二轮在启动 Pi 之前按"本机文件 → 远程宿主机临时文件 →
+  容器固定路径"顺序恢复（用实际调用记录断言恢复先于 `--print` 主调用）、恢复失败不启动 Pi、两轮复用同一容器路径
+  而 `InvocationID` 不同、第二轮成功后新快照替换旧归档；执行失败时保留最后一次完整归档、单轮 Session 仍按原规则
+  保存且不报告已归档；本机归档损坏时恢复明确失败、不启动 Pi、不删除或改写原归档；受控文件系统故障（归档临时路径
+  被非空目录占据）导致归档失败时返回 `agent.ErrSessionArchive`、`RunResult.Status` 仍是 `RunCompleted`、
+  `StableSession.Error` 说明归档失败且已有完整归档不被破坏；执行器不实现 `ContainerFileWriter` 时明确失败、不
+  静默忽略历史上下文、不启动 Pi、不删除历史归档。
+- **只读工作区与 Docker 参数**：`tests/unit/execenv/execenv_test.go` 覆盖 `NewReadOnlyWorkspace` 设置
+  `ProjectAccessReadOnly`、可写目录按声明顺序保留、Session 目录必须由显式可写目录覆盖（空白声明等同未声明）、
+  可写目录与项目代码目录互相包含或相等时拒绝、只读工作区不接受缓存卷，以及 `NewWorkspace` 仍保持可写语义并拒绝
+  在可写模式声明可写目录；`tests/unit/container/docker_args_test.go` 覆盖规划容器创建参数包含 `--read-only`、
+  项目代码快照卷以 `type=volume,...,readonly` 挂载、`--tmpfs` 取值与显式声明的可写目录逐项一致、不出现 `--privileged` /
+  `--pid=host` / `--network=host` / `type=bind` / Docker Socket / 可写缓存卷、普通任务容器参数不因只读能力改变
+  （无 `--read-only`、无 `--tmpfs`、缓存卷保持可写）、非法组合（缺只读代码卷、缺可写临时目录、挂可写缓存卷、
+  临时目录与代码卷重叠、临时目录使用保留路径、非只读模式声明只读挂载）在创建前被拒绝，且 `RequiredCLICommands`
+  的 `create` 清单包含 `--read-only`、`--tmpfs` 与 `--mount`。
+- **已运行的定向测试**（全部 `-race -count=1`，只跑本阶段用例）：
+
+  ```bash
+  go test -race -count=1 ./tests/unit/domain -run '^TestPlanningSession'
+  go test -race -count=1 ./tests/unit/store -run '^TestPlanningSession(Store|Message|Revision|RuntimeBinding|RoleBinding)'
+  go test -race -count=1 ./tests/unit/app -run '^TestPlanningSessionService'
+  go test -race -count=1 ./tests/unit/agent -run '^TestStableSession'
+  go test -race -count=1 ./tests/unit/execenv -run '^TestReadOnlyWorkspace'
+  go test -race -count=1 ./tests/unit/container -run '^TestPlanningContainerCreateArgs'
+  ```
+
+  六条命令全部通过，`-race` 无数据竞争报告。用例使用各包既有 `TestMain` + `testkit` 随机工作空间，产物保留在
+  `TEST_ARTIFACT_DIR`（`%TEMP%\lingting-agent-flow-tests\{domain,store,app,agent,execenv,container}-*`），不写入
+  仓库或用户数据目录。另外对本阶段改动涉及的既有容器 Runner 用例（`fakeExecutor` 增加了操作顺序记录与两个文件
+  传输方法）按精确测试名做了回归：`TestCommandConstruction`、`TestSessionPathUniquePerInvocation`、
+  `TestSessionSavedLocally`、`TestExportFailureKeepsJSONL`、`TestMissingSessionMarksFailure`、
+  `TestPartialSessionRecorded`、`TestDownloadFailureKeepsRemoteCopy`、`TestNonZeroExitClassified`、
+  `TestTimeoutAndCancelClassified`、`TestUncertainProcessReported`、`TestPiUnavailableInContainer`、
+  `TestDetachedContainerRejected`、`TestDockerIDMismatchRejected` 全部通过。
+- **非测试验证**：`gofmt`（仅本次修改的测试文件）、`go vet ./...`、`git diff --check` 均无输出，新增与修改文件
+  行尾均为 LF。
+- **未运行的测试与未验证的能力**：`go test ./...`、`go test ./tests/...`、`make test`、`make test-race` 与其他
+  测试包均未执行；未设置或修改 `AGENTFLOW_REAL_TESTS` 等真实测试开关，未连接真实 Docker / SSH / Pi / 远程主机，
+  未启动真实 AgentFlow Server。因此本阶段证明的是"代码路径已实现且自动化测试在受控替身下通过"，以下事项仍属于
+  未完成：真实规划容器中项目代码是否确实不可写、真实 Pi 是否可以从归档恢复并继续同一上下文、Docker 容器停止 /
+  重建后真实 Session 的恢复能力、`docker cp` / `mkdir -p` / SSH 上传与归档原子替换的实际行为、真实 SSH / Docker
+  取消后远端 Pi 进程是否确实终止、一次性准备容器的残留与远程释放不确定结果的恢复入口，以及 `0026` / `0027` /
+  `0029` / `0030` 迁移在旧库上的升级与数据保留。M2 状态继续为 `pending`。

@@ -7,6 +7,7 @@ import (
 
 	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
+	"github.com/lingting/agentflow/internal/execenv"
 )
 
 // newLanguageContainer 构造一个语言环境容器记录。
@@ -414,6 +415,221 @@ func TestContainerWorkDirMustBeInsideWorkspace(t *testing.T) {
 			WorkDir:   workDir,
 		}); err != nil {
 			t.Fatalf("工作目录 %q 应当被接受: %v", workDir, err)
+		}
+	}
+}
+
+// planningCodeVolumeName 是规划容器只读项目代码卷的名称。
+const planningCodeVolumeName = "agentflow-planning-code-snapshot"
+
+// planningWorkspace 构造规划容器的只读工作区。
+func planningWorkspace(t *testing.T) execenv.Workspace {
+	t.Helper()
+	workspace, err := execenv.NewReadOnlyWorkspace(
+		domain.DefaultContainerWorkDir,
+		execenv.DefaultSessionDir,
+		[]string{"/tmp"},
+	)
+	if err != nil {
+		t.Fatalf("构造规划只读工作区失败: %v", err)
+	}
+	return workspace
+}
+
+// planningCreateSpec 构造规划容器的创建参数。
+//
+// 它与规划运行时把只读工作区转换为 Docker 参数的结果一致：rootfs 只读、项目代码
+// 快照卷只读挂载、可写目录全部转换为 tmpfs。
+func planningCreateSpec(t *testing.T, container domain.Container) docker.CreateContainerSpec {
+	t.Helper()
+	workspace := planningWorkspace(t)
+	spec := docker.CreateContainerSpec{
+		Container:         container,
+		ImageRef:          "agentflow-language-go:v0001-aaaaaaaaaaaa",
+		WorkDir:           workspace.Project,
+		ReadOnlyRootFS:    true,
+		PlanningSessionID: domain.NewID().String(),
+		CodeVolumes: []docker.ReadOnlyVolumeSpec{
+			{VolumeName: planningCodeVolumeName, ContainerPath: workspace.Project},
+		},
+	}
+	for _, dir := range workspace.WritableDirs {
+		spec.Tmpfs = append(spec.Tmpfs, docker.TmpfsSpec{Target: dir})
+	}
+	return spec
+}
+
+// argValues 返回指定参数在命令中出现的全部取值。
+func argValues(args []string, flag string) []string {
+	values := make([]string, 0, 4)
+	for index, arg := range args {
+		if arg == flag && index+1 < len(args) {
+			values = append(values, args[index+1])
+		}
+	}
+	return values
+}
+
+// TestPlanningContainerCreateArgs 校验规划容器的只读创建参数与普通容器不变。
+func TestPlanningContainerCreateArgs(t *testing.T) {
+	t.Parallel()
+	container := newLanguageContainer(t)
+	spec := planningCreateSpec(t, container)
+	args, err := docker.ContainerCreateArgs(spec)
+	if err != nil {
+		t.Fatalf("构造规划容器创建参数失败: %v", err)
+	}
+	joined := strings.Join(args, " ")
+	for _, required := range []string{
+		"--read-only",
+		"--tmpfs",
+		"type=volume,source=" + planningCodeVolumeName +
+			",target=" + domain.DefaultContainerWorkDir + ",readonly",
+		docker.PlanningSessionLabelKey + "=" + spec.PlanningSessionID,
+	} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("规划容器创建参数缺少 %q: %s", required, joined)
+		}
+	}
+	// tmpfs 只允许规划工作区显式声明的可写目录。
+	writable := planningWorkspace(t).WritableDirs
+	tmpfsTargets := argValues(args, "--tmpfs")
+	if len(tmpfsTargets) != len(writable) {
+		t.Fatalf("tmpfs 数量应与显式声明的可写目录一致，实际 %v", tmpfsTargets)
+	}
+	for index, target := range tmpfsTargets {
+		if target != writable[index] {
+			t.Fatalf("tmpfs 目标应为显式声明目录 %s，实际 %s", writable[index], target)
+		}
+	}
+	// 规划容器不得出现宿主机 bind 挂载、可写缓存卷、Docker Socket 或特权参数。
+	for _, forbidden := range []string{
+		"--privileged",
+		"--pid=host",
+		"--network=host",
+		"type=bind",
+		"docker.sock",
+		"/var/cache/agentflow",
+		"readonly=false",
+	} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("规划容器创建参数不得包含 %q: %s", forbidden, joined)
+		}
+	}
+	// 只读代码卷必须显式声明 readonly，不允许退化为可写挂载。
+	codeMounts := argValues(args, "--mount")
+	if len(codeMounts) != 1 || !strings.HasSuffix(codeMounts[0], ",readonly") {
+		t.Fatalf("项目代码快照卷必须以只读方式挂载，实际 %v", codeMounts)
+	}
+
+	// 普通任务容器的创建参数不因规划只读能力而改变。
+	normalArgs, err := docker.ContainerCreateArgs(docker.CreateContainerSpec{
+		Container: container,
+		ImageRef:  "agentflow-language-go:v0001-aaaaaaaaaaaa",
+		WorkDir:   domain.DefaultContainerWorkDir,
+		Caches: []docker.CacheVolumeSpec{
+			{VolumeName: "agentflow-host1-go-mod-machine-go124", ContainerPath: "/var/cache/agentflow/go/pkg/mod"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("构造普通容器创建参数失败: %v", err)
+	}
+	normalJoined := strings.Join(normalArgs, " ")
+	for _, forbidden := range []string{"--read-only", "--tmpfs", ",readonly", "planning"} {
+		if strings.Contains(normalJoined, forbidden) {
+			t.Fatalf("普通任务容器不应获得规划只读参数 %q: %s", forbidden, normalJoined)
+		}
+	}
+	cacheMounts := argValues(normalArgs, "--mount")
+	if len(cacheMounts) != 1 || strings.Contains(cacheMounts[0], "readonly") {
+		t.Fatalf("普通任务容器的缓存卷应保持可写，实际 %v", cacheMounts)
+	}
+}
+
+// TestPlanningContainerCreateArgsRejectInvalidInput 校验非法只读组合在创建前被拒绝。
+func TestPlanningContainerCreateArgsRejectInvalidInput(t *testing.T) {
+	t.Parallel()
+	container := newLanguageContainer(t)
+	imageRef := "agentflow-language-go:v0001-aaaaaaaaaaaa"
+	valid := planningCreateSpec(t, container)
+
+	cases := []struct {
+		name   string
+		mutate func(spec *docker.CreateContainerSpec)
+	}{
+		{
+			name:   "缺少只读代码卷",
+			mutate: func(spec *docker.CreateContainerSpec) { spec.CodeVolumes = nil },
+		},
+		{
+			name:   "缺少可写临时目录",
+			mutate: func(spec *docker.CreateContainerSpec) { spec.Tmpfs = nil },
+		},
+		{
+			name: "挂载可写缓存卷",
+			mutate: func(spec *docker.CreateContainerSpec) {
+				spec.Caches = []docker.CacheVolumeSpec{
+					{VolumeName: "agentflow-host1-go-mod-machine-go124", ContainerPath: "/var/cache/agentflow/go/pkg/mod"},
+				}
+			},
+		},
+		{
+			name: "临时目录与只读代码卷重叠",
+			mutate: func(spec *docker.CreateContainerSpec) {
+				spec.Tmpfs = []docker.TmpfsSpec{{Target: domain.DefaultContainerWorkDir + "/cache"}}
+			},
+		},
+		{
+			name: "临时目录使用保留路径",
+			mutate: func(spec *docker.CreateContainerSpec) {
+				spec.Tmpfs = []docker.TmpfsSpec{{Target: "/etc/agentflow"}}
+			},
+		},
+		{
+			name: "非只读模式声明只读挂载",
+			mutate: func(spec *docker.CreateContainerSpec) {
+				spec.ReadOnlyRootFS = false
+			},
+		},
+	}
+	for _, testCase := range cases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			spec := valid
+			spec.CodeVolumes = append([]docker.ReadOnlyVolumeSpec(nil), valid.CodeVolumes...)
+			spec.Tmpfs = append([]docker.TmpfsSpec(nil), valid.Tmpfs...)
+			testCase.mutate(&spec)
+			if _, err := docker.ContainerCreateArgs(spec); err == nil {
+				t.Fatalf("非法规划容器参数应被拒绝: %+v", spec)
+			}
+		})
+	}
+
+	// 保证 imageRef 与容器自身校验不会被上面的用例掩盖。
+	if _, err := docker.ContainerCreateArgs(docker.CreateContainerSpec{
+		Container: container,
+		ImageRef:  imageRef,
+	}); err != nil {
+		t.Fatalf("普通容器参数应保持可用: %v", err)
+	}
+}
+
+// TestPlanningContainerCreateArgsRequiredCLICommands 校验 CLI 能力清单包含只读参数。
+func TestPlanningContainerCreateArgsRequiredCLICommands(t *testing.T) {
+	t.Parallel()
+	options := make(map[string]struct{}, 8)
+	for _, command := range docker.RequiredCLICommands() {
+		if command.Subcommand != "create" {
+			continue
+		}
+		for _, option := range command.Options {
+			options[option.Name] = struct{}{}
+		}
+	}
+	for _, required := range []string{"--read-only", "--tmpfs", "--mount"} {
+		if _, ok := options[required]; !ok {
+			t.Fatalf("Docker CLI 能力清单缺少规划容器实际使用的参数 %s", required)
 		}
 	}
 }
