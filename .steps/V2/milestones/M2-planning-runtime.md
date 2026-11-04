@@ -295,7 +295,54 @@ SQLite 持久化连接成统一入口。它仍**没有 Pi 调用方、HTTP 入�
   `RoleToolCeiling` 保证两个角色只读；不使用开发者权限兜底，也不因配置缺失、禁用或模型为空回退到其他
   角色或 Pi 默认模型。
 
-### 7.7 仍未完成
+### 7.7 已交付：规划服务装配与生命周期管理（M2 第七阶段）
+
+三个规划服务现在由 `agentflow server` 的组合入口构造，规划 Agent 调用有了完整的生命周期边界。本阶段
+只做装配与生命周期，**没有**实现 M3 的规划轮次编排：
+
+- **构造位置与依赖关系**（`internal/server/server.go` 的 `planningServices`，在 `startServices`
+  中、角色服务就绪之后调用一次）：
+  - `app.PlanningSessionService`：`app.NewPlanningSessionService` 传入当前 Server 已打开的
+    `storage.Store`；不另开数据库连接，也不新建第二套会话存储。
+  - `app.PlanningRuntimeService`：`app.NewPlanningRuntimeService(containerService)`，复用当前
+    Server 的 `ContainerService`（由 `containerObservation` 建立）；不在 Server 中复制 `Prepare` /
+    `Release`，也不另建 Docker / SSH / SFTP 调用链。
+  - `app.PlanningAgentService`：`app.NewPlanningAgentService` 的 `Store`、`Roles`、`Containers`、
+    `Runtime` 全部来自当前 Server 的既有实例，`SessionRoot` 取 `app.SessionRoot(s.cfg)`
+    （与 `SessionService` 同一来源的本次启动生效配置，不从请求、默认值或重新读取的配置文件生成）。
+  - 三个实例保存在 `Server` 上供 M3 装配复用；本阶段不新增 HTTP 路由，也不把服务暴露给 Handler。
+- **降级边界**：SSH 或 `ContainerService` 不可用时只构造 `PlanningSessionService`，规划运行时与规划
+  Agent 保持为空——规划能力整体不可用，不伪造运行环境，也不回退到本机执行；原有任务执行路径与服务
+  装配不受影响（普通任务容器参数、Step / Workflow / Scheduler 注册顺序均未改动）。
+- **生命周期状态**：`PlanningAgentService` 直接实现 `lifecycle.Service`（`internal/app` 不反向依赖
+  `internal/lifecycle`），状态区分"尚未启动 / 正常运行 / 停止中 / 已停止"。`Start` 校验传入上下文、
+  拒绝重复启动（不覆盖已建立的取消信号），不启动任何后台循环；`Stop` 在同一临界区内切到"已停止"后
+  取消生命周期上下文并等待收敛，重复调用安全。
+- **准入与取消传播**：`RunRole` 先执行 `beginCall`，准入判断与 `runs.Add` 在同一把锁内完成，因此
+  `Stop` 的 `Wait` 开始之后不可能再有新的 `Add`，停止边界之后不会启动任何新的 Pi 调用。每次准入生成
+  一个 `context.WithCancelCause(调用方 ctx)`，生命周期取消通过它传播到 `ContainerService.RunAgent`
+  的 `ctx`，最终到达 Pi 执行与 Session 归档路径；`defer finish()` 保证所有返回路径都释放在途计数
+  并 `Done`。按规划会话的 `keyedMutex` 串行化保持不变（仍是单进程内串行，不是跨进程锁）。
+- **Stop 的等待范围**：等待的是 `RunRole` 完整返回，包含 Runner 的 Session 提取与归档，而不只是 Pi
+  主进程退出；等待同时响应传入 `Stop` 的取消与 deadline（deadline 早于默认 30s 时只用它自己的取消
+  信号，避免两个几乎同时到期的计时器把"取消"随机报告成"超时"）。停止超时或未收敛时返回真实错误，
+  不报告成功。`Stop` 不释放规划容器、不删除快照卷、不删除 Session 归档。
+- **Resource / 恢复边界**：Server 停止与重启都不删除需要恢复的规划容器、快照卷、角色 Pi Session 标识
+  与本机归档；启动不重新 Clone，停止不无条件调用 `PlanningRuntimeService.Release`，单次请求取消也不
+  清理远程资源。
+- **生命周期注册**：`planningAgent` 在后台服务列表中最后注册，因此停止顺序反转为最先执行——先在停止
+  边界上拒绝新的规划调用并收敛在途调用，再停止其他后台服务；它依赖的存储、容器服务与角色服务都不是
+  lifecycle 服务，数据库在 `manager.Stop` 之后才关闭。整体关闭顺序仍是 HTTP → 后台服务 → 数据库，
+  启动失败继续由 Manager 逆序清理；`lifecycle.Manager` 本身未改动。
+- **测试缝隙**：新增窄端口 `app.PlanningAgentContainerPort`（`InspectContainer` + `RunAgent`），由
+  `*app.ContainerService` 满足，`PlanningAgentServiceOptions.Containers` 改为该端口，与
+  `app.StepExecutionContainerPort` 等既有写法一致；没有引入新的依赖注入框架，也没有改变运行时语义。
+- **本阶段测试**：新增 `tests/unit/app/planningagent`，覆盖"未启动拒绝 / 启动后可进入执行 / 停止后
+  拒绝 / 在途调用收到取消并收敛 / 停止等待收敛不提前返回"五条业务场景，以及"准入与停止竞争 /
+  多调用并发停止 / 并发 Stop 安全 / 停止超时返回真实错误"四条并发场景。取消传播用例断言的是传给
+  `RunAgent` 的 `ctx` 确实被取消，而不只是生命周期字段变化。实跑命令与结果见 §7.9。
+
+### 7.8 仍未完成
 
 以下能力尚未实现，M2 状态保持 `pending`：
 
@@ -304,20 +351,20 @@ SQLite 持久化连接成统一入口。它仍**没有 Pi 调用方、HTTP 入�
 - 迁移 `0028_projects_default_host.sql`（项目默认执行节点）与后续项目级调度的迁移。
 - 规划调用只在当前进程内按会话串行，没有跨进程租约：两个进程对同一规划会话发起规划调用时，角色会话绑定
   由条件更新拒绝过期写入，但两份 Pi 调用仍可能同时读写同一份容器内 Session 文件。
-- 规划运行时在 `internal/lifecycle` 中的注册与收敛，以及 `agentflow server` 的服务装配
-  （`PlanningRuntimeService`、`PlanningSessionService` 与 `PlanningAgentService` 目前都未被任何装配
-  入口构造，规划 Agent 服务的本机 Session 根目录也还没有由运行配置注入）。
-- HTTP API 与前端需求规划工作台。
+- 规划服务的 HTTP API 与前端需求规划工作台（M3）：三个服务只完成装配与生命周期，没有对外入口。
 - 撤销与重跑之外的失败恢复入口：结果不确定的运行时现场只能通过再次 `Prepare` 做只读核验；残留的
   一次性准备容器没有专门清理路径，也没有跨进程会话锁。
 - `Release` 不检查是否存在在途规划调用（运行时绑定写入用旧对象整行覆盖业务状态的风险已在 §7.5 解决，
   该处改为只写运行时列的条件更新）。
 - 真实环境下的只读验证（文件工具与 `sh -c` 写入是否真的被文件系统拒绝）尚未执行：本阶段只确认参数
   构造正确，**不代表只读规划环境已经可用**。
-- 本阶段新增的会话事务、条件更新、角色会话绑定与归档逻辑没有任何自动化测试守点，也未在真实数据库、真实
-  Docker / SSH 与真实 Pi 上验证并发行为、恢复与归档结果。
+- 第七阶段只新增了规划 Agent 生命周期的自动化测试：会话事务、条件更新、角色会话绑定、稳定 Session
+  恢复与归档逻辑仍没有自动化测试守点，也未在真实数据库、真实 Docker / SSH 与真实 Pi 上验证并发行为、
+  恢复与归档结果。
+- 未授权的验证：真实只读环境（文件工具与 `sh -c` 写入是否真的被文件系统拒绝）、真实多轮 Pi Session
+  跨容器重建恢复、迁移升级与旧库数据保留、真实远程容器释放，都没有执行，不得报告为通过。
 
-### 7.8 验证方式
+### 7.9 验证方式
 
 六个阶段都只做非测试验证：阅读代码核对调用链、`gofmt`、`go vet ./...`、`git diff --check`。第二阶段另加
 人工核对迁移的表、索引、字段、非枚举约束与版本顺序；第三阶段人工核对快照卷命名与标签、准备 / 只读复核
@@ -337,3 +384,28 @@ NULL 安全的比较并交换条件、`persistRuntime` 的事务内重读与错�
 只在代码层面核对过，容器仍在运行时复用同一份 tmpfs 文件**不等于**容器停止、重建或 Docker 环境恢复后仍能
 恢复上下文；`docker cp` 恢复、`mkdir -p` 建立容器目录、SSH 上传与归档原子替换的实际行为，以及 Pi 对已存在
 Session 文件的续写语义，都需要在真实只读规划环境中验证后才能报告为可用。
+
+第七阶段的验证方式与前六个阶段不同：本任务明确授权针对**本阶段实际实现的生命周期业务行为**编写并运行
+必要测试，因此既有非测试验证，也有定向测试结果。
+
+- **非测试验证**：人工核对三个服务的构造位置与参数来源（`Store` / `Roles` / `Containers` / `Runtime`
+  全部来自当前 Server 实例，`SessionRoot` 来自 `app.SessionRoot(s.cfg)`）、SSH 与容器服务缺失时的降级
+  分支、`planningAgent` 在服务列表中的注册位置与逆序关闭关系、`beginCall` 准入与 `Stop` 的临界区顺序、
+  `Wait` 之前不再发生 `Add`、取消信号从 `RunRole` 到 `RunAgent` 的传播路径，并确认普通任务执行路径
+  （Step / Workflow / Scheduler / 容器创建参数）未被改动。`gofmt`、`go vet ./...`、`git diff --check`
+  均无输出。
+- **已运行的定向测试**（`tests/unit/app/planningagent`，只跑本阶段用例）：
+
+  ```bash
+  go test -count=1 ./tests/unit/app/planningagent -run '^(TestPlanningAgentService)'
+  go test -count=1 -race ./tests/unit/app/planningagent -run '^(TestPlanningAgentService)'
+  ```
+
+  两条命令均通过（9 个用例全部 PASS，`-race` 无数据竞争报告）；`-count=2` 的重复运行同样全部通过，
+  用例使用 `TestMain` + `testkit` 随机工作空间，产物保留在 `TEST_ARTIFACT_DIR`
+  （`%TEMP%\lingting-agent-flow-tests\planningagent-*`），不写入仓库与用户数据目录。
+- **未运行的测试**：`go test ./...`、`go test ./tests/...`、`make test`、`make test-race`、其他测试包
+  （含 `tests/unit/store` 的迁移与仓储用例）、真实 Pi / SSH / Docker / 远程主机测试均未执行；未设置或
+  修改 `AGENTFLOW_REAL_TESTS` 等真实测试开关，未关闭 SSH 主机密钥校验，未启动真实 AgentFlow Server
+  连接真实设备。因此第七阶段只证明生命周期准入、取消传播与停止收敛在该测试缝隙下成立，不能推断真实
+  远程环境、真实 Pi 归档或多轮恢复已经可用。

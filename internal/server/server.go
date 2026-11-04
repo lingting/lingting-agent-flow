@@ -241,6 +241,19 @@ type Server struct {
 	codeInitialize *app.CodeInitializeService
 	// containerService 提供代码保存的只读核验能力，为空时核验接口返回 503。
 	containerService *app.ContainerService
+	// planningSessions 是规划会话业务编排服务，由已打开的数据库构造。
+	//
+	// 它只依赖存储：会话创建、消息与 Revision 追加都在同一事务内完成，不接触远程资源。
+	planningSessions *app.PlanningSessionService
+	// planningRuntime 是规划运行环境服务，复用上面的 containerService。
+	//
+	// 容器服务缺失时保持为空：规划运行环境不可用，不退化成任何本机执行路径。
+	planningRuntime *app.PlanningRuntimeService
+	// planningAgent 是规划角色 Pi 调用入口，注册进统一生命周期。
+	//
+	// 它复用同一份存储、角色服务、容器服务与本机 Session 根目录；为空表示规划 Agent
+	// 能力不可用（SSH 或容器服务缺失），此时不伪造调用入口。
+	planningAgent *app.PlanningAgentService
 	// taskContainers 提供任务容器的只读查询与显式处置。
 	//
 	// 查询部分只依赖存储；处置部分在容器服务缺失时返回服务不可用，不会伪造结论。
@@ -601,6 +614,11 @@ func (s *Server) startServices(ctx context.Context) error {
 		return err
 	}
 	s.roleQuery = roles
+	// 三个规划服务在存储、角色配置与容器服务就绪后一次装配完成：规划会话只依赖存储，
+	// 规划运行时与规划 Agent 复用当前 Server 已有的容器服务，不另建 SSH / Docker 调用链。
+	if err := s.planningServices(); err != nil {
+		return err
+	}
 	records, err := s.executionRecordService()
 	if err != nil {
 		return err
@@ -704,6 +722,14 @@ func (s *Server) startServices(ctx context.Context) error {
 		// 环境构建管理器注册在最后：停止顺序因此反转为最先执行，先取消并收敛在途
 		// 构建，再让编排器与调度器停止，避免它们在停止过程中又发起新的构建。
 		services = append(services, s.environmentBuilds)
+	}
+	if s.planningAgent != nil {
+		// 规划 Agent 注册在最后：停止顺序因此反转为最先执行，先在停止边界上拒绝新的
+		// 规划调用并等待在途调用连同 Session 归档一起收敛，再让其他后台服务停止。
+		//
+		// 它依赖的存储、容器服务与角色服务都不是 lifecycle 服务：数据库由 Server 在
+		// manager.Stop 之后关闭，因此规划调用的收敛发生在数据库关闭之前。
+		services = append(services, s.planningAgent)
 	}
 	if len(services) == 0 {
 		return nil
@@ -882,8 +908,50 @@ func (s *Server) containerObservation() (*app.ContainerService, error) {
 	})
 }
 
-// hostValidationService 构造后台环境预检服务并接入执行节点服务。
+// planningServices 装配规划会话、规划运行时与规划 Agent 三个服务。
 //
+// 依赖顺序固定：规划会话只依赖已打开的数据库；规划运行时复用当前 Server 的容器服务；
+// 规划 Agent 再复用前两者与角色服务。SSH 或容器服务不可用时规划运行时与规划 Agent
+// 保持为空：规划能力整体不可用，既不伪造运行环境，也不影响原有任务执行路径。
+//
+// 本机 Session 根目录取自本次启动实际生效的配置（与 SessionService 使用同一来源），
+// 不从请求、默认值或重新读取的配置文件生成。
+func (s *Server) planningServices() error {
+	if s.store == nil {
+		return nil
+	}
+	if s.planningSessions == nil {
+		sessions, err := app.NewPlanningSessionService(app.PlanningSessionServiceOptions{
+			Store: s.store,
+		})
+		if err != nil {
+			return fmt.Errorf("初始化规划会话服务失败: %w", err)
+		}
+		s.planningSessions = sessions
+	}
+	if s.containerService == nil || s.roleQuery == nil {
+		return nil
+	}
+	runtime, err := app.NewPlanningRuntimeService(s.containerService)
+	if err != nil {
+		return fmt.Errorf("初始化规划运行时服务失败: %w", err)
+	}
+	s.planningRuntime = runtime
+	agent, err := app.NewPlanningAgentService(app.PlanningAgentServiceOptions{
+		Store:       s.store,
+		Roles:       s.roleQuery,
+		Containers:  s.containerService,
+		Runtime:     runtime,
+		SessionRoot: app.SessionRoot(s.cfg),
+	})
+	if err != nil {
+		return fmt.Errorf("初始化规划 Agent 服务失败: %w", err)
+	}
+	s.planningAgent = agent
+	return nil
+}
+
+// hostValidationService 构造后台环境预检服务并接入执行节点服务。
 // SSH 服务缺失时无法执行预检，此时返回 nil：执行节点接口仍然可用，
 // 新增节点会停留在 checking，直到通过 CLI 或配置修正后重新校验。
 func (s *Server) hostValidationService(

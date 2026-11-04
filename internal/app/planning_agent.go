@@ -31,7 +31,9 @@ var (
 // 职责边界：
 //   - 读取并校验规划会话、所属项目、规划容器与固定角色配置；
 //   - 为需求分析师与方案规划师分别维护稳定的 Pi 会话标识、容器内固定路径与本机归档目录；
-//   - 通过 ContainerService.RunAgent 在规划容器内执行一次 Pi，并返回真实执行结果。
+//   - 通过 ContainerService.RunAgent 在规划容器内执行一次 Pi，并返回真实执行结果；
+//   - 实现 lifecycle.Service：Start 之后才接受调用，Stop 时拒绝新调用、取消在途调用并
+//     等待它们完整收敛。
 //
 // 它不推进会话状态、不追加消息与 Revision、不解析结构化输出，也不创建或释放容器：
 // 运行环境未准备时只调用 PlanningRuntimeService.Prepare 复用既有能力。外部接口不接受
@@ -39,15 +41,29 @@ var (
 type PlanningAgentService struct {
 	store      storage.Store
 	roles      *RoleService
-	containers *ContainerService
+	containers PlanningAgentContainerPort
 	// runtime 用于在规划运行环境尚未准备时复用既有准备流程，可为空。
 	runtime *PlanningRuntimeService
 	// sessionRoot 是本机 Session 持久化根目录的绝对路径。
 	sessionRoot string
 	// locks 按规划会话串行化规划调用：同一会话的两个角色共用一个稳定 Session 目录，
-	// 并发调用会让同一份 Pi JSONL 同时被两个进程读写。
+	// 并发调用会让同一份 Pi JSONL 同时被两个进程读写。它只保证单进程内串行，不是跨进程锁。
 	locks keyedMutex
-	now   func() time.Time
+	// lifecycle 管理后台服务状态与在途调用：Server 停止时据此拒绝新调用、取消在途
+	// 调用并等待其完整收敛。
+	lifecycle lifecycleState
+	now       func() time.Time
+}
+
+// PlanningAgentContainerPort 是规划角色调用需要的容器能力。
+//
+// 容器只被核验与使用：本服务不创建、启动、停止、删除或接管容器，也不会在容器不可用
+// 时静默回退到本机执行。
+type PlanningAgentContainerPort interface {
+	// InspectContainer 核验规划容器当前状态与标签。
+	InspectContainer(ctx context.Context, request InspectContainerRequest) (ContainerDetail, error)
+	// RunAgent 在受管理的规划容器内执行一次 Agent 调用。
+	RunAgent(ctx context.Context, request ContainerAgentRequest) (ContainerAgentResult, error)
 }
 
 // PlanningAgentServiceOptions 是构造规划 Agent 服务的输入。
@@ -57,7 +73,7 @@ type PlanningAgentServiceOptions struct {
 	// Roles 是固定角色配置的统一读取入口。
 	Roles *RoleService
 	// Containers 是受管理容器与容器内 Agent 调用入口。
-	Containers *ContainerService
+	Containers PlanningAgentContainerPort
 	// Runtime 是可选的规划运行时服务：会话尚未准备运行环境时用它准备容器与快照。
 	Runtime *PlanningRuntimeService
 	// SessionRoot 是本机 Session 持久化根目录，必须落在配置的数据目录下。
@@ -139,11 +155,29 @@ type PlanningAgentResult struct {
 
 // RunRole 在规划容器内执行一次规划角色的 Pi 调用。
 //
-// 执行顺序固定为：校验请求与会话状态 → 校验所属项目 → 读取并校验固定角色配置 → 核验
-// 规划容器归属与运行状态 → 确保两个角色的会话标识已绑定 → 生成稳定 Session 与本机归档
-// 路径 → 通过 ContainerService.RunAgent 执行。远程执行只走现有容器服务，不直接访问
-// SSH、Docker CLI 或 SFTP。
+// 准入判断与在途调用登记在同一个临界区完成：服务未启动、正在停止或已经停止时直接拒绝，
+// 登记成功的调用会在所有返回路径上释放在途计数。每次调用的上下文同时受调用方取消与
+// 服务生命周期取消约束，取消信号随上下文传递给 ContainerService.RunAgent，最终传到 Pi
+// 执行与 Session 归档路径。
+//
+// 登记之后的执行顺序固定为：校验请求与会话状态 → 校验所属项目 → 读取并校验固定角色
+// 配置 → 核验规划容器归属与运行状态 → 确保两个角色的会话标识已绑定 → 生成稳定 Session
+// 与本机归档路径 → 通过 ContainerService.RunAgent 执行。远程执行只走现有容器服务，
+// 不直接访问 SSH、Docker CLI 或 SFTP。
 func (s *PlanningAgentService) RunRole(
+	ctx context.Context,
+	request RunPlanningRoleRequest,
+) (PlanningAgentResult, error) {
+	runCtx, finish, err := s.beginCall(ctx)
+	if err != nil {
+		return PlanningAgentResult{}, err
+	}
+	defer finish()
+	return s.runRole(runCtx, request)
+}
+
+// runRole 执行一次已准入的规划角色调用：业务校验与执行顺序不变。
+func (s *PlanningAgentService) runRole(
 	ctx context.Context,
 	request RunPlanningRoleRequest,
 ) (PlanningAgentResult, error) {
