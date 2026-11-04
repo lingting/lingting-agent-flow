@@ -23,6 +23,8 @@ type dbStore struct {
 	planningMessageStore
 	// planningRevisionStore 提供规划方案版本的追加与查询，版本号在写入事务内分配。
 	planningRevisionStore
+	// planningSessionLeaseStore 提供规划会话的跨进程执行租约，与会话业务状态无关。
+	planningSessionLeaseStore
 	taskStore
 	stepStore
 	attemptStore
@@ -57,6 +59,8 @@ type txStore struct {
 	planningMessageStore
 	// planningRevisionStore 提供规划方案版本的追加与查询，版本号在写入事务内分配。
 	planningRevisionStore
+	// planningSessionLeaseStore 提供规划会话的跨进程执行租约，与会话业务状态无关。
+	planningSessionLeaseStore
 	taskStore
 	stepStore
 	attemptStore
@@ -82,56 +86,58 @@ type txStore struct {
 func newDBStore(db *sql.DB) *dbStore {
 	pool := sqlPool{db: db}
 	return &dbStore{
-		roleStore:               roleStore{q: pool},
-		executionHostStore:      executionHostStore{q: pool},
-		requirementStore:        requirementStore{q: pool},
-		projectStore:            projectStore{q: pool},
-		planningSessionStore:    planningSessionStore{q: pool},
-		planningMessageStore:    planningMessageStore{q: pool},
-		planningRevisionStore:   planningRevisionStore{q: pool},
-		taskStore:               taskStore{q: pool},
-		stepStore:               stepStore{q: pool},
-		attemptStore:            attemptStore{q: pool},
-		sessionStore:            sessionStore{q: pool},
-		validationStore:         validationStore{q: pool},
-		eventStore:              eventStore{q: pool},
-		environmentVersionStore: environmentVersionStore{q: pool},
-		containerStore:          containerStore{q: pool},
-		codeSaveStore:           codeSaveStore{q: pool},
-		codeFetchStore:          codeFetchStore{q: pool},
-		taskWorkspaceInitStore:  taskWorkspaceInitStore{q: pool},
-		stepExecutionStore:      stepExecutionStore{q: pool},
-		validationFeedbackStore: validationFeedbackStore{q: pool},
-		workflowRunStore:        workflowRunStore{q: pool},
-		repairCycleStore:        repairCycleStore{q: pool},
+		roleStore:                 roleStore{q: pool},
+		executionHostStore:        executionHostStore{q: pool},
+		requirementStore:          requirementStore{q: pool},
+		projectStore:              projectStore{q: pool},
+		planningSessionStore:      planningSessionStore{q: pool},
+		planningMessageStore:      planningMessageStore{q: pool},
+		planningRevisionStore:     planningRevisionStore{q: pool},
+		planningSessionLeaseStore: planningSessionLeaseStore{q: pool},
+		taskStore:                 taskStore{q: pool},
+		stepStore:                 stepStore{q: pool},
+		attemptStore:              attemptStore{q: pool},
+		sessionStore:              sessionStore{q: pool},
+		validationStore:           validationStore{q: pool},
+		eventStore:                eventStore{q: pool},
+		environmentVersionStore:   environmentVersionStore{q: pool},
+		containerStore:            containerStore{q: pool},
+		codeSaveStore:             codeSaveStore{q: pool},
+		codeFetchStore:            codeFetchStore{q: pool},
+		taskWorkspaceInitStore:    taskWorkspaceInitStore{q: pool},
+		stepExecutionStore:        stepExecutionStore{q: pool},
+		validationFeedbackStore:   validationFeedbackStore{q: pool},
+		workflowRunStore:          workflowRunStore{q: pool},
+		repairCycleStore:          repairCycleStore{q: pool},
 	}
 }
 
 // newTxStore 构造事务仓储，全部实体共享同一个事务连接。
 func newTxStore(tx *sql.Tx) *txStore {
 	return &txStore{
-		roleStore:               roleStore{q: tx},
-		executionHostStore:      executionHostStore{q: tx},
-		requirementStore:        requirementStore{q: tx},
-		projectStore:            projectStore{q: tx},
-		planningSessionStore:    planningSessionStore{q: tx},
-		planningMessageStore:    planningMessageStore{q: tx},
-		planningRevisionStore:   planningRevisionStore{q: tx},
-		taskStore:               taskStore{q: tx},
-		stepStore:               stepStore{q: tx},
-		attemptStore:            attemptStore{q: tx},
-		sessionStore:            sessionStore{q: tx},
-		validationStore:         validationStore{q: tx},
-		eventStore:              eventStore{q: tx},
-		environmentVersionStore: environmentVersionStore{q: tx},
-		containerStore:          containerStore{q: tx},
-		codeSaveStore:           codeSaveStore{q: tx},
-		codeFetchStore:          codeFetchStore{q: tx},
-		taskWorkspaceInitStore:  taskWorkspaceInitStore{q: tx},
-		stepExecutionStore:      stepExecutionStore{q: tx},
-		validationFeedbackStore: validationFeedbackStore{q: tx},
-		workflowRunStore:        workflowRunStore{q: tx},
-		repairCycleStore:        repairCycleStore{q: tx},
+		roleStore:                 roleStore{q: tx},
+		executionHostStore:        executionHostStore{q: tx},
+		requirementStore:          requirementStore{q: tx},
+		projectStore:              projectStore{q: tx},
+		planningSessionStore:      planningSessionStore{q: tx},
+		planningMessageStore:      planningMessageStore{q: tx},
+		planningRevisionStore:     planningRevisionStore{q: tx},
+		planningSessionLeaseStore: planningSessionLeaseStore{q: tx},
+		taskStore:                 taskStore{q: tx},
+		stepStore:                 stepStore{q: tx},
+		attemptStore:              attemptStore{q: tx},
+		sessionStore:              sessionStore{q: tx},
+		validationStore:           validationStore{q: tx},
+		eventStore:                eventStore{q: tx},
+		environmentVersionStore:   environmentVersionStore{q: tx},
+		containerStore:            containerStore{q: tx},
+		codeSaveStore:             codeSaveStore{q: tx},
+		codeFetchStore:            codeFetchStore{q: tx},
+		taskWorkspaceInitStore:    taskWorkspaceInitStore{q: tx},
+		stepExecutionStore:        stepExecutionStore{q: tx},
+		validationFeedbackStore:   validationFeedbackStore{q: tx},
+		workflowRunStore:          workflowRunStore{q: tx},
+		repairCycleStore:          repairCycleStore{q: tx},
 	}
 }
 

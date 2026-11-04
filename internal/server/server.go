@@ -932,7 +932,17 @@ func (s *Server) planningServices() error {
 	if s.containerService == nil || s.roleQuery == nil {
 		return nil
 	}
-	runtime, err := app.NewPlanningRuntimeService(s.containerService)
+	// 规划会话租约由两个服务共用：RunRole、Prepare 与 Release 必须竞争同一把会话锁，
+	// 否则一个实例准备容器时另一个实例可以释放它。
+	leases, err := app.NewPlanningSessionLeaseService(app.PlanningLeaseOptions{Store: s.store})
+	if err != nil {
+		return fmt.Errorf("初始化规划会话租约服务失败: %w", err)
+	}
+	runtime, err := app.NewPlanningRuntimeService(app.PlanningRuntimeServiceOptions{
+		Store:      s.store,
+		Containers: s.containerService,
+		Leases:     leases,
+	})
 	if err != nil {
 		return fmt.Errorf("初始化规划运行时服务失败: %w", err)
 	}
@@ -942,6 +952,7 @@ func (s *Server) planningServices() error {
 		Roles:       s.roleQuery,
 		Containers:  s.containerService,
 		Runtime:     runtime,
+		Leases:      leases,
 		SessionRoot: app.SessionRoot(s.cfg),
 	})
 	if err != nil {

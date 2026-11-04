@@ -268,6 +268,71 @@ func (b PlanningSessionRoleBinding) Complete() bool {
 		strings.TrimSpace(b.PlannerSessionID) != ""
 }
 
+// PlanningSessionLeaseStore 保存规划会话的跨进程执行租约。
+//
+// 规划调用（容器准备、角色会话绑定、Pi 执行与 Session 归档）必须由同一个执行者独占：
+// 进程内互斥只在单个 Server 内有效，两个 Server 连接同一个数据库时仍可能同时对同一个
+// 规划会话发起调用。租约把这份归属变成数据库事实，并由领取代次（epoch）提供栅栏。
+//
+// 三个操作都必须由单条条件语句完成，不允许"先查询判断空闲，再无条件写入"：两步方案在
+// 并发领取时会让两个执行者都认为自己是持有者。
+type PlanningSessionLeaseStore interface {
+	// AcquirePlanningSessionLease 以原子条件写入领取规划会话租约。
+	//
+	// 语义固定为：
+	//   - 没有租约行时创建一行，代次从 1 开始；
+	//   - 当前租约已显式释放（owner 为空）或已过期时允许领取，且代次在同一语句内递增；
+	//   - 当前租约仍有效时返回 storage.ErrConflict，调用方不得把冲突当作领取成功；
+	//   - 返回的 handle 是数据库确认过的执行权身份，包含存储层分配的代次。
+	AcquirePlanningSessionLease(
+		ctx context.Context,
+		request PlanningSessionLeaseRequest,
+	) (domain.PlanningSessionLeaseHandle, error)
+	// RenewPlanningSessionLease 以 owner + epoch 为条件延长规划会话租约。
+	//
+	// 只有"同一 owner、同一代次、仍未过期"三者同时成立才续期；租约过期、已被接管或
+	// 数据库不可用都返回 storage.ErrConflict（进程内无法再确认持有权时不得继续执行）。
+	RenewPlanningSessionLease(
+		ctx context.Context,
+		request PlanningSessionLeaseRenewRequest,
+	) error
+	// ReleasePlanningSessionLease 释放由指定租约身份持有的规划会话租约。
+	//
+	// 条件同时覆盖 owner、epoch 与"仍未过期"：过期租约不得通过迟到释放重新清空，旧代次
+	// 也不得释放新持有者的租约。释放只清空 owner / operation / 到期时间并保留代次，因此
+	// 下一次领取继续递增。没有命中任何记录时返回 false 与 storage.ErrConflict：调用方
+	// 不得把"没释放任何东西"当成本次执行者已成功解锁。
+	ReleasePlanningSessionLease(
+		ctx context.Context,
+		handle domain.PlanningSessionLeaseHandle,
+		at time.Time,
+	) (bool, error)
+}
+
+// PlanningSessionLeaseRequest 是一次规划会话租约领取请求。
+type PlanningSessionLeaseRequest struct {
+	// PlanningSessionID 是被领取的规划会话。
+	PlanningSessionID domain.ID
+	// Owner 是领取者标识，由服务端生成且每次领取唯一。
+	Owner string
+	// Operation 是本次操作类型，只用于诊断与审计，不设数据库取值白名单。
+	Operation domain.PlanningLeaseOperation
+	// TTL 是租约有效期，必须大于 0。
+	TTL time.Duration
+	// At 是领取时间，零值使用当前时间。
+	At time.Time
+}
+
+// PlanningSessionLeaseRenewRequest 是一次规划会话租约续期请求。
+type PlanningSessionLeaseRenewRequest struct {
+	// Handle 是本次领取的身份，必须来自成功的 AcquirePlanningSessionLease。
+	Handle domain.PlanningSessionLeaseHandle
+	// TTL 是新的租约有效期，必须大于 0。
+	TTL time.Duration
+	// At 是续期时间，零值使用当前时间。
+	At time.Time
+}
+
 // AppendPlanningMessageRequest 是一次"追加规划消息"的输入。
 //
 // 它不包含序号与标识：序号由存储层在事务内分配，标识由领域层构造，从而保证调用方
@@ -1071,6 +1136,9 @@ type Tx interface {
 	// PlanningSessionStore 提供规划会话、消息与方案版本的读写；规划会话不进入
 	// Task 执行记录。
 	PlanningSessionStore
+	// PlanningSessionLeaseStore 提供规划会话的跨进程执行租约；它与规划会话的业务状态
+	// 无关，只表达"谁正在占用这个会话的运行时资源"。
+	PlanningSessionLeaseStore
 	StepStore
 	AttemptStore
 	SessionStore

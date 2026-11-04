@@ -35,6 +35,8 @@
   已实现（M2 第二阶段），实际表结构与索引见 [`../DATA-MODEL.md`](../DATA-MODEL.md) §2。
 - 迁移 `0028_projects_default_host.sql`（项目默认执行节点）：已实现（M2 第八阶段），
   实际脚本、字段、部分索引与 NULL 语义见 [`../DATA-MODEL.md`](../DATA-MODEL.md) §2。
+- 迁移 `0031_planning_session_leases.sql`（规划会话跨进程执行租约）：已实现（M2 第九阶段），
+  实际脚本、组合约束、部分索引、epoch 与释放语义见 [`../DATA-MODEL.md`](../DATA-MODEL.md) §2。
 
 ### 2.4 生命周期
 
@@ -341,7 +343,7 @@ SQLite 持久化连接成统一入口。它仍**没有 Pi 调用方、HTTP 入�
 - **本阶段测试**：新增 `tests/unit/app/planningagent`，覆盖"未启动拒绝 / 启动后可进入执行 / 停止后
   拒绝 / 在途调用收到取消并收敛 / 停止等待收敛不提前返回"五条业务场景，以及"准入与停止竞争 /
   多调用并发停止 / 并发 Stop 安全 / 停止超时返回真实错误"四条并发场景。取消传播用例断言的是传给
-  `RunAgent` 的 `ctx` 确实被取消，而不只是生命周期字段变化。实跑命令与结果见 §7.10。
+  `RunAgent` 的 `ctx` 确实被取消，而不只是生命周期字段变化。实跑命令与结果见 §7.11。
 
 ### 7.8 已交付：项目默认执行节点配置（M2 第八阶段）
 
@@ -381,14 +383,66 @@ SQLite 持久化连接成统一入口。它仍**没有 Pi 调用方、HTTP 入�
 字段与项目执行租约（`0029` / `0030`）、跨进程规划调用协调、真实 Pi / SSH / Docker 规划环境验证，也
 不修改普通任务的执行节点选择与任务配置快照。
 
-定向测试覆盖本阶段业务场景（命令、结果与产物路径见 §7.10）：Domain 的归一化与空值语义；App 的
+定向测试覆盖本阶段业务场景（命令、结果与产物路径见 §7.11）：Domain 的归一化与空值语义；App 的
 "不设置 / 设置有效节点 / 更新切换 / 清空落 NULL / 拒绝不存在与已删除节点 / 节点删除后仍可读取与编辑"；
 Store 的 NULL 与非 NULL 往返、更新默认节点不影响其它项目字段、项目默认节点变化不改写任务
 `host_id` 与 `config_json` 快照；`0028` 在既有项目表上的增量升级（既有数据保留、新增列 NULL、版本
 记录与部分索引条件正确）；HTTP 的创建、列表、详情、更新读写与 null 语义、无效节点返回 `400` 且不留
 部分写入；前端表单取值转换、清除语义与"节点不在列表中"的展示规则。
 
-### 7.9 仍未完成
+### 7.9 已交付：规划会话跨进程执行租约与运行时释放保护（M2 第九阶段）
+
+规划调用现在有数据库级的跨进程互斥：`Prepare`、`RunRole` 与 `Release` 竞争同一把会话锁，租约覆盖容器准备、
+角色会话绑定、Pi 执行与 Session 归档的完整过程；租约丢失会取消在途调用并等待其收敛。M2 已有业务状态机、
+Revision、角色会话标识、固定快照与普通任务执行行为均未改变。
+
+- **持久化**：新增迁移 `internal/storage/sqlite/migrations/0031_planning_session_leases.sql`，表
+  `planning_session_leases`（主键 `planning_session_id`、`owner`、`operation`、`epoch`、
+  `lease_expires_at`、`updated_at`）与部分索引 `idx_planning_session_leases_expiry`。字段、组合约束、
+  epoch 与释放语义见 [`../DATA-MODEL.md`](../DATA-MODEL.md) §2 的 `0031` 条目：不声明外键、不为
+  `operation` 设枚举白名单、释放不删行且保留 epoch；`0026` / `0028` 未修改。
+- **领域与存储**：`domain.PlanningSessionLeaseHandle`（规划会话 + owner + epoch）与
+  `domain.PlanningLeaseOperation`（`run_role` / `prepare` / `release`，只是诊断分类）。存储层新增
+  `AcquirePlanningSessionLease` / `RenewPlanningSessionLease` / `ReleasePlanningSessionLease`，全部为单条
+  条件语句：领取用原子 UPSERT 递增 epoch（无记录从 1 开始，已释放或已过期可接管，未到期返回
+  `storage.ErrConflict`）；续期与释放都要求 owner + epoch 匹配且仍未过期；释放只清空 owner / operation /
+  到期时间并保留 epoch。影响行数为 0 一律返回 `storage.ErrConflict`（释放同时返回 false），没有任何"先
+  SELECT 判断空闲再无条件 UPDATE"的两步路径。owner 由服务端生成且每次领取唯一，epoch 只由存储层分配：
+  App 不计算代次，外部接口不接受 owner、epoch、TTL 与到期时间。
+- **应用层租约服务**（`internal/app/planning_lease.go`）：`PlanningSessionLeaseService` 集中定义 TTL（默认
+  2 分钟）、续租间隔（TTL/3，下限 50ms）与单次读写超时（5s），可注入时钟与较短 TTL。领取成功后立即启动
+  后台续租；续租失败即记录原因并取消业务上下文。续租使用独立于业务请求的上下文（`context.WithoutCancel`
+  加单次超时），因此请求取消或 Server 停止都不会停止续租——直到调用方显式 `Settle`。`Settle` 先关闭停止
+  信号并等待续租 goroutine 退出，再以 owner + epoch 释放租约；返回错误同时保留"租约丢失"与"释放失败"。
+- **RunRole 覆盖范围**：`PlanningAgentService.runRole` 在进程内排队之后、读取会话之前取得租约，之后的会话
+  校验、项目校验、角色配置、容器准备、角色会话绑定、Session 恢复、Pi 执行与归档都在租约上下文内执行；
+  租约收尾通过命名返回值合并进结果错误，释放失败或租约被接管不会被吞掉。Pi 进程退出不是结束边界，
+  归档完成后才 `Settle`。`Stop` 的等待范围因此仍包含租约收尾与归档。
+- **Prepare / Release 与 RunRole 的互斥关系**：`PlanningRuntimeService.Prepare` 与 `Release` 先取得同一
+  租约再动手；`Release` 冲突时在进入任何容器删除、快照卷删除或绑定清空之前返回
+  `ErrPlanningRuntimeBusy`，成功路径上租约持续到三类资源操作全部结束。`RunRole` 内部的准备走
+  `prepareHeld`，复用已持有的租约，不存在嵌套领取、自锁或提前释放。进程内 `keyedMutex` 保留为排队优化，
+  跨进程互斥由租约承担：同进程的第二个操作先排队，跨进程的第二个操作直接得到"正被占用"。
+- **错误语义**：规划 Agent 新增 `ErrPlanningAgentBusy` / `ErrPlanningAgentLeaseLost` /
+  `ErrPlanningAgentLeaseUnavailable`；规划运行时新增 `ErrPlanningRuntimeBusy` /
+  `ErrPlanningRuntimeLeaseLost` / `ErrPlanningRuntimeLeaseUnavailable` 与阶段 `lease`。竞争、丢失与数据库
+  不可用可区分，调用方不解析错误文本；M3 的 HTTP 尚未实现，本阶段不新增路由。
+- **释放路径测试缝隙**：新增窄端口 `app.PlanningRuntimeReleasePort`（读取执行节点、读取容器记录、删除容器、
+  删除本会话快照卷）与 `PlanningRuntimeServiceOptions.ReleasePort`。生产装配始终留空，由
+  `planningRuntimeContainerRelease` 包装 `ContainerService`：快照卷删除代码只是从 `PlanningRuntimeService`
+  移到该适配器，调用顺序、标签核验与错误映射未变，因此没有第二条容器或 SSH 调用链。
+
+fencing 边界（必须保留的风险）：
+
+- 数据库 epoch 只能阻止旧持有者继续续租与释放新租约，**不能**阻止容器内的 Pi 进程继续写文件：容器文件系统
+  不认识数据库代次。旧持有者失去租约后通过"取消上下文 → 等待 Runner 与归档收敛"尽快停止，这是收敛手段，
+  不等于对远程文件写入提供了绝对 fencing。
+- 现有 SSH / Docker exec 取消路径只保证本端命令与其会话结束；远端 Pi 进程是否随之终止没有在本阶段验证
+  （真实 SSH / Docker / Pi 环境未执行），因此"跨进程 Pi Session 写入已绝对受保护"不成立。
+- 若远端进程在取消后仍继续运行，新持有者的 Session 恢复可能与旧写入交叉。本阶段不通过缩短 TTL、忽略归档
+  错误或静默接管来掩盖该风险，也不另建远程侧互斥或进程终止核验链。
+
+### 7.10 仍未完成
 
 以下能力尚未实现，M2 状态保持 `pending`：
 
@@ -396,24 +450,25 @@ Store 的 NULL 与非 NULL 往返、更新默认节点不影响其它项目字�
   调用顺序、提示词组装、结构化输出解析与 `CompleteAnalysis` / `FailAnalysis` 的自动收口仍属 M3。
 - 后续项目级调度的迁移（`0027` 需求项目关联的业务实现、`0029` 任务顺序、`0030` 项目执行租约）：项目
   默认执行节点已在第八阶段落地，但调度侧仍未使用它。
-- 规划调用只在当前进程内按会话串行，没有跨进程租约：两个进程对同一规划会话发起规划调用时，角色会话绑定
-  由条件更新拒绝过期写入，但两份 Pi 调用仍可能同时读写同一份容器内 Session 文件。
+- 跨进程租约解决了"同一会话不能被两个执行者同时进入"，但没有解决"远端 Pi 进程是否真的已终止"：取消上下文
+  与等待收敛只保证本端调用结束，容器内进程的存续仍未核验（见 §7.9 的 fencing 边界）。
 - 规划服务的 HTTP API 与前端需求规划工作台（M3）：三个服务只完成装配与生命周期，没有对外入口。
 - 撤销与重跑之外的失败恢复入口：结果不确定的运行时现场只能通过再次 `Prepare` 做只读核验；残留的
-  一次性准备容器没有专门清理路径，也没有跨进程会话锁。
-- `Release` 不检查是否存在在途规划调用（运行时绑定写入用旧对象整行覆盖业务状态的风险已在 §7.5 解决，
-  该处改为只写运行时列的条件更新）。
+  一次性准备容器没有专门清理路径；释放本身已纳入跨进程租约（见 §7.9），但残留资源仍只能人工处理。
+- `Release` 仍不做"上一次释放结果不确定"的自动收敛：远程删除结果无法确认时保留定位信息并返回带阶段的错误，
+  由调用方再次核验，不自动重试。
 - 真实环境下的只读验证（文件工具与 `sh -c` 写入是否真的被文件系统拒绝）尚未执行：本阶段只确认参数
   构造正确，**不代表只读规划环境已经可用**。
-- 第七阶段只新增了规划 Agent 生命周期的自动化测试：会话事务、条件更新、角色会话绑定、稳定 Session
-  恢复与归档逻辑仍没有自动化测试守点，也未在真实数据库、真实 Docker / SSH 与真实 Pi 上验证并发行为、
-  恢复与归档结果。
-- 未授权的验证：真实只读环境（文件工具与 `sh -c` 写入是否真的被文件系统拒绝）、真实多轮 Pi Session
-  跨容器重建恢复、真实远程容器释放，都没有执行，不得报告为通过。`0028` 的旧库增量升级已由第八阶段
-  定向测试在测试数据库中执行（见 §7.8），其余迁移（`0026`、`0027`、`0029`、`0030`）的旧库升级与数据
-  保留仍没有自动化守点，也没有在真实开发数据库上执行。
+- 自动化测试守点仍不完整：第七阶段的生命周期用例与第九阶段的租约用例已覆盖准入、取消传播、停止等待、跨实例
+  互斥、续期与租约丢失后的收敛；会话事务、条件更新、角色会话绑定、稳定 Session 恢复与归档逻辑仍没有自动化
+  测试守点，也未在真实数据库、真实 Docker / SSH 与真实 Pi 上验证并发行为、恢复与归档结果。
+- 未验证的真实外部能力：真实只读环境（文件工具与 `sh -c` 写入是否真的被文件系统拒绝）、真实多轮 Pi Session
+  跨容器重建恢复、真实远程容器释放、远端 Pi 进程在取消后是否真的终止，都没有执行，不得报告为通过。`0028` 的
+  旧库增量升级已由第八阶段定向测试在测试数据库中执行（见 §7.8），`0031` 的表结构与条件写入已由第九阶段定向
+  测试在测试数据库中执行（见 §7.11），其余迁移（`0026`、`0027`、`0029`、`0030`）的旧库升级与数据保留仍没有
+  自动化守点，也没有在真实开发数据库上执行。
 
-### 7.10 验证方式
+### 7.11 验证方式
 
 六个阶段都只做非测试验证：阅读代码核对调用链、`gofmt`、`go vet ./...`、`git diff --check`。第二阶段另加
 人工核对迁移的表、索引、字段、非枚举约束与版本顺序；第三阶段人工核对快照卷命名与标签、准备 / 只读复核
@@ -501,3 +556,42 @@ Session 文件的续写语义，都需要在真实只读规划环境中验证后
   前端全量/E2E 测试均未执行；未设置或修改 `AGENTFLOW_REAL_TESTS` 等真实测试开关，未连接真实 Docker /
   SSH / Pi / 远程主机。因此第八阶段只证明"项目默认执行节点"在测试数据库与测试替身下从迁移到界面的配置
   链路成立：不代表真实开发数据库已完成升级，也不代表任何节点当前可用或已通过远程环境预检。
+
+第九阶段同样获得定向测试授权，验证范围收敛在"规划会话跨进程租约与运行时释放保护"，不执行完整测试套件。
+
+- **非测试验证**：人工核对迁移 `0031` 的表、列、组合 CHECK、部分索引与版本顺序（未占用 `0027`、`0029`、
+  `0030` 的预留编号），核对领取 UPSERT 的原子性、回读代次的条件、续期与释放的 owner + epoch + 未过期三个
+  条件、释放保留 epoch、受影响行数 0 一律按冲突返回；核对 `RunRole` 的租约取得点（读取会话之前）、
+  `Settle` 的调用点（Runner 与归档返回之后）、`prepareHeld` 不重复领取、`Release` 的租约先于任何远程删除、
+  释放路径的端口适配器与原实现的调用顺序 / 标签核验 / 错误映射一致，并确认 `planning_sessions` 表结构、
+  会话业务状态机、Revision、角色会话标识与普通任务执行路径（TaskLease、Step / Workflow）未被改动。
+  `gofmt`、`go vet ./...`、`git diff --check` 均无输出，本次修改文件行尾均为 LF。
+- **已运行的定向测试**（`-race`，`-count=1`）：
+
+  ```bash
+  go test -race -count=1 ./tests/unit/store -run '^TestPlanningSessionLease'
+  go test -race -count=1 ./tests/unit/app/planningagent \
+    -run '^(TestPlanningAgentServiceCrossInstanceLease|TestPlanningAgentServiceLeaseRenewal|TestPlanningAgentServiceLeaseLoss|TestPlanningAgentServiceLeaseTakeoverKeepsNewLease)$'
+  go test -race -count=1 ./tests/unit/app/planningagent -run '^TestPlanningRuntimeServiceLeaseGuard'
+  go test -race -count=1 ./tests/unit/app/planningagent -run '^TestPlanningAgentService'
+  ```
+
+  四条命令全部通过（`-race` 无数据竞争报告）：Store 侧 11 个用例（首次领取代次 1、第二领取者冲突、两个独立
+  数据库连接竞争只有一个成功、续期后不被接管、过期租约不得续期、新代次接管后旧持有者不得续期或释放、释放
+  保留代次、重新领取代次递增、数据库故障不同于冲突、非法请求按数据错误拒绝）；规划 Agent 侧 4 个用例
+  （两个独立服务实例共享同一数据库时第二个实例被租约拒绝且不进入自己的 `RunAgent`、不改写角色会话绑定；
+  长时间调用期间租约持续续期且不被接管、返回后可重新领取；续租失败取消 `RunAgent` 上下文、等待归档收尾、
+  以 `ErrPlanningAgentLeaseLost` 上报并在收敛后释放租约；旧持有者不得清空新代次租约）；规划运行时侧 5 个
+  用例（`RunRole` 持租期间 `Release` 冲突且未调用任何远程能力、绑定未被清空；`RunRole` 返回后 `Release`
+  正常完成并清空绑定；`Release` 期间 `RunRole` 与 `Prepare` 均被拒绝；远程删除失败返回
+  `ErrPlanningRuntimeFailed` 且保留定位信息、不报告资源已释放；释放期间租约被接管时返回
+  `ErrPlanningRuntimeLeaseLost` 而不报告成功）；既有规划 Agent 用例（含生命周期准入、取消传播、停止等待）
+  共 13 个用例全部通过。用例使用 `TestMain` + `testkit` 随机工作空间，产物保留在 `TEST_ARTIFACT_DIR`：
+  `%TEMP%\lingting-agent-flow-tests\store-2518212759`（Store 租约）、
+  `%TEMP%\lingting-agent-flow-tests\planningagent-4101371743`（跨实例 / 续期 / 丢失 / 接管）、
+  `%TEMP%\lingting-agent-flow-tests\planningagent-3040705929`（释放保护）、
+  `%TEMP%\lingting-agent-flow-tests\planningagent-102712429`（既有 `TestPlanningAgentService` 回归）。
+- **未运行的测试**：`go test ./...`、`go test ./tests/...`、`make test`、`make test-race`、其他测试包均未
+  执行；未设置或修改 `AGENTFLOW_REAL_TESTS` 等真实测试开关，未连接真实 Docker / SSH / Pi / 远程主机，未启动
+  真实 AgentFlow Server。因此第九阶段只证明租约在 SQLite 与受控替身下成立：不代表真实多 Server 部署已验证，
+  也不代表远端 Pi 进程会在租约丢失后真正终止（见 §7.9 的 fencing 边界）。

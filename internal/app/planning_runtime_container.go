@@ -192,7 +192,7 @@ func (s *PlanningRuntimeService) releasePlanningContainer(
 	ctx context.Context,
 	session domain.PlanningSession,
 ) (bool, error, error) {
-	container, err := s.containers.loadContainer(ctx, session.ContainerID)
+	container, err := s.release.LoadContainer(ctx, session.ContainerID)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return false, nil, planningRuntimeFailure(
@@ -224,7 +224,7 @@ func (s *PlanningRuntimeService) releasePlanningContainer(
 			nil,
 		)
 	}
-	detail, err := s.containers.DeleteContainer(ctx, DeleteContainerRequest{
+	detail, err := s.release.DeleteContainer(ctx, DeleteContainerRequest{
 		ContainerID: container.ID.String(),
 		Reason:      domain.ContainerEndReasonManual,
 	})
@@ -262,69 +262,6 @@ func (s *PlanningRuntimeService) releasePlanningContainer(
 		)
 	}
 	return true, nil, nil
-}
-
-// releasePlanningSnapshotVolume 删除本会话的快照卷。
-//
-// 只有名称、管理标签、节点标签与会话标签全部匹配时才删除；卷不存在视为已释放，
-// 归属不成立时拒绝删除并保留会话中的定位信息。
-func (s *PlanningRuntimeService) releasePlanningSnapshotVolume(
-	ctx context.Context,
-	session domain.PlanningSession,
-	host domain.ExecutionHost,
-) (bool, error) {
-	volumeName := planningSnapshotVolumeName(session.ID, host.ID)
-	released := false
-	err := s.containers.withRemoteDocker(
-		ctx,
-		host.ID.String(),
-		false,
-		func(ctx context.Context, remote *remoteDocker) error {
-			volume, found, inspectErr := inspectPlanningVolume(ctx, remote, volumeName)
-			if inspectErr != nil {
-				return planningRuntimeFailure(
-					ErrPlanningRuntimeFailed,
-					PlanningRuntimeStageReleaseSnapshot,
-					"读取快照卷失败",
-					inspectErr,
-				)
-			}
-			if !found {
-				return nil
-			}
-			if err := verifyPlanningSnapshotVolume(volume, volumeName, session.ID, host.ID); err != nil {
-				return planningRuntimeFailure(
-					ErrPlanningRuntimeConflict,
-					PlanningRuntimeStageReleaseSnapshot,
-					"快照卷归属与当前规划会话不一致，拒绝删除",
-					err,
-				)
-			}
-			existed, removeErr := remote.runner.RemoveVolume(ctx, volumeName)
-			if removeErr != nil {
-				if docker.ErrorCodeOf(removeErr) == docker.CodeStateUncertain {
-					return planningRuntimeFailure(
-						ErrPlanningRuntimeUncertain,
-						PlanningRuntimeStageReleaseSnapshot,
-						"删除快照卷的结果无法确认",
-						removeErr,
-					)
-				}
-				return planningRuntimeFailure(
-					ErrPlanningRuntimeFailed,
-					PlanningRuntimeStageReleaseSnapshot,
-					"删除快照卷失败",
-					removeErr,
-				)
-			}
-			released = existed
-			return nil
-		},
-	)
-	if err != nil {
-		return released, planningRuntimeStagedOrFailed(err, PlanningRuntimeStageReleaseSnapshot, "释放快照卷失败")
-	}
-	return released, nil
 }
 
 // deleteUnboundPlanningContainer 清理尚未写入会话关联的规划容器。

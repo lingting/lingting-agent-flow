@@ -15,10 +15,12 @@
 | `roles`（`0009` 重建） | `id`、`type`（无 CHECK 白名单）、`runner`、`model`、`system_prompt`、`tools_policy_json`、`enabled`、`deleted_at` | 无需结构变更（见 §3.6） |
 | `task_leases`（`0024`） | 按任务，含 `epoch` | 保持不动，与新项目租约共存 |
 
-**结论**：V2 只需 5 个新迁移（`0026`–`0030`），不需要改动任何已发布迁移。其中 `0026` 规划会话
-（原设计编号 `0027`）已在 M2 第二阶段落地，`0027` 需求项目关联顺延为原 `0026`；`0028` 项目默认执行
-节点已在 M2 第八阶段落地；其余编号与内容不变，版本顺序仍然单调递增。迁移引擎按"该具体版本是否未应用"
-逐条判断，不要求版本号连续，因此当前没有 `0027` 文件不影响 `0028` 及之后迁移的执行。
+**结论**：V2 需要 6 个新迁移（`0026`–`0031`，版本号不连续），不需要改动任何已发布迁移。其中 `0026` 规划
+会话（原设计编号 `0027`）已在 M2 第二阶段落地，`0027` 需求项目关联顺延为原 `0026`；`0028` 项目默认执行
+节点已在 M2 第八阶段落地；`0031` 规划会话执行租约已在 M2 第九阶段落地——它不在原计划的 `0026`–`0030`
+之内，因为跨进程执行租约是在第八阶段之后才确认为必需能力，故追加更高版本号，`0027`、`0029`、`0030` 的
+既定用途不变。迁移引擎按"该具体版本是否未应用"逐条判断，不要求版本号连续，因此当前没有 `0027` 文件不影响
+`0028` 及之后迁移的执行。
 
 ## 2. 迁移顺序与内容
 
@@ -133,7 +135,7 @@ CREATE INDEX idx_projects_default_host ON projects (default_host_id)
 - 历史任务继续使用自己 `tasks.host_id` 与 `config_json` 快照，不因项目字段变化被改写。
 - 已通过定向测试在该测试数据库中执行过旧库增量升级：既有项目数据保留、新增列为 NULL、`schema_migrations`
   版本记录与部分索引条件正确（命令与产物见
-  [`milestones/M2-planning-runtime.md`](./milestones/M2-planning-runtime.md) §7.10）。真实开发数据库尚未
+  [`milestones/M2-planning-runtime.md`](./milestones/M2-planning-runtime.md) §7.11）。真实开发数据库尚未
   执行升级，不得据此报告生产库已验证。
 
 ### 0029_task_requirement_sequence.sql
@@ -170,6 +172,64 @@ CREATE TABLE project_execution_leases (
 - 与 `task_leases` 并存，互不替代：任务租约证明"谁在跑这个任务"，项目租约证明
   "谁在占用这个项目的执行名额"。
 - 清理策略：服务重启时按 `lease_expires_at` 判定是否过期，过期即可被重新获取；不主动删行。
+
+### 0031_planning_session_leases.sql（已实现，M2 第九阶段）
+
+实际落地脚本 `internal/storage/sqlite/migrations/0031_planning_session_leases.sql`：
+
+```sql
+CREATE TABLE planning_session_leases (
+    planning_session_id TEXT    PRIMARY KEY NOT NULL CHECK (length(trim(planning_session_id)) > 0),
+    owner               TEXT,
+    operation           TEXT,
+    epoch               INTEGER NOT NULL DEFAULT 0 CHECK (epoch >= 0),
+    lease_expires_at    INTEGER,
+    updated_at          INTEGER NOT NULL CHECK (updated_at > 0),
+    CHECK (
+        (owner IS NULL AND operation IS NULL AND lease_expires_at IS NULL)
+        OR (
+            owner IS NOT NULL AND length(trim(owner)) > 0
+            AND operation IS NOT NULL AND length(trim(operation)) > 0
+            AND lease_expires_at IS NOT NULL AND lease_expires_at > 0
+        )
+    )
+);
+
+CREATE INDEX idx_planning_session_leases_expiry
+    ON planning_session_leases (lease_expires_at)
+    WHERE owner IS NOT NULL;
+```
+
+- `planning_session_id` 作主键即"每个规划会话最多一个执行者"的数据库级保证：进程内 `keyedMutex`
+  只覆盖单个 Server，两个 Server 连接同一数据库时仍可能同时准备容器、执行 Pi 或释放快照卷。
+- `owner` 由服务端生成、每次领取唯一；`operation` 记录当前操作类型（`run_role` / `prepare` /
+  `release`），只用于诊断与审计，**不设取值白名单**，新增取值无需修改 Schema。
+- `epoch` 是领取代次，由存储层在同一条原子 UPSERT 内递增，首次领取为 1；`(owner, epoch)` 唯一确定
+  一次领取，旧代次的续期与释放都被条件更新拒绝。代次是内部栅栏，HTTP / CLI 与应用层接口都不接受。
+- 释放**不删行**：只清空 `owner` / `operation` / `lease_expires_at` 并保留 `epoch`，因此下一次领取继续
+  递增，旧持有者的迟到写入仍被拒绝。
+- 表级 CHECK 只表达字段组合一致性（持有中三项必须同时存在、释放后三项必须同时为空），不是枚举白名单；
+  到期即视为持有者消失、允许被接管，但接管必须递增代次。
+- 不声明外键：`planning_session_id` 允许指向已不存在的规划会话（领取先于会话校验发生），关系合法性由
+  应用层承担；部分索引只覆盖持有中的租约，供按到期时间判断可接管范围。
+- 不修改 `0026_planning_sessions.sql` 与 `0028_projects_default_host.sql`，租约状态也不写进
+  `planning_sessions.status`，既有会话业务状态机不变。
+
+条件写入与错误语义（`internal/storage/sqlite/planning_session_leases.go`）：
+
+| 操作 | 条件 | 失败语义 |
+|---|---|---|
+| `AcquirePlanningSessionLease` | 单条 `INSERT ... ON CONFLICT DO UPDATE ... WHERE owner IS NULL OR lease_expires_at IS NULL OR lease_expires_at <= now` | 影响行数 0 → `storage.ErrConflict`；参数非法 → `storage.ErrInvalidData`；其余为数据库故障 |
+| `RenewPlanningSessionLease` | `owner` + `epoch` 匹配且 `lease_expires_at > now` | 影响行数 0 → `storage.ErrConflict` |
+| `ReleasePlanningSessionLease` | `owner` + `epoch` 匹配且 `lease_expires_at > now` | 影响行数 0 → `false` + `storage.ErrConflict` |
+
+- 领取成功后回读代次，回读条件同时覆盖 owner 与到期时间：回读前被接管则领取失败，绝不返回不属于本次
+  调用的代次；领取不使用"先 SELECT 判断空闲，再无条件 UPDATE"的两步方案。
+- 应用层按"竞争 / 丢失 / 存储不可用"三个类别映射（`app.errPlanningLeaseConflict`、
+  `errPlanningLeaseLost`、`errPlanningLeaseUnavailable`），再转成各服务自己的错误体系，调用方不需要
+  解析错误文本；数据库不可用不得被报告成"其他请求正在运行"。
+- 迁移脚本已人工核对表、列、索引、组合约束与版本顺序；旧库增量升级与幂等仍由 `tests/unit/store` 的
+  定向用例在测试数据库中执行（见里程碑 §7.11），真实开发数据库尚未执行升级。
 
 ### 固定四角色：不需要新迁移
 
@@ -218,7 +278,7 @@ CREATE TABLE project_execution_leases (
    其中 `0026` 已人工核对表结构、索引、字段、非枚举约束与版本顺序；旧库升级后的数据保留、未知枚举值
    写入与读回、迁移幂等仍未在真实数据库上执行，不得报告为已验证。
    `0028` 是纯 `ADD COLUMN` 加部分索引，已人工核对脚本、索引条件与版本记录，并由
-   `tests/unit/store` 的定向用例在测试数据库中执行过一次旧库增量升级（见 §2 该条目与里程碑 §7.10）；
+   `tests/unit/store` 的定向用例在测试数据库中执行过一次旧库增量升级（见 §2 该条目与里程碑 §7.11）；
    该结论只覆盖测试数据库，真实开发库的升级仍未执行。
 3. **`json_extract` 依赖 SQLite JSON1 扩展**：需确认当前驱动与最低 SQLite 版本已内置（`caches_json`
    的 `json_valid` 已在用，仍按实际迁移验证）。
