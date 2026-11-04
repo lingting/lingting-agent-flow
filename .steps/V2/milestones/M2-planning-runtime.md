@@ -208,7 +208,39 @@ SQLite 持久化连接成统一入口。它仍**没有 Pi 调用方、HTTP 入�
 边界：本阶段不启动 Pi、SSH 或 Docker，不准备、复用或释放规划容器与快照卷，也不把远程 Docker 操作
 放进数据库事务。终态会话与远程资源释放之间的组合仍不在本服务内，服务操作不会被报告为"资源已释放"。
 
-### 7.5 仍未完成
+### 7.5 已交付：运行时绑定并发覆盖修复（M2 第五阶段）
+
+`PlanningRuntimeService` 保存运行时绑定不再使用整行更新，运行时字段与会话业务状态因此可以安全并存：
+
+- **专用存储能力**：`storage.PlanningSessionStore.UpdatePlanningSessionRuntimeBinding`
+  （`internal/storage/sqlite/planning_sessions.go`）只更新 `host_id`、`container_id`、`source_commit`
+  与 `updated_at`。`status`、`finished_at`、`adopted_revision_id`、`error_summary`、
+  `analyst_session_id`、`planner_session_id` 与 `project_id` 完全不在 `SET` 子句中：运行时写入因此
+  不可能把 `confirmed` 改回 `active`，也不会清空已保存的 Revision、两个角色的 Pi 会话标识或失败摘要。
+- **比较并交换**：接口输入"调用方读到的预期绑定"（`storage.PlanningSessionRuntimeBinding`）与"准备
+  写入的新绑定"。`WHERE` 同时校验会话 ID 与三个绑定列，并用 `COALESCE(..., '')` 做 NULL 安全比较——空列
+  与空值都归一为空字符串，未绑定状态才能与读到的空值正确匹配。影响行数为 0 时，会话不存在返回
+  `storage.ErrNotFound`，绑定已被其他操作改写返回 `storage.ErrConflict`（附带数据库中的当前绑定），
+  不会退化成一条无条件的部分字段覆盖。
+- **`persistRuntime` 的新形式**：`Prepare` 的三个持久化阶段（执行节点、固定 commit、容器登记）与
+  `Release` 的清空绑定都走同一个入口。它在 `storage.Store.WithTx` 内先按传入的 `storage.Tx` 重新读取
+  会话，用这份最新副本调用 `domain.BindRuntime`，再以调用方读到的旧绑定为条件提交更新；返回的会话对象
+  因此带着数据库当前的业务状态与最新运行时字段，不会把并发推进的状态、方案版本或角色会话标识丢掉。
+  清空绑定不受会话是否结束的限制（已确认或已放弃的会话同样需要释放运行时资源），绑定新资源则拒绝已结束
+  的会话：确认或放弃之后不得再把运行时资源绑回去；`failed` 也不会被顺手改成其他状态。
+- **错误映射**：绑定冲突按 `ErrPlanningRuntimeConflict` 返回，并保留失败阶段（`persist_host` /
+  `persist_snapshot` / `persist_container` / `clear_binding`）。`storage.ErrConflict` 属于"不能用旧快照
+  覆盖新事实"，不再被报告为 `ErrPlanningRuntimeNotPersisted`；会话在写入过程中消失时仍是
+  `ErrPlanningRuntimeNotFound`。
+- 新能力同时由 `dbStore` 与 `txStore` 提供（两者组合同一个 `planningSessionStore`）；没有新增迁移，
+  `0026_planning_sessions.sql` 未改动，`app` 层不含 SQL。`PlanningSessionService` 的业务行为、领域状态机
+  与 `UpdatePlanningSessionIfStatus` 的条件语义都未改动。
+
+本阶段解决的只是"运行时字段与业务字段相互覆盖"。`PlanningRuntimeService` 的 `keyedMutex` 仍只保证当前
+进程内的同会话串行；不同进程对同一规划会话发起 `Prepare` / `Release` 时，运行时绑定由数据库条件更新拒绝
+过期写入，但远程资源操作本身仍没有跨进程租约，`Release` 也不检查在途规划调用。
+
+### 7.6 仍未完成
 
 以下能力尚未实现，M2 状态保持 `pending`：
 
@@ -221,21 +253,23 @@ SQLite 持久化连接成统一入口。它仍**没有 Pi 调用方、HTTP 入�
 - HTTP API 与前端需求规划工作台。
 - 撤销与重跑之外的失败恢复入口：结果不确定的运行时现场只能通过再次 `Prepare` 做只读核验；残留的
   一次性准备容器没有专门清理路径，也没有跨进程会话锁。
-- `Release` 不检查是否存在在途规划调用；且 `PlanningRuntimeService` 的运行时绑定写入是不带状态前置
-  条件的整行更新，与 `PlanningSessionService` 的状态迁移并发交错时可能覆盖状态，这一处需要后续统一。
+- `Release` 不检查是否存在在途规划调用（运行时绑定写入用旧对象整行覆盖业务状态的风险已在 §7.5 解决，
+  该处改为只写运行时列的条件更新）。
 - 真实环境下的只读验证（文件工具与 `sh -c` 写入是否真的被文件系统拒绝）尚未执行：本阶段只确认参数
   构造正确，**不代表只读规划环境已经可用**。
 - 本阶段新增的会话事务、条件更新与错误映射没有任何自动化测试守点，也未在真实数据库上验证并发行为。
 
-### 7.6 验证方式
+### 7.7 验证方式
 
-四个阶段都只做非测试验证：阅读代码核对调用链、`gofmt`、`go vet ./...`、`git diff --check`。第二阶段另加
+五个阶段都只做非测试验证：阅读代码核对调用链、`gofmt`、`go vet ./...`、`git diff --check`。第二阶段另加
 人工核对迁移的表、索引、字段、非枚举约束与版本顺序；第三阶段人工核对快照卷命名与标签、准备 / 只读复核
 容器、`--read-only` 与只读代码卷、tmpfs 可写目录、容器所有权校验、释放顺序与 `RequiredCLICommands`
 新增参数，并确认普通任务容器的创建参数未改变；第四阶段人工核对七个业务操作的事务边界、领域状态机调用点、
-条件更新的前置状态、角色消息发送方限制与失败摘要脱敏。
+条件更新的前置状态、角色消息发送方限制与失败摘要脱敏；第五阶段人工核对运行时绑定更新的实际 `SET` 列、
+NULL 安全的比较并交换条件、`persistRuntime` 的事务内重读与错误映射，并确认 `Prepare` 的三个持久化阶段与
+`Release` 都走同一入口。
 
-四个阶段都未运行任何测试（含迁移升级与 SQLite 读写测试），未创建测试文件，未连接真实 Docker / SSH / Pi /
+五个阶段都未运行任何测试（含迁移升级与 SQLite 读写测试），未创建测试文件，未连接真实 Docker / SSH / Pi /
 远程主机。因此旧库升级后的数据保留、未知枚举值写入与读回、序号分配与条件更新在并发下的实际行为、真实快照
 克隆、只读挂载与容器释放均未验证，不得报告为通过；第四阶段的并发结论来自事务与条件更新的代码路径核对，
-没有真实并发执行证据。
+第五阶段的运行时绑定冲突结论同样只来自 SQL 条件与调用链核对，没有真实并发执行与跨进程竞争的证据。

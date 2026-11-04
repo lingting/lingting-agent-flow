@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
@@ -140,6 +141,10 @@ type ProjectStore interface {
 type PlanningSessionStore interface {
 	CreatePlanningSession(ctx context.Context, session domain.PlanningSession) error
 	// UpdatePlanningSession 按主键更新规划会话，所属项目不可修改。
+	//
+	// 它写入整行字段（业务状态与运行时绑定一起写），因此只适用于调用方确实持有该会话
+	// 全部最新事实的场景。规划运行时保存绑定必须使用 UpdatePlanningSessionRuntimeBinding
+	// 的条件更新，否则会用旧对象覆盖并发推进的状态、方案版本与角色会话标识。
 	UpdatePlanningSession(ctx context.Context, session domain.PlanningSession) error
 	// UpdatePlanningSessionIfStatus 在数据库中的状态仍属于 expected 时写入规划会话。
 	//
@@ -149,6 +154,20 @@ type PlanningSessionStore interface {
 		ctx context.Context,
 		session domain.PlanningSession,
 		expected []domain.PlanningSessionStatus,
+	) error
+	// UpdatePlanningSessionRuntimeBinding 以调用方读到的运行时绑定为条件写入新的运行时绑定。
+	//
+	// 它只更新 host_id、container_id、source_commit 与 updated_at：status、finished_at、
+	// adopted_revision_id、error_summary 与两个角色的 Pi 会话标识由业务操作维护，运行时
+	// 绑定写入不得覆盖它们。expected 是读取会话时看到的绑定，next 是准备写入的绑定；
+	// 条件不成立说明绑定已被其他操作改写，返回 storage.ErrConflict，会话不存在返回
+	// storage.ErrNotFound。调用方必须重新读取会话，不能用旧绑定覆盖新事实。
+	UpdatePlanningSessionRuntimeBinding(
+		ctx context.Context,
+		id domain.ID,
+		expected PlanningSessionRuntimeBinding,
+		next PlanningSessionRuntimeBinding,
+		at time.Time,
 	) error
 	// GetPlanningSession 读取单个规划会话，不存在时返回 storage.ErrNotFound。
 	GetPlanningSession(ctx context.Context, id domain.ID) (*domain.PlanningSession, error)
@@ -174,6 +193,39 @@ type PlanningSessionStore interface {
 		ctx context.Context,
 		sessionID domain.ID,
 	) ([]domain.PlanningRevision, error)
+}
+
+// PlanningSessionRuntimeBinding 是规划会话的运行期绑定。
+//
+// 它只包含执行节点、规划容器与固定代码快照：这三项由规划运行时准备与释放，与会话业务
+// 状态、采纳的方案版本、失败摘要以及两个角色的 Pi 会话标识互不相干。条件更新用它表达
+// "更新前的预期绑定"，因此比较必须把空值与 NULL 视为同一个"未绑定"状态。
+type PlanningSessionRuntimeBinding struct {
+	// HostID 是承载规划容器的执行节点。
+	HostID *domain.ID
+	// ContainerID 是规划容器的登记记录标识。
+	ContainerID string
+	// SourceCommit 是代码快照固定的完整 commit SHA。
+	SourceCommit string
+}
+
+// PlanningSessionRuntimeBindingOf 读出规划会话当前的运行时绑定。
+func PlanningSessionRuntimeBindingOf(session domain.PlanningSession) PlanningSessionRuntimeBinding {
+	return PlanningSessionRuntimeBinding{
+		HostID:       session.HostID,
+		ContainerID:  session.ContainerID,
+		SourceCommit: session.SourceCommit,
+	}
+}
+
+// Empty 判断运行时绑定是否已全部清空。
+//
+// 释放运行环境时写入空绑定：它表示"会话不再占用运行时资源"，与业务状态无关，已确认或
+// 已放弃的会话同样需要清理容器与快照的关联。
+func (b PlanningSessionRuntimeBinding) Empty() bool {
+	return b.HostID == nil &&
+		strings.TrimSpace(b.ContainerID) == "" &&
+		strings.TrimSpace(b.SourceCommit) == ""
 }
 
 // AppendPlanningMessageRequest 是一次"追加规划消息"的输入。

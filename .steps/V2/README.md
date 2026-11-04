@@ -29,7 +29,7 @@ V2 把用户发起工作的入口从「创建一个任务」升级为「提出�
 |---|---|---|
 | [M0](./milestones/M0-v1-closeout-and-v2-design.md) | V1 收口与 V2 设计 | completed（2026-11-02） |
 | [M1](./milestones/M1-settings-and-fixed-roles.md) | 设置中心、环境管理、固定四角色 | completed（2026-11-03；2026-11-02 真实远程端到端运行曾失败于规划阶段步骤，修正「规划只规划、开发只验收」的职责边界后于 2026-11-03 真实运行通过，详见里程碑 §7 / §8） |
-| [M2](./milestones/M2-planning-runtime.md) | 规划运行环境（只读容器 + 多轮会话） | pending（第三阶段已交付规划运行时服务：固定 commit 快照卷、只读规划容器、复用与释放；第四阶段已交付规划会话业务编排 `PlanningSessionService`：会话创建与查询、提交消息并启动分析、显式重跑、Revision 与角色消息落库、失败收敛、确认与放弃。两个角色的 Pi 调用方、多轮 Pi Session、生命周期注册、HTTP 与前端未完成，见里程碑 §7.3 / §7.4） |
+| [M2](./milestones/M2-planning-runtime.md) | 规划运行环境（只读容器 + 多轮会话） | pending（第三阶段已交付规划运行时服务：固定 commit 快照卷、只读规划容器、复用与释放；第四阶段已交付规划会话业务编排 `PlanningSessionService`：会话创建与查询、提交消息并启动分析、显式重跑、Revision 与角色消息落库、失败收敛、确认与放弃；第五阶段修复运行时绑定的并发覆盖风险：绑定只写执行节点 / 规划容器 / 固定 commit / 更新时间，并以读取到的旧绑定做条件更新。两个角色的 Pi 调用方、多轮 Pi Session、生命周期注册、HTTP 与前端未完成，见里程碑 §7.3 / §7.4 / §7.5） |
 | [M3](./milestones/M3-requirement-planning.md) | 需求工作台与需求分析 | pending |
 | [M4](./milestones/M4-requirement-task-generation.md) | 方案确认与任务生成 | pending |
 | [M5](./milestones/M5-project-scheduling-and-progress.md) | 项目级调度与进度 | pending |

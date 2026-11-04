@@ -262,11 +262,10 @@ func (s *PlanningRuntimeService) Prepare(
 	if session.HostID == nil {
 		updated, persistErr := s.persistRuntime(ctx, session, &host.ID, "", "")
 		if persistErr != nil {
-			return detail, planningRuntimeFailure(
-				ErrPlanningRuntimeNotPersisted,
+			return detail, planningRuntimeBindingFailure(
+				persistErr,
 				PlanningRuntimeStagePersistHost,
 				"执行节点未能写入规划会话",
-				persistErr,
 			)
 		}
 		session = updated
@@ -296,11 +295,10 @@ func (s *PlanningRuntimeService) Prepare(
 			snapshot.Commit,
 		)
 		if persistErr != nil {
-			return detail, planningRuntimeFailure(
-				ErrPlanningRuntimeNotPersisted,
+			return detail, planningRuntimeBindingFailure(
+				persistErr,
 				PlanningRuntimeStagePersistSnapshot,
 				"快照已准备但固定 commit 未能写入规划会话",
-				persistErr,
 			)
 		}
 		session = updated
@@ -353,11 +351,10 @@ func (s *PlanningRuntimeService) Prepare(
 			detail.Container = container
 			// 本次创建的容器尚未被任何会话引用：按确定失败清理，避免留下孤儿容器。
 			cleanupErr := s.deleteUnboundPlanningContainer(context.WithoutCancel(ctx), container)
-			return detail, planningRuntimeFailure(
-				ErrPlanningRuntimeNotPersisted,
+			return detail, planningRuntimeBindingFailure(
+				errors.Join(persistErr, cleanupErr),
 				PlanningRuntimeStagePersistContainer,
 				"规划容器的会话关联未能持久化",
-				errors.Join(persistErr, cleanupErr),
 			)
 		}
 		session = updated
@@ -451,11 +448,10 @@ func (s *PlanningRuntimeService) Release(
 
 	updated, persistErr := s.persistRuntime(context.WithoutCancel(ctx), session, nil, "", "")
 	if persistErr != nil {
-		return result, planningRuntimeFailure(
-			ErrPlanningRuntimeNotPersisted,
+		return result, planningRuntimeBindingFailure(
+			persistErr,
 			PlanningRuntimeStageClearBinding,
 			"资源已释放但会话的运行时绑定未能清空",
-			persistErr,
 		)
 	}
 	result.Session = updated
@@ -625,8 +621,14 @@ func planningProjectVersionNumber(project domain.Project) (int, error) {
 
 // persistRuntime 把运行时绑定写入规划会话。
 //
-// 它只写 HostID / ContainerID / SourceCommit，不改变会话状态：运行环境准备本身
-// 不等于会话进入 analyzing 或 preview_ready。
+// 它只写 HostID / ContainerID / SourceCommit 与更新时间，不改变会话状态：运行环境准备
+// 本身不等于会话进入 analyzing 或 preview_ready。写入在单个事务内完成，并且先在事务内
+// 重新读取会话——返回的对象因此带有数据库当前的业务状态（状态、采纳的方案版本、角色
+// 会话标识与失败摘要），不会因为调用方手里的是旧对象而丢失并发业务更新。
+//
+// 更新以调用方读到的运行时绑定为前置条件：绑定已被其他操作改写时返回错误，绝不用旧
+// 绑定覆盖新事实。清空绑定不受会话是否结束的限制（已确认或已放弃的会话同样需要释放
+// 运行时资源），绑定新资源则拒绝已结束的会话——确认或放弃之后不得再把资源绑回去。
 func (s *PlanningRuntimeService) persistRuntime(
 	ctx context.Context,
 	session domain.PlanningSession,
@@ -634,12 +636,66 @@ func (s *PlanningRuntimeService) persistRuntime(
 	containerID string,
 	sourceCommit string,
 ) (domain.PlanningSession, error) {
-	candidate := session
-	if err := candidate.BindRuntime(hostID, containerID, sourceCommit, time.Now()); err != nil {
+	expected := storage.PlanningSessionRuntimeBindingOf(session)
+	var updated domain.PlanningSession
+	err := s.containers.store.WithTx(ctx, func(ctx context.Context, tx storage.Tx) error {
+		current, err := tx.GetPlanningSession(ctx, session.ID)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				return fmt.Errorf("%w: 规划会话 %s 不存在", ErrPlanningRuntimeNotFound, session.ID)
+			}
+			return fmt.Errorf("读取规划会话失败: %w", err)
+		}
+		candidate := *current
+		at := time.Now()
+		if err := candidate.BindRuntime(hostID, containerID, sourceCommit, at); err != nil {
+			return err
+		}
+		next := storage.PlanningSessionRuntimeBindingOf(candidate)
+		if !next.Empty() && candidate.Status.IsTerminal() {
+			return fmt.Errorf(
+				"%w: 规划会话处于 %s，不能再绑定运行时资源",
+				ErrPlanningRuntimeConflict,
+				candidate.Status,
+			)
+		}
+		if err := tx.UpdatePlanningSessionRuntimeBinding(
+			ctx,
+			session.ID,
+			expected,
+			next,
+			at,
+		); err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				return fmt.Errorf("%w: 规划会话 %s 不存在", ErrPlanningRuntimeNotFound, session.ID)
+			}
+			return err
+		}
+		updated = candidate
+		return nil
+	})
+	if err != nil {
 		return session, err
 	}
-	if err := s.containers.store.UpdatePlanningSession(ctx, candidate); err != nil {
-		return session, err
+	return updated, nil
+}
+
+// planningRuntimeBindingFailure 把运行时绑定写入失败映射为运行时错误类别。
+//
+// 绑定已被其他操作改写不是"写不进去"，而是"不能用旧快照覆盖新事实"：调用方必须重新
+// 读取会话与远程现场，因此归入冲突。会话在写入过程中被删除时保持 NotFound 语义；其余
+// 失败才是真正未能持久化。
+func planningRuntimeBindingFailure(
+	err error,
+	stage PlanningRuntimeStage,
+	detail string,
+) error {
+	switch {
+	case errors.Is(err, ErrPlanningRuntimeConflict), errors.Is(err, storage.ErrConflict):
+		return planningRuntimeFailure(ErrPlanningRuntimeConflict, stage, detail, err)
+	case errors.Is(err, ErrPlanningRuntimeNotFound), errors.Is(err, storage.ErrNotFound):
+		return planningRuntimeFailure(ErrPlanningRuntimeNotFound, stage, detail, err)
+	default:
+		return planningRuntimeFailure(ErrPlanningRuntimeNotPersisted, stage, detail, err)
 	}
-	return candidate, nil
 }

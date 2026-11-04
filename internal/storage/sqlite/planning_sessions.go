@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage"
@@ -22,6 +23,10 @@ const planningSessionInsertCount = 13
 //
 // 所属项目不在其中：会话一旦建立就绑定项目，改绑会让历史消息与分析指向另一份代码，
 // 因此 project_id 只在创建时写入。
+//
+// 运行时绑定（host_id / container_id / source_commit）虽然也在其中，但规划运行时不得
+// 使用整行更新：它走 UpdatePlanningSessionRuntimeBinding 的条件更新，只写运行时列，
+// 避免用旧对象覆盖并发推进的业务状态、采纳的方案版本、失败摘要与角色会话标识。
 const planningSessionUpdateSet = `status = ?, host_id = ?, container_id = ?, source_commit = ?,
 	analyst_session_id = ?, planner_session_id = ?, adopted_revision_id = ?, error_summary = ?,
 	updated_at = ?, finished_at = ?`
@@ -117,6 +122,101 @@ func (s planningSessionStore) UpdatePlanningSessionIfStatus(
 		return ensureAffected(result, "规划会话", session.ID)
 	}
 	return ensureStatusAffected(result, "规划会话", session.ID)
+}
+
+// UpdatePlanningSessionRuntimeBinding 以读取时的运行时绑定为条件写入新的运行时绑定。
+//
+// 只更新 host_id、container_id、source_commit 与 updated_at：status、finished_at、
+// adopted_revision_id、error_summary、analyst_session_id、planner_session_id 与
+// project_id 保持数据库中的值，因此规划运行时的写入不可能把已确认的会话改回进行中，
+// 也不会清空已保存的方案版本、角色会话标识或失败摘要。
+//
+// WHERE 条件对三个绑定列做 NULL 安全比较（COALESCE 把 NULL 与空值归一为空串）：未绑定
+// 状态必须能与调用方读到的空值正确匹配，否则"写入首个绑定"永远匹配不上，或者退化成
+// 一条不带条件的覆盖写入。影响行数为 0 说明会话不存在或绑定已被其他操作改写，前者
+// 返回 storage.ErrNotFound，后者返回 storage.ErrConflict。
+//
+// at 是本次更新时间，调用方必须传入真实时间：一次运行时绑定写入不允许把 updated_at
+// 退回到零值或旧时间。
+func (s planningSessionStore) UpdatePlanningSessionRuntimeBinding(
+	ctx context.Context,
+	id domain.ID,
+	expected storage.PlanningSessionRuntimeBinding,
+	next storage.PlanningSessionRuntimeBinding,
+	at time.Time,
+) error {
+	if err := id.Validate(); err != nil {
+		return err
+	}
+	if next.HostID != nil {
+		if err := next.HostID.Validate(); err != nil {
+			return err
+		}
+	}
+	containerID := strings.TrimSpace(next.ContainerID)
+	sourceCommit := strings.TrimSpace(next.SourceCommit)
+	if sourceCommit != "" {
+		if err := domain.ValidateGitCommitSHA("source_commit", sourceCommit); err != nil {
+			return err
+		}
+	}
+	// 空值在 SQL 里是 NULL，不能参与等值比较：归一为 '' 后再与 COALESCE 的结果比对。
+	expectedHostID := ""
+	if expected.HostID != nil {
+		expectedHostID = expected.HostID.String()
+	}
+	const statement = `
+UPDATE planning_sessions SET
+	host_id = ?, container_id = ?, source_commit = ?, updated_at = ?
+WHERE id = ?
+	AND COALESCE(host_id, '') = ?
+	AND COALESCE(container_id, '') = ?
+	AND COALESCE(source_commit, '') = ?`
+	result, err := s.q.ExecContext(
+		ctx,
+		statement,
+		toIDPtrParam(next.HostID),
+		nullIfBlank(containerID),
+		nullIfBlank(sourceCommit),
+		toMillis(at),
+		toIDParam(id),
+		expectedHostID,
+		strings.TrimSpace(expected.ContainerID),
+		strings.TrimSpace(expected.SourceCommit),
+	)
+	if err != nil {
+		return wrapError("更新规划会话运行时绑定", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return wrapError("更新规划会话运行时绑定", err)
+	}
+	if affected > 0 {
+		return nil
+	}
+	// 影响行数为 0 有两种可能：会话不存在，或绑定已被其他操作改写。两者都必须让调用方
+	// 重新读取会话，不能当作写入成功。
+	current, readErr := s.GetPlanningSession(ctx, id)
+	if readErr != nil {
+		if errors.Is(readErr, storage.ErrNotFound) {
+			return readErr
+		}
+		return wrapError("更新规划会话运行时绑定", readErr)
+	}
+	currentHostID := ""
+	if current.HostID != nil {
+		currentHostID = current.HostID.String()
+	}
+	return wrapError(
+		"更新规划会话运行时绑定",
+		errors.Join(
+			storage.ErrConflict,
+			errors.New(
+				"运行时绑定已被其他操作改写，当前执行节点 "+currentHostID+
+					"、容器 "+current.ContainerID+"、固定 commit "+current.SourceCommit,
+			),
+		),
+	)
 }
 
 // GetPlanningSession 读取单个规划会话。
