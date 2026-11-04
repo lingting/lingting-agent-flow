@@ -160,34 +160,82 @@
 - **Docker 能力**：`internal/docker` 新增 `docker run --detach` 一次性容器、`docker run --rm` 一次性
   执行、`docker volume inspect` / `docker volume rm` 与规划会话标签，并同步 `RequiredCLICommands`。
 
-本阶段仍未提供 `PlanningSessionService` 业务编排、两个角色的 Pi Session 路径与多轮上下文、生命周期
-注册、HTTP API、前端工作台与需求 / 方案结构化解析；真实 Docker / SSH 环境下的资源创建、只读挂载与释放
-均未执行。
+第三阶段仍未提供 `PlanningSessionService` 业务编排（已在 §7.4 交付）、两个角色的 Pi Session 路径与多轮
+上下文、生命周期注册、HTTP API、前端工作台与需求 / 方案结构化解析；真实 Docker / SSH 环境下的资源创建、
+只读挂载与释放均未执行。
 
-### 7.4 仍未完成
+### 7.4 已交付：规划会话业务编排（M2 第四阶段）
+
+`app.PlanningSessionService`（`internal/app/planning_session*.go`）把 §7.2 的领域状态机与
+SQLite 持久化连接成统一入口。它仍**没有 Pi 调用方、HTTP 入口与 CLI 入口**，也不接触远程资源：
+
+- **会话创建**（`Create`）：按领域书写规则校验并小写归一项目标识，读取项目并要求未被逻辑删除，
+  再用 `domain.NewPlanningSession` 创建 `active` 会话。会话标识、初始状态、创建时间与运行期字段
+  （执行节点、容器、固定 commit、两个角色的 Pi 会话标识）全部由服务端生成，调用方无法指定。
+- **会话查询**（`Get` / `ListByProject` / `Messages` / `Revisions`）：读取路径不调用领域校验、不做
+  状态或发送方映射，数据库中的未知取值原样返回；会话不存在返回 `ErrPlanningSessionNotFound` 而不是
+  空列表。按项目列表前先确认项目存在且未删除，避免把已下线项目的会话当作可用结果。
+- **提交消息与启动分析**（`SubmitMessage`）：单个事务内依次读取会话 → `CanAcceptMessage` 准入
+  （只有 `active` 与 `preview_ready`）→ 追加 `user` 消息 → `BeginAnalysis` → 以读到的状态为前置
+  条件写回。消息与状态同事务，任一步失败都整体回滚；`failed` 会话不会被普通消息隐式重置。
+- **显式重跑分析**（`RetryAnalysis`）：`failed` 的唯一出口，调用 `domain.RetryAnalysis`；可选的
+  用户补充消息与状态迁移在同一事务内完成。
+- **分析完成**（`CompleteAnalysis`）：单个事务内确认 `analyzing` → 追加 Revision（版本号由存储层
+  分配）→ 追加本轮角色消息 → `MarkPreviewReady` → 以 `analyzing` 为前置条件写回。角色消息的发送方
+  只允许 `requirement_analyst` 与 `planner`（判定在 `domain.PlanningSenderType.IsPlanningRole`），
+  用户与系统消息不能在这里伪造；`user` 消息只能经提交入口写入。
+- **分析失败**（`FailAnalysis`）：确认 `analyzing` → `domain.Fail`。摘要先经
+  `domain.ClipFeedbackText` 脱敏并按 `domain.MaxFeedbackReason` 裁剪，不保存凭据或完整日志；失败
+  不写 Revision、不写成功消息，状态保留为 `failed`。
+- **确认方案**（`Confirm`）：校验目标 Revision 确实属于该会话（按会话读取版本列表，跨会话与不存在
+  返回同一错误）→ `domain.Confirm` → 以 `preview_ready` 为前置条件写入状态与 `adopted_revision_id`。
+  确认只表示采纳该版规划：不创建 Requirement，也不创建 Task。
+- **放弃会话**（`Abandon`）：`domain.Abandon` + 以读到的状态为前置条件写入；消息、Revision 与运行期
+  绑定全部保留，不删除任何记录，`analyzing` 期间是否允许放弃完全由领域状态机决定。
+
+并发与事务边界：
+
+- 全部写操作都在 `storage.Store.WithTx` 内完成，读写共享同一事务；DSN 的 `_txlock=immediate`
+  让写事务串行，条件更新使用 `UpdatePlanningSessionIfStatus`。影响行数为 0 即 `storage.ErrConflict`，
+  映射为 `ErrPlanningSessionStateConflict`，不会被报告为成功。
+- 因此同一会话不能同时启动两轮分析，两个并发完成请求不会互相覆盖状态，两个并发确认请求不可能采纳
+  不同 Revision，已确认或已放弃的会话也不会被迟到结果重新打开。
+- 没有引入进程内互斥锁、队列或第二套任务引擎；消息序号与方案版本号仍由存储层在写入事务内分配，本层
+  不传序号与版本号。
+- 领域只补了一个纯判定 `domain.PlanningSenderType.IsPlanningRole`；结构化分析与实施方案仍只做 JSON
+  结构校验，内部字段语义（`WORKFLOW.md` §2 / §3）与任务拆分规则属于 M3 / M4，本阶段不解析、不建列。
+
+边界：本阶段不启动 Pi、SSH 或 Docker，不准备、复用或释放规划容器与快照卷，也不把远程 Docker 操作
+放进数据库事务。终态会话与远程资源释放之间的组合仍不在本服务内，服务操作不会被报告为"资源已释放"。
+
+### 7.5 仍未完成
 
 以下能力尚未实现，M2 状态保持 `pending`：
 
-- `PlanningSessionService`：会话创建、消息追加、Revision 追加、确认与放弃、状态收敛的业务编排
-  （领域类型与 `0026` 持久化已在 §7.2 交付，尚无调用方）。
+- 两个规划角色（需求分析师、方案规划师）的 Pi 调用方：`PlanningSessionService` 已提供
+  `CompleteAnalysis` / `FailAnalysis` 等收敛入口，但当前没有任何代码调用它们，也没有结构化输出解析。
 - 迁移 `0028_projects_default_host.sql`（项目默认执行节点）与后续项目级调度的迁移。
 - 两个规划角色的 Pi Session 路径生成与根目录校验、多轮 Pi Session 上下文复用。
-- 规划运行时在 `internal/lifecycle` 中的注册与收敛，以及 `agentflow server` 的服务装配。
+- 规划运行时在 `internal/lifecycle` 中的注册与收敛，以及 `agentflow server` 的服务装配
+  （`PlanningRuntimeService` 与 `PlanningSessionService` 目前都未被任何装配入口构造）。
 - HTTP API 与前端需求规划工作台。
-- 规划运行时的失败恢复入口：结果不确定的现场目前只能通过再次 `Prepare` 做只读核验；残留的一次性
-  准备容器没有专门清理路径，也没有跨进程会话锁。
-- `Release` 不检查是否存在在途规划调用：本阶段不执行 AI 调用，M3 接入角色调用后必须先确认没有在途分析
-  才能释放。
+- 撤销与重跑之外的失败恢复入口：结果不确定的运行时现场只能通过再次 `Prepare` 做只读核验；残留的
+  一次性准备容器没有专门清理路径，也没有跨进程会话锁。
+- `Release` 不检查是否存在在途规划调用；且 `PlanningRuntimeService` 的运行时绑定写入是不带状态前置
+  条件的整行更新，与 `PlanningSessionService` 的状态迁移并发交错时可能覆盖状态，这一处需要后续统一。
 - 真实环境下的只读验证（文件工具与 `sh -c` 写入是否真的被文件系统拒绝）尚未执行：本阶段只确认参数
   构造正确，**不代表只读规划环境已经可用**。
+- 本阶段新增的会话事务、条件更新与错误映射没有任何自动化测试守点，也未在真实数据库上验证并发行为。
 
-### 7.5 验证方式
+### 7.6 验证方式
 
-三个阶段都只做非测试验证：阅读代码核对调用链、`gofmt`、`go vet ./...`、`git diff --check`。第二阶段另加
+四个阶段都只做非测试验证：阅读代码核对调用链、`gofmt`、`go vet ./...`、`git diff --check`。第二阶段另加
 人工核对迁移的表、索引、字段、非枚举约束与版本顺序；第三阶段人工核对快照卷命名与标签、准备 / 只读复核
 容器、`--read-only` 与只读代码卷、tmpfs 可写目录、容器所有权校验、释放顺序与 `RequiredCLICommands`
-新增参数，并确认普通任务容器的创建参数未改变。
+新增参数，并确认普通任务容器的创建参数未改变；第四阶段人工核对七个业务操作的事务边界、领域状态机调用点、
+条件更新的前置状态、角色消息发送方限制与失败摘要脱敏。
 
-三个阶段都未运行任何测试（含迁移升级与 SQLite 读写测试），未创建测试文件，未连接真实 Docker / SSH / Pi /
-远程主机。因此旧库升级后的数据保留、未知枚举值写入与读回、序号分配在并发下的实际行为、真实快照克隆、
-只读挂载与容器释放均未验证，不得报告为通过。
+四个阶段都未运行任何测试（含迁移升级与 SQLite 读写测试），未创建测试文件，未连接真实 Docker / SSH / Pi /
+远程主机。因此旧库升级后的数据保留、未知枚举值写入与读回、序号分配与条件更新在并发下的实际行为、真实快照
+克隆、只读挂载与容器释放均未验证，不得报告为通过；第四阶段的并发结论来自事务与条件更新的代码路径核对，
+没有真实并发执行证据。

@@ -36,6 +36,20 @@ func (t PlanningSenderType) Validate() error {
 	}
 }
 
+// IsPlanningRole 判断发送方是否是规划角色的输出。
+//
+// 一轮分析完成后产生的角色消息只允许来自需求分析师与方案规划师：用户消息必须经
+// 用户提交入口写入，系统消息由系统记录产生，两者都不能在收敛分析结果时被伪造。
+// 未知取值一律返回 false，不把它当作合法角色。
+func (t PlanningSenderType) IsPlanningRole() bool {
+	switch t {
+	case PlanningSenderRequirementAnalyst, PlanningSenderPlanner:
+		return true
+	default:
+		return false
+	}
+}
+
 // PlanningMessage 是规划会话中的一条消息。
 //
 // 序号在会话内唯一且稳定：它由存储层在写入事务内分配，调用方不能自带序号覆盖历史
