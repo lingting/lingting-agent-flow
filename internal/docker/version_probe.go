@@ -85,7 +85,7 @@ func (r *Runner) ProbeVersion(ctx context.Context) VersionProbe {
 		return probe
 	}
 
-	apiResult := r.ProbeAPIVersion(ctx, DefaultDistributionTimeout)
+	apiResult := r.ProbeAPIVersion(ctx, DefaultEngineAPIProbeTimeout)
 	probe.APIVersion = apiResult.APIVersion
 	probe.MinAPIVersion = apiResult.MinAPIVersion
 	if !apiResult.Succeeded() {

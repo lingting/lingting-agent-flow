@@ -11,10 +11,10 @@ import (
 // 只使用三种取值，不新增第二种对外状态名；详细结果中的单项状态由 CheckStatus
 // 表达，不引入额外的总体状态。
 //
-// normal 的含义仅限于本方案实际执行的检查项：SSH 连接可用、Docker CLI 帮助信息
-// 覆盖当前使用的命令与参数、基础 Dockerfile 的外部 FROM 镜像元数据可查询。
-// 第一版不执行容器创建、启动或运行，因此 normal 不代表该 Docker Engine 一定能
-// 成功创建并运行 AgentFlow 所需的容器。
+// normal 的含义仅限于本方案实际执行的检查项：SSH 连接可用、Docker CLI / Engine 与
+// 固定 API 基准兼容、Docker CLI 帮助信息覆盖当前使用的命令与参数。预检既不查询
+// 基础镜像 Registry 元数据，也不执行 Docker Build 或容器创建启动，因此 normal 不
+// 代表基础镜像存在、环境镜像可构建，也不代表该 Engine 一定能成功运行所需的容器。
 type ValidationStatus string
 
 // 总体状态取值。
@@ -93,48 +93,26 @@ const (
 	// ValidatorVersion 是当前校验器实现的版本标识。
 	//
 	// 版本号参与校验详情，便于区分"旧版本校验结果"与"新版本校验结果"。
-	// v2 增加了 Docker CLI / Engine / API 基线检查，因此 v1 的 normal 结果不再被视为有效。
-	ValidatorVersion = "v2"
+	// v2 增加了 Docker CLI / Engine / API 基线检查；v3 移除了基础镜像元数据检查，
+	// 因此 v2 与更早版本的 normal 结果都不再被视为有效。
+	ValidatorVersion = "v3"
 
 	// 校验项名称，与界面展示一一对应。
-	ValidationCheckSSHConnection     = "ssh_connection"
-	ValidationCheckDockerVersion     = "docker_version"
-	ValidationCheckDockerCLIHelp     = "docker_cli_help"
-	ValidationCheckBaseImageMetadata = "base_image_metadata"
+	ValidationCheckSSHConnection = "ssh_connection"
+	ValidationCheckDockerVersion = "docker_version"
+	ValidationCheckDockerCLIHelp = "docker_cli_help"
 )
 
 // 校验能力边界说明。
 //
-// 这些文案同时写入校验详情与界面，避免用户把 normal 误读为"已经证明远端 Docker
-// Engine 能成功创建并运行 AgentFlow 所需的容器"。
+// 这些文案同时写入校验详情与界面，避免用户把 normal 误读为"基础镜像可用"或
+// "已经证明远端 Docker Engine 能成功创建并运行 AgentFlow 所需的容器"。
 const (
-	// CapabilityDockerVersionChecked 说明版本检查覆盖的范围。
-	CapabilityDockerVersionChecked = "Docker 兼容性检查校验实际 CLI 版本、Engine 版本与固定 API 基准是否落在 Engine 支持的版本区间内。"
-	// CapabilityDockerCLIHelpOnly 说明 Docker 检查只基于 CLI 帮助信息。
-	CapabilityDockerCLIHelpOnly = "Docker 命令与参数检查基于 CLI 帮助信息，尚未执行容器创建、启动或实际参数兼容性验证。"
-	// CapabilityImageMetadataOnly 说明镜像检查只查询元数据。
-	CapabilityImageMetadataOnly = "基础镜像检查只查询 FROM 镜像元数据，不下载镜像层、不拉取完整镜像，也不创建或运行容器。"
+	// CapabilityDockerVersionChecked 说明连接与版本检查覆盖的范围。
+	CapabilityDockerVersionChecked = "SSH 连接能力已验证：握手、身份认证与一条无副作用的远程命令均正常；Docker CLI、Engine 与固定 API 基准的兼容性也在同一连接上验证。"
+	// CapabilityDockerCLIHelpOnly 说明命令检查的边界。
+	CapabilityDockerCLIHelpOnly = "Docker 命令与参数仅通过 CLI 帮助信息核对；没有验证基础镜像 Registry 可访问性，也没有执行 Docker Build、容器创建或启动。"
 )
-
-// ImageMetadataResult 是单个外部 FROM 镜像的元数据查询结果。
-type ImageMetadataResult struct {
-	// Reference 是 Dockerfile 中的原始镜像引用。
-	Reference string `json:"reference"`
-	// Resolved 是补齐默认 tag 后用于查询的镜像引用。
-	Resolved string `json:"resolved,omitempty"`
-	// Status 是本次查询的结果状态。
-	Status CheckStatus `json:"status"`
-	// ErrorCode 是稳定的失败分类代码，成功时为空。
-	ErrorCode string `json:"error_code,omitempty"`
-	// Message 是简短的成功说明或失败原因，已截断并脱敏。
-	Message string `json:"message,omitempty"`
-	// Digest 是远端 Engine 返回的镜像摘要，接口未返回时为空。
-	Digest string `json:"digest,omitempty"`
-	// Platforms 是接口返回的平台列表，形如 linux/amd64。
-	Platforms []string `json:"platforms,omitempty"`
-	// DurationMillis 是本次查询耗时毫秒数。
-	DurationMillis int64 `json:"duration_millis"`
-}
 
 // ValidationCheck 是一项校验的结果。
 type ValidationCheck struct {
@@ -154,8 +132,6 @@ type ValidationCheck struct {
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
 	// DurationMillis 是该项检查耗时毫秒数。
 	DurationMillis int64 `json:"duration_millis"`
-	// Images 是镜像检查项内部的逐镜像结果，其他检查项为空。
-	Images []ImageMetadataResult `json:"images,omitempty"`
 	// Details 是该检查项的补充说明，例如缺失的 Docker 选项列表。
 	Details []string `json:"details,omitempty"`
 }
@@ -164,6 +140,9 @@ type ValidationCheck struct {
 //
 // 该结构整体以 JSON 保存到 execution_hosts.validation_details_json，因此字段变更
 // 不需要数据库结构变更；读取失败时按"详情不可用"处理，不影响总体状态。
+//
+// Checks 只包含三项必需检查（SSH 连接、Docker 版本与 API 兼容性、Docker CLI 帮助
+// 信息），不再携带基础镜像元数据等逐镜像结果。
 type ValidationDetails struct {
 	// ValidatorVersion 是产生本结果的校验器版本。
 	ValidatorVersion string `json:"validator_version"`
@@ -207,45 +186,12 @@ func (d ValidationDetails) AllRequiredPassed() bool {
 	return true
 }
 
-// ValidationInputFingerprint 是一次校验输入的非秘密指纹。
-//
-// 指纹只覆盖非机密数据：连接目标、认证方式种类、工作空间路径与基础 Dockerfile
-// 内容摘要。密码、私钥口令等凭据不参与指纹，也不会被写入数据库。
-type ValidationInputFingerprint struct {
-	// Host 是 SSH 主机地址。
-	Host string `json:"host"`
-	// Port 是 SSH 端口。
-	Port int `json:"port"`
-	// Username 是 SSH 登录用户名。
-	Username string `json:"username"`
-	// AuthMethod 是认证方式种类。
-	AuthMethod AuthMethod `json:"auth_method"`
-	// PrivateKeyPath 是本机私钥文件路径（不含内容与口令）。
-	PrivateKeyPath string `json:"private_key_path,omitempty"`
-	// WorkspaceRoot 是远程工作空间配置。
-	WorkspaceRoot string `json:"workspace_root"`
-	// DockerfileSHA256 是本次参与检查的基础 Dockerfile 内容摘要。
-	DockerfileSHA256 string `json:"dockerfile_sha256,omitempty"`
-}
-
-// FingerprintOf 返回节点当前配置的非秘密校验输入指纹。
-func FingerprintOf(host ExecutionHost, dockerfileSHA256 string) ValidationInputFingerprint {
-	return ValidationInputFingerprint{
-		Host:             host.Host,
-		Port:             host.Port,
-		Username:         host.Username,
-		AuthMethod:       host.AuthMethod,
-		PrivateKeyPath:   host.PrivateKeyPath,
-		WorkspaceRoot:    host.WorkspaceRoot,
-		DockerfileSHA256: dockerfileSHA256,
-	}
-}
-
 // InvalidateValidation 使既有校验结果失效，并把状态置为 checking。
 //
-// 任何影响连接目标、认证、Docker 命令环境或被检查基础 Dockerfile 的有效变更都必须
-// 调用本方法：旧结果一旦失效就不能继续被当作 normal 使用。代次随之增加，使正在
-// 执行的旧校验任务在写回结果时被拒绝。
+// 任何影响连接目标、认证方式、私钥路径或启用状态的有效变更都必须调用本方法：
+// 旧结果一旦失效就不能继续被当作 normal 使用。远程工作空间路径不参与预检输入，
+// 因此修改它不需要让校验结果失效。代次随之增加，使正在执行的旧校验任务在写回
+// 结果时被拒绝。
 func (h *ExecutionHost) InvalidateValidation(at time.Time) {
 	invalidateAt := normalizeTime(at)
 	h.ValidationStatus = ValidationStatusChecking
@@ -359,7 +305,7 @@ func summarizeValidation(details ValidationDetails) string {
 		return fmt.Sprintf("%s未通过：%s", title, message)
 	}
 	if details.AllRequiredPassed() {
-		return "全部必需预检项通过；Docker 兼容性仅基于 CLI 帮助信息，未验证容器创建与运行。"
+		return "全部必需预检项通过；未验证基础镜像 Registry 可访问性，也未执行 Docker Build、容器创建或启动。"
 	}
 	return "校验未完成"
 }

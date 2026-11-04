@@ -21,15 +21,16 @@ type HostValidationSubmitter interface {
 
 // validationAffectingFields 判断一次更新是否影响校验结果。
 //
-// 连接目标、认证方式、私钥路径、远程工作空间与启用状态都会改变校验输入，
-// 因此只要其中任一字段发生有效变更就必须让旧结果失效。
+// 连接目标、认证方式、私钥路径与启用状态都会改变校验输入，因此只要其中任一字段
+// 发生有效变更就必须让旧结果失效。远程工作空间路径不参与预检（预检既不读取远程
+// 目录也不读取 Dockerfile），修改它不增加校验代次，其合法性由后续远程工作空间与
+// 环境准备操作负责。
 func validationAffectingFields(before, after domain.ExecutionHost) bool {
 	return before.Host != after.Host ||
 		before.Port != after.Port ||
 		before.Username != after.Username ||
 		before.AuthMethod != after.AuthMethod ||
 		before.PrivateKeyPath != after.PrivateKeyPath ||
-		before.WorkspaceRoot != after.WorkspaceRoot ||
 		before.Enabled != after.Enabled
 }
 
@@ -105,7 +106,7 @@ func (s *ExecutionHostService) failValidation(
 // Revalidate 重新触发指定执行节点的环境预检。
 //
 // 该方法只把状态置回 checking、增加代次并提交后台任务，然后立即返回当前配置：
-// HTTP 请求不会等待远程连接与镜像元数据查询结束。
+// HTTP 请求不会等待远程连接与 Docker 版本检查结束。
 func (s *ExecutionHostService) Revalidate(
 	ctx context.Context,
 	id string,

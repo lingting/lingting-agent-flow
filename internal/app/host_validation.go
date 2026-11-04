@@ -2,8 +2,6 @@ package app
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,7 +9,6 @@ import (
 	"time"
 
 	"github.com/lingting/agentflow/internal/docker"
-	"github.com/lingting/agentflow/internal/dockerfile"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/logging"
 	"github.com/lingting/agentflow/internal/sshclient"
@@ -40,9 +37,8 @@ type HostValidationOptions struct {
 
 // HostValidator 执行执行节点的环境预检。
 //
-// 校验按顺序执行三项必需检查：SSH 连接、Docker CLI 帮助信息、基础 Dockerfile 的
-// 外部 FROM 镜像元数据。前一项失败时后续检查记为 not_run，不会伪装成已实际验证。
-//
+// 校验按顺序执行三项必需检查：SSH 连接、Docker 版本与 API 兼容性、Docker CLI
+// 帮助信息。前一项失败时后续检查记为 not_run，不会伪装成已实际验证。
 // 校验器不创建或启动容器、不拉取镜像层，也不改变远端镜像缓存、容器与卷状态。
 type HostValidator struct {
 	ssh      *SSHService
@@ -187,11 +183,11 @@ func (v *HostValidator) FailWithoutChecks(
 	return err
 }
 
-// runChecks 依次执行四项必需检查。
+// runChecks 依次执行三项必需检查。
 //
-// 顺序为 SSH 连接 → Docker 版本与 API 兼容性 → Docker CLI 帮助信息 → 基础镜像元数据。
-// 前一项失败时后续检查记为 not_run：版本不兼容时命令帮助与镜像元数据检查都没有意义，
-// 不能因为它们可能通过就判定节点可用。
+// 顺序为 SSH 连接 → Docker 版本与 API 兼容性 → Docker CLI 帮助信息。前一项失败时
+// 后续检查记为 not_run：SSH 不可用时无法执行任何远程检查，版本不兼容时命令帮助
+// 检查也没有意义，不能因为它们可能通过就判定节点可用。
 func (v *HostValidator) runChecks(
 	ctx context.Context,
 	host domain.ExecutionHost,
@@ -201,10 +197,9 @@ func (v *HostValidator) runChecks(
 		Capabilities: []string{
 			domain.CapabilityDockerVersionChecked,
 			domain.CapabilityDockerCLIHelpOnly,
-			domain.CapabilityImageMetadataOnly,
 		},
 	}
-	sshCheck, client, home := v.checkSSH(ctx, host, startedAt)
+	sshCheck, client := v.checkSSH(ctx, host, startedAt)
 	details.Checks = append(details.Checks, sshCheck)
 	if !sshCheck.Status.Passed() {
 		details.Checks = append(
@@ -218,11 +213,6 @@ func (v *HostValidator) runChecks(
 				domain.ValidationCheckDockerCLIHelp,
 				"Docker CLI 帮助信息",
 				"SSH 检查未通过，未执行 Docker CLI 帮助检查",
-			),
-			notRunCheck(
-				domain.ValidationCheckBaseImageMetadata,
-				"基础镜像元数据",
-				"SSH 检查未通过，未查询基础镜像元数据",
 			),
 		)
 		return details
@@ -247,11 +237,6 @@ func (v *HostValidator) runChecks(
 				"Docker CLI 帮助信息",
 				"构造远程 Docker 执行器失败，未执行 Docker CLI 帮助检查",
 			),
-			notRunCheck(
-				domain.ValidationCheckBaseImageMetadata,
-				"基础镜像元数据",
-				"构造远程 Docker 执行器失败，未查询基础镜像元数据",
-			),
 		)
 		return details
 	}
@@ -266,29 +251,13 @@ func (v *HostValidator) runChecks(
 				"Docker CLI 帮助信息",
 				"Docker 版本与 API 兼容性检查未通过，未执行 Docker CLI 帮助检查",
 			),
-			notRunCheck(
-				domain.ValidationCheckBaseImageMetadata,
-				"基础镜像元数据",
-				"Docker 版本与 API 兼容性检查未通过，未查询基础镜像元数据",
-			),
 		)
-		return details
-	}
-
-	helpCheck := v.checkDockerCLIHelp(ctx, runner, startedAt)
-	details.Checks = append(details.Checks, helpCheck)
-	if !helpCheck.Status.Passed() {
-		details.Checks = append(details.Checks, notRunCheck(
-			domain.ValidationCheckBaseImageMetadata,
-			"基础镜像元数据",
-			"Docker CLI 帮助检查未通过，未查询基础镜像元数据",
-		))
 		return details
 	}
 
 	details.Checks = append(
 		details.Checks,
-		v.checkBaseImages(ctx, client, runner, host, home, startedAt),
+		v.checkDockerCLIHelp(ctx, runner, startedAt),
 	)
 	return details
 }
@@ -364,7 +333,7 @@ func (v *HostValidator) checkDockerCLIHelp(
 		check.CompletedAt = &completed
 		check.DurationMillis = time.Since(started).Milliseconds()
 	}()
-	result := runner.CheckCLIHelp(ctx, docker.RequiredCLICommands(), v.imageTimeout())
+	result := runner.CheckCLIHelp(ctx, docker.RequiredCLICommands(), v.cliHelpTimeout())
 	check.ErrorCode = result.Status
 	if result.Succeeded() {
 		check.Status = domain.CheckStatusPassed
@@ -396,7 +365,7 @@ func (v *HostValidator) checkSSH(
 	ctx context.Context,
 	host domain.ExecutionHost,
 	startedAt time.Time,
-) (domain.ValidationCheck, sshclient.Client, string) {
+) (domain.ValidationCheck, sshclient.Client) {
 	check := domain.ValidationCheck{
 		Name:      domain.ValidationCheckSSHConnection,
 		Title:     "SSH 连接",
@@ -412,7 +381,7 @@ func (v *HostValidator) checkSSH(
 	if !host.Enabled {
 		check.Message = "节点已禁用，请先启用该节点"
 		check.ErrorCode = sshclient.CodeInvalidConfig.String()
-		return check, nil, ""
+		return check, nil
 	}
 	sshCtx, cancel := context.WithTimeout(ctx, v.sshTimeout())
 	defer cancel()
@@ -420,13 +389,13 @@ func (v *HostValidator) checkSSH(
 	if err != nil {
 		check.Message = err.Error()
 		check.ErrorCode = sshclient.CodeInvalidConfig.String()
-		return check, nil, ""
+		return check, nil
 	}
 	dialResult, dialErr := v.ssh.dialer.Dial(sshCtx, endpoint, authConfig)
 	if dialErr != nil {
 		check.Message = sshFailureMessage(dialErr)
 		check.ErrorCode = sshclient.ErrorCodeOf(dialErr).String()
-		return check, nil, ""
+		return check, nil
 	}
 	client := dialResult.Client
 	command, cmdErr := sshclient.ShellCommand("true")
@@ -434,7 +403,7 @@ func (v *HostValidator) checkSSH(
 		_ = client.Close()
 		check.Message = "构造远程检查命令失败"
 		check.ErrorCode = sshclient.CodeInvalidConfig.String()
-		return check, nil, ""
+		return check, nil
 	}
 	run, runErr := client.Run(sshCtx, command, sshclient.RunOptions{Timeout: v.sshTimeout()})
 	if runErr != nil || !run.Succeeded() {
@@ -458,183 +427,11 @@ func (v *HostValidator) checkSSH(
 			)
 			check.ErrorCode = "command_exit_error"
 		}
-		return check, nil, ""
-	}
-	home, homeErr := sshclient.ResolveHome(sshCtx, client, v.sshTimeout())
-	if homeErr != nil {
-		_ = client.Close()
-		check.Message = "SSH 认证成功，但解析远程 Home 目录失败: " + summarizeSSHError(homeErr)
-		check.ErrorCode = sshclient.CodeInvalidConfig.String()
-		return check, nil, ""
+		return check, nil
 	}
 	check.Status = domain.CheckStatusPassed
 	check.Message = "SSH 握手、身份认证与远程命令执行均正常"
-	return check, client, home
-}
-
-// checkBaseImages 解析基础 Dockerfile 并查询全部外部 FROM 镜像元数据。
-func (v *HostValidator) checkBaseImages(
-	ctx context.Context,
-	client sshclient.Client,
-	runner *docker.Runner,
-	host domain.ExecutionHost,
-	home string,
-	startedAt time.Time,
-) domain.ValidationCheck {
-	check := domain.ValidationCheck{
-		Name:      domain.ValidationCheckBaseImageMetadata,
-		Title:     "基础镜像元数据",
-		Status:    domain.CheckStatusFailed,
-		StartedAt: startedAt,
-	}
-	started := time.Now()
-	defer func() {
-		completed := time.Now().UTC()
-		check.CompletedAt = &completed
-		check.DurationMillis = time.Since(started).Milliseconds()
-	}()
-	content, source, err := v.loadBaseDockerfile(ctx, client, host, home)
-	if err != nil {
-		check.Message = err.Error()
-		check.ErrorCode = "dockerfile_unavailable"
-		return check
-	}
-	check.Details = append(check.Details, "基础 Dockerfile 来源: "+source)
-	parsed, parseErr := dockerfile.Parse(content)
-	if parseErr != nil {
-		check.Message = "解析基础 Dockerfile 失败: " + parseErr.Error()
-		check.ErrorCode = "dockerfile_unparsable"
-		return check
-	}
-	for _, skipped := range parsed.Skipped {
-		check.Details = append(check.Details, fmt.Sprintf(
-			"跳过 %s（第 %d 行）: %s",
-			skipped.Reference,
-			skipped.Line,
-			skipped.Reason,
-		))
-	}
-	if len(parsed.Unresolved) > 0 {
-		reasons := make([]string, 0, len(parsed.Unresolved))
-		for _, unresolved := range parsed.Unresolved {
-			reasons = append(reasons, fmt.Sprintf(
-				"第 %d 行 %s: %s",
-				unresolved.Line,
-				unresolved.Reference,
-				unresolved.Reason,
-			))
-		}
-		check.Message = "存在无法解析的 FROM 引用: " + strings.Join(reasons, "；")
-		check.ErrorCode = "dockerfile_unresolved"
-		return check
-	}
-	if len(parsed.Images) == 0 {
-		// 没有任何外部镜像时无法确认该 Dockerfile 可用于构建，不判为通过。
-		check.Message = "基础 Dockerfile 未引用任何外部镜像，无法确认构建可用性"
-		check.ErrorCode = "dockerfile_no_external_image"
-		return check
-	}
-	failed := 0
-	for _, image := range parsed.Images {
-		result := runner.InspectDistribution(ctx, image.Resolved, v.imageTimeout())
-		item := domain.ImageMetadataResult{
-			Reference:      image.Reference,
-			Resolved:       image.Resolved,
-			Status:         domain.CheckStatusPassed,
-			Digest:         result.Digest,
-			Platforms:      result.Platforms,
-			DurationMillis: result.Duration.Milliseconds(),
-			Message:        result.Message,
-		}
-		if !result.Succeeded() {
-			failed++
-			item.Status = metadataCheckStatus(result.Status)
-			item.ErrorCode = result.Status
-		}
-		check.Images = append(check.Images, item)
-	}
-	switch {
-	case failed == 0:
-		check.Status = domain.CheckStatusPassed
-		check.Message = fmt.Sprintf(
-			"已查询 %d 个外部 FROM 镜像的元数据（未下载镜像层）",
-			len(parsed.Images),
-		)
-	case failed == len(parsed.Images):
-		check.Message = fmt.Sprintf("%d 个外部 FROM 镜像的元数据查询均失败", failed)
-		check.ErrorCode = check.Images[0].ErrorCode
-	default:
-		check.Message = fmt.Sprintf(
-			"%d 个外部 FROM 镜像中有 %d 个元数据查询失败",
-			len(parsed.Images),
-			failed,
-		)
-		check.ErrorCode = "partial_image_metadata_failure"
-	}
-	return check
-}
-
-// metadataCheckStatus 把元数据查询状态映射为单项检查状态。
-func metadataCheckStatus(status string) domain.CheckStatus {
-	switch status {
-	case docker.MetadataCodeTimeout:
-		return domain.CheckStatusTimedOut
-	default:
-		return domain.CheckStatusFailed
-	}
-}
-
-// loadBaseDockerfile 读取当前节点对应的基础环境 Dockerfile。
-//
-// 选择规则与产品一致：使用该节点上最新的基础环境版本，读取其远程版本目录中的
-// Dockerfile；节点尚未创建任何基础环境版本时使用内置默认基础 Dockerfile。
-// 这里不会硬编码测试用文件，也不会在多个版本之间随意选择。
-func (v *HostValidator) loadBaseDockerfile(
-	ctx context.Context,
-	client sshclient.Client,
-	host domain.ExecutionHost,
-	home string,
-) ([]byte, string, error) {
-	baseRef, err := domain.NewEnvironmentRef(domain.EnvironmentTypeBase, "")
-	if err != nil {
-		return nil, "", err
-	}
-	versions, listErr := v.store.ListEnvironmentVersions(ctx, storage.EnvironmentVersionFilter{
-		HostID: host.ID,
-		Ref:    &baseRef,
-	})
-	if listErr != nil {
-		return nil, "", fmt.Errorf("读取基础环境版本失败: %w", listErr)
-	}
-	if len(versions) == 0 {
-		return []byte(docker.DefaultBaseDockerfile),
-			"内置默认基础 Dockerfile（节点尚未创建基础环境版本）", nil
-	}
-	latest := versions[len(versions)-1]
-	root, resolveErr := sshclient.ResolveWorkspace(host.WorkspaceRoot, home)
-	if resolveErr != nil {
-		return nil, "", fmt.Errorf("解析远程工作空间失败: %w", resolveErr)
-	}
-	layout, layoutErr := docker.NewLayout(root)
-	if layoutErr != nil {
-		return nil, "", layoutErr
-	}
-	remotePath := layout.DockerfilePath(latest.Ref, latest.Number)
-	transfer, transferErr := client.SFTP()
-	if transferErr != nil {
-		return nil, "", fmt.Errorf("打开 SFTP 通道读取基础 Dockerfile 失败: %w", transferErr)
-	}
-	defer func() {
-		_ = transfer.Close()
-	}()
-	content, readErr := transfer.ReadFile(ctx, remotePath, docker.MaxContextFileBytes)
-	if readErr != nil {
-		return nil, "", fmt.Errorf("读取基础 Dockerfile 失败: %s: %w", remotePath, readErr)
-	}
-	if len(content) == 0 {
-		return nil, "", fmt.Errorf("基础 Dockerfile 为空: %s", remotePath)
-	}
-	return content, remotePath + "（基础环境版本 " + latest.Label() + "）", nil
+	return check, client
 }
 
 // notRunCheck 构造未执行检查项。
@@ -699,11 +496,11 @@ func (v *HostValidator) sshTimeout() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-// imageTimeout 返回单镜像查询超时。
-func (v *HostValidator) imageTimeout() time.Duration {
-	seconds := v.timeouts.ImageSeconds
+// cliHelpTimeout 返回 Docker CLI 帮助检查的超时。
+func (v *HostValidator) cliHelpTimeout() time.Duration {
+	seconds := v.timeouts.CLIHelpSeconds
 	if seconds <= 0 {
-		seconds = docker.ValidationImageTimeoutSeconds
+		seconds = docker.ValidationCLIHelpTimeoutSeconds
 	}
 	return time.Duration(seconds) * time.Second
 }
@@ -741,10 +538,4 @@ func (v *HostValidator) debug(ctx context.Context, message string, attrs ...slog
 		return
 	}
 	v.logger.Slog().LogAttrs(ctx, slog.LevelDebug, message, attrs...)
-}
-
-// DockerfileSHA256 计算基础 Dockerfile 的内容摘要，用于校验输入指纹。
-func DockerfileSHA256(content []byte) string {
-	digest := sha256.Sum256(content)
-	return hex.EncodeToString(digest[:])
 }

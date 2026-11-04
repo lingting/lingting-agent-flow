@@ -1,5 +1,10 @@
 # 组件评估：BuildKit Dockerfile Parser（github.com/moby/buildkit/frontend/dockerfile/parser）
 
+> **状态：已被本轮产品架构决策取代（本文件结论不再实施）。**
+> 执行节点预检已移除基础镜像元数据检查，专用 Dockerfile `FROM` 解析器（`internal/dockerfile`）与
+> Distribution Inspect 一并删除。节点预检不再需要解析 Dockerfile，也不再查询 `FROM` 镜像元数据；
+> 基础镜像可用性由真实的环境构建负责。因此本文就不再为预检维护 Dockerfile 解析逻辑，
+> **不引入 BuildKit Parser，也不引入 `distribution/reference`**。以下内容只作为历史评估记录保留。
 > **状态：审计结论，未实施。**
 > 本项目当前**没有**引入 `github.com/moby/buildkit` 或 `github.com/distribution/reference`：
 > `go.mod` / `go.sum` 未修改，`internal/dockerfile/`、`internal/docker/templates.go` 以及其余生产代码未修改，
@@ -404,7 +409,11 @@ type Node struct {
 
 ## 11. 最终结论
 
-**部分值得替换。**
+> **已被取代**：本节的历史结论是"部分值得替换"。执行节点预检移除基础镜像元数据检查后，专用 Dockerfile
+> `FROM` 解析能力已随 `internal/dockerfile` 删除，`ValidateDockerfile` 的安全性由现有的内容安全校验独立
+> 承担。因此不再实施"替换 parser"或"引入 `distribution/reference`"，本结论仅作记录。
+
+历史结论（已失效）：**部分值得替换。**
 
 具体范围：
 

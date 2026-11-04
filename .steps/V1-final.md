@@ -27,8 +27,9 @@ AgentFlow 是**本地优先的 AI Coding Workflow Orchestrator**。它把一条�
 
 - 执行节点（`execution_hosts`）注册、更新、逻辑删除、设为默认；认证方式固定为**无口令私钥**。
 - 主机密钥校验不可关闭：known_hosts 全程只读，未知主机返回指纹与算法，密钥变化返回已信任记录。
-- 节点环境预检：SSH 连接 → Docker 版本与 API 兼容性 → Docker CLI 帮助 → 基础 `FROM` 镜像元数据；
-  四项必需检查全部通过才写 `normal`，`skipped` / `not_run` 不算通过。
+- 节点环境预检：SSH 连接 → Docker 版本与 API 兼容性 → Docker CLI 帮助信息；
+  三项必需检查全部通过才写 `normal`，`skipped` / `not_run` 不算通过。预检不查询基础镜像元数据，也不
+  执行 Docker Build、容器创建或启动，基础镜像可用性由真实的环境构建负责。
 - 语言环境定义、环境版本（只追加，历史版本不可覆盖）、构建与构建状态查询。
 - Docker 兼容性基线固定在 CLI 29.0.0 / Engine 29.0.0 / API 1.52，所有 Docker 调用经
   `internal/docker` 统一入口。

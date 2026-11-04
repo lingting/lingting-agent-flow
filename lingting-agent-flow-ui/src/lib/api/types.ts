@@ -204,17 +204,6 @@ export type ValidationStatus = "checking" | "normal" | "abnormal";
  */
 export type ValidationCheckStatus = "passed" | "failed" | "timed_out" | "skipped" | "not_run";
 
-/** 单个外部 FROM 镜像的元数据查询结果 */
-export type ImageMetadataResult = {
-  reference: string;
-  resolved?: string;
-  status: ValidationCheckStatus;
-  error_code?: string;
-  message?: string;
-  digest?: string;
-  platforms?: string[];
-  duration_millis: number;
-};
 
 /** 一项校验的结果 */
 export type ValidationCheck = {
@@ -226,7 +215,6 @@ export type ValidationCheck = {
   started_at: string;
   completed_at?: string;
   duration_millis: number;
-  images?: ImageMetadataResult[];
   details?: string[];
 };
 

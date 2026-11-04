@@ -4,6 +4,11 @@
 > 本项目当前**没有**引入 `github.com/moby/moby/client`：`go.mod` 与 `go.sum` 未修改，
 > `internal/docker`、`internal/sshclient` 的生产代码未修改，当前仍使用自研的直连 Engine API 实现。
 > 本文是替换前的可行性审计记录，结论见第 13 节。
+>
+> **部分内容已被取代**：执行节点预检已移除基础镜像元数据检查，`internal/docker/distribution.go`
+> （`InspectDistribution`、`DistributionResult`、`MetadataCode*`、Distribution 响应解析与错误分类）已删除，
+> 预检只剩 `GET /v1.52/version` 一处直接 Engine API 调用。因此本文涉及 Distribution Inspect 的章节
+> 只作为历史评估记录保留，不再对应现有实现。
 
 - 审计对象：`github.com/moby/moby/client@v0.6.2`（含配套类型模块 `github.com/moby/moby/api@v1.56.1`）
 - 审计时间：2026-11-04

@@ -35,7 +35,7 @@
 | `host test <id>` | 测试完整 SSH 身份认证连接 |
 | `host workspace <id>` | 解析并检查远程工作空间（`--create` 显式创建） |
 | `host transfer upload|download <id> …` | 开发者诊断用 SFTP 单文件传输 |
-| `host validate <id>` | 同步执行一次环境预检，非零退出码表示未通过 |
+| `host validate <id>` | 同步执行一次环境预检（SSH 连接、Docker 版本与 API 兼容性、Docker CLI 帮助信息），非零退出码表示未通过 |
 
 各命令的认证语义与主机密钥规则见 [ssh-hosts.md](ssh-hosts.md)。
 

@@ -80,6 +80,8 @@
 - 不得关闭 SSH 主机密钥校验，不得引入密码认证、私钥口令或产品级 Git 凭据管理。
 - Docker 调用必须遵守既定版本与 API 基线，且只经由
   `internal/docker` 的命令入口（见 [docs/docker-compatibility.md](docs/docker-compatibility.md)）。
+- 执行节点预检不得解析基础 Dockerfile，不得查询 `FROM` 镜像的 Registry 元数据，不得执行 Docker Build
+  或 Pull；基础镜像可用性由真实环境构建负责（见 [docs/docker-compatibility.md](docs/docker-compatibility.md)）。
 - 未经用户明确要求，不运行测试、不创建测试文件与临时验证脚本，也不通过"测试后删除"绕过
   （见 [docs/testing.md](docs/testing.md)）。
 - 文档只描述已实现的能力，不提前声明尚未落地的命令或接口；代码编辑期间不改文档。

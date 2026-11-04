@@ -179,7 +179,6 @@ export type {
   HealthStatus,
   Host,
   HostListResponse,
-  ImageMetadataResult,
   InitializeCodeRequest,
   InitializeCodeResponse,
   OpenRepairCycleResponse,

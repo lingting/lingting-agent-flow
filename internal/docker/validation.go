@@ -10,11 +10,11 @@ const (
 	ValidationSSHTimeoutSeconds = 10
 	// ValidationVersionTimeout 是 Docker CLI、Engine 与 API 兼容性检查的上限。
 	//
-	// 该检查包含两条远程 CLI 命令与一次基准路径的 Engine API 探测，因此比单镜像查询宽松。
+	// 该检查包含两条远程 CLI 命令与一次基准路径的 Engine API 探测，因此比单项 CLI 检查宽松。
 	ValidationVersionTimeoutSeconds = 15
-	// ValidationImageTimeout 是单个镜像元数据查询的上限。
-	ValidationImageTimeoutSeconds = 8
-	// ValidationTotalTimeout 是一次完整校验（四项检查）的总时限。
+	// ValidationCLIHelpTimeout 是 Docker CLI 帮助信息检查的上限。
+	ValidationCLIHelpTimeoutSeconds = 8
+	// ValidationTotalTimeout 是一次完整校验（三项检查）的总时限。
 	ValidationTotalTimeoutSeconds = 45
 )
 
@@ -24,8 +24,8 @@ type ValidationTimeouts struct {
 	SSHSeconds int
 	// Version 是 Docker 版本与 API 兼容性检查的上限。
 	VersionSeconds int
-	// Image 是单镜像元数据查询的上限。
-	ImageSeconds int
+	// CLIHelp 是 Docker CLI 帮助信息检查的上限。
+	CLIHelpSeconds int
 	// Total 是整体校验的上限。
 	TotalSeconds int
 }
@@ -35,7 +35,7 @@ func DefaultValidationTimeouts() ValidationTimeouts {
 	return ValidationTimeouts{
 		SSHSeconds:     ValidationSSHTimeoutSeconds,
 		VersionSeconds: ValidationVersionTimeoutSeconds,
-		ImageSeconds:   ValidationImageTimeoutSeconds,
+		CLIHelpSeconds: ValidationCLIHelpTimeoutSeconds,
 		TotalSeconds:   ValidationTotalTimeoutSeconds,
 	}
 }

@@ -19,13 +19,14 @@ func newHostValidateCommand(a *app.App) *cobra.Command {
 	var flags credentialFlags
 	command := &cobra.Command{
 		Use:   "validate <id>",
-		Short: "执行节点环境预检（SSH、Docker CLI 帮助、基础镜像元数据）",
+		Short: "执行节点环境预检（SSH、Docker 版本与 API、Docker CLI 帮助）",
 		Long: "同步执行一次完整的执行节点环境预检，依次检查：\n" +
 			"  1. SSH 连接：握手、认证与无副作用的远程命令；\n" +
-			"  2. Docker CLI 帮助信息：核对 AgentFlow 实际使用的命令与参数选项；\n" +
-			"  3. 基础 Dockerfile 的外部 FROM 镜像元数据（不下载镜像层）。\n" +
-			"第一版 Docker 检查只基于 CLI 帮助信息，不创建或启动容器，也不拉取镜像，\n" +
-			"因此通过校验不代表该 Docker Engine 一定能成功创建并运行 AgentFlow 所需的容器。\n" +
+			"  2. Docker 版本与 API 兼容性：CLI 版本、Engine 版本与固定 API 基线；\n" +
+			"  3. Docker CLI 帮助信息：核对 AgentFlow 实际使用的命令与参数选项。\n" +
+			"预检不查询基础镜像 Registry 元数据，也不执行 Docker Build、容器创建或启动，\n" +
+			"因此通过校验不代表基础镜像可用，也不代表该 Docker Engine 一定能成功构建环境\n" +
+			"镜像或运行 AgentFlow 所需的容器。基础镜像可用性由真实的环境构建负责。\n" +
 			"密码与私钥口令只在内存中传递，可用 --password-stdin 或 --passphrase-stdin 读取。",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -89,15 +90,6 @@ func printValidationResult(a *app.App, host domain.ExecutionHost) error {
 				check.DurationMillis,
 				optionalDetail(check.Message),
 			))
-			for _, image := range check.Images {
-				lines = append(lines, fmt.Sprintf(
-					"    镜像 %s → %s: %s%s",
-					image.Reference,
-					image.Resolved,
-					checkStatusLabel(image.Status),
-					optionalDetail(image.Message),
-				))
-			}
 			for _, detail := range check.Details {
 				lines = append(lines, "    "+detail)
 			}

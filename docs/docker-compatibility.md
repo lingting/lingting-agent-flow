@@ -32,7 +32,8 @@ docker.EngineAPIBaseVersion // "1.52"
 7. SSH 环境预检必须同时检查实际使用的 CLI 版本、Engine 版本与 API 版本信息。
 8. `docker --help` 只能用于辅助检查命令与参数，不得作为 Engine 实际运行能力的证明。
 9. 预检禁止执行 `docker create`、`docker run`、`docker pull` 等会创建容器、启动工作负载或下载镜像层
-   的操作；基础 `FROM` 镜像检查只查询镜像元数据。
+   的操作，也不得解析基础 Dockerfile 或查询 `FROM` 镜像的 Registry 元数据；基础镜像可用性由真实的环境
+   构建负责。
 10. 命令的新增、修改与移除都必须检查最低基线兼容性；不得为了让单个测试通过而提高最低版本或依赖高
     版本专属参数。
 11. 修改最低版本或 API 基准属于架构决策，必须同步更新规则、代码、测试与文档。
@@ -95,17 +96,17 @@ AgentFlow 会把它作为明确失败上报。不修改远端用户的 Shell 配
 
 ## 5. 直接 Engine API 调用
 
-当前只有两处直接访问 Engine API，都经由已认证 SSH 连接访问远端 Docker 的 Unix 套接字：
+当前只有一处直接访问 Engine API，经由已认证 SSH 连接访问远端 Docker 的 Unix 套接字：
 
 | 用途 | 请求 |
 |---|---|
 | API 基准探测 | `GET /v1.52/version` |
-| 基础镜像元数据 | `GET /v1.52/distribution/{name}/json` |
 
 路径前缀由 `dockerAPIVersionPrefix`（`"/v" + EngineAPIBaseVersion`）派生，禁止硬编码。
 
-两条请求都是只读的：不创建容器、不拉取镜像层、不改变远端镜像缓存与容器状态。不要求远端安装 `curl`
-等额外工具，也不得用 `docker pull` 作为回退手段。
+该请求是只读的：不创建容器、不拉取镜像层、不改变远端镜像缓存与容器状态。不要求远端安装 `curl`
+等额外工具，也不得用 `docker pull` 作为回退手段。Distribution Inspect（`/distribution/{name}/json`）
+不再是 AgentFlow 的调用范围：基础镜像可用性由 Docker Build 在真实环境构建时处理。
 
 ## 6. Docker 命令清单
 
@@ -148,17 +149,18 @@ AgentFlow 会把它作为明确失败上报。不修改远端用户的 Shell 配
 
 ## 8. 与执行节点预检的关系
 
-预检的状态机、代次写入与四项检查的顺序在 [ssh-hosts.md](ssh-hosts.md) 中定义；本文件只提供判据：
+预检的状态机、代次写入与三项检查的顺序在 [ssh-hosts.md](ssh-hosts.md) 中定义；本文件只提供判据：
 
 - `docker_version`：CLI 与 Engine 版本分别不低于基线，固定 API `1.52` 落在 Engine 声明的区间内。
 - `docker_cli_help`：逐条核对第 6 节的命令与参数清单，只执行 `docker <command> --help`。
-- `base_image_metadata`：只查询 `FROM` 镜像元数据。无法解析的动态 `FROM` 引用（例如依赖构建期参数的
-  变量）必须判为失败并记录原因，不得跳过并判为成功；`scratch` 与内部阶段别名不产生网络查询。
 - 帮助文本可能写入标准输出或标准错误，核对时必须同时读取两个流；退出码为 0 但没有输出时不能判为
   通过。
-- 校验超时集中定义在 `internal/docker/validation.go`：单步 SSH 检查、单镜像查询与整体时限都不得分散
-  写入 Handler 或业务方法，且整体时限必须大于单步时限。
-- `normal` 的含义仅限实际执行的检查，**不代表**已验证容器创建与运行。
+- 校验超时集中定义在 `internal/docker/validation.go`：单步 SSH 检查、Docker CLI 帮助检查与整体时限都
+  不得分散写入 Handler 或业务方法，且整体时限必须大于单步时限。
+- 预检不解析基础 Dockerfile、不查询 `FROM` 镜像元数据，也不执行 Docker Build 或 Pull；基础镜像可用性
+  由真实的环境构建负责，构建失败沿用既有状态并阻止容器创建。
+- `normal` 的含义仅限实际执行的三项检查，**不代表** Registry 可访问、基础镜像存在或环境镜像构建成功，
+  也不代表已验证容器创建与运行。
 
 ## 9. 新增 Docker 命令
 

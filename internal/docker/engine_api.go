@@ -61,8 +61,8 @@ type engineVersionResponse struct {
 // ProbeAPIVersion 通过固定基准路径探测远端 Engine 的 API 兼容性。
 //
 // 只发起一次只读的 GET /v1.52/version：不创建容器、不拉取镜像、不改变任何远端状态。
-// 请求经由已认证 SSH 连接直接访问远端 Docker Engine 的 Unix 套接字，与镜像元数据查询
-// 使用同一套传输方式与固定的 API 基准。
+// 请求经由已认证 SSH 连接直接访问远端 Docker Engine 的 Unix 套接字，不要求远端安装
+// curl 等额外工具，也不依赖 CLI 的自动版本协商结果。
 func (r *Runner) ProbeAPIVersion(
 	ctx context.Context,
 	timeout time.Duration,
@@ -73,7 +73,7 @@ func (r *Runner) ProbeAPIVersion(
 		result.Duration = time.Since(started)
 	}()
 	if timeout <= 0 {
-		timeout = DefaultDistributionTimeout
+		timeout = DefaultEngineAPIProbeTimeout
 	}
 	dialer, ok := r.client.(interface {
 		DialUnixSocket(ctx context.Context, socketPath string) (net.Conn, error)
@@ -109,10 +109,10 @@ func (r *Runner) ProbeAPIVersion(
 		return result
 	}
 	defer func() {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxDistributionBodyBytes))
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxEngineAPIResponseBytes))
 		_ = response.Body.Close()
 	}()
-	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxDistributionBodyBytes))
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxEngineAPIResponseBytes))
 	if readErr != nil {
 		result.Status = classifyAPIProbeError(probeCtx, readErr)
 		result.Message = summarizeOutput(readErr.Error())

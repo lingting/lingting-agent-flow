@@ -40,7 +40,7 @@ function formatDuration(millis: number): string {
   return `${(millis / 1000).toFixed(2)} s`;
 }
 
-/** 单项检查卡片：展示状态、耗时、说明与镜像逐条结果 */
+/** 单项检查卡片：展示状态、耗时与说明 */
 function CheckBlock({ check }: { check: ValidationCheck }) {
   const meta = checkStatusMeta(check.status);
   const title = VALIDATION_CHECK_TITLES[check.name] ?? check.title ?? check.name;
@@ -72,25 +72,6 @@ function CheckBlock({ check }: { check: ValidationCheck }) {
           ))}
         </Flex>
       )}
-      {check.images && check.images.length > 0 && (
-        <Flex gap={2} vertical>
-          {check.images.map((image) => (
-            <Space align="start" key={image.resolved ?? image.reference} size={8}>
-              <DictTag dict={CHECK_STATUS_DICT} value={image.status} />
-              <Typography.Text code>{image.reference}</Typography.Text>
-              <Typography.Text type="secondary">
-                查询引用 {image.resolved ?? image.reference}，耗时{" "}
-                {formatDuration(image.duration_millis)}
-                {image.digest ? `，摘要 ${image.digest}` : ""}
-                {image.platforms && image.platforms.length > 0
-                  ? `，平台 ${image.platforms.join("、")}`
-                  : ""}
-                {image.message ? `，${image.message}` : ""}
-              </Typography.Text>
-            </Space>
-          ))}
-        </Flex>
-      )}
     </Flex>
   );
 }
@@ -98,7 +79,7 @@ function CheckBlock({ check }: { check: ValidationCheck }) {
 /**
  * 执行节点校验详情面板。
  *
- * 只展示接口真实返回的字段：总体状态、摘要、三项检查结果、镜像逐条结果与能力边界说明。
+ * 只展示接口真实返回的字段：总体状态、摘要、三项检查结果与能力边界说明。
  * 详情缺失时给出明确提示，不把缺失当成通过。
  */
 export function HostValidationPanel({ host }: { host: Host }) {

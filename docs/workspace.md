@@ -39,8 +39,7 @@ tests/                    全部测试代码（见 testing.md）
 | `internal/codesaver/` | 代码保存：提交、推送、可选合并与只读核验 |
 | `internal/sshprobe/` | SSH 端点探测（TCP 可达性与协议标识） |
 | `internal/sshclient/` | SSH 连接层：主机密钥校验、私钥认证、远程执行、SFTP、远端套接字 |
-| `internal/docker/` | 远程 Docker 命令构造、版本与 API 兼容性、镜像元数据查询 |
-| `internal/dockerfile/` | Dockerfile 静态解析（多阶段、`AS` 别名、`ARG`、`--platform`） |
+| `internal/docker/` | 远程 Docker 命令构造、版本与 API 兼容性、镜像构建与容器管理 |
 | `internal/webui/` | 前端产物嵌入与静态资源服务 |
 | `internal/cigate/` | CI 准入门禁 |
 | `internal/release/` | 发布制品构建、清单、校验和与来源证明 |

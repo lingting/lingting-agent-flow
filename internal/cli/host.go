@@ -20,7 +20,7 @@ func newHostCommand(a *app.App) *cobra.Command {
 			"工作空间，并测试完整的 SSH 身份认证连接。\n" +
 			"认证只使用节点配置中的无口令私钥，命令层不收集任何凭据；\n" +
 			"未知主机密钥必须核验指纹后显式信任，密钥变化时会拒绝连接。\n" +
-			"host validate 执行环境预检（SSH 连接、Docker CLI 帮助信息、基础镜像元数据）。",
+			"host validate 执行环境预检（SSH 连接、Docker 版本与 API 兼容性、Docker CLI 帮助信息）。",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return cmd.Help()

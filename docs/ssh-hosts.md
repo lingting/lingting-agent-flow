@@ -81,21 +81,22 @@ Unix 套接字通道（`DialUnixSocket`）。它不依赖 `cli`、`storage` 或 
 
 - 新建节点一律由服务端置为 `checking` 并提交后台校验，客户端不能指定 `validation_status`、
   `validation_generation` 等校验字段。
-- 任何影响连接目标、认证方式、私钥路径、远程工作空间或启用状态的修改都必须调用
-  `InvalidateValidation`：状态回到 `checking`、清空旧摘要与详情、代次加一。
+- 任何影响连接目标、认证方式、私钥路径或启用状态的修改都必须调用 `InvalidateValidation`：
+  状态回到 `checking`、清空旧摘要与详情、代次加一。远程工作空间路径不参与预检输入（预检既不读取
+  远程目录也不读取 Dockerfile），修改它不触发校验失效，其合法性由后续远程工作空间与环境准备操作
+  负责。
 - 校验结果必须通过 `UpdateExecutionHostValidation` 以代次为条件写入；代次不一致时丢弃结果，不得
   覆盖新配置。`RecordValidationResult` 与 `FailValidation` 同样校验代次。
 
 ### 检查项
 
-四项必需检查按顺序执行，前一项失败时后续检查记为 `not_run`，不得伪装成已验证：
+三项必需检查按顺序执行，前一项失败时后续检查记为 `not_run`，不得伪装成已验证：
 
 1. **SSH 连接**：握手、认证、执行一条无副作用的非交互远程命令。
 2. **Docker 版本与 API 兼容性**（`docker_version`）：CLI 版本、Engine 版本分别不低于基线，固定 API
    `1.52` 落在 Engine 声明的版本区间内。
 3. **Docker CLI 帮助信息**（`docker_cli_help`）：逐条核对 `docker.RequiredCLICommands` 中的命令与
    参数选项。
-4. **基础镜像元数据**（`base_image_metadata`）：解析基础 Dockerfile，查询外部 `FROM` 镜像的元数据。
 
 Docker 相关判据与允许执行的命令见 [docker-compatibility.md](docker-compatibility.md)。
 
@@ -104,8 +105,12 @@ Docker 相关判据与允许执行的命令见 [docker-compatibility.md](docker-
 - 只有当前代次全部必需检查都通过才允许写入 `normal`；`skipped` 与 `not_run` 一律不算通过。
 - 无法开始校验（调度失败、服务未运行等）时不得永久停留在 `checking`：要么保持可恢复的待校验状态
   并由启动恢复重新调度，要么收敛为 `abnormal` 并给出可读原因。
-- `normal` 的含义仅限本方案实际执行的检查：Docker 兼容性基于实际 CLI / Engine / API 版本与 CLI
-  帮助信息，不验证 Engine 的实际运行契约，因此不得把 `normal` 表述为"容器创建与运行已验证"。
+- `normal` 的含义仅限这三项检查：SSH 连接可用、Docker CLI / Engine / 固定 API 基准兼容、CLI 帮助
+  信息覆盖实际使用的命令与参数。预检既不查询基础镜像 Registry 元数据，也不执行 Docker Build 或容器
+  创建启动，因此 `normal` **不代表** Registry 可访问、基础镜像存在或环境镜像构建成功，也不得表述为
+  "容器创建与运行已验证"。基础镜像可用性由真实的环境构建（`EnvironmentService.Build` →
+  `Runner.BuildImage` → `docker build`）负责，构建失败沿用既有 `failed` / `uncertain` 状态并阻止容器
+  创建。
 - 后台校验作为 `agentflow server` 的后台服务注册进 `internal/lifecycle`：由统一 Server 启动与停止，
   不得在 HTTP Handler 内创建不受管理的长期 goroutine。停止时必须取消在途校验并等待其释放 SSH 连接；
   启动时必须重新调度停留在 `checking` 的记录。

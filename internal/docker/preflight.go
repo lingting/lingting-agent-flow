@@ -173,7 +173,7 @@ func (r *Runner) checkEngine(ctx context.Context, result *Preflight) error {
 // 通过固定基准路径的只读 GET /v1.52/version 完成：既取得服务端声明的最高与最低 API
 // 版本，也直接验证基准路径本身可用，不依赖 CLI 自动协商成功来推断。
 func (r *Runner) checkEngineAPI(ctx context.Context, result *Preflight) error {
-	probe := r.ProbeAPIVersion(ctx, DefaultDistributionTimeout)
+	probe := r.ProbeAPIVersion(ctx, DefaultEngineAPIProbeTimeout)
 	result.APIVersion = probe.APIVersion
 	result.MinAPIVersion = probe.MinAPIVersion
 	if probe.Succeeded() {

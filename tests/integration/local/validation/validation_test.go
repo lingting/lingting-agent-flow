@@ -4,7 +4,7 @@
 // 并让它同时提供：
 //   - exec 会话：用于 SSH 检查与 Docker CLI 帮助信息检查；
 //   - direct-streamlocal 通道：模拟远端 Docker Engine 的 Unix 套接字，
-//     用于 Distribution Inspect 镜像元数据查询。
+//     用于固定 API 基准的版本探测（GET /v1.52/version）。
 //
 // 因此本测试覆盖的是真实的 SSH 与 HTTP 交互，而不是替身接口，同时不依赖外部
 // SSH 机器、真实 Docker Engine 或网络。
@@ -47,13 +47,9 @@ const dockerSocketPath = "/var/run/docker.sock"
 
 // engineBehaviour 控制假 Docker Engine 的响应。
 type engineBehaviour struct {
-	// status 是 Distribution Inspect 的 HTTP 状态码。
-	status int
-	// body 是响应体。
-	body string
 	// requests 记录收到的请求行。
 	requests []string
-	// delay 是响应前的延迟，用于让取消发生在查询过程中。
+	// delay 是响应前的延迟，用于让取消发生在版本探测过程中。
 	delay time.Duration
 	// apiRange 覆盖 Engine 版本接口声明的 API 区间，零值表示满足基线。
 	apiRange docker.APIRange
@@ -235,9 +231,6 @@ func (s *testServer) runCommand(channel ssh.Channel, command string) int {
 	switch {
 	case fields[0] == "true":
 		return 0
-	case fields[0] == "printf":
-		_, _ = channel.Write([]byte(remoteHome()))
-		return 0
 	case fields[0] == "env":
 		// 版本探测通过 env -u DOCKER_API_VERSION docker ... 隔离遗留变量，
 		// 因此这里必须先剥掉 env 前缀再分派到 docker。
@@ -368,25 +361,24 @@ func (s *testServer) handleStreamLocal(newChannel ssh.NewChannel) {
 	s.options.engine.requests = append(s.options.engine.requests, line)
 	s.mu.Unlock()
 
-	// 版本探测使用固定基准路径 /v1.52/version；镜像元数据查询使用
-	// /v1.52/distribution/{name}/json。两者必须分别响应，否则无法区分
-	// "API 基准可用" 与 "镜像元数据可查询"。
-	if strings.Contains(line, "/version") {
-		status, body := s.engineVersionResponse(line)
-		s.writeEngineResponse(channel, status, body)
-		return
-	}
-
 	if delay := s.options.engine.delay; delay > 0 {
 		time.Sleep(delay)
 	}
-	s.writeEngineResponse(channel, s.options.engine.status, s.options.engine.body)
+	// 版本探测使用固定基准路径 /v1.52/version，这是预检唯一允许的 Engine API 请求。
+	if !strings.Contains(line, "/version") {
+		// 未预期的 Engine API 请求（例如已移除的 Distribution Inspect）必须让断言失败。
+		s.t.Errorf("收到未预期的 Engine API 请求: %s", line)
+		s.writeEngineResponse(channel, 404, `{"message":"unexpected request"}`)
+		return
+	}
+	status, body := s.engineVersionResponse()
+	s.writeEngineResponse(channel, status, body)
 }
 
 // engineVersionResponse 返回 Engine 版本接口的响应。
 //
 // 默认返回满足基线的响应；需要模拟 API 不兼容时由测试覆盖 apiRange 字段。
-func (s *testServer) engineVersionResponse(line string) (int, string) {
+func (s *testServer) engineVersionResponse() (int, string) {
 	s.mu.Lock()
 	apiRange := s.options.engine.apiRange
 	s.mu.Unlock()
@@ -425,10 +417,6 @@ func httpStatusText(status int) string {
 	switch status {
 	case 200:
 		return "OK"
-	case 400:
-		return "Bad Request"
-	case 401:
-		return "Unauthorized"
 	case 404:
 		return "Not Found"
 	default:
@@ -451,15 +439,6 @@ func dockerHelpText() string {
 // removeOption 从帮助文本中删除指定选项。
 func removeOption(text, option string) string {
 	return strings.ReplaceAll(text, option, "--removed-option")
-}
-
-// remoteHome 返回模拟的远程 Home 目录。
-func remoteHome() string {
-	slashed := filepath.ToSlash(os.TempDir())
-	if !strings.HasPrefix(slashed, "/") {
-		return "/" + slashed
-	}
-	return slashed
 }
 
 // close 关闭测试服务。
@@ -574,17 +553,10 @@ type discard struct{}
 // Write 丢弃内容。
 func (discard) Write(p []byte) (int, error) { return len(p), nil }
 
-// distributionBody 返回一份成功的镜像元数据响应。
-func distributionBody() string {
-	return `{"Descriptor":{"mediaType":"application/vnd.oci.image.index.v1+json",` +
-		`"digest":"sha256:abcdef","platform":{"os":"linux","architecture":"amd64"}},` +
-		`"Platforms":[{"os":"linux","architecture":"amd64"}]}`
-}
-
-// TestValidatePassesAllChecks 验证四项检查全部通过时总体状态为 normal。
+// TestValidatePassesAllChecks 验证三项检查全部通过时总体状态为 normal。
 func TestValidatePassesAllChecks(t *testing.T) {
 	t.Parallel()
-	engine := &engineBehaviour{status: 200, body: distributionBody()}
+	engine := &engineBehaviour{}
 	fixture := newFixture(t, serverOptions{engine: engine})
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -596,50 +568,34 @@ func TestValidatePassesAllChecks(t *testing.T) {
 		t.Fatalf("状态应为 normal: %s / %s", outcome.Status, outcome.Host.ValidationMessage)
 	}
 	if !outcome.Details.AllRequiredPassed() {
-		t.Fatalf("四项检查应全部通过: %+v", outcome.Details.Checks)
+		t.Fatalf("三项检查应全部通过: %+v", outcome.Details.Checks)
 	}
-	if len(outcome.Details.Checks) != 4 {
-		t.Fatalf("应执行四项检查: %d", len(outcome.Details.Checks))
+	if len(outcome.Details.Checks) != 3 {
+		t.Fatalf("应执行三项检查: %d", len(outcome.Details.Checks))
 	}
 	versionCheck := outcome.Details.Checks[1]
 	if versionCheck.Name != domain.ValidationCheckDockerVersion {
 		t.Fatalf("第二项应为 Docker 版本检查: %s", versionCheck.Name)
 	}
-	imageCheck := outcome.Details.Checks[3]
-	if len(imageCheck.Images) != 1 {
-		t.Fatalf("应查询一个外部镜像: %+v", imageCheck.Images)
+	if outcome.Details.Checks[2].Name != domain.ValidationCheckDockerCLIHelp {
+		t.Fatalf("第三项应为 Docker CLI 帮助检查: %s", outcome.Details.Checks[2].Name)
 	}
-	image := imageCheck.Images[0]
-	if image.Reference != "node:22.19.0-bookworm-slim" {
-		t.Fatalf("镜像引用不符: %s", image.Reference)
-	}
-	if image.Digest != "sha256:abcdef" {
-		t.Fatalf("摘要不符: %s", image.Digest)
-	}
-	if len(image.Platforms) != 1 || image.Platforms[0] != "linux/amd64" {
-		t.Fatalf("平台不符: %+v", image.Platforms)
-	}
-	// 能力边界说明必须存在，避免把 normal 误读为运行兼容性已验证。
-	if len(outcome.Details.Capabilities) != 3 {
+	// 能力边界说明必须存在，避免把 normal 误读为镜像可用或运行兼容性已验证。
+	if len(outcome.Details.Capabilities) != 2 {
 		t.Fatalf("能力边界说明缺失: %+v", outcome.Details.Capabilities)
 	}
-	// 请求必须是只读的：一次固定基准的版本探测 + 一次镜像元数据查询。
-	if len(engine.requests) != 2 {
-		t.Fatalf("应发起版本探测与镜像元数据查询各一次: %+v", engine.requests)
+	// 请求必须是只读的：只需一次固定基准的版本探测，不得出现 Distribution Inspect。
+	if len(engine.requests) != 1 {
+		t.Fatalf("应只发起一次版本探测: %+v", engine.requests)
 	}
 	if !strings.Contains(engine.requests[0], "/v1.52/version") {
 		t.Fatalf("版本探测必须使用固定 API 基准路径: %s", engine.requests[0])
-	}
-	if !strings.Contains(engine.requests[1], "/distribution/") ||
-		!strings.Contains(engine.requests[1], "/json") {
-		t.Fatalf("请求路径不符: %s", engine.requests[1])
 	}
 	for _, request := range engine.requests {
 		if !strings.HasPrefix(request, "GET /v1.52/") {
 			t.Fatalf("Engine API 请求必须使用固定基准路径: %s", request)
 		}
 	}
-	// 校验只允许帮助命令，不得出现任何变更命令（create/run/pull 等）。
 	// 校验只允许版本查询与帮助命令，不得出现 create / run / pull 等变更命令。
 	for _, command := range fixture.server.recordedCommands() {
 		if !strings.Contains(command, "docker ") {
@@ -661,7 +617,7 @@ func TestValidateFailsWhenSSHRejected(t *testing.T) {
 	// 服务端只接受另一把公钥：客户端私钥认证必然被拒绝。
 	otherKey := generateHostKey(t)
 	fixture := newFixture(t, serverOptions{
-		engine:        &engineBehaviour{status: 200},
+		engine:        &engineBehaviour{},
 		authorizedKey: otherKey.PublicKey(),
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -675,8 +631,8 @@ func TestValidateFailsWhenSSHRejected(t *testing.T) {
 	if outcome.Status != domain.ValidationStatusAbnormal {
 		t.Fatalf("状态应为 abnormal: %s", outcome.Status)
 	}
-	if len(outcome.Details.Checks) != 4 {
-		t.Fatalf("应保留四项检查结果: %d", len(outcome.Details.Checks))
+	if len(outcome.Details.Checks) != 3 {
+		t.Fatalf("应保留三项检查结果: %d", len(outcome.Details.Checks))
 	}
 	if outcome.Details.Checks[0].Status.Passed() {
 		t.Fatal("SSH 检查不应通过")
@@ -704,8 +660,8 @@ func TestValidateFailsWhenHelpExitNonZero(t *testing.T) {
 	if outcome.Details.Checks[2].Status.Passed() {
 		t.Fatal("Docker 帮助检查不应通过")
 	}
-	if outcome.Details.Checks[3].Status != domain.CheckStatusNotRun {
-		t.Fatalf("帮助检查失败时镜像检查应为 not_run: %s", outcome.Details.Checks[3].Status)
+	if len(outcome.Details.Checks) != 3 {
+		t.Fatalf("帮助检查失败后不应产生额外的检查项: %d", len(outcome.Details.Checks))
 	}
 }
 
@@ -714,7 +670,7 @@ func TestValidateFailsWhenOptionMissing(t *testing.T) {
 	t.Parallel()
 	fixture := newFixture(t, serverOptions{
 		missingOption: "--mount",
-		engine:        &engineBehaviour{status: 200, body: distributionBody()},
+		engine:        &engineBehaviour{},
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -731,52 +687,10 @@ func TestValidateFailsWhenOptionMissing(t *testing.T) {
 	}
 }
 
-// TestValidateFailsWhenImageMissing 验证镜像不存在时判为 abnormal。
-func TestValidateFailsWhenImageMissing(t *testing.T) {
-	t.Parallel()
-	engine := &engineBehaviour{status: 404, body: `{"message":"manifest unknown"}`}
-	fixture := newFixture(t, serverOptions{engine: engine})
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	outcome := fixture.validate(t, ctx)
-	if outcome.Status != domain.ValidationStatusAbnormal {
-		t.Fatalf("状态应为 abnormal: %s", outcome.Status)
-	}
-	check := outcome.Details.Checks[3]
-	if check.Status.Passed() {
-		t.Fatal("镜像不存在时检查不应通过")
-	}
-	if len(check.Images) != 1 {
-		t.Fatalf("应记录镜像结果: %+v", check.Images)
-	}
-	if check.Images[0].Status != domain.CheckStatusFailed {
-		t.Fatalf("镜像单项状态应为失败: %s", check.Images[0].Status)
-	}
-	if check.Images[0].ErrorCode == "" {
-		t.Fatal("镜像失败应带错误代码")
-	}
-}
-
-// TestValidateFailsWhenEngineUnsupported 验证 Engine 接口不兼容时判为 abnormal。
-func TestValidateFailsWhenEngineUnsupported(t *testing.T) {
-	t.Parallel()
-	engine := &engineBehaviour{status: 400, body: `{"message":"bad request"}`}
-	fixture := newFixture(t, serverOptions{engine: engine})
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	outcome := fixture.validate(t, ctx)
-	if outcome.Status != domain.ValidationStatusAbnormal {
-		t.Fatalf("状态应为 abnormal: %s", outcome.Status)
-	}
-	if outcome.Details.Checks[3].Status.Passed() {
-		t.Fatal("接口不兼容时镜像检查不应通过")
-	}
-}
-
 // TestValidateRecordsTimestamps 验证校验结果记录了开始与完成时间。
 func TestValidateRecordsTimestamps(t *testing.T) {
 	t.Parallel()
-	engine := &engineBehaviour{status: 200, body: distributionBody()}
+	engine := &engineBehaviour{}
 	fixture := newFixture(t, serverOptions{engine: engine})
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -798,8 +712,8 @@ func TestValidateRecordsTimestamps(t *testing.T) {
 // TestValidateCancellationConverges 验证取消时校验仍会收敛并释放连接。
 func TestValidateCancellationConverges(t *testing.T) {
 	t.Parallel()
-	// 镜像查询被刻意放慢，使取消必然发生在检查过程中。
-	engine := &engineBehaviour{status: 200, body: distributionBody(), delay: 300 * time.Millisecond}
+	// 版本探测被刻意放慢，使取消必然发生在检查过程中。
+	engine := &engineBehaviour{delay: 300 * time.Millisecond}
 	fixture := newFixture(t, serverOptions{engine: engine})
 	// 校验已经开始后再取消：模拟 Server 关闭时中断在途校验。
 	// 取消发生在检查过程中，因此结果必须收敛为 abnormal 而不是保持 checking。
@@ -820,7 +734,7 @@ func TestValidateCancellationConverges(t *testing.T) {
 // TestValidateFailsWhenCLIVersionTooLow 验证 CLI 版本不足时不进入 normal。
 func TestValidateFailsWhenCLIVersionTooLow(t *testing.T) {
 	t.Parallel()
-	engine := &engineBehaviour{status: 200, body: distributionBody()}
+	engine := &engineBehaviour{}
 	fixture := newFixture(t, serverOptions{
 		cliVersion: "28.5.2",
 		engine:     engine,
@@ -844,10 +758,7 @@ func TestValidateFailsWhenCLIVersionTooLow(t *testing.T) {
 	if outcome.Details.Checks[2].Status != domain.CheckStatusNotRun {
 		t.Fatalf("版本检查失败时帮助检查应为 not_run: %s", outcome.Details.Checks[2].Status)
 	}
-	if outcome.Details.Checks[3].Status != domain.CheckStatusNotRun {
-		t.Fatalf("版本检查失败时镜像检查应为 not_run: %s", outcome.Details.Checks[3].Status)
-	}
-	// 版本检查失败时不得发起镜像元数据查询：CLI 版本不足时连 Engine 都不会访问。
+	// 版本检查失败时不得发起 Engine API 请求：CLI 版本不足时连 Engine 都不会访问。
 	if len(engine.requests) != 0 {
 		t.Fatalf("版本检查失败时不应查询 Engine: %+v", engine.requests)
 	}
@@ -858,7 +769,7 @@ func TestValidateFailsWhenEngineVersionTooLow(t *testing.T) {
 	t.Parallel()
 	fixture := newFixture(t, serverOptions{
 		engineVersion: "28.5.2",
-		engine:        &engineBehaviour{status: 200, body: distributionBody()},
+		engine:        &engineBehaviour{},
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -890,11 +801,7 @@ func TestValidateFailsWhenAPIIncompatible(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 			fixture := newFixture(t, serverOptions{
-				engine: &engineBehaviour{
-					status:   200,
-					body:     distributionBody(),
-					apiRange: testCase.apiRange,
-				},
+				engine: &engineBehaviour{apiRange: testCase.apiRange},
 			})
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
@@ -917,7 +824,7 @@ func TestValidateFailsWhenAPIIncompatible(t *testing.T) {
 func TestValidateVersionCheckRecordsActualVersions(t *testing.T) {
 	t.Parallel()
 	fixture := newFixture(t, serverOptions{
-		engine: &engineBehaviour{status: 200, body: distributionBody()},
+		engine: &engineBehaviour{},
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
