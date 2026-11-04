@@ -62,7 +62,7 @@
 ## 4. 配置持久化与快照
 
 - 现状已具备：`roles` 表含 `system_prompt`、`tools_policy_json`、`model`、`enabled`、`deleted_at`；
-  `sessions.role_snapshot_json` 已按会话保存角色快照。**V2 无需为快照新增迁移。**
+  `sessions.role_snapshot_json` 已按会话保存角色快照。**V2 无需为快照新增结构。**
 - 每次规划或执行调用使用**当次读取的配置快照**；配置后续修改不影响已运行或已完成的会话。
 - 角色初始化只补齐缺失角色，不覆盖用户已修改的配置。
 - 默认 Prompt 随代码内置（不放在可被覆盖的配置目录），用户修改后以数据库记录为准。

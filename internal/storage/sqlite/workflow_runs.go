@@ -22,7 +22,7 @@ const workflowRunInsertCount = 22
 
 // workflowRunActivePredicate 是"未结束执行记录"的判定条件。
 //
-// 与迁移脚本中的部分唯一索引保持一致：两处必须描述同一集合，否则"唯一性由数据库
+// 与 `schema.sql` 中的部分唯一索引保持一致：两处必须描述同一集合，否则"唯一性由数据库
 // 保证"就会失效。
 const workflowRunActivePredicate = `status NOT IN ('completed', 'cancelled', 'failed')`
 

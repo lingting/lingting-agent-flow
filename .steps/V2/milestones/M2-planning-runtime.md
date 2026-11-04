@@ -2,7 +2,7 @@
 
 > 状态：**pending**。
 > 前置：M1 completed。参考：[`../ARCHITECTURE.md`](../ARCHITECTURE.md) §4、
-> [`../DATA-MODEL.md`](../DATA-MODEL.md) `0027`、[`../ROLE-DESIGN.md`](../ROLE-DESIGN.md) §7。
+> [`../DATA-MODEL.md`](../DATA-MODEL.md) §4、[`../ROLE-DESIGN.md`](../ROLE-DESIGN.md) §7。
 
 ## 1. 目标
 
@@ -31,12 +31,13 @@
 
 ### 2.3 持久化
 
-- 迁移 `0026_planning_sessions.sql`（`planning_sessions` / `planning_messages` / `planning_revisions`）：
-  已实现（M2 第二阶段），实际表结构与索引见 [`../DATA-MODEL.md`](../DATA-MODEL.md) §2。
-- 迁移 `0028_projects_default_host.sql`（项目默认执行节点）：已实现（M2 第八阶段），
-  实际脚本、字段、部分索引与 NULL 语义见 [`../DATA-MODEL.md`](../DATA-MODEL.md) §2。
-- 迁移 `0031_planning_session_leases.sql`（规划会话跨进程执行租约）：已实现（M2 第九阶段），
-  实际脚本、组合约束、部分索引、epoch 与释放语义见 [`../DATA-MODEL.md`](../DATA-MODEL.md) §2。
+- `internal/storage/sqlite/schema.sql` 中的 `planning_sessions` / `planning_messages` /
+  `planning_revisions`：已实现（M2 第二阶段），表结构、索引与序号/版本号唯一约束见
+  [`../DATA-MODEL.md`](../DATA-MODEL.md) §2。
+- `projects.default_host_id`（项目默认执行节点）：已实现（M2 第八阶段），字段、部分索引与 NULL 语义见
+  [`../DATA-MODEL.md`](../DATA-MODEL.md) §2。
+- `planning_session_leases`（规划会话跨进程执行租约）：已实现（M2 第九阶段），组合约束、部分索引、
+  epoch 与释放语义见 [`../DATA-MODEL.md`](../DATA-MODEL.md) §2。
 
 ### 2.4 生命周期
 
@@ -118,7 +119,7 @@
   校验，不解析内部字段，也不定义任务拆分规则。
 - `internal/storage`：`PlanningSessionStore`（创建、更新、按 ID 查询、按项目列表、追加与查询消息、
   追加与查询方案版本），已并入 `Tx` 与 `Store`。
-- `internal/storage/sqlite`：迁移 `0026_planning_sessions.sql`（三张表与四个索引）与仓储实现；消息
+- `internal/storage/sqlite`：`schema.sql` 中的三张规划表与四个索引，以及仓储实现；消息
   序号与方案版本号在写入事务内分配。
 
 约束与语义：
@@ -235,8 +236,8 @@ SQLite 持久化连接成统一入口。它仍**没有 Pi 调用方、HTTP 入�
   `persist_snapshot` / `persist_container` / `clear_binding`）。`storage.ErrConflict` 属于"不能用旧快照
   覆盖新事实"，不再被报告为 `ErrPlanningRuntimeNotPersisted`；会话在写入过程中消失时仍是
   `ErrPlanningRuntimeNotFound`。
-- 新能力同时由 `dbStore` 与 `txStore` 提供（两者组合同一个 `planningSessionStore`）；没有新增迁移，
-  `0026_planning_sessions.sql` 未改动，`app` 层不含 SQL。`PlanningSessionService` 的业务行为、领域状态机
+- 新能力同时由 `dbStore` 与 `txStore` 提供（两者组合同一个 `planningSessionStore`）；没有新增 Schema
+  变更，规划会话表结构未改动，`app` 层不含 SQL。`PlanningSessionService` 的业务行为、领域状态机
   与 `UpdatePlanningSessionIfStatus` 的条件语义都未改动。
 
 本阶段解决的只是"运行时字段与业务字段相互覆盖"。`PlanningRuntimeService` 的 `keyedMutex` 仍只保证当前
@@ -259,7 +260,7 @@ SQLite 持久化连接成统一入口。它仍**没有 Pi 调用方、HTTP 入�
   会话不存在返回 `storage.ErrNotFound`，绑定已被改写返回 `storage.ErrConflict`。写入在事务内先重新
   读取会话再条件更新：并发初始化只有一个写入获胜，另一个重新读取并复用获胜结果，不会退化成无条件覆盖，
   也不会改写状态、结束时间、采纳的 Revision、失败摘要与运行时绑定。`dbStore` 与 `txStore` 都提供该
-  能力；没有新增迁移，`0026_planning_sessions.sql` 未改动。
+  能力；没有新增 Schema 变更，规划会话表结构未改动。
 - **稳定路径**：容器内固定文件为 `/tmp/agentflow/sessions/<规划会话标识>/<角色会话标识>/session.jsonl`
   （POSIX `path` 生成，位于规划容器的 Session 根目录下）；本机持久归档为
   `<SessionRoot>/planning/<规划会话标识>/<角色会话标识>/session.jsonl`（`filepath` 生成，落在配置
@@ -350,8 +351,8 @@ SQLite 持久化连接成统一入口。它仍**没有 Pi 调用方、HTTP 入�
 项目现在把"默认执行节点"作为持久化配置保存，并从既有项目管理入口完成创建、读取、修改与清除。本阶段
 不涉及任何规划轮次编排，也没有新增规划工作台：
 
-- **持久化**：新增迁移 `internal/storage/sqlite/migrations/0028_projects_default_host.sql`：
-  `projects.default_host_id TEXT`（可空）与部分索引 `idx_projects_default_host (default_host_id)
+- **持久化**：`internal/storage/sqlite/schema.sql` 的 `projects` 表增加
+  `default_host_id TEXT`（可空）与部分索引 `idx_projects_default_host (default_host_id)
   WHERE default_host_id IS NOT NULL`。可空表示"未设置"，写入时由存储层把空值落成 SQL NULL；
   不为 NULL 行建立索引项，也不声明外键或枚举白名单。历史任务继续使用自己的 `tasks.host_id` 与
   `config_json` 快照，项目字段变化不改写任何历史事实。
@@ -379,15 +380,14 @@ SQLite 持久化连接成统一入口。它仍**没有 Pi 调用方、HTTP 入�
   不判断节点是否可执行，也不因为选为默认值就宣称它已通过远程环境预检。
 
 本阶段不做：M3 需求工作台与规划 HTTP API、`RequirementAnalysisService` / `RequirementPlanningService`、
-需求分析师与方案规划师的调用顺序与结构化解析、`0027_requirements_project.sql` 的业务实现、任务顺序
-字段与项目执行租约（`0029` / `0030`）、跨进程规划调用协调、真实 Pi / SSH / Docker 规划环境验证，也
+需求分析师与方案规划师的调用顺序与结构化解析、`requirements` 项目关联（M3 结构变更）的业务实现、任务顺序
+字段与项目执行租约（后续阶段的结构变更）、跨进程规划调用协调、真实 Pi / SSH / Docker 规划环境验证，也
 不修改普通任务的执行节点选择与任务配置快照。
 
 定向测试覆盖本阶段业务场景（命令、结果与产物路径见 §7.11）：Domain 的归一化与空值语义；App 的
 "不设置 / 设置有效节点 / 更新切换 / 清空落 NULL / 拒绝不存在与已删除节点 / 节点删除后仍可读取与编辑"；
 Store 的 NULL 与非 NULL 往返、更新默认节点不影响其它项目字段、项目默认节点变化不改写任务
-`host_id` 与 `config_json` 快照；`0028` 在既有项目表上的增量升级（既有数据保留、新增列 NULL、版本
-记录与部分索引条件正确）；HTTP 的创建、列表、详情、更新读写与 null 语义、无效节点返回 `400` 且不留
+`host_id` 与 `config_json` 快照；HTTP 的创建、列表、详情、更新读写与 null 语义、无效节点返回 `400` 且不留
 部分写入；前端表单取值转换、清除语义与"节点不在列表中"的展示规则。
 
 ### 7.9 已交付：规划会话跨进程执行租约与运行时释放保护（M2 第九阶段）
@@ -396,11 +396,11 @@ Store 的 NULL 与非 NULL 往返、更新默认节点不影响其它项目字�
 角色会话绑定、Pi 执行与 Session 归档的完整过程；租约丢失会取消在途调用并等待其收敛。M2 已有业务状态机、
 Revision、角色会话标识、固定快照与普通任务执行行为均未改变。
 
-- **持久化**：新增迁移 `internal/storage/sqlite/migrations/0031_planning_session_leases.sql`，表
-  `planning_session_leases`（主键 `planning_session_id`、`owner`、`operation`、`epoch`、
-  `lease_expires_at`、`updated_at`）与部分索引 `idx_planning_session_leases_expiry`。字段、组合约束、
-  epoch 与释放语义见 [`../DATA-MODEL.md`](../DATA-MODEL.md) §2 的 `0031` 条目：不声明外键、不为
-  `operation` 设枚举白名单、释放不删行且保留 epoch；`0026` / `0028` 未修改。
+- **持久化**：`internal/storage/sqlite/schema.sql` 新增表 `planning_session_leases`（主键
+  `planning_session_id`、`owner`、`operation`、`epoch`、`lease_expires_at`、`updated_at`）与部分索引
+  `idx_planning_session_leases_expiry`。字段、组合约束、epoch 与释放语义见
+  [`../DATA-MODEL.md`](../DATA-MODEL.md) §2：不声明外键、不为 `operation` 设枚举白名单、释放不删行且
+  保留 epoch；规划会话表与项目表结构均未改动。
 - **领域与存储**：`domain.PlanningSessionLeaseHandle`（规划会话 + owner + epoch）与
   `domain.PlanningLeaseOperation`（`run_role` / `prepare` / `release`，只是诊断分类）。存储层新增
   `AcquirePlanningSessionLease` / `RenewPlanningSessionLease` / `ReleasePlanningSessionLease`，全部为单条
@@ -448,7 +448,7 @@ fencing 边界（必须保留的风险）：
 
 - 规划轮次的业务编排：`PlanningAgentService` 只提供单角色调用入口，当前没有任何代码调用它；两个角色的
   调用顺序、提示词组装、结构化输出解析与 `CompleteAnalysis` / `FailAnalysis` 的自动收口仍属 M3。
-- 后续项目级调度的迁移（`0027` 需求项目关联的业务实现、`0029` 任务顺序、`0030` 项目执行租约）：项目
+- 后续项目级调度需要的结构变化（`requirements` 项目关联的业务实现、任务顺序、项目执行租约）：项目
   默认执行节点已在第八阶段落地，但调度侧仍未使用它。
 - 跨进程租约解决了"同一会话不能被两个执行者同时进入"，但没有解决"远端 Pi 进程是否真的已终止"：取消上下文
   与等待收敛只保证本端调用结束，容器内进程的存续仍未核验（见 §7.9 的 fencing 边界）。
@@ -462,18 +462,18 @@ fencing 边界（必须保留的风险）：
 - 自动化测试守点仍不完整：第七阶段的生命周期用例、第九阶段的租约用例与第十阶段的规划会话 / 稳定 Session /
   只读参数用例已覆盖准入、取消传播、停止等待、跨实例互斥、续期与租约丢失后的收敛、会话状态机与事务边界、状态
   与两个绑定的条件更新、稳定 Session 首轮归档 / 多轮恢复 / 归档失败上报，以及规划只读工作区与 Docker 参数
-  （见 §7.12）。仍未自动化覆盖的是这些行为在真实环境中的结果：真实数据库上的旧库升级与数据保留、真实 Docker /
-  SSH 的资源创建与释放，以及真实 Pi 的多轮上下文恢复。
+  （见 §7.12）。仍未自动化覆盖的是这些行为在真实环境中的结果：真实数据库上的 Schema 初始化与不兼容旧库的
+  失败行为、真实 Docker / SSH 的资源创建与释放，以及真实 Pi 的多轮上下文恢复。
 - 未验证的真实外部能力：真实只读环境（文件工具与 `sh -c` 写入是否真的被文件系统拒绝）、真实多轮 Pi Session
-  跨容器重建恢复、真实远程容器释放、远端 Pi 进程在取消后是否真的终止，都没有执行，不得报告为通过。`0028` 的
-  旧库增量升级已由第八阶段定向测试在测试数据库中执行（见 §7.8），`0031` 的表结构与条件写入已由第九阶段定向
-  测试在测试数据库中执行（见 §7.11），其余迁移（`0026`、`0027`、`0029`、`0030`）的旧库升级与数据保留仍没有
-  自动化守点，也没有在真实开发数据库上执行。
+  跨容器重建恢复、真实远程容器释放、远端 Pi 进程在取消后是否真的终止，都没有执行，不得报告为通过。
+  `planning_session_leases` 的表结构与条件写入已由第九阶段定向测试在测试数据库中执行（见 §7.11），其余
+  Schema 结构（项目默认节点、规划会话表）只在测试数据库中由首次初始化建表验证，没有自动化审计守点，也没有
+  在真实开发数据库上执行。
 
 ### 7.11 验证方式
 
 六个阶段都只做非测试验证：阅读代码核对调用链、`gofmt`、`go vet ./...`、`git diff --check`。第二阶段另加
-人工核对迁移的表、索引、字段、非枚举约束与版本顺序；第三阶段人工核对快照卷命名与标签、准备 / 只读复核
+人工核对 `schema.sql` 中对应的表、索引、字段与非枚举约束；第三阶段人工核对快照卷命名与标签、准备 / 只读复核
 容器、`--read-only` 与只读代码卷、tmpfs 可写目录、容器所有权校验、释放顺序与 `RequiredCLICommands`
 新增参数，并确认普通任务容器的创建参数未改变；第四阶段人工核对七个业务操作的事务边界、领域状态机调用点、
 条件更新的前置状态、角色消息发送方限制与失败摘要脱敏；第五阶段人工核对运行时绑定更新的实际 `SET` 列、
@@ -482,8 +482,8 @@ NULL 安全的比较并交换条件、`persistRuntime` 的事务内重读与错�
 包含校验、恢复与归档的调用顺序、归档只有在本轮正常完成且校验通过时才替换、归档失败与执行状态的分离上报，
 并确认普通任务不传稳定 Session 时的路径与参数未改变。
 
-六个阶段都未运行任何测试（含迁移升级与 SQLite 读写测试），未创建测试文件，未连接真实 Docker / SSH / Pi /
-远程主机。因此旧库升级后的数据保留、未知枚举值写入与读回、序号分配与条件更新在并发下的实际行为、真实快照
+六个阶段都未运行任何测试（含数据库 Schema 初始化与 SQLite 读写测试），未创建测试文件，未连接真实 Docker / SSH / Pi /
+远程主机。因此不兼容旧库的失败行为、未知枚举值写入与读回、序号分配与条件更新在并发下的实际行为、真实快照
 克隆、只读挂载与容器释放均未验证，不得报告为通过；第四阶段的并发结论来自事务与条件更新的代码路径核对，
 第五阶段的运行时绑定冲突结论同样只来自 SQL 条件与调用链核对，没有真实并发执行与跨进程竞争的证据。
 第六阶段的多轮上下文恢复也没有真实环境证据：把容器内 Session 复制回本机、再从本机归档恢复到容器内这条链路
@@ -511,15 +511,15 @@ Session 文件的续写语义，都需要在真实只读规划环境中验证后
   用例使用 `TestMain` + `testkit` 随机工作空间，产物保留在 `TEST_ARTIFACT_DIR`
   （`%TEMP%\lingting-agent-flow-tests\planningagent-*`），不写入仓库与用户数据目录。
 - **未运行的测试**：`go test ./...`、`go test ./tests/...`、`make test`、`make test-race`、其他测试包
-  （含 `tests/unit/store` 的迁移与仓储用例）、真实 Pi / SSH / Docker / 远程主机测试均未执行；未设置或
+  （含 `tests/unit/store` 的仓储用例）、真实 Pi / SSH / Docker / 远程主机测试均未执行；未设置或
   修改 `AGENTFLOW_REAL_TESTS` 等真实测试开关，未关闭 SSH 主机密钥校验，未启动真实 AgentFlow Server
   连接真实设备。因此第七阶段只证明生命周期准入、取消传播与停止收敛在该测试缝隙下成立，不能推断真实
   远程环境、真实 Pi 归档或多轮恢复已经可用。
 
 第八阶段同样获得定向测试授权，验证范围收敛在"项目默认执行节点"这一配置链路上，不执行完整测试套件。
 
-- **非测试验证**：人工核对迁移脚本只新增一列与一个部分索引、迁移引擎按未应用的具体版本跳过而非要求版本
-  连续（当前没有 `0027` 文件）、`projectColumns` 与占位列数一致、`scanProject` 的 NULL 还原、`UpdateProject`
+- **非测试验证**：人工核对 `schema.sql` 中 `projects.default_host_id` 与部分索引的定义、`projectColumns`
+  与占位列数一致、`scanProject` 的 NULL 还原、`UpdateProject`
   的 `SET` 列不含 `created_at` / `deleted_at`、应用层的引用校验只在引入新标识时发生、HTTP 响应以 JSON
   `null` 表达未设置，并确认普通任务执行路径（`tasks.host_id`、`config_json` 快照与执行节点选择）未被改动。
   `gofmt`、`go vet ./...`、`git diff --check` 均无输出，所有改动文件行尾均为 LF。
@@ -528,7 +528,7 @@ Session 文件的续写语义，都需要在真实只读规划环境中验证后
   ```bash
   go test -race -count=1 ./tests/unit/domain -run '^TestProject.*DefaultHost'
   go test -race -count=1 ./tests/unit/app -run '^TestProjectService.*DefaultHost'
-  go test -race -count=1 ./tests/unit/store -run '^(TestProject.*DefaultHost|TestProjectsMigration.*)'
+  go test -race -count=1 ./tests/unit/store -run '^TestProject.*DefaultHost'
   go test -race -count=1 ./tests/unit/httpapi -run '^TestProjectAPI.*DefaultHost'
 
   # 既有项目主流程回归（精确名称）
@@ -538,8 +538,9 @@ Session 文件的续写语义，都需要在真实只读规划环境中验证后
   go test -race -count=1 ./tests/unit/httpapi -run '^TestProjectAPI'
   ```
 
-  八条命令全部通过（`-race` 无数据竞争报告），分别覆盖 1 / 6 / 4 / 3 个新增用例与 8 / 14 / 12 / 12 个
-  项目相关用例。用例使用 `TestMain` + `testkit` 随机工作空间，产物保留在 `TEST_ARTIFACT_DIR`
+  八条命令全部通过（`-race` 无数据竞争报告），覆盖本阶段新增的默认节点用例与既有项目主流程用例；其中旧库
+  增量升级用例 `TestProjectsMigrationDefaultHostKeepsExistingProjects` 已在取消增量迁移时删除。
+  用例使用 `TestMain` + `testkit` 随机工作空间，产物保留在 `TEST_ARTIFACT_DIR`
   （`%TEMP%\lingting-agent-flow-tests\{domain,app,store,httpapi}-*`），不写入仓库与用户数据目录。
 - **前端**（`lingting-agent-flow-ui`）：
 
@@ -556,13 +557,13 @@ Session 文件的续写语义，都需要在真实只读规划环境中验证后
   `%TEMP%\lingting-agent-flow-ui-tests\run-*`，构建写入 `internal/webui/dist/`（不提交）。
 - **未运行的测试**：`go test ./...`、`go test ./tests/...`、`make test`、`make test-race`、其他测试包与
   前端全量/E2E 测试均未执行；未设置或修改 `AGENTFLOW_REAL_TESTS` 等真实测试开关，未连接真实 Docker /
-  SSH / Pi / 远程主机。因此第八阶段只证明"项目默认执行节点"在测试数据库与测试替身下从迁移到界面的配置
-  链路成立：不代表真实开发数据库已完成升级，也不代表任何节点当前可用或已通过远程环境预检。
+  SSH / Pi / 远程主机。因此第八阶段只证明"项目默认执行节点"在测试数据库与测试替身下从数据库结构到界面的
+  配置链路成立：不代表真实开发数据库已按当前 Schema 重建，也不代表任何节点当前可用或已通过远程环境预检。
 
 第九阶段同样获得定向测试授权，验证范围收敛在"规划会话跨进程租约与运行时释放保护"，不执行完整测试套件。
 
-- **非测试验证**：人工核对迁移 `0031` 的表、列、组合 CHECK、部分索引与版本顺序（未占用 `0027`、`0029`、
-  `0030` 的预留编号），核对领取 UPSERT 的原子性、回读代次的条件、续期与释放的 owner + epoch + 未过期三个
+- **非测试验证**：人工核对 `schema.sql` 中 `planning_session_leases` 的表、列、组合 CHECK 与部分索引，
+  核对领取 UPSERT 的原子性、回读代次的条件、续期与释放的 owner + epoch + 未过期三个
   条件、释放保留 epoch、受影响行数 0 一律按冲突返回；核对 `RunRole` 的租约取得点（读取会话之前）、
   `Settle` 的调用点（Runner 与归档返回之后）、`prepareHeld` 不重复领取、`Release` 的租约先于任何远程删除、
   释放路径的端口适配器与原实现的调用顺序 / 标签核验 / 错误映射一致，并确认 `planning_sessions` 表结构、
@@ -675,5 +676,5 @@ Session 文件的续写语义，都需要在真实只读规划环境中验证后
   未启动真实 AgentFlow Server。因此本阶段证明的是"代码路径已实现且自动化测试在受控替身下通过"，以下事项仍属于
   未完成：真实规划容器中项目代码是否确实不可写、真实 Pi 是否可以从归档恢复并继续同一上下文、Docker 容器停止 /
   重建后真实 Session 的恢复能力、`docker cp` / `mkdir -p` / SSH 上传与归档原子替换的实际行为、真实 SSH / Docker
-  取消后远端 Pi 进程是否确实终止、一次性准备容器的残留与远程释放不确定结果的恢复入口，以及 `0026` / `0027` /
-  `0029` / `0030` 迁移在旧库上的升级与数据保留。M2 状态继续为 `pending`。
+  取消后远端 Pi 进程是否确实终止、一次性准备容器的残留与远程释放不确定结果的恢复入口，以及旧数据库被
+  明确拒绝打开的行为（未在真实旧库上验证）。M2 状态继续为 `pending`。

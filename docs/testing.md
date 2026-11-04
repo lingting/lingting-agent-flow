@@ -9,7 +9,8 @@
 - 默认只做非测试验证：阅读代码、检查 `git diff`、`gofmt`、`go vet`、类型与引用检查。
 - 未经用户明确要求，不运行测试、不创建测试文件、不编写临时验证脚本，也不通过"测试后删除"的方式绕过
   该限制。
-- 数据库 schema 变更必须同时提供迁移脚本（见 `AGENTS.md` 的「数据库约束规范」）。
+- 数据库结构变更直接修改 `internal/storage/sqlite/schema.sql`，不新增迁移脚本，也不要求迁移升级或迁移
+  回归测试（见 `AGENTS.md` 的「数据库约束规范」）。
 
 ## 2. 目录
 
@@ -109,8 +110,8 @@
 ## 6. 数据库与状态测试
 
 - 数据库相关测试集中在 `tests/unit/store/`：仓储读写、未知枚举值原样保留、逻辑删除、条件更新拒绝迟到
-  结果与并发写入。`tests/integration/local/database/`（Schema 审计、旧库升级与数据保留）已删除，当前没有
-  Schema 审计与旧库升级的自动化守点，新增迁移需要人工核对。
+  结果与并发写入。`tests/integration/local/database/`（Schema 审计、旧库升级与数据保留）已删除：Schema
+  与旧库不兼容行为没有自动化守点，修改 `schema.sql` 需要人工核对。
 - 涉及跨实体状态更新时，必须通过 `storage.WithTx` 在单个事务内完成。
 - 测试不得读写用户真实配置、仓库或 `.agentflow/` 下的真实数据。
 

@@ -163,7 +163,7 @@ type ValidationCheck struct {
 // ValidationDetails 是一次预检的完整结构化结果。
 //
 // 该结构整体以 JSON 保存到 execution_hosts.validation_details_json，因此字段变更
-// 不需要数据库迁移；读取失败时按"详情不可用"处理，不影响总体状态。
+// 不需要数据库结构变更；读取失败时按"详情不可用"处理，不影响总体状态。
 type ValidationDetails struct {
 	// ValidatorVersion 是产生本结果的校验器版本。
 	ValidatorVersion string `json:"validator_version"`

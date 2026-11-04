@@ -30,8 +30,11 @@ var (
 	ErrInvalidData = errors.New("storage: 数据不符合约束")
 	// ErrBusy 表示数据库被其他连接或进程占用，等待锁超时。
 	ErrBusy = errors.New("storage: 数据库忙")
-	// ErrUnsupportedSchema 表示数据库版本高于当前程序支持的版本。
-	ErrUnsupportedSchema = errors.New("storage: 不支持的数据库版本")
+	// ErrUnsupportedSchema 表示数据库不是当前程序支持的 Schema。
+	//
+	// 程序不提供旧库升级：既不是全新数据库、也不是当前 Schema 的数据库一律拒绝打开，
+	// 由用户自行备份后手动重建。
+	ErrUnsupportedSchema = errors.New("storage: 不支持的数据库 Schema")
 )
 
 // RoleSeed 是角色初始化的最小定义：由内置的固定角色默认值转换为存储定义后传入。

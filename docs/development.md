@@ -21,6 +21,10 @@
 
 SQLite 驱动为 `modernc.org/sqlite`，纯 Go 实现，无需安装 CGO 工具链或系统 SQLite。
 
+数据库结构由 `internal/storage/sqlite/schema.sql` 定义并通过 `//go:embed` 嵌入程序：全新数据库首次
+打开时在一个事务内建表，已初始化且 Schema 匹配的数据库直接打开。程序不提供增量迁移与旧库升级，
+Schema 不匹配时打开失败并返回 `storage.ErrUnsupportedSchema`，需要自行备份后手动重建数据库文件。
+
 ## 初始化
 
 ```bash
@@ -100,8 +104,8 @@ make release                                         # 单文件生产构建：�
 1. 确认改动属于哪一层，按 [workspace.md](workspace.md) 的依赖方向选择位置。
 2. 领域规则变化优先修改 `internal/domain`，其余层只做编排与适配。
 3. 涉及状态迁移时，检查是否仍通过 `Transition` 校验，并确认迁移路径在状态机中已声明。
-4. 涉及持久化时，在 `internal/storage/sqlite/migrations/` 追加新迁移脚本，并在对应实体文件中补充仓储
-   实现；不要修改已发布的迁移。
+4. 涉及持久化时，在 `internal/storage/sqlite/schema.sql` 中直接修改完整的最终态结构，并在对应实体文件中
+   补充仓储实现；不新增迁移脚本，也没有待应用的增量版本。
 5. 改动完成后执行 `gofmt` 与 `go vet`，并自查 `git diff`。
 
 ### 修改单步骤执行链路时
@@ -171,7 +175,8 @@ make release                                         # 单文件生产构建：�
   未补齐时 `EffectivePiTools` 会因"不支持的角色类型"拒绝调用，而不会回退到开发者权限。
   角色定义随代码内置，YAML 不再声明角色。
 - 新增状态：在对应实体的状态机中声明合法迁移与终态，并确认重试、取消路径可达。
-- 新增状态后，必须检查持久化层对旧数据的兼容性，必要时提供迁移。
+- 新增状态后，必须检查持久化层是否需要同步修改 `schema.sql` 中的最终态结构，并确认读取层仍原样保留未知
+  取值。
 
 ## 提交约定
 

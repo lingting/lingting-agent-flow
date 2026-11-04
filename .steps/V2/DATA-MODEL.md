@@ -1,286 +1,139 @@
-# V2 数据模型与迁移方案
+# V2 数据模型与当前 Schema
 
-> 状态：V2 设计基线（M0 交付物）。
-> 依据：迁移 `0001`–`0025` 的实际结构、`domain/` 实体定义，以及迁移脚本与 `tests/unit/store/` 的
-> 存储层用例。
-> **本文件只给设计与迁移顺序，迁移脚本在对应里程碑落地；落地时必须重新核对当时的表结构。**
+> 状态：V2 设计基线（M0 交付物，已按"Schema 单文件化"更新）。
+> 依据：`internal/storage/sqlite/schema.sql`（唯一 Schema 文件）、`domain/` 实体定义，以及
+> `tests/unit/store/` 的存储层用例。
+> **本文件只描述当前最终态结构与后续里程碑需要的结构变化；实现时必须重新核对当时的 `schema.sql`。**
 
-## 1. 现有结构事实（V1 结束时）
+## 1. Schema 的唯一入口
 
-| 表 | 关键事实 | V2 需要的改变 |
-|---|---|---|
-| `projects`（`0025`） | 主键 `id`；仓库、基础分支、`env_type/env_name/env_version`、`work_dir`、`caches_json`、`deleted_at` | 增加默认执行节点 |
-| `requirements`（`0009` 重建） | `id`、`title`、`description`、`priority`(int)、`status`、`source`、`source_id`、时间戳；**无 project_id、无逻辑删除、无规划快照** | 增加 `project_id`、规划关联、最终快照、`confirmed_at`、`deleted_at` |
-| `tasks`（`0009` 重建） | `requirement_id NOT NULL`；`config_json`（含 `project_id`）；`status`；租约与 `lease_epoch`；无需求内顺序 | 增加需求内稳定顺序 |
-| `roles`（`0009` 重建） | `id`、`type`（无 CHECK 白名单）、`runner`、`model`、`system_prompt`、`tools_policy_json`、`enabled`、`deleted_at` | 无需结构变更（见 §3.6） |
-| `task_leases`（`0024`） | 按任务，含 `epoch` | 保持不动，与新项目租约共存 |
+- `internal/storage/sqlite/schema.sql` 通过 `//go:embed` 嵌入程序，是数据库结构的**唯一事实来源**。
+- 全新空数据库首次打开时在一个事务内完整执行这份 SQL，并在同一事务内写入 `PRAGMA user_version` 标记；
+  执行失败整体回滚，不留下半套结构。
+- 已有数据库的标记与当前 Schema 一致时直接打开，不重复执行建表语句，也不读取任何版本记录表。
+- 存在业务表但标记缺失或标记不一致的数据库一律拒绝打开（`storage.ErrUnsupportedSchema`）：程序不提供
+  旧库升级，不自动删除、清空或重建用户数据库，用户需自行备份后手动重建数据库文件。
+- `user_version` 只用于识别"是否已是当前 Schema"，不是增量迁移版本号：不存在迁移目录、迁移版本表、
+  逐版本执行与迁移状态查询。
+- **结构变化直接修改这份完整的最终态 `schema.sql`**，不新增迁移脚本，也不为 Schema 变更提供增量升级
+  能力或迁移回归测试。
 
-**结论**：V2 需要 6 个新迁移（`0026`–`0031`，版本号不连续），不需要改动任何已发布迁移。其中 `0026` 规划
-会话（原设计编号 `0027`）已在 M2 第二阶段落地，`0027` 需求项目关联顺延为原 `0026`；`0028` 项目默认执行
-节点已在 M2 第八阶段落地；`0031` 规划会话执行租约已在 M2 第九阶段落地——它不在原计划的 `0026`–`0030`
-之内，因为跨进程执行租约是在第八阶段之后才确认为必需能力，故追加更高版本号，`0027`、`0029`、`0030` 的
-既定用途不变。迁移引擎按"该具体版本是否未应用"逐条判断，不要求版本号连续，因此当前没有 `0027` 文件不影响
-`0028` 及之后迁移的执行。
+## 2. 当前最终 Schema 结构
 
-## 2. 迁移顺序与内容
+### 2.1 角色、需求与执行节点
 
-顺序按依赖排列，每个迁移单独可回滚到上一版本（迁移事务内失败即回滚，不写版本记录）。
+| 表 | 关键事实 |
+|---|---|
+| `roles` | `id`、`name`、`type`（无取值白名单）、`runner`、`model`、`system_prompt`、`tools_policy_json`（`json_valid`）、`enabled`、时间戳、`deleted_at`（逻辑删除）；索引 `idx_roles_type (type, enabled)` |
+| `requirements` | `id`、`title`、`description`、`priority`（非负整数，0 最高）、`status`（无白名单）、`source`、`source_id`、时间戳；索引 `idx_requirements_queue (status, priority, created_at)` |
+| `execution_hosts` | 连接目标（`host` / `port` 1–65535 / `username` / `workspace_root`）、`is_default`（部分唯一索引保证最多一个）、`enabled`、认证配置（`auth_method`、`private_key_path`、主机密钥算法/指纹/信任时间）、最近连接状态与错误、`validation_*` 预检状态与代次、`deleted_at`；触发器保证"私钥认证必须给出私钥路径" |
 
-### 0026_planning_sessions.sql（已实现，M2 第二阶段）
+`execution_hosts` 的索引：`idx_execution_hosts_default (is_default) WHERE is_default = 1`、
+`idx_execution_hosts_name (name)`、`idx_execution_hosts_validation (validation_status) WHERE deleted_at IS NULL`。
 
-实际落地脚本 `internal/storage/sqlite/migrations/0026_planning_sessions.sql`：
+### 2.2 任务执行链
 
-```sql
-CREATE TABLE planning_sessions (
-    id                  TEXT    PRIMARY KEY NOT NULL CHECK (length(trim(id)) > 0),
-    project_id          TEXT    NOT NULL CHECK (length(trim(project_id)) > 0),
-    status              TEXT    NOT NULL,
-    host_id             TEXT,
-    container_id        TEXT,
-    source_commit       TEXT,
-    analyst_session_id  TEXT,
-    planner_session_id  TEXT,
-    adopted_revision_id TEXT,
-    error_summary       TEXT,
-    created_at          INTEGER NOT NULL CHECK (created_at > 0),
-    updated_at          INTEGER NOT NULL CHECK (updated_at > 0),
-    finished_at         INTEGER CHECK (finished_at IS NULL OR finished_at > 0)
-);
+| 表 | 关键事实 |
+|---|---|
+| `tasks` | `requirement_id`、`status`（无白名单）、`host_id`、`config_json`、`repository_path`、`base_ref`、`worktree_path`、`container_id`、`current_step_id` / `current_attempt_id`、取消请求、`final_result`、`failure_summary`、`idempotency_key`（部分唯一索引）、租约三列（`lease_owner` / `lease_expires_at` / `lease_epoch`）、`deleted_at` |
+| `steps` | `task_id`、`sequence`（`UNIQUE (task_id, sequence)`）、`step_type`（默认 `develop`，无白名单）、`title`、`objective`、`instructions_json`、`role_id` / `role_snapshot_json`（非 Agent 阶段为空）、`verification_spec_json`、`retry_json`、`max_attempts`（1–10）、`current_attempt_id`、`status`、`result`、`failure_stage`、`failure_summary`、时间戳 |
+| `attempts` | `step_id`、`task_id`（可空，仅供历史孤立记录）、`attempt_number`（`UNIQUE (step_id, attempt_number)`）、`status`、`container_id` / `docker_id`、`input_digest`、`exit_code`、`timed_out` / `cancelled`、重试与失败分类、`verification_verdict` / `verification_summary` / `verification_id`、`session_ids_json`、`code_save_id`、Git 快照（`git_branch` / `git_before_json` / `git_after_json`）、修复预算归属（`budget_scope` / `budget_scope_id`）、时间戳 |
+| `sessions` | `task_id`、`step_id` / `attempt_id`（`attempt_id` 非空时 `step_id` 必须非空）、`role_id` / `role_snapshot_json`、`provider` / `model`、`external_session_id`、`process_id`、`status`、Session 与输出路径（`session_jsonl_path` / `session_html_path` / `stdout_path` / `stderr_path` / `archive_path` / `archive_status`）、`run_status` / `completeness` / `export_status` / `exit_code` / `failure_summary`、`invocation_id`、`container_id` / `docker_id`、时间戳 |
+| `events` | 自增整数主键保留写入顺序；`task_id`、`step_id` / `attempt_id` / `session_id`、`event_type`、`payload_json`、`created_at`；只追加写入 |
 
-CREATE INDEX idx_planning_sessions_project
-    ON planning_sessions (project_id, status, created_at);
-CREATE INDEX idx_planning_sessions_status
-    ON planning_sessions (status, created_at);
+执行链索引：`tasks` 按需求/状态/节点/容器/幂等键/未删除列表；`steps` 按任务序号、角色、状态；
+`attempts` 按步骤序号、状态、任务、Git 分支、修复周期；`sessions` 按任务、步骤、尝试、运行状态、
+完整度、调用标识、容器、任务+角色+状态；`events` 按任务、步骤、尝试。
 
-CREATE TABLE planning_messages (
-    id                  TEXT    PRIMARY KEY NOT NULL CHECK (length(trim(id)) > 0),
-    planning_session_id TEXT    NOT NULL CHECK (length(trim(planning_session_id)) > 0),
-    sequence            INTEGER NOT NULL CHECK (sequence > 0),
-    sender_type         TEXT    NOT NULL CHECK (length(trim(sender_type)) > 0),
-    role_id             TEXT,
-    content             TEXT    NOT NULL CHECK (length(trim(content)) > 0),
-    created_at          INTEGER NOT NULL CHECK (created_at > 0)
-);
+### 2.3 环境版本与容器
 
-CREATE UNIQUE INDEX idx_planning_messages_sequence
-    ON planning_messages (planning_session_id, sequence);
+| 表 | 关键事实 |
+|---|---|
+| `environment_versions` | 主键 `(host_id, env_type, env_name, version_number)`（`version_number` 1–9999）；三个 64 位小写十六进制哈希（`dockerfile_sha256` / `build_config_sha256` / `context_sha256`）、`parent_version`、`image_ref`、`image_id`（`sha256:` + 64 位）、`build_status`（无白名单）、`error_summary`、`created_at` / `built_at` |
+| `containers` | `id`、`host_id`、`docker_id`、`name`（`UNIQUE (host_id, name)`）、环境三元组、构建配置哈希、`image_id`、`task_id` / `attempt_id`（尝试关联必须同时给出任务）、管理状态 `state` 与观测状态 `docker_state`、时间戳、`end_reason`、`detached` / `detached_at` / `synced_at`、`error_summary` |
 
-CREATE TABLE planning_revisions (
-    id                        TEXT    PRIMARY KEY NOT NULL CHECK (length(trim(id)) > 0),
-    planning_session_id       TEXT    NOT NULL CHECK (length(trim(planning_session_id)) > 0),
-    revision_number           INTEGER NOT NULL CHECK (revision_number > 0),
-    requirement_analysis_json TEXT    NOT NULL CHECK (json_valid(requirement_analysis_json)),
-    implementation_plan_json  TEXT    NOT NULL CHECK (json_valid(implementation_plan_json)),
-    validation_result_json    TEXT    CHECK (validation_result_json IS NULL
-                                             OR json_valid(validation_result_json)),
-    created_at                INTEGER NOT NULL CHECK (created_at > 0)
-);
+### 2.4 代码初始化、代码保存与验证
 
-CREATE UNIQUE INDEX idx_planning_revisions_number
-    ON planning_revisions (planning_session_id, revision_number);
-```
+| 表 | 关键事实 |
+|---|---|
+| `code_fetches` | 尝试级代码初始化：`task_id` / `step_id` / `attempt_id` 必填、来源与仓库、`work_dir`、容器、基础分支与任务分支（两者不得相同）、commit SHA（40/64 位）、状态与失败分类、时间戳；部分唯一索引 `idx_code_fetch_active_attempt` 保证同一 Attempt 最多一条未结束记录 |
+| `task_workspace_initializations` | 任务级工作区初始化：以「任务 + 容器代次」为幂等边界，字段与 `code_fetches` 同构但不伪造 `step_id` / `attempt_id`；部分唯一索引 `idx_task_workspace_init_active` |
+| `code_saves` | 提交、推送、合并三段状态互相独立；分支名非空且基础分支不得等于任务分支；三个 SHA 列限定 40/64 位；`merge_enabled`；`attempt_id`；恢复相关列（`baseline_commit_sha` / `baseline_base_commit_sha` / `persist_status` / `persist_error` / `recovery_status`）；时间戳 |
+| `validation_runs` | 一次确定性验证：`status` 与 `verdict` 分离，`spec_json` / `spec_snapshot`、四项计数（`passed + failed + skipped <= total`）、执行环境与工作区、`validator_session_id`、语义审查（`review_status` / `review_summary` / `assessment_json`）、时间戳 |
+| `validation_check_results` | 验证运行内逐项检查：`(validation_run_id, check_id)` 唯一、`sequence`、`definition_json`、`status`、退出码与输出路径/摘要、`timed_out` / `cancelled` / `certain`、失败原因、`duration_ms` |
+| `validation_feedbacks` | 可复用的失败反馈：`validation_run_id` 唯一，`verdict`、`summary`、`infrastructure_error`、`checks_json`；只描述上一轮发生了什么 |
 
-- `planning_sessions.status` 与 `planning_messages.sender_type` 不设取值白名单；未知取值必须能
-  写入并原样读回，状态迁移规则只由 `internal/domain` 的状态机承担。
-- `adopted_revision_id` 表示用户确认的那一版；确认动作同时把 `status` 推进到 `confirmed`。
-- 消息序号与方案版本号分别由 `(planning_session_id, sequence)` 与
-  `(planning_session_id, revision_number)` 唯一索引保证；序号由存储层在写入事务内分配，不
-  "先查最大值再插入"。
-- 只 `json_valid` 结构约束，不为分析/方案内部字段建列、不设字段白名单。
-- 规划会话不进入 `steps` / `attempts` / `sessions`：规划阶段不产生正式任务，也不复用执行记录表。
-- 本阶段只落地表结构与存储层读写，不含需求分析、方案生成、容器准备与 HTTP 入口。
-- 已人工核对表、索引、字段、约束与迁移版本顺序；旧库升级与 Schema 审计没有自动化守点
-  （见 §5.2），本阶段未运行任何数据库测试。
+### 2.5 编排、修复与项目
 
-### 0027_requirements_project.sql
+| 表 | 关键事实 |
+|---|---|
+| `workflow_runs` | 任务级编排记录：`plan_digest`、`status` / `stage`（无白名单）、当前游标与已完成游标、`completed_steps <= total_steps`、取消请求、`worker_id` / `lease_expires_at`、`error_class` / `error_summary`、`revision`（乐观并发）；部分唯一索引 `idx_workflow_runs_active_task` 保证同一任务最多一条未结束记录 |
+| `repair_cycles` | 开发执行周期：`task_id` / `step_id`、`sequence`（步骤内唯一）、`max_attempts` 上限快照、`opened_by`、`opened_at` / `closed_at`（结束不得早于开启）；部分唯一索引 `idx_repair_cycles_active_step` 保证步骤内最多一个活动周期 |
+| `projects` | 项目登记：`id`（同时是远程目录名）、`name`、`repository_url`（已脱敏）、`base_branch`、`env_type` / `env_name` / `env_version`（可空）、`work_dir`、`caches_json`、时间戳、`deleted_at`、`default_host_id`（可空，部分索引） |
 
-```sql
-ALTER TABLE requirements ADD COLUMN project_id TEXT;
-ALTER TABLE requirements ADD COLUMN planning_session_id TEXT;
-ALTER TABLE requirements ADD COLUMN final_analysis_json TEXT;
-ALTER TABLE requirements ADD COLUMN final_plan_json TEXT;
-ALTER TABLE requirements ADD COLUMN confirmed_at INTEGER;
-ALTER TABLE requirements ADD COLUMN deleted_at INTEGER;
+### 2.6 规划会话
 
-CREATE INDEX idx_requirements_project
-    ON requirements (project_id, deleted_at, created_at);
-```
+| 表 | 关键事实 |
+|---|---|
+| `planning_sessions` | 所属项目、`status`（无白名单）、运行期绑定（`host_id` / `container_id` / `source_commit`）、两个角色的 Pi 会话标识、`adopted_revision_id`、`error_summary`、时间戳；索引按项目+状态+创建时间与按状态 |
+| `planning_messages` | 会话内多轮消息：`(planning_session_id, sequence)` 唯一，`sender_type`（无白名单）、`role_id`、`content`、`created_at`；只追加不覆盖 |
+| `planning_revisions` | 每轮完整快照：`(planning_session_id, revision_number)` 唯一，需求分析 / 实施方案 / 校验结果均为 JSON 文档（只做 `json_valid`） |
+| `planning_session_leases` | 规划会话跨进程执行租约：`planning_session_id` 为主键（每会话最多一个持有者）、`owner` / `operation` / `epoch` / `lease_expires_at` / `updated_at`；组合 CHECK 保证持有中三项同时存在、释放后三项同时为空，释放不删行且保留 `epoch`；部分索引按到期时间 |
 
-- 全部**可空**：历史需求没有项目、没有规划快照、没有确认时间。用 NOT NULL 会破坏旧库升级，
-  业务必填性由应用层在确认流程中强制（`RequirementService.Confirm`）。
-- `final_analysis_json` / `final_plan_json` 只存**用户确认的那一版** Revision 快照；工作台展示的
-  "最新草案"取自 `planning_revisions`，不写入 `requirements`。
-- 排序索引 `(project_id, deleted_at, created_at)` 覆盖"项目下需求列表"这一唯一读路径。
+### 2.7 冻结的遗留表
 
-### 0028_projects_default_host.sql（已实现，M2 第八阶段）
+`verification_results` 是**已冻结的遗留数据**：结构仍由 `schema.sql` 保留（`passed`、`verdict`、
+`checks_json`、`command_results_json`、`assessment_json`、`review_skipped` 等），但当前生产代码不再读写
+它，确定性验证结论由 `validation_runs` 与 `validation_check_results` 承载。禁止在业务代码中重新写入或
+读取，也禁止在没有可靠数据保全方案时删除该表定义。
 
-实际落地脚本 `internal/storage/sqlite/migrations/0028_projects_default_host.sql`：
+## 3. V2 已交付的结构（M2）
 
-```sql
-ALTER TABLE projects ADD COLUMN default_host_id TEXT;
+- **规划会话**（M2 第二阶段）：`planning_sessions` / `planning_messages` / `planning_revisions` 三张表
+  与四个索引（两个会话列表索引、消息序号唯一索引、方案版本唯一索引）。
+- **项目默认执行节点**（M2 第八阶段）：`projects.default_host_id`（可空）与部分索引
+  `idx_projects_default_host`。可空表示"未设置"，写入时把空值落成 SQL NULL，不为 NULL 行建立索引项；
+  历史任务继续使用自己的 `tasks.host_id` 与 `config_json` 快照。
+- **规划会话执行租约**（M2 第九阶段）：`planning_session_leases` 与部分索引
+  `idx_planning_session_leases_expiry`。跨进程互斥由主键与 `epoch` 保证，规划会话的业务状态机不变。
 
-CREATE INDEX idx_projects_default_host ON projects (default_host_id)
-    WHERE default_host_id IS NOT NULL;
-```
+固定四角色不需要结构变化：`roles.type` 没有取值白名单，新增角色类型可直接写入；"固定身份"由 `domain`
+常量与 `app.RoleService` 保证，不是数据库约束；缺失角色由应用层按固定 ID 补齐，已有角色不被覆盖。
 
-- 可空表示未指定默认执行节点；未指定时发起方必须要求用户显式选择执行节点，不得猜测默认节点。
-- 项目配置读写路径：`internal/domain/project.go`（`Project.DefaultHostID` / `ProjectInput.DefaultHostID`，
-  只做空白裁剪，空白即未设置）、`internal/app/projects.go`（写入前用 `GetExecutionHost` 确认引用成立）、
-  `internal/storage/sqlite/projects.go`（`projectColumns` 增加该列，空值落 SQL NULL，
-  `scanProject` 用 `sql.NullString` 还原）、`internal/httpapi/projects.go`（请求可省略或传空，响应以
-  JSON `null` 表达未设置）。
-- 只有引入新的非空标识时才校验节点存在且未被逻辑删除；与项目当前已保存取值相同则原样保留，使节点被
-  逻辑删除后项目仍可读取、仍可编辑其它配置，并可清除该历史引用。节点当前的预检状态不是项目配置合法性
-  的一部分，规划运行时仍须自行校验。
-- 历史任务继续使用自己 `tasks.host_id` 与 `config_json` 快照，不因项目字段变化被改写。
-- 已通过定向测试在该测试数据库中执行过旧库增量升级：既有项目数据保留、新增列为 NULL、`schema_migrations`
-  版本记录与部分索引条件正确（命令与产物见
-  [`milestones/M2-planning-runtime.md`](./milestones/M2-planning-runtime.md) §7.11）。真实开发数据库尚未
-  执行升级，不得据此报告生产库已验证。
+## 4. 后续里程碑需要的结构变化（尚未实现）
 
-### 0029_task_requirement_sequence.sql
+以下变化落地时**直接修改 `schema.sql`**，不提供旧库升级：已有的开发数据库需要用户自行备份后手动重建。
 
-```sql
-ALTER TABLE tasks ADD COLUMN requirement_sequence INTEGER;
+- **M3 需求项目关联**：`requirements` 增加 `project_id`、`planning_session_id`、`final_analysis_json`、
+  `final_plan_json`、`confirmed_at`、`deleted_at`，并增加覆盖"项目下需求列表"的索引。这些列全部可空：
+  业务必填性由确认流程在应用层强制；`final_*` 只存用户确认的那一版 Revision 快照。
+- **M4 需求内任务顺序**：`tasks` 增加 `requirement_sequence` 与部分唯一索引
+  `(requirement_id, requirement_sequence) WHERE requirement_sequence IS NOT NULL`。顺序是业务事实而不是
+  时间戳推断值，由确认生成流程写入。
+- **M5 项目执行租约**：新增 `project_execution_leases`，以 `project_id` 为主键表达"每个项目最多一份
+  执行权"，释放不删行、以单调 `epoch` 做 fencing，与 `tasks` 的任务租约并存且互不替代。
 
-CREATE UNIQUE INDEX idx_tasks_requirement_sequence
-    ON tasks (requirement_id, requirement_sequence)
-    WHERE requirement_sequence IS NOT NULL;
-```
+不再保留历史数据回填规则：单文件 Schema 只用于全新数据库初始化，既有开发库不升级，因此不需要用
+`json_extract` 从 `tasks.config_json` 推导 `requirements.project_id`，也不需要在 Schema 初始化中做任何
+数据搬运。
 
-- 需求内顺序是**业务事实**，不是时间戳推断值：确认生成时按方案顺序写入 1..N。
-- 历史任务一律保持 `NULL`（不猜测顺序），读取层把 `NULL` 表示为"历史数据/未排序"，展示时
-  以 `created_at` 兜底并标注，不得显示成确定的执行顺序。
-- 部分唯一索引保证同一需求内不出现重复序号，同时允许历史 `NULL` 行共存。
-
-### 0030_project_execution_leases.sql
-
-```sql
-CREATE TABLE project_execution_leases (
-    project_id      TEXT    PRIMARY KEY NOT NULL CHECK (length(trim(project_id)) > 0),
-    task_id         TEXT,
-    owner           TEXT    NOT NULL CHECK (length(trim(owner)) > 0),
-    epoch           INTEGER NOT NULL DEFAULT 0 CHECK (epoch >= 0),
-    lease_expires_at INTEGER NOT NULL CHECK (lease_expires_at > 0),
-    updated_at      INTEGER NOT NULL CHECK (updated_at > 0)
-);
-```
-
-- 以 `project_id` 为主键即为"每个项目最多一份执行权"的数据库级保证，不依赖进程内互斥。
-- 释放时**不删行**：`task_id` 置 `NULL`、`epoch` 递增，用单调 `epoch` 做 fencing，
-  使旧 Worker 的迟到写入被条件更新拒绝。
-- 与 `task_leases` 并存，互不替代：任务租约证明"谁在跑这个任务"，项目租约证明
-  "谁在占用这个项目的执行名额"。
-- 清理策略：服务重启时按 `lease_expires_at` 判定是否过期，过期即可被重新获取；不主动删行。
-
-### 0031_planning_session_leases.sql（已实现，M2 第九阶段）
-
-实际落地脚本 `internal/storage/sqlite/migrations/0031_planning_session_leases.sql`：
-
-```sql
-CREATE TABLE planning_session_leases (
-    planning_session_id TEXT    PRIMARY KEY NOT NULL CHECK (length(trim(planning_session_id)) > 0),
-    owner               TEXT,
-    operation           TEXT,
-    epoch               INTEGER NOT NULL DEFAULT 0 CHECK (epoch >= 0),
-    lease_expires_at    INTEGER,
-    updated_at          INTEGER NOT NULL CHECK (updated_at > 0),
-    CHECK (
-        (owner IS NULL AND operation IS NULL AND lease_expires_at IS NULL)
-        OR (
-            owner IS NOT NULL AND length(trim(owner)) > 0
-            AND operation IS NOT NULL AND length(trim(operation)) > 0
-            AND lease_expires_at IS NOT NULL AND lease_expires_at > 0
-        )
-    )
-);
-
-CREATE INDEX idx_planning_session_leases_expiry
-    ON planning_session_leases (lease_expires_at)
-    WHERE owner IS NOT NULL;
-```
-
-- `planning_session_id` 作主键即"每个规划会话最多一个执行者"的数据库级保证：进程内 `keyedMutex`
-  只覆盖单个 Server，两个 Server 连接同一数据库时仍可能同时准备容器、执行 Pi 或释放快照卷。
-- `owner` 由服务端生成、每次领取唯一；`operation` 记录当前操作类型（`run_role` / `prepare` /
-  `release`），只用于诊断与审计，**不设取值白名单**，新增取值无需修改 Schema。
-- `epoch` 是领取代次，由存储层在同一条原子 UPSERT 内递增，首次领取为 1；`(owner, epoch)` 唯一确定
-  一次领取，旧代次的续期与释放都被条件更新拒绝。代次是内部栅栏，HTTP / CLI 与应用层接口都不接受。
-- 释放**不删行**：只清空 `owner` / `operation` / `lease_expires_at` 并保留 `epoch`，因此下一次领取继续
-  递增，旧持有者的迟到写入仍被拒绝。
-- 表级 CHECK 只表达字段组合一致性（持有中三项必须同时存在、释放后三项必须同时为空），不是枚举白名单；
-  到期即视为持有者消失、允许被接管，但接管必须递增代次。
-- 不声明外键：`planning_session_id` 允许指向已不存在的规划会话（领取先于会话校验发生），关系合法性由
-  应用层承担；部分索引只覆盖持有中的租约，供按到期时间判断可接管范围。
-- 不修改 `0026_planning_sessions.sql` 与 `0028_projects_default_host.sql`，租约状态也不写进
-  `planning_sessions.status`，既有会话业务状态机不变。
-
-条件写入与错误语义（`internal/storage/sqlite/planning_session_leases.go`）：
-
-| 操作 | 条件 | 失败语义 |
-|---|---|---|
-| `AcquirePlanningSessionLease` | 单条 `INSERT ... ON CONFLICT DO UPDATE ... WHERE owner IS NULL OR lease_expires_at IS NULL OR lease_expires_at <= now` | 影响行数 0 → `storage.ErrConflict`；参数非法 → `storage.ErrInvalidData`；其余为数据库故障 |
-| `RenewPlanningSessionLease` | `owner` + `epoch` 匹配且 `lease_expires_at > now` | 影响行数 0 → `storage.ErrConflict` |
-| `ReleasePlanningSessionLease` | `owner` + `epoch` 匹配且 `lease_expires_at > now` | 影响行数 0 → `false` + `storage.ErrConflict` |
-
-- 领取成功后回读代次，回读条件同时覆盖 owner 与到期时间：回读前被接管则领取失败，绝不返回不属于本次
-  调用的代次；领取不使用"先 SELECT 判断空闲，再无条件 UPDATE"的两步方案。
-- 应用层按"竞争 / 丢失 / 存储不可用"三个类别映射（`app.errPlanningLeaseConflict`、
-  `errPlanningLeaseLost`、`errPlanningLeaseUnavailable`），再转成各服务自己的错误体系，调用方不需要
-  解析错误文本；数据库不可用不得被报告成"其他请求正在运行"。
-- 迁移脚本已人工核对表、列、索引、组合约束与版本顺序；旧库增量升级与幂等仍由 `tests/unit/store` 的
-  定向用例在测试数据库中执行（见里程碑 §7.11），真实开发数据库尚未执行升级。
-
-### 固定四角色：不需要新迁移
-
-- `roles.type` 在 `0009` 重建时已去掉 CHECK 白名单，新增取值 `requirement_analyst` 可直接写入。
-- 四角色的"固定身份"由 `domain` 常量与 `app.RoleService` 保证（无增删入口），不是数据库约束；已实现于 V2-M1-E2。
-- 默认 Prompt / 默认工具策略由应用层在初始化时按固定 ID 补齐缺失角色，已存在角色不被启动流程覆盖。
-
-## 3. 历史数据回填规则（`0027` / `0029` 必须遵守）
-
-`Requirement` 的 `project_id` 用 `tasks.config_json` 的 `$.project_id` 推导：
-
-1. 取该 requirement 下所有任务的 `json_extract(config_json, '$.project_id')`。
-2. **全部非空且唯一**，并且该值在 `projects` 中确有一条记录 → 回填。
-3. 没有任何任务，或所有任务都不带项目 → 保持 `NULL`，不猜测。
-4. 同一 requirement 下出现两个及以上不同项目 → 保持 `NULL`，记录冲突清单，交人工处理。
-5. 值存在但 `projects` 中查不到记录 → 保持 `NULL`（指向不存在的项目不是合法关系）。
-
-回填必须：
-
-- 在迁移事务内完成，失败整体回滚；
-- 不修改任何 `tasks` 行、不修改历史迁移、不删除任何历史记录；
-- 回填条数、跳过条数与冲突条数写入迁移输出，供 `legacy_migration_test` 逐类断言；
-- 视为幂等操作：重复执行不会改变已决定的结果。
-
-## 4. 数据库约束规则（不变）
+## 5. 数据库约束规则（不变）
 
 - 不声明外键，不使用 `REFERENCES` / `FOREIGN KEY` / 级联行为，不用触发器模拟引用完整性。
 - 枚举式字段不设 `CHECK` 取值白名单；未知取值必须能写入并原样读回。
-- 保留非枚举约束：主键、`NOT NULL`、有业务意义的 `UNIQUE`、数值范围、长度、`json_valid`、
-  跨字段组合一致性。
-- 逻辑删除优先：`requirements`、`projects`、`tasks`、`roles`、`execution_hosts` 用 `deleted_at`，
-  删除不级联清空历史。
+- 保留非枚举约束：主键、`NOT NULL`、有业务意义的 `UNIQUE`、数值范围、长度、`json_valid`、跨字段组合
+  一致性。
+- 逻辑删除优先：`roles`、`execution_hosts`、`tasks`、`projects` 用 `deleted_at`，删除不级联清空历史。
 - 连接显式关闭外键检查（`foreign_keys(0)`），业务不得依赖该开关。
-- 迁移在事务内完成；并发打开同一数据库只允许执行一次迁移。
-- `verification_results` 是冻结遗留表：不读、不写、不改历史迁移、不加删除迁移。
+- Schema 初始化在单个事务内完成，并发首次打开同一数据库只允许一方建表，其余进程取得写锁后重新判断。
+- `verification_results` 是冻结遗留表：结构保留在 `schema.sql`，不读、不写、不删除。
 
-## 5. 待验证风险（落地前必须实测，不写成结论）
+## 6. 待确认风险
 
-1. **`ALTER TABLE ADD COLUMN` 与 CHECK 的组合**：本方案在 `0027` / `0028` / `0029` 只用无 CHECK
-   的加列；需要 `json_valid` 的列全部落在**新建表**（`0026`）。若某个迁移必须给历史表加带 CHECK
-   的列，必须改为 `0009` 已证明可行的"建新表 → 复制 → 改名 → 重建索引"路径，并保留全部非枚举约束。
-2. **旧库升级与 Schema 审计已没有自动化守点**：`tests/integration/local/database/`（
-   `legacy_migration_test.go`、`schema_audit_test.go`）已在测试精简中删除，新增迁移落地时必须人工核对
-   新表结构、索引、非枚举约束、旧库升级后数据保留、未知枚举值写入与读回、迁移幂等。未执行的核对不得
-   报告为已完成。
-   其中 `0026` 已人工核对表结构、索引、字段、非枚举约束与版本顺序；旧库升级后的数据保留、未知枚举值
-   写入与读回、迁移幂等仍未在真实数据库上执行，不得报告为已验证。
-   `0028` 是纯 `ADD COLUMN` 加部分索引，已人工核对脚本、索引条件与版本记录，并由
-   `tests/unit/store` 的定向用例在测试数据库中执行过一次旧库增量升级（见 §2 该条目与里程碑 §7.11）；
-   该结论只覆盖测试数据库，真实开发库的升级仍未执行。
-3. **`json_extract` 依赖 SQLite JSON1 扩展**：需确认当前驱动与最低 SQLite 版本已内置（`caches_json`
-   的 `json_valid` 已在用，仍按实际迁移验证）。
-4. **回填冲突的人工处理入口**：本方案只记录冲突、不提供 UI；若真实库出现冲突，需要在
-   M4 前给出处置方式（保持 `NULL` 并在需求页标注"历史需求未关联项目"）。
+1. **Schema 没有自动化审计守点**：`tests/integration/local/database/`（Schema 审计、旧库升级与数据保留）
+   已在测试精简中删除。修改 `schema.sql` 必须人工核对表结构、索引、非枚举约束、未知枚举值的写入与读回，
+   并确认仓储 SQL 依赖的列与索引全部存在；未执行的核对不得报告为已完成。
+2. **不兼容旧库的失败行为**：拒绝打开旧库的路径没有自动化测试，也没有在真实旧库上执行；错误信息必须
+   明确提示"只支持全新初始化或当前 Schema"，不得让用户误以为程序会自动升级。
+3. **后续结构变化的重建成本**：因为不提供升级，M3–M5 的结构变化落地后，已有的开发数据库需要人工备份
+   与重建，`README.md` 的本地开发说明需要同步这一操作方式。

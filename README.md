@@ -42,7 +42,7 @@ AgentFlow 是一个本地优先的 AI 编码工作流编排器，使用 Go 实�
 | [.steps/V2/ROADMAP.md](.steps/V2/ROADMAP.md) | V2 里程碑状态与依赖顺序 |
 | [.steps/V2/PRODUCT-SCOPE.md](.steps/V2/PRODUCT-SCOPE.md) | V2 做什么、不做什么 |
 | [.steps/V2/ARCHITECTURE.md](.steps/V2/ARCHITECTURE.md) | V2 分层、服务职责与接口结构 |
-| [.steps/V2/DATA-MODEL.md](.steps/V2/DATA-MODEL.md) | V2 新增实体、迁移与历史数据处理 |
+| [.steps/V2/DATA-MODEL.md](.steps/V2/DATA-MODEL.md) | 当前最终 Schema 结构与后续里程碑需要的结构变化 |
 | [.steps/V2/WORKFLOW.md](.steps/V2/WORKFLOW.md) | V2 需求规划、确认、调度、进度与删除流程 |
 | [.steps/V2/ROLE-DESIGN.md](.steps/V2/ROLE-DESIGN.md) | V2 角色设计与工具限制 |
 | [.steps/V2/ENVIRONMENT-MANAGEMENT.md](.steps/V2/ENVIRONMENT-MANAGEMENT.md) | V2 环境管理 |

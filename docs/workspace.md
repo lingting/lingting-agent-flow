@@ -12,7 +12,6 @@ cmd/agentflow-release/    发布制品构建程序
 internal/                 产品实现（见下节包职责）
 lingting-agent-flow-ui/   React + TypeScript 前端（独立 pnpm 工程）
 configs/                  示例配置
-migrations/               迁移说明（实际 SQL 脚本在 internal/storage/sqlite/migrations/）
 docs/                     工程文档
 tests/                    全部测试代码（见 testing.md）
 .steps/                   规划与阶段性成果文档（V1 收口、V2 设计与里程碑）
@@ -32,7 +31,7 @@ tests/                    全部测试代码（见 testing.md）
 | `internal/config/` | 配置结构与 YAML 加载、校验 |
 | `internal/logging/` | 结构化日志封装（`log/slog`） |
 | `internal/storage/` | 存储接口与统一存储错误 |
-| `internal/storage/sqlite/` | 连接、迁移与仓储实现 |
+| `internal/storage/sqlite/` | 连接、Schema 初始化与仓储实现（`schema.sql` 是唯一 Schema 文件） |
 | `internal/execenv/` | 统一执行环境契约（纯类型与纯函数） |
 | `internal/agent/` | Agent 接口与 Pi CLI 适配器、容器 Runner |
 | `internal/process/` | 外部进程生命周期管理（启动、输出、超时、取消、回收） |

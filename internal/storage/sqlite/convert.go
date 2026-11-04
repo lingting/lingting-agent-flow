@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
@@ -83,6 +84,24 @@ func toBoolInt(value bool) int {
 // fromBoolInt 把数据库整数还原为布尔值。
 func fromBoolInt(value int) bool {
 	return value != 0
+}
+
+// sqlNullString 把空字符串转换为 NULL，用于可空文本列。
+func sqlNullString(value string) sql.NullString {
+	if strings.TrimSpace(value) == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: value, Valid: true}
+}
+
+// nullIfBlank 把空字符串转换为 NULL，用于可选文本列。
+//
+// 与 sqlNullString 不同，这里保留调用方传入的原始值，只把空白视为未设置。
+func nullIfBlank(value string) any {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
 }
 
 // marshalJSON 把值编码为 UTF-8 JSON 文本。

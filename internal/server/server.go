@@ -35,7 +35,7 @@ type Service = lifecycle.Service
 // ConfigLoader 加载并校验配置，失败时服务不启动任何组件。
 type ConfigLoader func(ctx context.Context) (*config.Config, error)
 
-// StoreOpener 打开数据库并执行迁移，失败时服务不启动任何组件。
+// StoreOpener 打开数据库并确认或初始化 Schema，失败时服务不启动任何组件。
 //
 // 它以函数注入而不是直接调用 app.App：命令层持有 App 实例，服务层只需要"打开
 // 数据库"这一项能力，测试也可以注入可控的失败与替身。

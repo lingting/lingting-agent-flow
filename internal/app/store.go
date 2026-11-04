@@ -11,7 +11,7 @@ import (
 
 // OpenStore 按配置打开数据库并返回存储入口。
 //
-// 打开过程会自动创建父目录并执行迁移；调用方负责在结束后调用 Close。
+// 打开过程会自动创建父目录并确认或初始化 Schema；调用方负责在结束后调用 Close。
 func (a *App) OpenStore(ctx context.Context, cfg *config.Config) (storage.Store, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("打开数据库失败: 配置为空")

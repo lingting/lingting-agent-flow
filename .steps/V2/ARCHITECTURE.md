@@ -13,7 +13,7 @@ V2 不引入第二套工作流引擎，也不新增分层。新能力一律按�
 - 业务语义、状态迁移、准入判定、进度聚合规则 → `internal/domain`（纯函数，无 IO）。
 - 生命周期、编排、事务边界、外部调用 → `internal/app`。
 - 协议转换、DTO、错误码映射、SSE → `internal/httpapi`。
-- 数据库结构 → `internal/storage/sqlite/migrations/`，只追加。
+- 数据库结构 → `internal/storage/sqlite/schema.sql`，唯一的最终态定义，结构变化直接改这份文件。
 - 展示与操作发起 → `lingting-agent-flow-ui/`，不实现工作流逻辑。
 
 ## 2. 新增领域类型（`internal/domain`）
@@ -30,7 +30,7 @@ V2 不引入第二套工作流引擎，也不新增分层。新能力一律按�
 | `RequirementProgress` / `ProjectProgress` | 进度聚合结果 | 只由 Task 真实状态计算，不接受模型输入 |
 
 `Requirement` 扩展字段（`ProjectID`、`PlanningSessionID`、最终快照、`ConfirmedAt`、`DeletedAt`）
-与迁移顺序见 [`DATA-MODEL.md`](./DATA-MODEL.md)。
+与结构变化见 [`DATA-MODEL.md`](./DATA-MODEL.md)。
 
 ## 3. 新增应用服务（`internal/app`）
 
@@ -186,8 +186,8 @@ PUT    /api/v1/roles/{roleID}
 | G2 | ~~无角色更新 API~~ **已关闭**（V2-M1-E2 / E3） | 现状：`internal/httpapi/roles.go` 提供角色列表、详情与 `PUT /api/v1/roles/{roleID}`；E3 起 `tools_policy` 可更新，越出角色能力上限返回 400 | M1 |
 | G3 | ~~环境管理只有查询 API，无创建/修改/构建 HTTP 入口~~ **已关闭**（V2-M1-E1） | 现状：`internal/httpapi/environments.go` 提供环境详情、创建版本、初始化、后台构建与构建状态/日志/Dockerfile 读取入口，写路径全部复用 `app.EnvironmentService` | M1 |
 | G4 | `execenv` 无只读挂载与只读 rootfs 能力 | `internal/execenv/workspace.go`、`internal/docker/container.go` | M2 |
-| G5 | `Requirement` 无项目关联、无规划快照、无逻辑删除 | `domain/requirement.go`、迁移 `0009` 的 `requirements` 表 | M3/M4 |
-| G6 | 无 PlanningSession / Message / Revision 持久化 | 无对应 domain 类型、无迁移 | M2/M3 |
+| G5 | `Requirement` 无项目关联、无规划快照、无逻辑删除 | `domain/requirement.go`、`schema.sql` 的 `requirements` 表 | M3/M4 |
+| G6 | ~~无 PlanningSession / Message / Revision 持久化~~ **已交付**（M2 第二阶段） | `domain/planning_*.go`、`schema.sql` 的三张规划表 | M2/M3 |
 | G7 | 无项目级执行租约，`TaskScheduler` 只有全局并发 | `internal/app/task_scheduler.go`、`task_leases` 表按任务 | M5 |
 | G8 | 无项目/需求聚合查询 | `internal/app/projects.go` 只有项目 CRUD | M5 |
 

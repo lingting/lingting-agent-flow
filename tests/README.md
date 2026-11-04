@@ -105,8 +105,8 @@ go test -race -count=1 ./tests/integration/local/ssh/...
 
 CI 不会让 `go test` 按机器核数自行决定并行度：三个 Go 测试组与竞态检测都显式使用 4
 （Runner 为 4 vCPU），真实测试在单 Job 内以 `-p 1` 串行执行多个真实套件。`-race` 下
-SQLite 迁移与连接建立对并发量敏感，在高核数机器上用默认并行度会出现
-`database is locked` 与迁移超时，因此竞态检测的并行度同样显式设置（`make test-race`
+SQLite 初始化与连接建立对并发量敏感，在高核数机器上用默认并行度会出现
+`database is locked` 与初始化超时，因此竞态检测的并行度同样显式设置（`make test-race`
 跟随 `PARALLEL`）。
 
 ## CI 门禁与本地入口的对应关系
@@ -140,7 +140,7 @@ Go 测试的分组与并行策略：
 - 分组包集合互不重叠，并集等于 `make test` 覆盖的全部普通测试包；这一点由
   `go list` 的真实清单核验，而不是人眼比对；
 - 每个分组 Job 独享一台 4 vCPU Runner，`go test` 只用 `-p 4` / `-parallel 4`；`go-race` 也
-  显式传入 `--parallel 4`（`-race` 下 SQLite 迁移与连接建立对并发量敏感）；
+  显式传入 `--parallel 4`（`-race` 下 SQLite 初始化与连接建立对并发量敏感）；
 - 真实测试（`pi` / `ssh` / `remote`）不进普通 CI，并由 `real-tests` 单 Job 执行，包之间固定
   `-p 1` 串行：全部真实套件共用同一台远程机器与同一个 Docker Engine。
 
@@ -177,7 +177,7 @@ Actions 运行制品，不创建 GitHub Release、不推送镜像、不部署环
 Release。上表"本地等价入口"一列是可以在本地真实执行并已执行过的部分；远端上传、来源证明
 签发与草稿转公开目前没有自动化测试覆盖，只能靠实际发布流程验证。
 `go-race` 的补充范围（`make test-race` 未包含），竞态检测同样按 Runner 的 4 vCPU 显式限制
-并行度（`-race` 下 SQLite 迁移与连接建立对并发量敏感，用机器核数兜底会在高核数机器上超时）：
+并行度（`-race` 下 SQLite 初始化与连接建立对并发量敏感，用机器核数兜底会在高核数机器上超时）：
 
 ```bash
 go test -race -count=1 -p 4 -parallel 4 ./tests/integration/local/workflow/
@@ -735,9 +735,9 @@ go test -race -count=1 ./tests/unit/store/ ./tests/integration/local/scheduler/
 ```
 
 `tests/integration/local/database/`（迁移后全量 Schema 审计、旧库升级与数据保留、自增主键续号、
-迁移失败不留半成品、并发打开只迁移一次）已在测试精简中删除。Schema 审计与旧库升级因此**目前没有
-自动化守点**：新增迁移、修改表结构或调整约束都不会被测试发现，只能靠迁移脚本自身、`make vet` 与
-人工核对。
+迁移失败不留半成品、并发打开只迁移一次）已在测试精简中删除。Schema 审计与旧库不兼容行为因此**目前
+没有自动化守点**：修改 `schema.sql` 中的表结构或约束都不会被测试发现，只能靠 `schema.sql` 自身、
+`make vet` 与人工核对。程序已不再提供增量迁移，Schema 只是新数据库首次打开时执行的完整最终态定义。
 
 ### 查看测试结果
 

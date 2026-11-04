@@ -3,7 +3,6 @@ package sqlite_test
 import (
 	"database/sql"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -255,16 +254,6 @@ func TestProjectKeepsUnknownEnvironmentType(t *testing.T) {
 	}
 }
 
-// openMigrationDB 打开指定路径的数据库；调用方负责关闭，便于模拟重复打开触发迁移。
-func openMigrationDB(t *testing.T, path string) *sqlite.DB {
-	t.Helper()
-	db, err := sqlite.Open(testContext(t), sqlite.Options{Path: path})
-	if err != nil {
-		t.Fatalf("打开测试数据库失败: %v", err)
-	}
-	return db
-}
-
 // projectDefaultHostValue 直接读取项目默认执行节点列的原始值。
 func projectDefaultHostValue(t *testing.T, db *sql.DB, projectID string) sql.NullString {
 	t.Helper()
@@ -418,90 +407,5 @@ func TestProjectDefaultHostDoesNotTouchTaskSnapshot(t *testing.T) {
 	}
 	if configAfter != configBefore {
 		t.Fatalf("项目默认节点变化不应改写任务的 config_json: %q vs %q", configAfter, configBefore)
-	}
-}
-
-// TestProjectsMigrationDefaultHostKeepsExistingProjects 校验 0028 在既有项目表上增量升级。
-//
-// 用例把已迁移的数据库回退到"0028 之前"的形态：删除部分索引与新列，并移除版本记录，
-// 然后重新打开数据库触发迁移。断言的是真实迁移行为：既有项目数据保留、新增列为 NULL、
-// 版本记录正确、部分索引条件正确。
-func TestProjectsMigrationDefaultHostKeepsExistingProjects(t *testing.T) {
-	t.Parallel()
-	path := testkit.New(t).SQLitePath()
-
-	legacy := openMigrationDB(t, path)
-	project := testkit.CreateProject(t, legacy, "legacy-project", time.Now().UTC())
-	if err := legacy.Close(); err != nil {
-		t.Fatalf("关闭数据库失败: %v", err)
-	}
-
-	setup := testkit.OpenSQLite(t, path)
-	testkit.MustExec(t, setup, `DROP INDEX idx_projects_default_host`)
-	testkit.MustExec(t, setup, `ALTER TABLE projects DROP COLUMN default_host_id`)
-	testkit.MustExec(t, setup, `DELETE FROM schema_migrations WHERE version = ?`, 28)
-	if err := setup.Close(); err != nil {
-		t.Fatalf("关闭数据库失败: %v", err)
-	}
-
-	upgraded := openMigrationDB(t, path)
-	defer func() {
-		if err := upgraded.Close(); err != nil {
-			t.Fatalf("关闭数据库失败: %v", err)
-		}
-	}()
-	ctx := testContext(t)
-
-	loaded, err := upgraded.GetProject(ctx, domain.ID(project.ID))
-	if err != nil {
-		t.Fatalf("升级后既有项目应当仍可读取: %v", err)
-	}
-	if loaded.Name != project.Name || loaded.RepositoryURL != project.RepositoryURL {
-		t.Fatalf("升级不应改动既有项目数据: %+v", loaded)
-	}
-	if loaded.DefaultHostID != "" {
-		t.Fatalf("旧项目升级后默认节点应为空: %q", loaded.DefaultHostID)
-	}
-
-	version, err := upgraded.SchemaVersion(ctx)
-	if err != nil {
-		t.Fatalf("读取 Schema 版本失败: %v", err)
-	}
-	if version != 28 {
-		t.Fatalf("当前程序支持的迁移版本应为 28，实际: %d", version)
-	}
-
-	raw := testkit.OpenSQLite(t, path)
-	defer func() {
-		if err := raw.Close(); err != nil {
-			t.Errorf("关闭数据库失败: %v", err)
-		}
-	}()
-	var recorded int
-	if err := raw.QueryRow(
-		`SELECT COUNT(*) FROM schema_migrations WHERE version = ? AND name = ?`,
-		28,
-		"projects_default_host",
-	).Scan(&recorded); err != nil {
-		t.Fatalf("读取迁移版本记录失败: %v", err)
-	}
-	if recorded != 1 {
-		t.Fatalf("0028 的版本记录不正确: %d", recorded)
-	}
-
-	var indexSQL string
-	if err := raw.QueryRow(
-		`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`,
-		"idx_projects_default_host",
-	).Scan(&indexSQL); err != nil {
-		t.Fatalf("读取部分索引定义失败: %v", err)
-	}
-	if !strings.Contains(indexSQL, "default_host_id") ||
-		!strings.Contains(indexSQL, "WHERE default_host_id IS NOT NULL") {
-		t.Fatalf("部分索引的条件不正确: %s", indexSQL)
-	}
-
-	if column := projectDefaultHostValue(t, raw, project.ID); column.Valid {
-		t.Fatalf("旧项目升级后新增列应为 NULL，实际: %q", column.String)
 	}
 }

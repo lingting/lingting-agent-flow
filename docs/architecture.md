@@ -70,7 +70,7 @@ HTTP 接口契约见 [http-api.md](http-api.md)；测试规范见 [testing.md](t
 - 完整 Agent 会话历史不能作为唯一业务记录，业务结论必须写入结构化字段。
 - 单步骤执行的步骤占用必须在单个事务内完成：以状态为前置条件创建 Attempt，再条件更新 Step 与
   Task。禁止"先查询、后无条件更新"，也不得只依赖进程内互斥锁保证一致性。
-- 迁移脚本、schema 与引用完整性的长期约束见 `AGENTS.md` 的「数据库约束规范」；本文件不重复列出。
+- `schema.sql`、引用完整性与数据库建模的长期约束见 `AGENTS.md` 的「数据库约束规范」；本文件不重复列出。
 
 ## Pi Runner 与 Session 生命周期边界
 
@@ -422,8 +422,8 @@ HTTP Handler（POST /api/v1/tasks/{taskID}/execute-workflow → 202 + 真实初�
 
 ### 持久化与并发
 
-- 编排进度只持久化在 `workflow_runs`（迁移 `0018_workflow_runs.sql`）：任务状态表达业务阶段，工作流
-  执行状态表达"这一次编排是否在推进"，两者不得合并为同一个字段。
+- 编排进度只持久化在 `workflow_runs`（结构见 `internal/storage/sqlite/schema.sql`）：任务状态表达业务
+  阶段，工作流执行状态表达"这一次编排是否在推进"，两者不得合并为同一个字段。
 - 同一任务同一时刻最多一条未结束的执行记录：唯一性由 `idx_workflow_runs_active_task` 部分唯一索引
   保证，进程内以任务为键串行化只是第一道防线，不是一致性保证。
 - 状态写入必须以版本号为前置条件（`UpdateWorkflowRun` 的 `revision` 条件）：迟到的结果不得覆盖已
@@ -502,7 +502,7 @@ CodeSaver 缺失时编排器仍会按顺序执行并验证全部步骤，但收�
 两个独立事实。提交、推送与合并成功后写回 `code_saves` 仍可能失败：数据库停留在 `pending`，
 而仓库已经是另一个状态。仅凭 `pending` 重新执行 Git 操作会产生重复提交或覆盖远程历史。
 
-**持久化依据。** `0019_code_save_recovery.sql` 增加五个可空列：`baseline_commit_sha`、
+**持久化依据。** `schema.sql` 的 `code_saves` 表包含五个可空列：`baseline_commit_sha`、
 `baseline_base_commit_sha`、`persist_status`、`persist_error`、`recovery_status`。基线一律在
 副作用之前落盘——写不进去就中止该阶段，不在未知起点上产生新提交或合并。历史记录保持 `NULL`，
 按"没有基线 → 转人工核验"处理，不补造基线。
@@ -630,7 +630,7 @@ CodeSaver 缺失时编排器仍会按顺序执行并验证全部步骤，但收�
 启动链路中的工作区阶段固定为 `app.TaskWorkspaceService`（`internal/app/task_workspace*.go`）：
 它发生在任何 Step / Attempt 存在之前，因此与尝试级的 `app.CodeInitializeService` 是两个层次。
 
-- 记录模型：`task_workspace_initializations`（迁移 `0020`），以「任务 + 容器代次」为幂等边界。
+- 记录模型：`task_workspace_initializations`，以「任务 + 容器代次」为幂等边界。
   `code_fetches` 的 `step_id` / `attempt_id` 保持必填，尝试级契约不变，不得伪造归属。
 - 状态与结论分离：`status`（`pending` / `running` / `succeeded` / `skipped` / `failed` /
   `cancelled` / `timed_out` / `uncertain`）与失败阶段 `stage`、错误类别 `error_code` 分别保存。
