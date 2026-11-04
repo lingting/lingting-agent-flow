@@ -104,3 +104,17 @@ type ContainerExecutor interface {
 	// RemoveHostFile 删除远程宿主机临时文件，目标不存在时视为成功。
 	RemoveHostFile(ctx context.Context, hostPath string) error
 }
+
+// ContainerFileWriter 是把本机文件写入容器内路径的可选能力。
+//
+// 普通任务只需要把容器内 Session 导出到本机，因此 ContainerExecutor 不强制实现它；
+// 需要把历史 Session 恢复到容器内的规划调用要求实现该能力。缺少实现时 Runner 返回
+// 明确错误，不会静默创建一个空 Session 顶替历史上下文。
+type ContainerFileWriter interface {
+	// UploadFromLocal 把本机文件上传到远程宿主机临时路径。
+	//
+	// 上传目标必须位于受控的远程临时目录，调用方不得用它写项目代码目录。
+	UploadFromLocal(ctx context.Context, localPath, hostPath string) error
+	// CopyToContainer 把远程宿主机文件复制到容器内路径。
+	CopyToContainer(ctx context.Context, dockerID, hostPath, containerPath string) error
+}

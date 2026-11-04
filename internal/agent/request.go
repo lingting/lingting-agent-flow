@@ -40,6 +40,11 @@ type RunRequest struct {
 	//
 	// 为空时由执行器按 SessionID 生成，保证每次调用都得到独立的 Session 文件路径。
 	InvocationID string
+	// StableSession 是跨轮复用的稳定 Session 位置，为空表示每次调用使用独立 Session 文件。
+	//
+	// 规划角色在同一个规划会话的多轮调用之间复用同一份 Pi Session 上下文，因此需要
+	// 由服务端给出固定路径；普通任务不设置该字段，Runner 继续按调用标识分层。
+	StableSession *StableSessionTarget
 	// Container 是容器内执行的附加配置，为空表示在本机执行。
 	Container *ContainerTarget
 	// Timeout 是本次调用的超时时间，零值表示使用执行器的默认超时。
@@ -89,6 +94,33 @@ func (t ContainerTarget) Validate() error {
 	return nil
 }
 
+// StableSessionTarget 描述规划角色在同一规划会话多轮调用之间复用的稳定 Session 位置。
+//
+// 两个路径都由服务端生成：容器内路径使用 POSIX 形式，本机归档路径使用本机路径形式。
+// 这里只校验书写形式；容器 Session 根目录与本机 Session 根目录的包含关系由 Runner
+// 取得这两个根目录之后再校验。
+type StableSessionTarget struct {
+	// ContainerPath 是容器内固定的 Session 文件路径，必须位于容器 Session 根目录之内。
+	ContainerPath string
+	// ArchiveDir 是本机持久归档目录，用于保存可恢复的最新完整 Session 快照。
+	ArchiveDir string
+}
+
+// Validate 校验稳定 Session 位置是否完整并具备基本书写形式。
+func (t StableSessionTarget) Validate() error {
+	containerPath := strings.TrimSpace(t.ContainerPath)
+	if containerPath == "" {
+		return fmt.Errorf("agent: 稳定 Session 必须给出容器内路径")
+	}
+	if !strings.HasPrefix(containerPath, "/") {
+		return fmt.Errorf("agent: 稳定 Session 容器内路径 %q 必须是绝对路径", containerPath)
+	}
+	if strings.TrimSpace(t.ArchiveDir) == "" {
+		return fmt.Errorf("agent: 稳定 Session 必须给出本机归档目录")
+	}
+	return nil
+}
+
 // Validate 校验执行输入。
 //
 // WorkingDir 允许为空以继承当前进程工作目录，其余字段必须显式给出。
@@ -110,6 +142,11 @@ func (r RunRequest) Validate() error {
 	}
 	if r.Container != nil {
 		if err := r.Container.Validate(); err != nil {
+			return err
+		}
+	}
+	if r.StableSession != nil {
+		if err := r.StableSession.Validate(); err != nil {
 			return err
 		}
 	}

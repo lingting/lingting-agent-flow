@@ -89,11 +89,13 @@ func resolveRunnerOptions(options Options) Options {
 
 // Run 在任务容器内执行一次完整的 Agent 调用。
 //
-// 执行顺序固定为：核验容器 → 检查容器内 Pi → 生成独立 Session 路径 → 启动 Pi 并
-// 写入提示词 → 收集退出状态 → 导出 HTML → 复制 Session 到本机 → 清理远程临时文件。
+// 执行顺序固定为：核验容器 → 校验 Session 路径 → 检查容器内 Pi → 恢复历史 Session
+// （仅在给出稳定 Session 时）→ 启动 Pi 并写入提示词 → 收集退出状态 → 导出 HTML →
+// 复制 Session 到本机 → 清理远程临时文件 → 更新可恢复快照。
 //
 // 无论进程如何结束，都会尽力把已写入的 Session 复制到本机：容器内的 Session
-// 会随容器删除而消失，本机副本是唯一可追溯的记录。
+// 会随容器删除而消失，本机副本是唯一可追溯的记录。恢复失败会阻止本次调用，恢复前
+// 不会删除任何历史归档；归档失败与执行成功分别上报，不会合并成一个模糊的成功状态。
 func (r *ContainerRunner) Run(
 	ctx context.Context,
 	request agent.RunRequest,
@@ -160,13 +162,31 @@ func (r *ContainerRunner) Run(
 	if err != nil {
 		return r.fail(request, result, emit, "session_path_invalid", err, agent.RunFailed)
 	}
+	stable, err := r.resolveStableSession(request)
+	if err != nil {
+		return r.fail(request, result, emit, "session_path_invalid", err, agent.RunFailed)
+	}
+	if stable.enabled() {
+		result.StableSession = agent.StableSessionResult{
+			ContainerPath: stable.ContainerJSONL,
+			ArchivePath:   stable.ArchiveJSONL,
+		}
+	}
 	if err := paths.EnsureDir(); err != nil {
 		return r.fail(request, result, emit, "session_dir_failed", err, agent.RunFailed)
 	}
 	if err := r.checkPi(ctx, request.Container); err != nil {
 		return r.fail(request, result, emit, "pi_unavailable", err, agent.RunFailed)
 	}
-	remote := r.containerPaths(request.Container, invocationID)
+
+	// 历史 Session 必须先恢复到容器内的固定路径，才能在同一份上下文上继续调用 Pi。
+	restored, restoreErr := r.restoreStableSession(ctx, request, stable)
+	if restoreErr != nil {
+		result.StableSession.Error = restoreErr.Error()
+		return r.fail(request, result, emit, "session_restore_failed", restoreErr, agent.RunFailed)
+	}
+	result.StableSession.Restored = restored
+	remote := r.containerPaths(request.Container, invocationID, stable.ContainerJSONL)
 	runCtx, cancel := context.WithTimeout(ctx, r.timeoutOf(request))
 	defer cancel()
 	emitEvent(result.SessionID, emit, agent.EventRunStarted, agent.RunStartedData{
@@ -194,6 +214,18 @@ func (r *ContainerRunner) Run(
 	result.Status, result.Failure = classifyContainerOutcome(executed, execErr, request)
 	// Session 处理在进程结束之后：Pi 在退出前写完 Session 文件。
 	result.Session = r.persistSession(ctx, request, remote, paths, executed, result.Status, emit)
+	var archiveErr error
+	if stable.enabled() {
+		archived, promoteErr := r.promoteStableSession(
+			request,
+			stable,
+			result.Session,
+			result.Status,
+			result.StableSession,
+		)
+		result.StableSession = archived
+		archiveErr = promoteErr
+	}
 	if result.Session.Completeness == agent.SessionMissing && result.Status == agent.RunCompleted {
 		// 进程正常结束却没有可用 Session，属于提取失败，不能报告为成功。
 		result.Status = agent.RunFailed
@@ -203,7 +235,9 @@ func (r *ContainerRunner) Run(
 	}
 	emitContainerOutcome(result, emit)
 	result.FinishedAt = time.Now()
-	return result, containerRunError(result)
+	// Pi 的执行结果与 Session 归档结果分别返回：状态保持真实的执行结论，归档失败
+	// 额外作为错误上报，调用方不得把归档失败当成 Session 保存成功。
+	return result, errors.Join(containerRunError(result), archiveErr)
 }
 
 // fail 构造失败结果并发出事件。
@@ -245,19 +279,22 @@ type containerSessionPaths struct {
 
 // containerPaths 生成容器内本次调用的 Session 路径。
 //
-// 路径按调用标识分层，保证同一容器内的多次调用不会共用同一个 Session 文件。
+// 普通任务的原始 JSONL 按调用标识分层，保证同一容器内的多次调用不会共用同一个 Session
+// 文件；提供稳定路径时原始 JSONL 固定在该路径上，HTML 仍按调用标识分层，避免不同轮次
+// 互相覆盖导出结果。
 func (r *ContainerRunner) containerPaths(
 	target *agent.ContainerTarget,
 	invocationID string,
+	stableJSONL string,
 ) containerSessionPaths {
-	dir := strings.TrimSpace(target.SessionDir)
-	if dir == "" {
-		dir = DefaultContainerSessionDir
+	dir := path.Join(r.containerSessionRoot(target), sanitizeSegment(invocationID))
+	jsonl := path.Join(dir, containerSessionFileName)
+	if strings.TrimSpace(stableJSONL) != "" {
+		jsonl = stableJSONL
 	}
-	dir = path.Join(dir, sanitizeSegment(invocationID))
 	return containerSessionPaths{
 		Dir:   dir,
-		JSONL: path.Join(dir, containerSessionFileName),
+		JSONL: jsonl,
 		HTML:  path.Join(dir, containerHTMLFileName),
 	}
 }

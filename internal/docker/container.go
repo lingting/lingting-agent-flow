@@ -1480,3 +1480,41 @@ func (r *Runner) CopyFromContainer(
 	}
 	return r.Run(ctx, "docker cp", command, timeout)
 }
+
+// CopyToContainer 用 docker cp 把远程宿主机文件复制到容器内路径。
+//
+// 与 CopyFromContainer 对称：同样经由本包的 Docker 命令构造入口，业务层不拼接命令行。
+// 目标文件的父目录必须已经存在，docker cp 不会为文件目标递归创建目录。
+func (r *Runner) CopyToContainer(
+	ctx context.Context,
+	dockerID, hostPath, containerPath string,
+	timeout time.Duration,
+) (CommandResult, error) {
+	if strings.TrimSpace(dockerID) == "" {
+		return CommandResult{}, newError(CodeInvalidArgument, "docker cp", "容器 ID 不能为空", nil)
+	}
+	if !strings.HasPrefix(hostPath, "/") {
+		return CommandResult{}, newError(
+			CodeInvalidArgument,
+			"docker cp",
+			fmt.Sprintf("宿主机路径 %q 必须是绝对路径", hostPath),
+			nil,
+		)
+	}
+	if !strings.HasPrefix(containerPath, "/") {
+		return CommandResult{}, newError(
+			CodeInvalidArgument,
+			"docker cp",
+			fmt.Sprintf("容器内路径 %q 必须是绝对路径", containerPath),
+			nil,
+		)
+	}
+	command, err := dockerCommand("cp", hostPath, dockerID+":"+containerPath)
+	if err != nil {
+		return CommandResult{}, err
+	}
+	if timeout <= 0 {
+		timeout = DefaultMutateTimeout
+	}
+	return r.Run(ctx, "docker cp", command, timeout)
+}

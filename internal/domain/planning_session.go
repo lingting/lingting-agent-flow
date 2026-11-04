@@ -400,13 +400,23 @@ func (s *PlanningSession) BindRuntime(hostID *ID, containerID, sourceCommit stri
 // BindRoleSessions 记录两个规划角色的 Pi 侧会话标识。
 //
 // 标识形式由规划运行时决定，这里只做去空白与落库；同一会话多轮复用同一对标识，
-// 因此重复写入相同取值是幂等的。
+// 因此重复写入相同取值是幂等的。两个角色必须各自独立：两个取值相同说明上下文会串线，
+// 直接拒绝而不是落库后由调用方自行发现。
 func (s *PlanningSession) BindRoleSessions(analystSessionID, plannerSessionID string, at time.Time) error {
 	if s == nil {
 		return invalidField("PlanningSession", "", "实体为空")
 	}
-	s.AnalystSessionID = strings.TrimSpace(analystSessionID)
-	s.PlannerSessionID = strings.TrimSpace(plannerSessionID)
+	analyst := strings.TrimSpace(analystSessionID)
+	planner := strings.TrimSpace(plannerSessionID)
+	if analyst != "" && analyst == planner {
+		return invalidField(
+			"PlanningSession",
+			"analyst_session_id",
+			"两个角色的 Pi 会话标识不能相同",
+		)
+	}
+	s.AnalystSessionID = analyst
+	s.PlannerSessionID = planner
 	s.UpdatedAt = normalizeTime(at)
 	return nil
 }

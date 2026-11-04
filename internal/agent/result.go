@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -109,6 +110,30 @@ type SessionFiles struct {
 	Error string
 }
 
+// ErrSessionArchive 表示 Pi 已执行结束，但本轮 Session 未能归档为可恢复快照。
+//
+// 它与执行状态是两件事实：RunResult.Status 仍然描述 Pi 的执行结果，归档结果单独由
+// RunResult.StableSession 表达，调用方不能把二者合成一个模糊的成功状态。
+var ErrSessionArchive = errors.New("agent: 稳定 Session 归档失败")
+
+// StableSessionResult 描述规划角色稳定 Session 的恢复与归档结果。
+//
+// 恢复与归档互相独立：本轮可以从历史归档恢复，也可能因为执行失败而没有更新归档。
+type StableSessionResult struct {
+	// ContainerPath 是容器内固定 Session 文件路径，未启用稳定 Session 时为空。
+	ContainerPath string
+	// ArchivePath 是本机可恢复快照路径。
+	ArchivePath string
+	// Restored 表示本轮启动 Pi 之前已从本机归档恢复历史 Session。
+	Restored bool
+	// Archived 表示本轮已把校验通过的 Session 更新为本机可恢复快照。
+	Archived bool
+	// Bytes 是已归档快照的字节数。
+	Bytes int64
+	// Error 是恢复或归档失败的可诊断说明。
+	Error string
+}
+
 // RunResult 是一次 Agent 执行的最终结果。
 type RunResult struct {
 	// SessionID 是 AgentFlow 内部会话标识。
@@ -129,6 +154,8 @@ type RunResult struct {
 	Failure string
 	// Session 是本次调用产生的 Session 文件信息。
 	Session SessionFiles
+	// StableSession 是稳定 Session 的恢复与归档结果，未启用时为零值。
+	StableSession StableSessionResult
 	// InvocationID 是本次调用的唯一标识。
 	InvocationID string
 	// ContainerID 是执行本次调用的容器登记记录 ID，本机执行时为空。

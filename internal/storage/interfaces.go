@@ -169,6 +169,20 @@ type PlanningSessionStore interface {
 		next PlanningSessionRuntimeBinding,
 		at time.Time,
 	) error
+	// UpdatePlanningSessionRoleBindings 以调用方读到的角色会话绑定为条件写入新的绑定。
+	//
+	// 它只更新 analyst_session_id、planner_session_id 与 updated_at：状态、结束时间、
+	// 采纳的方案版本、失败摘要、运行时绑定与所属项目保持数据库中的值。两个角色的标识
+	// 成对写入，避免并发初始化时只覆盖其中一个；条件不成立说明绑定已被其他操作改写，
+	// 返回 storage.ErrConflict，会话不存在返回 storage.ErrNotFound。调用方必须重新读取
+	// 会话并复用获胜的绑定，不能退化成无条件覆盖。
+	UpdatePlanningSessionRoleBindings(
+		ctx context.Context,
+		id domain.ID,
+		expected PlanningSessionRoleBinding,
+		next PlanningSessionRoleBinding,
+		at time.Time,
+	) error
 	// GetPlanningSession 读取单个规划会话，不存在时返回 storage.ErrNotFound。
 	GetPlanningSession(ctx context.Context, id domain.ID) (*domain.PlanningSession, error)
 	// ListPlanningSessionsByProject 按项目列出规划会话，最近的在前。
@@ -226,6 +240,32 @@ func (b PlanningSessionRuntimeBinding) Empty() bool {
 	return b.HostID == nil &&
 		strings.TrimSpace(b.ContainerID) == "" &&
 		strings.TrimSpace(b.SourceCommit) == ""
+}
+
+// PlanningSessionRoleBinding 是规划会话两个角色的 Pi 会话标识绑定。
+//
+// 它与运行时绑定互不相干：执行节点、规划容器与固定代码快照由规划运行时维护，角色会话
+// 标识由规划 Agent 调用方维护。条件更新用它表达"更新前的预期绑定"，因此比较必须把
+// 空值与 NULL 视为同一个"未绑定"状态。
+type PlanningSessionRoleBinding struct {
+	// AnalystSessionID 是需求分析师角色的 Pi 侧会话标识。
+	AnalystSessionID string
+	// PlannerSessionID 是方案规划师角色的 Pi 侧会话标识。
+	PlannerSessionID string
+}
+
+// PlanningSessionRoleBindingOf 读出规划会话当前的角色会话绑定。
+func PlanningSessionRoleBindingOf(session domain.PlanningSession) PlanningSessionRoleBinding {
+	return PlanningSessionRoleBinding{
+		AnalystSessionID: session.AnalystSessionID,
+		PlannerSessionID: session.PlannerSessionID,
+	}
+}
+
+// Complete 判断两个角色的会话标识是否都已绑定。
+func (b PlanningSessionRoleBinding) Complete() bool {
+	return strings.TrimSpace(b.AnalystSessionID) != "" &&
+		strings.TrimSpace(b.PlannerSessionID) != ""
 }
 
 // AppendPlanningMessageRequest 是一次"追加规划消息"的输入。

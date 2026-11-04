@@ -65,6 +65,11 @@ type ContainerAgentRequest struct {
 	WorkDir string
 	// SessionDir 是容器内临时 Session 目录，空值使用 Runner 默认目录。
 	SessionDir string
+	// StableSession 是跨轮复用的稳定 Session 位置，为空时每次调用使用独立 Session 文件。
+	//
+	// 规划角色用它把多轮调用落在同一个容器内 Session 文件与本机归档目录上；路径由
+	// 规划 Agent 服务生成，调用方不提交任意路径。
+	StableSession *agent.StableSessionTarget
 	// PiOptions 覆盖 Pi Runner 的默认配置。
 	PiOptions pi.Options
 }
@@ -156,19 +161,20 @@ func (s *ContainerService) RunAgent(
 				sessionID = domain.NewID().String()
 			}
 			runRequest := agent.RunRequest{
-				SessionID:    sessionID,
-				TaskID:       strings.TrimSpace(request.TaskID),
-				StepID:       strings.TrimSpace(request.StepID),
-				AttemptID:    strings.TrimSpace(request.AttemptID),
-				RoleType:     strings.TrimSpace(request.RoleType),
-				Model:        strings.TrimSpace(request.Model),
-				SystemPrompt: request.SystemPrompt,
-				Tools:        tools,
-				Prompt:       request.Prompt,
-				WorkingDir:   workDir,
-				SessionRoot:  sessionRoot,
-				InvocationID: invocationID,
-				Timeout:      request.Timeout,
+				SessionID:     sessionID,
+				TaskID:        strings.TrimSpace(request.TaskID),
+				StepID:        strings.TrimSpace(request.StepID),
+				AttemptID:     strings.TrimSpace(request.AttemptID),
+				RoleType:      strings.TrimSpace(request.RoleType),
+				Model:         strings.TrimSpace(request.Model),
+				SystemPrompt:  request.SystemPrompt,
+				Tools:         tools,
+				Prompt:        request.Prompt,
+				WorkingDir:    workDir,
+				SessionRoot:   sessionRoot,
+				InvocationID:  invocationID,
+				Timeout:       request.Timeout,
+				StableSession: request.StableSession,
 				Container: &agent.ContainerTarget{
 					ContainerID: current.ID.String(),
 					DockerID:    current.DockerID,
@@ -310,6 +316,66 @@ func (e *containerSessionExecutor) CopyFromContainer(
 	return nil
 }
 
+// UploadFromLocal 把本机文件上传到远程宿主机临时路径。
+//
+// 目标位于受控的远程临时目录，权限按保守模式写入；同一调用标识下的中转文件属于本次
+// 调用自己，因此允许覆盖。
+func (e *containerSessionExecutor) UploadFromLocal(
+	ctx context.Context,
+	localPath, hostPath string,
+) error {
+	if e == nil || e.session == nil {
+		return fmt.Errorf("上传文件失败: 远程会话不可用")
+	}
+	if !strings.HasPrefix(hostPath, "/") {
+		return fmt.Errorf("上传文件失败: 宿主机路径 %q 必须是绝对路径", hostPath)
+	}
+	if err := e.session.transfer.MkdirAll(ctx, path.Dir(hostPath)); err != nil {
+		return fmt.Errorf("创建宿主机临时目录失败: %w", err)
+	}
+	if err := e.session.transfer.Upload(ctx, localPath, hostPath, sshclient.UploadOptions{
+		Overwrite:    true,
+		Mode:         0o600,
+		CreateParent: true,
+	}); err != nil {
+		return fmt.Errorf("上传文件失败: %w", err)
+	}
+	return nil
+}
+
+// CopyToContainer 用 docker cp 把远程宿主机文件复制到容器内路径。
+func (e *containerSessionExecutor) CopyToContainer(
+	ctx context.Context,
+	dockerID, hostPath, containerPath string,
+) error {
+	if e == nil || e.session == nil {
+		return fmt.Errorf("写入容器文件失败: 远程会话不可用")
+	}
+	if strings.TrimSpace(dockerID) == "" {
+		return fmt.Errorf("写入容器文件失败: 容器 ID 不能为空")
+	}
+	if !strings.HasPrefix(hostPath, "/") {
+		return fmt.Errorf("写入容器文件失败: 宿主机路径 %q 必须是绝对路径", hostPath)
+	}
+	if !strings.HasPrefix(containerPath, "/") {
+		return fmt.Errorf("写入容器文件失败: 容器内路径 %q 必须是绝对路径", containerPath)
+	}
+	run, runErr := e.session.runner.CopyToContainer(
+		ctx,
+		dockerID,
+		hostPath,
+		containerPath,
+		containerCopyTimeout,
+	)
+	if runErr != nil {
+		return fmt.Errorf("docker cp 失败: %w", runErr)
+	}
+	if !run.Succeeded() {
+		return fmt.Errorf("docker cp 失败（退出码 %d）: %s", run.ExitCode, run.Stderr)
+	}
+	return nil
+}
+
 // DownloadToLocal 把远程宿主机文件下载到本机路径。
 func (e *containerSessionExecutor) DownloadToLocal(
 	ctx context.Context,
@@ -378,4 +444,5 @@ func (g *sessionContainerGuard) EnsureExecutable(
 
 // 编译期确认适配器满足 Agent 侧接口。
 var _ agent.ContainerExecutor = (*containerSessionExecutor)(nil)
+var _ agent.ContainerFileWriter = (*containerSessionExecutor)(nil)
 var _ agent.ContainerGuard = (*sessionContainerGuard)(nil)

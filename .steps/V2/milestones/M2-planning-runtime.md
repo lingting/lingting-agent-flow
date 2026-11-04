@@ -240,16 +240,73 @@ SQLite 持久化连接成统一入口。它仍**没有 Pi 调用方、HTTP 入�
 进程内的同会话串行；不同进程对同一规划会话发起 `Prepare` / `Release` 时，运行时绑定由数据库条件更新拒绝
 过期写入，但远程资源操作本身仍没有跨进程租约，`Release` 也不检查在途规划调用。
 
-### 7.6 仍未完成
+### 7.6 已交付：规划角色 Pi Session 持久化与多轮上下文复用（M2 第六阶段）
+
+两个固定规划角色现在各自拥有独立、稳定、可复用的 Pi Session，且上下文恢复不再依赖规划容器 tmpfs 是否
+存活。本阶段只打通运行基础设施，**没有**实现需求语义解析、任务拆分与方案业务规则：
+
+- **角色会话身份**：`app.PlanningAgentService`（`internal/app/planning_agent*.go`）在首次准备角色
+  会话时用 `domain.NewID` 为 `requirement_analyst` 与 `planner` 各生成一个标识，通过
+  `domain.PlanningSession.BindRoleSessions` 成对写入；`domain` 拒绝两个角色得到相同标识。后续多轮
+  只复用已绑定的值，重新初始化、重新准备运行环境或角色配置变化都不会覆盖它们。标识由服务端生成，
+  调用方无法指定。
+- **安全持久化**：新增 `storage.PlanningSessionStore.UpdatePlanningSessionRoleBindings`
+  （`internal/storage/sqlite/planning_session_roles.go`），只写 `analyst_session_id`、
+  `planner_session_id` 与 `updated_at`，`WHERE` 用 `COALESCE(..., '')` 对两个列做 NULL 安全比较；
+  会话不存在返回 `storage.ErrNotFound`，绑定已被改写返回 `storage.ErrConflict`。写入在事务内先重新
+  读取会话再条件更新：并发初始化只有一个写入获胜，另一个重新读取并复用获胜结果，不会退化成无条件覆盖，
+  也不会改写状态、结束时间、采纳的 Revision、失败摘要与运行时绑定。`dbStore` 与 `txStore` 都提供该
+  能力；没有新增迁移，`0026_planning_sessions.sql` 未改动。
+- **稳定路径**：容器内固定文件为 `/tmp/agentflow/sessions/<规划会话标识>/<角色会话标识>/session.jsonl`
+  （POSIX `path` 生成，位于规划容器的 Session 根目录下）；本机持久归档为
+  `<SessionRoot>/planning/<规划会话标识>/<角色会话标识>/session.jsonl`（`filepath` 生成，落在配置
+  的数据目录下，不进入项目代码目录）。两个角色互相隔离，不同规划会话互相隔离，同一角色的多轮调用共用
+  同一个文件；路径片段拒绝空值、`.`、`..` 与不安全字符。
+- **Runner 扩展**：`agent.RunRequest.StableSession`（`ContainerPath` + `ArchiveDir`）表达稳定位置，
+  `pi.ContainerRunner` 校验容器路径位于容器 Session 根目录内且已规范化、本机归档目录位于 Session 根
+  目录内，并保证稳定文件名为 `session.jsonl`。不提供该字段时行为与之前完全一致：普通任务仍按
+  `InvocationID` 分层得到独立 Session 文件，V1 的独立调用语义不变。每轮仍生成独立 `InvocationID`
+  用于事件、日志与单轮归档，稳定 Session 标识与调用标识不混用；规划调用不使用 `--no-session`，模型、
+  工具白名单、`--no-mcp`、`--no-extensions` 等受管参数保持原有策略。
+- **恢复流程**：每轮调用 Pi 之前检查本机归档。归档不存在表示首轮，允许 Pi 新建 Session；存在则先用现有
+  `validateSessionFile` 做结构校验，再经"本机 → 远程宿主机
+  `/tmp/agentflow/sessions/<容器 ID>/<调用标识>/restore/` → 容器内固定路径"三段传输恢复
+  （复用 `sshclient.FileTransfer.Upload` 与新增的 `docker.Runner.CopyToContainer`）。归档损坏、
+  超过大小上限、传输失败或执行器不支持写入时返回明确错误，本轮不启动 Pi，也不会静默丢弃历史上下文。
+- **归档判定**：Pi 结束后仍按原顺序导出 HTML 并把原始 JSONL 复制到按调用标识分层的单轮归档；只有"本轮
+  执行正常完成 + 单轮归档通过结构校验"才用同目录临时文件加原子重命名更新可恢复快照。失败、超时、取消或
+  残缺的记录只保留单轮归档，不覆盖最后一份完整历史；归档写入后再次校验，未确认落盘即视为归档失败。归档
+  失败不改变 Pi 的执行状态，而是通过 `agent.ErrSessionArchive` 与 `RunResult.StableSession.Error`
+  单独上报，不伪装成 Session 保存成功。远程中转副本只在本机文件可靠落盘（恢复时为本机归档已校验通过）
+  之后清理。
+- **文件传输能力**：`agent.ContainerFileWriter` 是把本机文件写入容器内的可选能力（上传 + `docker cp`
+  入容器），由 `containerSessionExecutor` 实现；`internal/docker` 新增 `CopyToContainer`，命令仍经
+  `dockerCommand` 构造，`docker cp` 已在 `RequiredCLICommands` 中，无需新增预检参数。远程中转目录固定
+  在 `/tmp/agentflow/sessions/` 下按容器与调用标识隔离；不把 Docker Socket、宿主机项目目录或私钥带入
+  规划容器。
+- **应用服务**：`PlanningAgentService.RunRole` 是单角色调用入口，只接受规划会话、角色类型
+  （`requirement_analyst` / `planner`）、提示词与可选的执行节点，不接受 Session 路径、Pi 参数、工具
+  列表、模型或容器标识。它要求会话处于 `analyzing`、项目未删除、角色配置来自 `RoleService` 且已启用、
+  类型匹配、模型非空；容器必须是本会话登记的规划容器、属于会话的执行节点、带本会话的
+  `agentflow.planning_session_id` 标签且正在运行，未准备时只复用 `PlanningRuntimeService.Prepare`
+  （不创建第二个容器，也不接管 detached 容器）。同一规划会话的规划调用在本进程内串行，避免两个调用
+  同时读写同一份 Pi JSONL。返回真实 `agent.RunResult`，不伪造成功。
+- **工具策略**：规划角色只提交角色类型与 `ToolsPolicy`，由 `domain.EffectivePiTools` 计算实际工具，
+  `RoleToolCeiling` 保证两个角色只读；不使用开发者权限兜底，也不因配置缺失、禁用或模型为空回退到其他
+  角色或 Pi 默认模型。
+
+### 7.7 仍未完成
 
 以下能力尚未实现，M2 状态保持 `pending`：
 
-- 两个规划角色（需求分析师、方案规划师）的 Pi 调用方：`PlanningSessionService` 已提供
-  `CompleteAnalysis` / `FailAnalysis` 等收敛入口，但当前没有任何代码调用它们，也没有结构化输出解析。
+- 规划轮次的业务编排：`PlanningAgentService` 只提供单角色调用入口，当前没有任何代码调用它；两个角色的
+  调用顺序、提示词组装、结构化输出解析与 `CompleteAnalysis` / `FailAnalysis` 的自动收口仍属 M3。
 - 迁移 `0028_projects_default_host.sql`（项目默认执行节点）与后续项目级调度的迁移。
-- 两个规划角色的 Pi Session 路径生成与根目录校验、多轮 Pi Session 上下文复用。
+- 规划调用只在当前进程内按会话串行，没有跨进程租约：两个进程对同一规划会话发起规划调用时，角色会话绑定
+  由条件更新拒绝过期写入，但两份 Pi 调用仍可能同时读写同一份容器内 Session 文件。
 - 规划运行时在 `internal/lifecycle` 中的注册与收敛，以及 `agentflow server` 的服务装配
-  （`PlanningRuntimeService` 与 `PlanningSessionService` 目前都未被任何装配入口构造）。
+  （`PlanningRuntimeService`、`PlanningSessionService` 与 `PlanningAgentService` 目前都未被任何装配
+  入口构造，规划 Agent 服务的本机 Session 根目录也还没有由运行配置注入）。
 - HTTP API 与前端需求规划工作台。
 - 撤销与重跑之外的失败恢复入口：结果不确定的运行时现场只能通过再次 `Prepare` 做只读核验；残留的
   一次性准备容器没有专门清理路径，也没有跨进程会话锁。
@@ -257,19 +314,26 @@ SQLite 持久化连接成统一入口。它仍**没有 Pi 调用方、HTTP 入�
   该处改为只写运行时列的条件更新）。
 - 真实环境下的只读验证（文件工具与 `sh -c` 写入是否真的被文件系统拒绝）尚未执行：本阶段只确认参数
   构造正确，**不代表只读规划环境已经可用**。
-- 本阶段新增的会话事务、条件更新与错误映射没有任何自动化测试守点，也未在真实数据库上验证并发行为。
+- 本阶段新增的会话事务、条件更新、角色会话绑定与归档逻辑没有任何自动化测试守点，也未在真实数据库、真实
+  Docker / SSH 与真实 Pi 上验证并发行为、恢复与归档结果。
 
-### 7.7 验证方式
+### 7.8 验证方式
 
-五个阶段都只做非测试验证：阅读代码核对调用链、`gofmt`、`go vet ./...`、`git diff --check`。第二阶段另加
+六个阶段都只做非测试验证：阅读代码核对调用链、`gofmt`、`go vet ./...`、`git diff --check`。第二阶段另加
 人工核对迁移的表、索引、字段、非枚举约束与版本顺序；第三阶段人工核对快照卷命名与标签、准备 / 只读复核
 容器、`--read-only` 与只读代码卷、tmpfs 可写目录、容器所有权校验、释放顺序与 `RequiredCLICommands`
 新增参数，并确认普通任务容器的创建参数未改变；第四阶段人工核对七个业务操作的事务边界、领域状态机调用点、
 条件更新的前置状态、角色消息发送方限制与失败摘要脱敏；第五阶段人工核对运行时绑定更新的实际 `SET` 列、
 NULL 安全的比较并交换条件、`persistRuntime` 的事务内重读与错误映射，并确认 `Prepare` 的三个持久化阶段与
-`Release` 都走同一入口。
+`Release` 都走同一入口；第六阶段人工核对角色会话绑定的 `SET` 列与比较条件、两个角色路径的生成与根目录
+包含校验、恢复与归档的调用顺序、归档只有在本轮正常完成且校验通过时才替换、归档失败与执行状态的分离上报，
+并确认普通任务不传稳定 Session 时的路径与参数未改变。
 
-五个阶段都未运行任何测试（含迁移升级与 SQLite 读写测试），未创建测试文件，未连接真实 Docker / SSH / Pi /
+六个阶段都未运行任何测试（含迁移升级与 SQLite 读写测试），未创建测试文件，未连接真实 Docker / SSH / Pi /
 远程主机。因此旧库升级后的数据保留、未知枚举值写入与读回、序号分配与条件更新在并发下的实际行为、真实快照
 克隆、只读挂载与容器释放均未验证，不得报告为通过；第四阶段的并发结论来自事务与条件更新的代码路径核对，
 第五阶段的运行时绑定冲突结论同样只来自 SQL 条件与调用链核对，没有真实并发执行与跨进程竞争的证据。
+第六阶段的多轮上下文恢复也没有真实环境证据：把容器内 Session 复制回本机、再从本机归档恢复到容器内这条链路
+只在代码层面核对过，容器仍在运行时复用同一份 tmpfs 文件**不等于**容器停止、重建或 Docker 环境恢复后仍能
+恢复上下文；`docker cp` 恢复、`mkdir -p` 建立容器目录、SSH 上传与归档原子替换的实际行为，以及 Pi 对已存在
+Session 文件的续写语义，都需要在真实只读规划环境中验证后才能报告为可用。
