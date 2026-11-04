@@ -345,6 +345,13 @@ type Project struct {
 	RepositoryURL string `json:"repository_url"`
 	// BaseBranch 是规范化后的基础分支名。
 	BaseBranch string `json:"base_branch"`
+	// DefaultHostID 是项目默认执行节点标识，空值表示未指定。
+	//
+	// 它只是项目配置偏好，不代表该节点当前可用：节点是否通过环境预检、是否可用于
+	// 真实远程执行，必须由规划运行时在发起时重新校验，不得因为项目登记了它就直接
+	// 跳过后置检查。节点之后被逻辑删除时该标识仍然保留，使项目仍能打开并清除或
+	// 重新选择默认节点，而不是让整个项目读取失败。
+	DefaultHostID string `json:"default_host_id,omitempty"`
 	// DeletedAt 是逻辑删除时间，nil 表示未删除。
 	DeletedAt *time.Time `json:"deleted_at,omitempty"`
 }
@@ -370,6 +377,11 @@ type ProjectInput struct {
 	Caches []string
 	// WorkDir 是容器内项目工作目录，空值使用默认目录。
 	WorkDir string
+	// DefaultHostID 是项目默认执行节点标识，空值表示未指定。
+	//
+	// 是否真的存在且未被逻辑删除由应用层在写入前确认：领域层不做跨实体查询，
+	// 也不在空值时补一个隐式默认节点。
+	DefaultHostID string
 }
 
 // NewProject 创建并校验项目。
@@ -398,6 +410,9 @@ func NewProject(input ProjectInput, at time.Time) (Project, error) {
 		ProjectConfig: config,
 		RepositoryURL: strings.TrimSpace(input.RepositoryURL),
 		BaseBranch:    baseBranch,
+		// 默认执行节点只做空白归一：空值就是"未设置"，不生成隐式默认节点；
+		// 标识是否存在由应用层在写入前确认，这里不做跨实体查询。
+		DefaultHostID: strings.TrimSpace(input.DefaultHostID),
 	}
 	if err := project.Validate(); err != nil {
 		return Project{}, err

@@ -8,14 +8,18 @@ import {
   projectPath,
   updateProject,
   type Environment,
+  type Host,
   type Project,
 } from "../../src/lib/api";
 import {
   describeProjectCaches,
+  describeProjectDefaultHost,
   describeProjectEnvironment,
   findProject,
+  isDefaultHostMissing,
   joinCacheTypes,
   PROJECT_CACHES_FALLBACK,
+  PROJECT_DEFAULT_HOST_FALLBACK,
   PROJECT_VERSION_FALLBACK,
   projectSelectOptions,
   resolveProjectSelection,
@@ -495,5 +499,112 @@ describe("项目字段的取值来源说明", () => {
   it("既不是项目默认值也不是显式设置时不给出来源说明", () => {
     expect(projectFieldSourceLabel({ applied: false, overridden: false, project })).toBeUndefined();
     expect(projectFieldSourceLabel({ applied: true, overridden: false })).toBeUndefined();
+  });
+});
+
+describe("项目默认执行节点", () => {
+  it("未设置默认节点时新增请求不提交该字段", () => {
+    const request = toCreateProjectRequest({
+      base_branch: "main",
+      environment: "go",
+      id: "demo-service",
+      name: "示例服务",
+      repository_url: "ssh://git.example.com/team/repo",
+    });
+    expect(request).not.toHaveProperty("default_host_id");
+  });
+
+  it("选择默认节点时新增请求提交归一化后的标识", () => {
+    const request = toCreateProjectRequest({
+      base_branch: "main",
+      default_host_id: " host-1 ",
+      environment: "go",
+      id: "demo-service",
+      name: "示例服务",
+      repository_url: "ssh://git.example.com/team/repo",
+    });
+    expect(request.default_host_id).toBe("host-1");
+  });
+
+  it("整体更新时显式提交空字符串传达清除语义", () => {
+    // 不提供"省略字段表示保留原值"的部分更新语义：清空必须能被后端识别为清除。
+    const cleared = toUpdateProjectRequest({
+      base_branch: "main",
+      default_host_id: "",
+      environment: "go",
+      id: "demo-service",
+      name: "示例服务",
+      repository_url: "ssh://git.example.com/team/repo",
+    });
+    expect(cleared.default_host_id).toBe("");
+
+    const alsoCleared = toUpdateProjectRequest({
+      base_branch: "main",
+      environment: "go",
+      id: "demo-service",
+      name: "示例服务",
+      repository_url: "ssh://git.example.com/team/repo",
+    });
+    expect(alsoCleared.default_host_id).toBe("");
+  });
+
+  it("切换默认节点时更新请求提交新标识", () => {
+    const request = toUpdateProjectRequest({
+      base_branch: "main",
+      default_host_id: " host-2 ",
+      environment: "go",
+      id: "demo-service",
+      name: "示例服务",
+      repository_url: "ssh://git.example.com/team/repo",
+    });
+    expect(request.default_host_id).toBe("host-2");
+  });
+
+  it("项目记录回填表单时保留默认节点，null 表示未设置", () => {
+    expect(toProjectFormValues(sampleProject({ default_host_id: "host-1" })).default_host_id).toBe(
+      "host-1",
+    );
+    expect(
+      toProjectFormValues(sampleProject({ default_host_id: null })).default_host_id,
+    ).toBeUndefined();
+  });
+
+  it("默认节点未设置时显示中性占位符", () => {
+    expect(describeProjectDefaultHost({ hostID: null, hosts: [], loaded: true })).toBe(
+      PROJECT_DEFAULT_HOST_FALLBACK,
+    );
+    expect(describeProjectDefaultHost({ hostID: "  ", hosts: [], loaded: true })).toBe(
+      PROJECT_DEFAULT_HOST_FALLBACK,
+    );
+  });
+
+  it("节点在列表中时显示真实节点名称", () => {
+    const hosts = [
+      {
+        host: "10.0.0.1",
+        id: "host-1",
+        name: "构建机",
+        port: 22,
+        usable_for_remote_task: false,
+      } as Host,
+    ];
+    expect(describeProjectDefaultHost({ hostID: "host-1", hosts, loaded: true })).toBe(
+      "构建机（host-1）",
+    );
+  });
+
+  it("节点查询未完成时不声称节点不存在", () => {
+    expect(describeProjectDefaultHost({ hostID: "host-9", hosts: [], loaded: false })).toBe(
+      "host-9",
+    );
+    expect(isDefaultHostMissing({ hostID: "host-9", hosts: [], loaded: false })).toBe(false);
+  });
+
+  it("节点不在已加载列表中时标注并提示可清除", () => {
+    expect(describeProjectDefaultHost({ hostID: "host-9", hosts: [], loaded: true })).toBe(
+      "host-9（节点未在列表中）",
+    );
+    expect(isDefaultHostMissing({ hostID: "host-9", hosts: [], loaded: true })).toBe(true);
+    expect(isDefaultHostMissing({ hostID: undefined, hosts: [], loaded: true })).toBe(false);
   });
 });

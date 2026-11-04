@@ -1,7 +1,9 @@
 package sqlite_test
 
 import (
+	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -250,5 +252,256 @@ func TestProjectKeepsUnknownEnvironmentType(t *testing.T) {
 	}
 	if loaded.Environment.Type != domain.EnvironmentType("quantum") {
 		t.Fatalf("未知环境类型应原样保留，实际: %q", loaded.Environment.Type)
+	}
+}
+
+// openMigrationDB 打开指定路径的数据库；调用方负责关闭，便于模拟重复打开触发迁移。
+func openMigrationDB(t *testing.T, path string) *sqlite.DB {
+	t.Helper()
+	db, err := sqlite.Open(testContext(t), sqlite.Options{Path: path})
+	if err != nil {
+		t.Fatalf("打开测试数据库失败: %v", err)
+	}
+	return db
+}
+
+// projectDefaultHostValue 直接读取项目默认执行节点列的原始值。
+func projectDefaultHostValue(t *testing.T, db *sql.DB, projectID string) sql.NullString {
+	t.Helper()
+	var value sql.NullString
+	if err := db.QueryRow(
+		`SELECT default_host_id FROM projects WHERE id = ?`,
+		projectID,
+	).Scan(&value); err != nil {
+		t.Fatalf("读取 default_host_id 失败: %v", err)
+	}
+	return value
+}
+
+// TestProjectDefaultHostRoundTrip 校验默认执行节点列的 NULL 与非 NULL 往返。
+func TestProjectDefaultHostRoundTrip(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ctx := testContext(t)
+	raw := rawDB(t, db)
+
+	unset := mustProject(t, db, "demo-service")
+	loaded, err := db.GetProject(ctx, domain.ID(unset.ID))
+	if err != nil {
+		t.Fatalf("读取项目失败: %v", err)
+	}
+	if loaded.DefaultHostID != "" {
+		t.Fatalf("未设置默认节点时读取结果应为空: %q", loaded.DefaultHostID)
+	}
+	if column := projectDefaultHostValue(t, raw, unset.ID); column.Valid {
+		t.Fatalf("未设置默认节点时数据库应为 NULL，实际: %q", column.String)
+	}
+
+	environment, err := domain.NewEnvironmentRef(domain.EnvironmentTypeLanguage, "go")
+	if err != nil {
+		t.Fatalf("构造环境失败: %v", err)
+	}
+	withHost, err := domain.NewProject(domain.ProjectInput{
+		ID:            "with-host",
+		Name:          "带默认节点的项目",
+		RepositoryURL: "ssh://git.example.com/team/other",
+		BaseBranch:    "main",
+		Environment:   environment,
+		DefaultHostID: "host-7",
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("构造项目失败: %v", err)
+	}
+	if err := db.CreateProject(ctx, withHost); err != nil {
+		t.Fatalf("写入项目失败: %v", err)
+	}
+	loaded, err = db.GetProject(ctx, domain.ID(withHost.ID))
+	if err != nil {
+		t.Fatalf("读取项目失败: %v", err)
+	}
+	if loaded.DefaultHostID != "host-7" {
+		t.Fatalf("默认节点未完整往返: %q", loaded.DefaultHostID)
+	}
+	column := projectDefaultHostValue(t, raw, withHost.ID)
+	if !column.Valid || column.String != "host-7" {
+		t.Fatalf("数据库中的默认节点不符: %+v", column)
+	}
+}
+
+// TestProjectDefaultHostUpdateKeepsOtherFields 校验更新默认节点不影响其它项目字段。
+func TestProjectDefaultHostUpdateKeepsOtherFields(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ctx := testContext(t)
+	project := mustProject(t, db, "demo-service")
+	createdAt := project.CreatedAt
+
+	project.DefaultHostID = "host-9"
+	project.UpdatedAt = time.Now().UTC().Add(time.Minute)
+	if err := db.UpdateProject(ctx, project); err != nil {
+		t.Fatalf("更新项目失败: %v", err)
+	}
+	loaded, err := db.GetProject(ctx, domain.ID(project.ID))
+	if err != nil {
+		t.Fatalf("读取项目失败: %v", err)
+	}
+	if loaded.DefaultHostID != "host-9" {
+		t.Fatalf("默认节点未更新: %q", loaded.DefaultHostID)
+	}
+	if loaded.Name != project.Name ||
+		loaded.RepositoryURL != project.RepositoryURL ||
+		loaded.BaseBranch != project.BaseBranch ||
+		loaded.Environment.Name != project.Environment.Name ||
+		loaded.EffectiveWorkDir() != project.EffectiveWorkDir() {
+		t.Fatalf("其它项目字段被改动: %+v", loaded)
+	}
+	if !loaded.CreatedAt.Equal(createdAt) {
+		t.Fatalf("创建时间不应被更新改写: %s vs %s", loaded.CreatedAt, createdAt)
+	}
+	if loaded.Deleted() {
+		t.Fatal("更新不应写入删除标记")
+	}
+}
+
+// TestProjectDefaultHostDoesNotTouchTaskSnapshot 校验项目默认节点变化不改写历史任务事实。
+func TestProjectDefaultHostDoesNotTouchTaskSnapshot(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ctx := testContext(t)
+	raw := rawDB(t, db)
+
+	project := mustProject(t, db, "demo-service")
+	requirement := mustRequirement(t, db)
+	task := mustTask(t, db, requirement.ID)
+	hostID := domain.ID("host-legacy")
+	task.HostID = &hostID
+	environment, err := domain.NewEnvironmentRef(domain.EnvironmentTypeLanguage, "go")
+	if err != nil {
+		t.Fatalf("构造环境失败: %v", err)
+	}
+	planner := mustRole(t, db, domain.RoleTypePlanner, "规划师")
+	developer := mustRole(t, db, domain.RoleTypeDeveloper, "开发工程师")
+	task.Config = domain.TaskConfig{
+		Goal:            "验证项目默认节点不改写任务快照",
+		Environment:     environment,
+		ProjectID:       project.ID,
+		PlannerRoleID:   planner.ID,
+		DeveloperRoleID: developer.ID,
+	}
+	if err := db.UpdateTask(ctx, task); err != nil {
+		t.Fatalf("写入任务快照失败: %v", err)
+	}
+
+	var hostBefore, configBefore string
+	if err := raw.QueryRow(
+		`SELECT host_id, config_json FROM tasks WHERE id = ?`,
+		task.ID.String(),
+	).Scan(&hostBefore, &configBefore); err != nil {
+		t.Fatalf("读取任务快照失败: %v", err)
+	}
+
+	project.DefaultHostID = "host-new"
+	project.UpdatedAt = time.Now().UTC().Add(time.Minute)
+	if err := db.UpdateProject(ctx, project); err != nil {
+		t.Fatalf("更新项目失败: %v", err)
+	}
+
+	var hostAfter, configAfter string
+	if err := raw.QueryRow(
+		`SELECT host_id, config_json FROM tasks WHERE id = ?`,
+		task.ID.String(),
+	).Scan(&hostAfter, &configAfter); err != nil {
+		t.Fatalf("读取任务快照失败: %v", err)
+	}
+	if hostAfter != hostBefore {
+		t.Fatalf("项目默认节点变化不应改写任务的 host_id: %q vs %q", hostAfter, hostBefore)
+	}
+	if configAfter != configBefore {
+		t.Fatalf("项目默认节点变化不应改写任务的 config_json: %q vs %q", configAfter, configBefore)
+	}
+}
+
+// TestProjectsMigrationDefaultHostKeepsExistingProjects 校验 0028 在既有项目表上增量升级。
+//
+// 用例把已迁移的数据库回退到"0028 之前"的形态：删除部分索引与新列，并移除版本记录，
+// 然后重新打开数据库触发迁移。断言的是真实迁移行为：既有项目数据保留、新增列为 NULL、
+// 版本记录正确、部分索引条件正确。
+func TestProjectsMigrationDefaultHostKeepsExistingProjects(t *testing.T) {
+	t.Parallel()
+	path := testkit.New(t).SQLitePath()
+
+	legacy := openMigrationDB(t, path)
+	project := testkit.CreateProject(t, legacy, "legacy-project", time.Now().UTC())
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("关闭数据库失败: %v", err)
+	}
+
+	setup := testkit.OpenSQLite(t, path)
+	testkit.MustExec(t, setup, `DROP INDEX idx_projects_default_host`)
+	testkit.MustExec(t, setup, `ALTER TABLE projects DROP COLUMN default_host_id`)
+	testkit.MustExec(t, setup, `DELETE FROM schema_migrations WHERE version = ?`, 28)
+	if err := setup.Close(); err != nil {
+		t.Fatalf("关闭数据库失败: %v", err)
+	}
+
+	upgraded := openMigrationDB(t, path)
+	defer func() {
+		if err := upgraded.Close(); err != nil {
+			t.Fatalf("关闭数据库失败: %v", err)
+		}
+	}()
+	ctx := testContext(t)
+
+	loaded, err := upgraded.GetProject(ctx, domain.ID(project.ID))
+	if err != nil {
+		t.Fatalf("升级后既有项目应当仍可读取: %v", err)
+	}
+	if loaded.Name != project.Name || loaded.RepositoryURL != project.RepositoryURL {
+		t.Fatalf("升级不应改动既有项目数据: %+v", loaded)
+	}
+	if loaded.DefaultHostID != "" {
+		t.Fatalf("旧项目升级后默认节点应为空: %q", loaded.DefaultHostID)
+	}
+
+	version, err := upgraded.SchemaVersion(ctx)
+	if err != nil {
+		t.Fatalf("读取 Schema 版本失败: %v", err)
+	}
+	if version != 28 {
+		t.Fatalf("当前程序支持的迁移版本应为 28，实际: %d", version)
+	}
+
+	raw := testkit.OpenSQLite(t, path)
+	defer func() {
+		if err := raw.Close(); err != nil {
+			t.Errorf("关闭数据库失败: %v", err)
+		}
+	}()
+	var recorded int
+	if err := raw.QueryRow(
+		`SELECT COUNT(*) FROM schema_migrations WHERE version = ? AND name = ?`,
+		28,
+		"projects_default_host",
+	).Scan(&recorded); err != nil {
+		t.Fatalf("读取迁移版本记录失败: %v", err)
+	}
+	if recorded != 1 {
+		t.Fatalf("0028 的版本记录不正确: %d", recorded)
+	}
+
+	var indexSQL string
+	if err := raw.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`,
+		"idx_projects_default_host",
+	).Scan(&indexSQL); err != nil {
+		t.Fatalf("读取部分索引定义失败: %v", err)
+	}
+	if !strings.Contains(indexSQL, "default_host_id") ||
+		!strings.Contains(indexSQL, "WHERE default_host_id IS NOT NULL") {
+		t.Fatalf("部分索引的条件不正确: %s", indexSQL)
+	}
+
+	if column := projectDefaultHostValue(t, raw, project.ID); column.Valid {
+		t.Fatalf("旧项目升级后新增列应为 NULL，实际: %q", column.String)
 	}
 }

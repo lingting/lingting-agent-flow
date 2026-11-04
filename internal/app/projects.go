@@ -78,6 +78,11 @@ type CreateProjectRequest struct {
 	Caches []string
 	// WorkDir 是容器内项目工作目录，空值使用默认目录。
 	WorkDir string
+	// DefaultHostID 是默认执行节点标识，可空；空值表示不设置默认节点。
+	//
+	// 给出时必须指向一条存在且未被逻辑删除的执行节点记录，服务端不会把不存在
+	// 的标识写进项目配置。
+	DefaultHostID string
 }
 
 // toProjectInput 校验并归一化创建输入。
@@ -102,6 +107,7 @@ func (r CreateProjectRequest) toProjectInput() (domain.ProjectInput, error) {
 		EnvironmentVersion: strings.TrimSpace(r.EnvironmentVersion),
 		Caches:             r.Caches,
 		WorkDir:            strings.TrimSpace(r.WorkDir),
+		DefaultHostID:      strings.TrimSpace(r.DefaultHostID),
 	}, nil
 }
 
@@ -114,6 +120,12 @@ func (s *ProjectService) Create(
 	if err != nil {
 		return domain.Project{}, err
 	}
+	// 新建项目没有历史取值：任何非空默认执行节点都必须指向真实存在的记录。
+	defaultHostID, err := s.resolveDefaultHostID(ctx, input.DefaultHostID, "")
+	if err != nil {
+		return domain.Project{}, err
+	}
+	input.DefaultHostID = defaultHostID
 	project, err := domain.NewProject(input, s.now())
 	if err != nil {
 		return domain.Project{}, fmt.Errorf("%w: %w", ErrProjectInvalidInput, err)
@@ -150,6 +162,12 @@ type UpdateProjectRequest struct {
 	Caches []string
 	// WorkDir 是容器内项目工作目录，空值使用默认目录。
 	WorkDir string
+	// DefaultHostID 是默认执行节点标识，可空。
+	//
+	// 更新是整体替换：不提供该字段与传空值都表示"清除默认节点"，服务端不会保留
+	// 更新前的旧节点。给出新的节点标识时必须指向存在且未被逻辑删除的执行节点；
+	// 与项目当前已保存的取值相同则原样保留，使节点下线后项目仍可编辑其它配置。
+	DefaultHostID string
 }
 
 // Update 按标识整体更新项目配置。
@@ -180,6 +198,17 @@ func (s *ProjectService) Update(
 	updated.EnvironmentVersion = strings.TrimSpace(request.EnvironmentVersion)
 	updated.Caches = request.Caches
 	updated.WorkDir = strings.TrimSpace(request.WorkDir)
+	// 清空默认执行节点时写入空值，由存储层落成 SQL NULL；不保留更新前的旧节点。
+	// 项目原有的已下线节点引用可以原样保留，让用户仍能编辑其它配置。
+	defaultHostID, hostErr := s.resolveDefaultHostID(
+		ctx,
+		request.DefaultHostID,
+		existing.DefaultHostID,
+	)
+	if hostErr != nil {
+		return domain.Project{}, hostErr
+	}
+	updated.DefaultHostID = defaultHostID
 	updated.UpdatedAt = s.now()
 	// 重新走一次领域构造，保证更新路径与创建路径使用同一套校验，不会因为绕过
 	// NewProject 而写入一份创建时会被拒绝的配置。
@@ -192,6 +221,7 @@ func (s *ProjectService) Update(
 		EnvironmentVersion: updated.EnvironmentVersion,
 		Caches:             updated.Caches,
 		WorkDir:            updated.WorkDir,
+		DefaultHostID:      updated.DefaultHostID,
 	}, updated.CreatedAt)
 	if normalizeErr != nil {
 		return domain.Project{}, fmt.Errorf("%w: %w", ErrProjectInvalidInput, normalizeErr)
@@ -253,6 +283,43 @@ func (s *ProjectService) List(ctx context.Context) ([]domain.Project, error) {
 		return nil, fmt.Errorf("查询项目列表失败: %w", err)
 	}
 	return projects, nil
+}
+
+// resolveDefaultHostID 校验项目默认执行节点，返回可写入的空值或归一化标识。
+//
+// 空值表示"未设置默认节点"，不做任何查询，也不补隐式默认节点：没有默认节点时由
+// 发起方要求用户显式选择，系统不猜测。
+//
+// 非空且与项目当前已保存的取值相同时直接沿用，不再查询节点记录：节点被逻辑删除后，
+// 项目仍然可以编辑其它配置，历史引用不会因为"保存了一次"而变成一个必须立即处理的
+// 错误。只有引入新的、非空的节点标识时才要求它存在且未被逻辑删除，避免把已下线
+// 节点写成新的默认值。
+//
+// 这里只确认引用成立，不判断节点的环境预检状态与真实可用性——那是规划运行时自己的
+// 前置条件。除记录不存在之外的其他存储错误不映射为参数错误，按读取失败上报。
+func (s *ProjectService) resolveDefaultHostID(
+	ctx context.Context,
+	hostID string,
+	storedHostID string,
+) (string, error) {
+	trimmed := strings.TrimSpace(hostID)
+	if trimmed == "" {
+		return "", nil
+	}
+	if trimmed == strings.TrimSpace(storedHostID) {
+		return trimmed, nil
+	}
+	if _, err := s.store.GetExecutionHost(ctx, domain.ID(trimmed)); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return "", fmt.Errorf(
+				"%w: 执行节点 %s 不存在或已删除",
+				ErrProjectInvalidInput,
+				trimmed,
+			)
+		}
+		return "", fmt.Errorf("读取默认执行节点失败: %w", err)
+	}
+	return trimmed, nil
 }
 
 // resolveTaskProject 读取任务必须关联的项目。

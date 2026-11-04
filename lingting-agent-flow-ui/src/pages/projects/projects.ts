@@ -4,13 +4,16 @@
  * 这里只做纯函数转换：项目数据全部来自 `GET /api/v1/projects`，可用性、唯一性与
  * 归属校验都在服务端；前端不得自行补齐标识、猜测环境版本或把查询失败当成空列表。
  */
-import type { CreateProjectRequest, Project, UpdateProjectRequest } from "@/lib/api";
+import type { CreateProjectRequest, Host, Project, UpdateProjectRequest } from "@/lib/api";
 
 /** 项目环境版本说明：空值表示使用当前可用版本，不等于某个具体版本 */
 export const PROJECT_VERSION_FALLBACK = "当前可用版本";
 
 /** 缓存类型为空时的中性说明 */
 export const PROJECT_CACHES_FALLBACK = "未声明";
+
+/** 项目未设置默认执行节点时的中性说明 */
+export const PROJECT_DEFAULT_HOST_FALLBACK = "未设置";
 
 /** 返回项目环境的可读描述 */
 export function describeProjectEnvironment(project: Project): string {
@@ -22,6 +25,40 @@ export function describeProjectEnvironment(project: Project): string {
 export function describeProjectCaches(project: Project): string {
   if (project.caches.length === 0) return PROJECT_CACHES_FALLBACK;
   return project.caches.join(", ");
+}
+
+/**
+ * 返回项目默认执行节点的可读描述。
+ *
+ * 节点名称只能来自服务端返回的节点列表，前端不缓存、不猜测；节点查询尚未成功时不
+ * 断言"节点不存在"，只展示项目记录里的原始标识。节点已被逻辑删除时标识仍然显示，
+ * 使用户能看出项目仍指向一个不再出现于列表中的节点。
+ */
+export function describeProjectDefaultHost(input: {
+  /** 项目记录中的默认节点标识 */
+  hostID?: string | null;
+  /** 服务端返回的执行节点列表 */
+  hosts: Host[];
+  /** 节点查询是否已经成功完成 */
+  loaded: boolean;
+}): string {
+  const trimmed = input.hostID?.trim();
+  if (!trimmed) return PROJECT_DEFAULT_HOST_FALLBACK;
+  const host = input.hosts.find((item) => item.id === trimmed);
+  if (host) return `${host.name}（${host.id}）`;
+  if (!input.loaded) return trimmed;
+  return `${trimmed}（节点未在列表中）`;
+}
+
+/** 判断项目记录的默认节点是否不在已加载的节点列表中 */
+export function isDefaultHostMissing(input: {
+  hostID?: string | null;
+  hosts: Host[];
+  loaded: boolean;
+}): boolean {
+  const trimmed = input.hostID?.trim();
+  if (!trimmed || !input.loaded) return false;
+  return !input.hosts.some((item) => item.id === trimmed);
 }
 
 /**
@@ -60,6 +97,8 @@ export type ProjectFormValues = {
   environment_version?: string;
   caches?: string;
   work_dir?: string;
+  /** 默认执行节点标识；空值表示不设置默认节点 */
+  default_host_id?: string;
 };
 
 /** 把多行/逗号分隔文本转换为去空的缓存类型数组 */
@@ -89,6 +128,8 @@ export function toCreateProjectRequest(values: ProjectFormValues): CreateProject
     name: values.name.trim(),
     repository_url: values.repository_url.trim(),
     work_dir: values.work_dir?.trim() || undefined,
+    // 不设置默认节点时省略该字段，由服务端落成 NULL，而不是空字符串。
+    default_host_id: values.default_host_id?.trim() || undefined,
   };
   for (const key of Object.keys(request) as (keyof CreateProjectRequest)[]) {
     if (request[key] === undefined) {
@@ -108,6 +149,9 @@ export function toUpdateProjectRequest(values: ProjectFormValues): UpdateProject
     name: values.name.trim(),
     repository_url: values.repository_url.trim(),
     work_dir: values.work_dir?.trim() || undefined,
+    // 更新是整体替换：清空选择时显式提交空字符串，让后端把默认节点落成 NULL，
+    // 而不是靠"字段缺失"表达保留旧值。
+    default_host_id: values.default_host_id?.trim() ?? "",
   };
   for (const key of Object.keys(request) as (keyof UpdateProjectRequest)[]) {
     if (request[key] === undefined) {
@@ -128,6 +172,8 @@ export function toProjectFormValues(project: Project): ProjectFormValues {
     name: project.name,
     repository_url: project.repository_url,
     work_dir: project.work_dir,
+    // null 表示项目没有默认节点：表单用空值表达"未设置"，不伪造节点标识。
+    default_host_id: project.default_host_id ?? undefined,
   };
 }
 

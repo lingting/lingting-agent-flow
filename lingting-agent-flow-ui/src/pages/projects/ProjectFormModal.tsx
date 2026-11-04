@@ -1,13 +1,16 @@
-import { Alert, Form, Input, Modal } from "antd";
+import { Alert, Form, Input, Modal, Select } from "antd";
+import { Button } from "lingting-react-ui";
 import { useEffect, useMemo, useState } from "react";
 
 import { ApiError, createProject, updateProject, type Project } from "@/lib/api";
 import {
+  isDefaultHostMissing,
   toCreateProjectRequest,
   toProjectFormValues,
   toUpdateProjectRequest,
   type ProjectFormValues,
 } from "@/pages/projects/projects";
+import type { HostQueryState } from "@/pages/tasks/useHosts";
 
 /** 把未知错误转成可读说明，保留服务端返回的业务提示 */
 function describeError(error: unknown): string {
@@ -26,6 +29,13 @@ export type ProjectFormModalProps = {
   project?: Project;
   onCancel: () => void;
   onSaved: (project: Project) => void;
+  /**
+   * 执行节点查询状态。
+   *
+   * 由页面统一查询后传入：加载中、查询失败与空列表是三种不同事实，弹窗不得把失败
+   * 当成"没有节点"，也不得在前端判断节点是否可执行。
+   */
+  hostState: HostQueryState & { reload: () => void };
 };
 
 /**
@@ -36,8 +46,17 @@ export type ProjectFormModalProps = {
  * 范围键与远程管理目录名，改名会让同一项目的任务落到不同位置。
  *
  * 环境版本可以留空，表示使用当前可用版本；留空不会被当作某个具体版本。
+ *
+ * 默认执行节点是可选项：可选项只能来自服务端返回的节点列表，也可以选择"不设置"。
+ * 选定节点只是保存配置偏好，不代表该节点已通过环境预检或当前可用于真实远程执行。
  */
-export function ProjectFormModal({ open, project, onCancel, onSaved }: ProjectFormModalProps) {
+export function ProjectFormModal({
+  open,
+  project,
+  onCancel,
+  onSaved,
+  hostState,
+}: ProjectFormModalProps) {
   const [form] = Form.useForm<ProjectFormValues>();
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
@@ -48,6 +67,22 @@ export function ProjectFormModal({ open, project, onCancel, onSaved }: ProjectFo
     return toProjectFormValues(project) as Partial<ProjectFormValues>;
   }, [project]);
 
+  // 节点可选项只来自服务端返回的列表；"不设置"始终可选，使清空旧引用永远有入口。
+  const hostOptions = useMemo(() => {
+    const unset = { label: "不设置默认执行节点", value: "" };
+    if (hostState.status === "error") return [unset];
+    return [
+      unset,
+      ...hostState.hosts.map((host) => ({ label: `${host.name}（${host.id}）`, value: host.id })),
+    ];
+  }, [hostState.hosts, hostState.status]);
+  const hostQueryFailed = hostState.status === "error";
+  // 项目指向的节点可能已被逻辑删除：这类项目仍须可编辑，并允许清除旧引用。
+  const defaultHostMissing = isDefaultHostMissing({
+    hostID: project?.default_host_id,
+    hosts: hostState.hosts,
+    loaded: hostState.status === "ready",
+  });
   // 打开弹窗时按当前记录重置表单：同一个弹窗复用于新增与编辑，残留取值会误导用户。
   useEffect(() => {
     if (!open) return;
@@ -96,6 +131,37 @@ export function ProjectFormModal({ open, project, onCancel, onSaved }: ProjectFo
       onOk={() => void handleOk()}
     >
       {error && <Alert description={error} showIcon style={{ marginBottom: 16 }} type="error" />}
+      {hostQueryFailed && (
+        <Alert
+          action={<Button onClick={hostState.reload} size="small" text="重试" />}
+          description={`${hostState.error} 在节点列表恢复之前，默认执行节点只能保持当前取值或选择"不设置"。`}
+          showIcon
+          style={{ marginBottom: 16 }}
+          title="加载执行节点失败"
+          type="error"
+        />
+      )}
+      {defaultHostMissing && (
+        <Alert
+          description={
+            `项目当前指向的执行节点 ${project?.default_host_id} 不在服务端返回的节点列表中（可能已被逻辑删除）。` +
+            "保留它不影响保存其它配置，也可以重新选择一个节点，或选择「不设置默认执行节点」清除该引用。"
+          }
+          showIcon
+          style={{ marginBottom: 16 }}
+          title="默认执行节点不在节点列表中"
+          type="warning"
+        />
+      )}
+      {hostState.status === "ready" && hostState.hosts.length === 0 && (
+        <Alert
+          description="服务端还没有登记任何执行节点，此时只能选择「不设置默认执行节点」。"
+          showIcon
+          style={{ marginBottom: 16 }}
+          title="暂无可选执行节点"
+          type="info"
+        />
+      )}
       <Form form={form} initialValues={initialValues} layout="vertical" preserve={false}>
         <Form.Item
           extra="项目标识同时是缓存共享范围与远程管理工作目录名，创建后不可修改"
@@ -160,6 +226,31 @@ export function ProjectFormModal({ open, project, onCancel, onSaved }: ProjectFo
           name="work_dir"
         >
           <Input placeholder="/workspace/project" />
+        </Form.Item>
+        <Form.Item
+          extra={
+            "只登记默认执行节点的配置偏好：选定节点不代表它已通过环境预检或当前可用于真实远程执行，" +
+            "真实可用性由服务端在发起时核验；留空表示不设置默认节点"
+          }
+          label="默认执行节点（可选）"
+          name="default_host_id"
+        >
+          <Select
+            aria-label="默认执行节点"
+            allowClear
+            disabled={hostState.status === "loading"}
+            loading={hostState.status === "loading"}
+            optionFilterProp="label"
+            options={hostOptions}
+            placeholder={
+              hostState.status === "loading"
+                ? "正在加载执行节点…"
+                : hostQueryFailed
+                  ? "执行节点列表不可用"
+                  : "不设置默认执行节点"
+            }
+            showSearch
+          />
         </Form.Item>
       </Form>
     </Modal>

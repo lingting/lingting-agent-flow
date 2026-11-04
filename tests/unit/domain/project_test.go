@@ -181,3 +181,42 @@ func TestProjectIDPatternLimits(t *testing.T) {
 		t.Fatal("超过 32 字符的标识应当被拒绝")
 	}
 }
+
+// TestProjectDefaultHostNormalization 校验默认执行节点只做空白归一与空值语义。
+//
+// 空值表示"未指定默认节点"，领域层不得生成隐式默认节点；标识是否存在由应用层在
+// 写入前确认，领域层不做跨实体查询。
+func TestProjectDefaultHostNormalization(t *testing.T) {
+	t.Parallel()
+
+	project, err := domain.NewProject(projectInput(t), time.Now())
+	if err != nil {
+		t.Fatalf("未设置默认节点应当可以构造项目: %v", err)
+	}
+	if project.DefaultHostID != "" {
+		t.Fatalf("未设置默认节点时不应生成隐式默认值: %q", project.DefaultHostID)
+	}
+	if err := project.Validate(); err != nil {
+		t.Fatalf("没有默认节点的项目应当通过校验: %v", err)
+	}
+
+	input := projectInput(t)
+	input.DefaultHostID = "  host-1  "
+	project, err = domain.NewProject(input, time.Now())
+	if err != nil {
+		t.Fatalf("设置默认节点后构造项目失败: %v", err)
+	}
+	if project.DefaultHostID != "host-1" {
+		t.Fatalf("默认节点标识应去空白: %q", project.DefaultHostID)
+	}
+
+	// 更新路径同样经 NewProject，空值归一规则与创建路径保持一致。
+	input.DefaultHostID = "   "
+	project, err = domain.NewProject(input, time.Now())
+	if err != nil {
+		t.Fatalf("空白默认节点应当按未设置处理: %v", err)
+	}
+	if project.DefaultHostID != "" {
+		t.Fatalf("空白默认节点应归一为空值: %q", project.DefaultHostID)
+	}
+}

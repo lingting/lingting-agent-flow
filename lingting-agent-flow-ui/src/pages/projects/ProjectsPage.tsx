@@ -8,10 +8,12 @@ import { ApiError, deleteProject, fetchProjects, type Project } from "@/lib/api"
 import { ProjectFormModal } from "@/pages/projects/ProjectFormModal";
 import {
   describeProjectCaches,
+  describeProjectDefaultHost,
   describeProjectEnvironment,
   PROJECT_CACHES_FALLBACK,
   PROJECT_VERSION_FALLBACK,
 } from "@/pages/projects/projects";
+import { useHosts } from "@/pages/tasks/useHosts";
 
 /** 把未知错误转成可读说明，保留服务端返回的业务提示 */
 function describeError(error: unknown): string {
@@ -48,6 +50,9 @@ export function ProjectsPage() {
   const [editing, setEditing] = useState<Project>();
   const [loadError, setLoadError] = useState<string>();
   const [actionError, setActionError] = useState<string>();
+  // 执行节点只查询一次：列表用它把节点标识显示成真实名称，表单用它作为可选项来源。
+  // 复用任务表单已有的节点查询，不重复实现接口调用；查询失败不会被当成空列表。
+  const hosts = useHosts();
 
   const reload = useCallback(() => {
     // ProTable 的 reload 返回 Promise；这里不需要等待结果，失败由 request 内部记录。
@@ -112,6 +117,20 @@ export function ProjectsPage() {
         title: "缓存类型",
       },
       {
+        dataIndex: "default_host_id",
+        render: (_dom, record) => (
+          <Typography.Text type={record.default_host_id ? undefined : "secondary"}>
+            {describeProjectDefaultHost({
+              hostID: record.default_host_id,
+              hosts: hosts.hosts,
+              loaded: hosts.status === "ready",
+            })}
+          </Typography.Text>
+        ),
+        search: false,
+        title: "默认执行节点",
+      },
+      {
         dataIndex: "work_dir",
         search: false,
         title: "工作目录",
@@ -153,7 +172,7 @@ export function ProjectsPage() {
         valueType: "option",
       },
     ],
-    [handleDelete],
+    [handleDelete, hosts.hosts, hosts.status],
   );
 
   /**
@@ -237,6 +256,7 @@ export function ProjectsPage() {
           setFormOpen(false);
           reload();
         }}
+        hostState={hosts}
       />
     </Flex>
   );

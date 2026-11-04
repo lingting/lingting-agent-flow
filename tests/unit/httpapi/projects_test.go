@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/lingting/agentflow/internal/app"
+	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/httpapi"
 	"github.com/lingting/agentflow/internal/logging"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
@@ -360,5 +361,187 @@ func assertErrorCode(t *testing.T, recorder *httptest.ResponseRecorder, expected
 	}
 	if response.Error.Code != expected {
 		t.Fatalf("错误代码不符: 期望 %s，实际 %s", expected, response.Error.Code)
+	}
+}
+
+// mustAPIDefaultHost 在测试数据库中写入一个可作为项目默认执行节点的节点。
+func mustAPIDefaultHost(t *testing.T, fixture *projectAPIFixture, name, address string) domain.ExecutionHost {
+	t.Helper()
+	host, err := domain.NewExecutionHost(
+		"", name, address, 0, "deploy", "", time.Now().UTC(),
+		domain.WithPrivateKey(testkit.PrivateKeyPath(t)),
+	)
+	if err != nil {
+		t.Fatalf("构造执行节点失败: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	if err := fixture.db.CreateExecutionHost(ctx, host); err != nil {
+		t.Fatalf("写入执行节点失败: %v", err)
+	}
+	return host
+}
+
+// decodeProjectRaw 把项目响应体解析为原始 JSON 对象。
+//
+// 用于确认 default_host_id 字段确实存在且为 null，而不是被省略或替换成空字符串。
+func decodeProjectRaw(t *testing.T, recorder *httptest.ResponseRecorder) map[string]any {
+	t.Helper()
+	var body map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("解析项目响应失败: %v: %s", err, recorder.Body.String())
+	}
+	return body
+}
+
+// TestProjectAPIDefaultHostNullWhenUnset 校验未设置默认节点时响应字段为 null。
+func TestProjectAPIDefaultHostNullWhenUnset(t *testing.T) {
+	t.Parallel()
+	fixture := newProjectAPIFixture(t)
+
+	created := fixture.send(t, http.MethodPost, httpapi.PathProjects, projectCreateBody())
+	if created.Code != http.StatusCreated {
+		t.Fatalf("创建项目应返回 201，实际 %d: %s", created.Code, created.Body.String())
+	}
+	raw := decodeProjectRaw(t, created)
+	value, ok := raw["default_host_id"]
+	if !ok {
+		t.Fatalf("响应必须包含 default_host_id 字段: %s", created.Body.String())
+	}
+	if value != nil {
+		t.Fatalf("未设置默认节点时应为 null，实际: %v", value)
+	}
+
+	detail := fixture.send(t, http.MethodGet, httpapi.PathProjects+"/demo-service", nil)
+	if detail.Code != http.StatusOK {
+		t.Fatalf("详情应返回 200，实际 %d", detail.Code)
+	}
+	if value, ok := decodeProjectRaw(t, detail)["default_host_id"]; !ok || value != nil {
+		t.Fatalf("详情中的默认节点应为 null，实际: %v", value)
+	}
+
+	listed := fixture.send(t, http.MethodGet, httpapi.PathProjects, nil)
+	var listBody httpapi.ProjectListResponse
+	if err := json.Unmarshal(listed.Body.Bytes(), &listBody); err != nil {
+		t.Fatalf("解析列表失败: %v", err)
+	}
+	if len(listBody.Records) != 1 || listBody.Records[0].DefaultHostID != nil {
+		t.Fatalf("列表中的默认节点应为 null: %+v", listBody.Records)
+	}
+}
+
+// TestProjectAPIDefaultHostLifecycle 校验设置、切换与清除默认节点的响应语义一致。
+func TestProjectAPIDefaultHostLifecycle(t *testing.T) {
+	t.Parallel()
+	fixture := newProjectAPIFixture(t)
+	first := mustAPIDefaultHost(t, fixture, "构建节点", "10.0.0.41")
+	second := mustAPIDefaultHost(t, fixture, "验证节点", "10.0.0.42")
+
+	body := projectCreateBody()
+	body["default_host_id"] = first.ID.String()
+	created := fixture.send(t, http.MethodPost, httpapi.PathProjects, body)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("创建项目应返回 201，实际 %d: %s", created.Code, created.Body.String())
+	}
+	if value := decodeProjectRaw(t, created)["default_host_id"]; value != first.ID.String() {
+		t.Fatalf("创建响应中的默认节点不符: %v", value)
+	}
+
+	detail := fixture.send(t, http.MethodGet, httpapi.PathProjects+"/demo-service", nil)
+	if value := decodeProjectRaw(t, detail)["default_host_id"]; value != first.ID.String() {
+		t.Fatalf("详情中的默认节点不符: %v", value)
+	}
+
+	update := map[string]any{
+		"name":            "示例服务",
+		"repository_url":  "ssh://git.example.com/team/repo",
+		"base_branch":     "main",
+		"environment":     "go",
+		"default_host_id": second.ID.String(),
+	}
+	updated := fixture.send(t, http.MethodPut, httpapi.PathProjects+"/demo-service", update)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("更新应返回 200，实际 %d: %s", updated.Code, updated.Body.String())
+	}
+	if value := decodeProjectRaw(t, updated)["default_host_id"]; value != second.ID.String() {
+		t.Fatalf("切换后的默认节点不符: %v", value)
+	}
+
+	// 整体替换：不提交该字段即清除默认节点，响应必须是 null。
+	delete(update, "default_host_id")
+	cleared := fixture.send(t, http.MethodPut, httpapi.PathProjects+"/demo-service", update)
+	if cleared.Code != http.StatusOK {
+		t.Fatalf("清除默认节点应返回 200，实际 %d: %s", cleared.Code, cleared.Body.String())
+	}
+	raw := decodeProjectRaw(t, cleared)
+	if value, ok := raw["default_host_id"]; !ok || value != nil {
+		t.Fatalf("清除后默认节点应为 null，实际: %v", value)
+	}
+	detail = fixture.send(t, http.MethodGet, httpapi.PathProjects+"/demo-service", nil)
+	if value, ok := decodeProjectRaw(t, detail)["default_host_id"]; !ok || value != nil {
+		t.Fatalf("清除后详情中的默认节点应为 null，实际: %v", value)
+	}
+
+	// 空字符串与省略字段等价，同样表示清除。
+	update["default_host_id"] = first.ID.String()
+	if recorder := fixture.send(
+		t,
+		http.MethodPut,
+		httpapi.PathProjects+"/demo-service",
+		update,
+	); recorder.Code != http.StatusOK {
+		t.Fatalf("重新设置默认节点应返回 200，实际 %d", recorder.Code)
+	}
+	update["default_host_id"] = "   "
+	blank := fixture.send(t, http.MethodPut, httpapi.PathProjects+"/demo-service", update)
+	if value, ok := decodeProjectRaw(t, blank)["default_host_id"]; !ok || value != nil {
+		t.Fatalf("空白默认节点应落成 null，实际: %v", value)
+	}
+}
+
+// TestProjectAPIDefaultHostRejectsUnknownHost 校验无效执行节点返回 400 且不产生部分写入。
+func TestProjectAPIDefaultHostRejectsUnknownHost(t *testing.T) {
+	t.Parallel()
+	fixture := newProjectAPIFixture(t)
+
+	body := projectCreateBody()
+	body["default_host_id"] = "missing-host"
+	created := fixture.send(t, http.MethodPost, httpapi.PathProjects, body)
+	if created.Code != http.StatusBadRequest {
+		t.Fatalf("不存在的执行节点应返回 400，实际 %d: %s", created.Code, created.Body.String())
+	}
+	assertErrorCode(t, created, httpapi.CodeInvalidRequest)
+	if detail := fixture.send(
+		t,
+		http.MethodGet,
+		httpapi.PathProjects+"/demo-service",
+		nil,
+	); detail.Code != http.StatusNotFound {
+		t.Fatalf("被拒绝的创建不应留下项目记录，实际 %d", detail.Code)
+	}
+
+	// 已存在的项目也不能被改成不存在的节点，且旧配置保持不变。
+	if recorder := fixture.send(
+		t,
+		http.MethodPost,
+		httpapi.PathProjects,
+		projectCreateBody(),
+	); recorder.Code != http.StatusCreated {
+		t.Fatalf("创建项目应返回 201，实际 %d", recorder.Code)
+	}
+	update := map[string]any{
+		"name":            "示例服务",
+		"repository_url":  "ssh://git.example.com/team/repo",
+		"base_branch":     "main",
+		"environment":     "go",
+		"default_host_id": "missing-host",
+	}
+	rejected := fixture.send(t, http.MethodPut, httpapi.PathProjects+"/demo-service", update)
+	if rejected.Code != http.StatusBadRequest {
+		t.Fatalf("更新到不存在的执行节点应返回 400，实际 %d: %s", rejected.Code, rejected.Body.String())
+	}
+	detail := fixture.send(t, http.MethodGet, httpapi.PathProjects+"/demo-service", nil)
+	if value, ok := decodeProjectRaw(t, detail)["default_host_id"]; !ok || value != nil {
+		t.Fatalf("被拒绝的更新不应写入默认节点，实际: %v", value)
 	}
 }

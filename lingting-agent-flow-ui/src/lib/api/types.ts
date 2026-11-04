@@ -1923,7 +1923,15 @@ export type Project = {
   /** 允许挂载的缓存类型 */
   caches: string[];
   /** 生效的容器内项目工作目录 */
+  /** 生效的容器内项目工作目录 */
   work_dir: string;
+  /**
+   * 项目默认执行节点标识；null 表示没有默认执行节点。
+   *
+   * 该字段只是配置偏好，不代表节点当前可用或已通过环境预检；节点之后被逻辑删除时
+   * 服务端仍保留该标识，使项目可被打开并清除或重新选择。
+   */
+  default_host_id?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -1944,6 +1952,8 @@ export type CreateProjectRequest = {
   environment_version?: string;
   caches?: string[];
   work_dir?: string;
+  /** 默认执行节点标识；省略表示不设置默认节点 */
+  default_host_id?: string;
 };
 
 /**
@@ -1960,4 +1970,10 @@ export type UpdateProjectRequest = {
   environment_version?: string;
   caches?: string[];
   work_dir?: string;
+  /**
+   * 默认执行节点标识。
+   *
+   * 整体替换语义：省略与传空字符串都表示清除默认节点，服务端不会保留旧值。
+   */
+  default_host_id?: string;
 };

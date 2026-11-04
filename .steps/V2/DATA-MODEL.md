@@ -16,8 +16,9 @@
 | `task_leases`（`0024`） | 按任务，含 `epoch` | 保持不动，与新项目租约共存 |
 
 **结论**：V2 只需 5 个新迁移（`0026`–`0030`），不需要改动任何已发布迁移。其中 `0026` 规划会话
-（原设计编号 `0027`）已在 M2 第二阶段落地，`0027` 需求项目关联顺延为原 `0026`；其余编号不变，版本
-顺序仍然单调递增。
+（原设计编号 `0027`）已在 M2 第二阶段落地，`0027` 需求项目关联顺延为原 `0026`；`0028` 项目默认执行
+节点已在 M2 第八阶段落地；其余编号与内容不变，版本顺序仍然单调递增。迁移引擎按"该具体版本是否未应用"
+逐条判断，不要求版本号连续，因此当前没有 `0027` 文件不影响 `0028` 及之后迁移的执行。
 
 ## 2. 迁移顺序与内容
 
@@ -109,7 +110,9 @@ CREATE INDEX idx_requirements_project
   "最新草案"取自 `planning_revisions`，不写入 `requirements`。
 - 排序索引 `(project_id, deleted_at, created_at)` 覆盖"项目下需求列表"这一唯一读路径。
 
-### 0028_projects_default_host.sql
+### 0028_projects_default_host.sql（已实现，M2 第八阶段）
+
+实际落地脚本 `internal/storage/sqlite/migrations/0028_projects_default_host.sql`：
 
 ```sql
 ALTER TABLE projects ADD COLUMN default_host_id TEXT;
@@ -118,8 +121,20 @@ CREATE INDEX idx_projects_default_host ON projects (default_host_id)
     WHERE default_host_id IS NOT NULL;
 ```
 
-- 可空表示未指定；未指定时需求工作台必须要求用户选择执行节点，不得猜测默认节点。
+- 可空表示未指定默认执行节点；未指定时发起方必须要求用户显式选择执行节点，不得猜测默认节点。
+- 项目配置读写路径：`internal/domain/project.go`（`Project.DefaultHostID` / `ProjectInput.DefaultHostID`，
+  只做空白裁剪，空白即未设置）、`internal/app/projects.go`（写入前用 `GetExecutionHost` 确认引用成立）、
+  `internal/storage/sqlite/projects.go`（`projectColumns` 增加该列，空值落 SQL NULL，
+  `scanProject` 用 `sql.NullString` 还原）、`internal/httpapi/projects.go`（请求可省略或传空，响应以
+  JSON `null` 表达未设置）。
+- 只有引入新的非空标识时才校验节点存在且未被逻辑删除；与项目当前已保存取值相同则原样保留，使节点被
+  逻辑删除后项目仍可读取、仍可编辑其它配置，并可清除该历史引用。节点当前的预检状态不是项目配置合法性
+  的一部分，规划运行时仍须自行校验。
 - 历史任务继续使用自己 `tasks.host_id` 与 `config_json` 快照，不因项目字段变化被改写。
+- 已通过定向测试在该测试数据库中执行过旧库增量升级：既有项目数据保留、新增列为 NULL、`schema_migrations`
+  版本记录与部分索引条件正确（命令与产物见
+  [`milestones/M2-planning-runtime.md`](./milestones/M2-planning-runtime.md) §7.10）。真实开发数据库尚未
+  执行升级，不得据此报告生产库已验证。
 
 ### 0029_task_requirement_sequence.sql
 
@@ -202,6 +217,9 @@ CREATE TABLE project_execution_leases (
    报告为已完成。
    其中 `0026` 已人工核对表结构、索引、字段、非枚举约束与版本顺序；旧库升级后的数据保留、未知枚举值
    写入与读回、迁移幂等仍未在真实数据库上执行，不得报告为已验证。
+   `0028` 是纯 `ADD COLUMN` 加部分索引，已人工核对脚本、索引条件与版本记录，并由
+   `tests/unit/store` 的定向用例在测试数据库中执行过一次旧库增量升级（见 §2 该条目与里程碑 §7.10）；
+   该结论只覆盖测试数据库，真实开发库的升级仍未执行。
 3. **`json_extract` 依赖 SQLite JSON1 扩展**：需确认当前驱动与最低 SQLite 版本已内置（`caches_json`
    的 `json_valid` 已在用，仍按实际迁移验证）。
 4. **回填冲突的人工处理入口**：本方案只记录冲突、不提供 UI；若真实库出现冲突，需要在

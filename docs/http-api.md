@@ -243,3 +243,54 @@
   客户端不得自行推算这三个字段。
 - 工具策略无法换算（例如数据库出现不支持的角色类型）时返回 `500`，不返回"没有工具限制"的响应。
 - 配置修改只影响后续新会话；已创建会话的 `role_snapshot_json` 不随配置变化。
+
+## 14. 项目登记
+
+项目接口挂在 `/api/v1/projects` 下，任务必须关联一个真实存在的项目。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/v1/projects` | 全部未删除项目（数量有限，不分页，固定 `records` / `total`） |
+| `POST` | `/api/v1/projects` | 创建项目（`201`） |
+| `GET` | `/api/v1/projects/{projectID}` | 项目详情 |
+| `PUT` | `/api/v1/projects/{projectID}` | 整体更新项目配置 |
+| `DELETE` | `/api/v1/projects/{projectID}` | 逻辑删除（`204`，无响应体） |
+
+请求与响应字段：
+
+```json
+{
+  "id": "demo-service",
+  "name": "示例服务",
+  "repository_url": "ssh://git.example.com/team/repo",
+  "base_branch": "main",
+  "environment": "go",
+  "environment_version": "v0001",
+  "caches": ["go-mod"],
+  "work_dir": "/workspace/project",
+  "default_host_id": null,
+  "created_at": "2026-10-28T02:00:00Z",
+  "updated_at": "2026-10-28T02:00:00Z"
+}
+```
+
+- `default_host_id` 是项目的默认执行节点标识。响应用 JSON `null` 表达"没有默认执行节点"，
+  不返回空字符串，也不会替换成任意节点标识；请求省略该字段或传空字符串都表示未设置。
+  该字段是配置偏好，**不代表**节点当前可用或已通过环境预检，规划运行时仍须执行自己的
+  节点与环境前置条件检查。
+- 只有引入新的非空 `default_host_id` 时才要求该节点存在且未被逻辑删除；引用不成立返回 `400`
+  （`invalid_request`），且不产生项目配置的部分写入。项目已保存的历史引用在节点下线后仍可原样
+  提交（项目仍可编辑其它配置），也可以传空值清除。清除在数据库中落为 `NULL`。
+- `PUT` 是整体替换：未提交的配置字段表示清除，不提供"省略表示保留原值"的部分更新语义；项目标识
+  不可修改。
+- 客户端不能提交 `created_at`、`updated_at`、`deleted_at` 等服务端字段，携带未知字段返回 `400`。
+- 删除是逻辑删除：只写 `deleted_at`，不级联删除历史任务、代码获取与代码保存记录。
+
+错误语义：
+
+| 情形 | 状态码 | `error.code` |
+|---|---|---|
+| 标识/名称/仓库/分支/环境非法，默认执行节点不存在或已删除 | 400 | `invalid_request` |
+| 项目不存在或已逻辑删除 | 404 | `not_found` |
+| 项目标识已存在 | 409 | `state_conflict` |
+| 项目服务未装配或已停止 | 503 | `internal_error` |

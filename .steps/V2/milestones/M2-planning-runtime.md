@@ -33,7 +33,8 @@
 
 - 迁移 `0026_planning_sessions.sql`（`planning_sessions` / `planning_messages` / `planning_revisions`）：
   已实现（M2 第二阶段），实际表结构与索引见 [`../DATA-MODEL.md`](../DATA-MODEL.md) §2。
-- 迁移 `0028_projects_default_host.sql`（项目默认执行节点）。
+- 迁移 `0028_projects_default_host.sql`（项目默认执行节点）：已实现（M2 第八阶段），
+  实际脚本、字段、部分索引与 NULL 语义见 [`../DATA-MODEL.md`](../DATA-MODEL.md) §2。
 
 ### 2.4 生命周期
 
@@ -340,15 +341,61 @@ SQLite 持久化连接成统一入口。它仍**没有 Pi 调用方、HTTP 入�
 - **本阶段测试**：新增 `tests/unit/app/planningagent`，覆盖"未启动拒绝 / 启动后可进入执行 / 停止后
   拒绝 / 在途调用收到取消并收敛 / 停止等待收敛不提前返回"五条业务场景，以及"准入与停止竞争 /
   多调用并发停止 / 并发 Stop 安全 / 停止超时返回真实错误"四条并发场景。取消传播用例断言的是传给
-  `RunAgent` 的 `ctx` 确实被取消，而不只是生命周期字段变化。实跑命令与结果见 §7.9。
+  `RunAgent` 的 `ctx` 确实被取消，而不只是生命周期字段变化。实跑命令与结果见 §7.10。
 
-### 7.8 仍未完成
+### 7.8 已交付：项目默认执行节点配置（M2 第八阶段）
+
+项目现在把"默认执行节点"作为持久化配置保存，并从既有项目管理入口完成创建、读取、修改与清除。本阶段
+不涉及任何规划轮次编排，也没有新增规划工作台：
+
+- **持久化**：新增迁移 `internal/storage/sqlite/migrations/0028_projects_default_host.sql`：
+  `projects.default_host_id TEXT`（可空）与部分索引 `idx_projects_default_host (default_host_id)
+  WHERE default_host_id IS NOT NULL`。可空表示"未设置"，写入时由存储层把空值落成 SQL NULL；
+  不为 NULL 行建立索引项，也不声明外键或枚举白名单。历史任务继续使用自己的 `tasks.host_id` 与
+  `config_json` 快照，项目字段变化不改写任何历史事实。
+- **领域**：`domain.Project` / `domain.ProjectInput` 增加 `DefaultHostID`，创建与更新走同一个
+  `domain.NewProject`，因此归一化规则一致：只做空白裁剪，空白即未设置，不生成隐式默认节点，也不
+  因为该字段缺失而拒绝历史项目。领域层不做跨实体查询。
+- **应用**：`ProjectService.Create` / `Update` 在写入前用现有存储能力 `GetExecutionHost` 确认节点
+  存在且未被逻辑删除；不存在或已删除时按既有错误类别 `ErrProjectInvalidInput` 拒绝，不解析错误
+  文本。只有引入**新的**非空标识时才校验引用，与项目当前已保存取值相同则原样保留——节点之后被
+  逻辑删除时，项目仍可打开、仍可编辑其它配置、也可以清空该历史引用；清除写入 NULL 而不是空串。
+  该确认只看引用是否成立，不把节点当前的预检状态当作项目配置合法性：规划运行时仍须执行自己的
+  节点与环境前置条件检查。
+- **存储**：`projectColumns` 增加 `default_host_id`（列数 12 → 13），`CreateProject` /
+  `UpdateProject` 写入该列（空值落 NULL），`scanProject` 用 `sql.NullString` 还原 NULL；更新语句
+  仍只写项目配置字段与 `updated_at`，不触碰 `created_at`、`deleted_at` 与历史任务记录。
+- **HTTP**：既有 `POST/GET/PUT /api/v1/projects` 与列表接口增加 `default_host_id`：
+  请求省略或传空都表示未设置；响应使用 JSON `null` 表达"没有默认节点"，不返回空字符串或任意节点
+  标识；列表、详情、创建、更新的字段语义一致。无效节点引用返回 `400 invalid_request`，不产生项目
+  配置的部分写入。客户端仍不能提交创建时间、更新时间或删除标记（未知字段被拒绝）。
+- **前端**：`ProjectFormModal` 增加"默认执行节点（可选）"下拉，候选来自既有
+  `GET /api/v1/hosts`（复用任务表单已有的 `useHosts` 查询，不新增重复 API），支持"不设置默认执行
+  节点"，并区分加载中、查询失败与空列表：查询失败只给出重试入口，不伪装成"没有节点"，此时不提供
+  除了"不设置"以外的选项。编辑时回显现有 `default_host_id`；节点已不在列表中时给出提示并保留旧
+  引用，用户可原样保存、重新选择或清空。项目列表新增"默认执行节点"列，未设置显示中性占位符。前端
+  不判断节点是否可执行，也不因为选为默认值就宣称它已通过远程环境预检。
+
+本阶段不做：M3 需求工作台与规划 HTTP API、`RequirementAnalysisService` / `RequirementPlanningService`、
+需求分析师与方案规划师的调用顺序与结构化解析、`0027_requirements_project.sql` 的业务实现、任务顺序
+字段与项目执行租约（`0029` / `0030`）、跨进程规划调用协调、真实 Pi / SSH / Docker 规划环境验证，也
+不修改普通任务的执行节点选择与任务配置快照。
+
+定向测试覆盖本阶段业务场景（命令、结果与产物路径见 §7.10）：Domain 的归一化与空值语义；App 的
+"不设置 / 设置有效节点 / 更新切换 / 清空落 NULL / 拒绝不存在与已删除节点 / 节点删除后仍可读取与编辑"；
+Store 的 NULL 与非 NULL 往返、更新默认节点不影响其它项目字段、项目默认节点变化不改写任务
+`host_id` 与 `config_json` 快照；`0028` 在既有项目表上的增量升级（既有数据保留、新增列 NULL、版本
+记录与部分索引条件正确）；HTTP 的创建、列表、详情、更新读写与 null 语义、无效节点返回 `400` 且不留
+部分写入；前端表单取值转换、清除语义与"节点不在列表中"的展示规则。
+
+### 7.9 仍未完成
 
 以下能力尚未实现，M2 状态保持 `pending`：
 
 - 规划轮次的业务编排：`PlanningAgentService` 只提供单角色调用入口，当前没有任何代码调用它；两个角色的
   调用顺序、提示词组装、结构化输出解析与 `CompleteAnalysis` / `FailAnalysis` 的自动收口仍属 M3。
-- 迁移 `0028_projects_default_host.sql`（项目默认执行节点）与后续项目级调度的迁移。
+- 后续项目级调度的迁移（`0027` 需求项目关联的业务实现、`0029` 任务顺序、`0030` 项目执行租约）：项目
+  默认执行节点已在第八阶段落地，但调度侧仍未使用它。
 - 规划调用只在当前进程内按会话串行，没有跨进程租约：两个进程对同一规划会话发起规划调用时，角色会话绑定
   由条件更新拒绝过期写入，但两份 Pi 调用仍可能同时读写同一份容器内 Session 文件。
 - 规划服务的 HTTP API 与前端需求规划工作台（M3）：三个服务只完成装配与生命周期，没有对外入口。
@@ -362,9 +409,11 @@ SQLite 持久化连接成统一入口。它仍**没有 Pi 调用方、HTTP 入�
   恢复与归档逻辑仍没有自动化测试守点，也未在真实数据库、真实 Docker / SSH 与真实 Pi 上验证并发行为、
   恢复与归档结果。
 - 未授权的验证：真实只读环境（文件工具与 `sh -c` 写入是否真的被文件系统拒绝）、真实多轮 Pi Session
-  跨容器重建恢复、迁移升级与旧库数据保留、真实远程容器释放，都没有执行，不得报告为通过。
+  跨容器重建恢复、真实远程容器释放，都没有执行，不得报告为通过。`0028` 的旧库增量升级已由第八阶段
+  定向测试在测试数据库中执行（见 §7.8），其余迁移（`0026`、`0027`、`0029`、`0030`）的旧库升级与数据
+  保留仍没有自动化守点，也没有在真实开发数据库上执行。
 
-### 7.9 验证方式
+### 7.10 验证方式
 
 六个阶段都只做非测试验证：阅读代码核对调用链、`gofmt`、`go vet ./...`、`git diff --check`。第二阶段另加
 人工核对迁移的表、索引、字段、非枚举约束与版本顺序；第三阶段人工核对快照卷命名与标签、准备 / 只读复核
@@ -409,3 +458,46 @@ Session 文件的续写语义，都需要在真实只读规划环境中验证后
   修改 `AGENTFLOW_REAL_TESTS` 等真实测试开关，未关闭 SSH 主机密钥校验，未启动真实 AgentFlow Server
   连接真实设备。因此第七阶段只证明生命周期准入、取消传播与停止收敛在该测试缝隙下成立，不能推断真实
   远程环境、真实 Pi 归档或多轮恢复已经可用。
+
+第八阶段同样获得定向测试授权，验证范围收敛在"项目默认执行节点"这一配置链路上，不执行完整测试套件。
+
+- **非测试验证**：人工核对迁移脚本只新增一列与一个部分索引、迁移引擎按未应用的具体版本跳过而非要求版本
+  连续（当前没有 `0027` 文件）、`projectColumns` 与占位列数一致、`scanProject` 的 NULL 还原、`UpdateProject`
+  的 `SET` 列不含 `created_at` / `deleted_at`、应用层的引用校验只在引入新标识时发生、HTTP 响应以 JSON
+  `null` 表达未设置，并确认普通任务执行路径（`tasks.host_id`、`config_json` 快照与执行节点选择）未被改动。
+  `gofmt`、`go vet ./...`、`git diff --check` 均无输出，所有改动文件行尾均为 LF。
+- **已运行的定向测试**（每条命令只跑本阶段用例或本阶段涉及的既有项目主流程）：
+
+  ```bash
+  go test -race -count=1 ./tests/unit/domain -run '^TestProject.*DefaultHost'
+  go test -race -count=1 ./tests/unit/app -run '^TestProjectService.*DefaultHost'
+  go test -race -count=1 ./tests/unit/store -run '^(TestProject.*DefaultHost|TestProjectsMigration.*)'
+  go test -race -count=1 ./tests/unit/httpapi -run '^TestProjectAPI.*DefaultHost'
+
+  # 既有项目主流程回归（精确名称）
+  go test -race -count=1 ./tests/unit/domain -run '^(TestNewProject|TestProject|TestRequireProjectID)'
+  go test -race -count=1 ./tests/unit/app -run '^(TestProjectService|TestTaskCreationRequiresExistingProject)'
+  go test -race -count=1 ./tests/unit/store -run '^(TestProject|TestCreateAndGetProject|TestGetProjectNotFound|TestUpdateProject|TestDeleteProjectIsLogical|TestListProjectsFiltersDeleted)'
+  go test -race -count=1 ./tests/unit/httpapi -run '^TestProjectAPI'
+  ```
+
+  八条命令全部通过（`-race` 无数据竞争报告），分别覆盖 1 / 6 / 4 / 3 个新增用例与 8 / 14 / 12 / 12 个
+  项目相关用例。用例使用 `TestMain` + `testkit` 随机工作空间，产物保留在 `TEST_ARTIFACT_DIR`
+  （`%TEMP%\lingting-agent-flow-tests\{domain,app,store,httpapi}-*`），不写入仓库与用户数据目录。
+- **前端**（`lingting-agent-flow-ui`）：
+
+  ```bash
+  npx vitest run tests/unit/projects.test.ts
+  npx tsc --noEmit
+  npx vp fmt <本次修改的前端文件>
+  npx vp lint
+  npm run build
+  ```
+
+  单元测试 41 个用例全部通过（含本阶段新增的表单取值转换、清除语义与"节点不在列表中"展示规则），类型
+  检查无输出，生产构建成功（仅保留既有的 chunk 体积告警）；产物留在
+  `%TEMP%\lingting-agent-flow-ui-tests\run-*`，构建写入 `internal/webui/dist/`（不提交）。
+- **未运行的测试**：`go test ./...`、`go test ./tests/...`、`make test`、`make test-race`、其他测试包与
+  前端全量/E2E 测试均未执行；未设置或修改 `AGENTFLOW_REAL_TESTS` 等真实测试开关，未连接真实 Docker /
+  SSH / Pi / 远程主机。因此第八阶段只证明"项目默认执行节点"在测试数据库与测试替身下从迁移到界面的配置
+  链路成立：不代表真实开发数据库已完成升级，也不代表任何节点当前可用或已通过远程环境预检。

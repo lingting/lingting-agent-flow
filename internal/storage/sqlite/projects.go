@@ -12,10 +12,10 @@ import (
 
 // projectColumns 是项目表的完整列顺序。
 const projectColumns = `id, name, repository_url, base_branch, env_type, env_name,
-	env_version, work_dir, caches_json, created_at, updated_at, deleted_at`
+	env_version, work_dir, caches_json, default_host_id, created_at, updated_at, deleted_at`
 
 // projectColumnCount 是项目表的列数，用于生成 INSERT 占位符。
-const projectColumnCount = 12
+const projectColumnCount = 13
 
 // projectStore 实现 storage.ProjectStore。
 //
@@ -49,6 +49,7 @@ func (s projectStore) CreateProject(ctx context.Context, project domain.Project)
 		nullIfBlank(project.EnvironmentVersion),
 		project.EffectiveWorkDir(),
 		caches,
+		nullIfBlank(project.DefaultHostID),
 		toMillis(project.CreatedAt),
 		toMillis(project.UpdatedAt),
 		toMillisPtr(project.DeletedAt),
@@ -74,7 +75,7 @@ func (s projectStore) UpdateProject(ctx context.Context, project domain.Project)
 	const statement = `
 UPDATE projects SET
 	name = ?, repository_url = ?, base_branch = ?, env_type = ?, env_name = ?,
-	env_version = ?, work_dir = ?, caches_json = ?, updated_at = ?
+	env_version = ?, work_dir = ?, caches_json = ?, default_host_id = ?, updated_at = ?
 WHERE id = ? AND deleted_at IS NULL`
 	result, err := s.q.ExecContext(
 		ctx,
@@ -87,6 +88,7 @@ WHERE id = ? AND deleted_at IS NULL`
 		nullIfBlank(project.EnvironmentVersion),
 		project.EffectiveWorkDir(),
 		caches,
+		nullIfBlank(project.DefaultHostID),
 		toMillis(project.UpdatedAt),
 		project.ID,
 	)
@@ -192,9 +194,12 @@ func scanProject(row projectScanner) (domain.Project, error) {
 		envVersion sql.NullString
 		workDir    string
 		caches     string
-		createdAt  int64
-		updatedAt  int64
-		deletedAt  sql.NullInt64
+		// defaultHostID 用 NULL 表达"未设置默认执行节点"，与空字符串严格区分：
+		// 读取层不得把 NULL 映射成某个节点标识。
+		defaultHostID sql.NullString
+		createdAt     int64
+		updatedAt     int64
+		deletedAt     sql.NullInt64
 	)
 	if err := row.Scan(
 		&id,
@@ -206,6 +211,7 @@ func scanProject(row projectScanner) (domain.Project, error) {
 		&envVersion,
 		&workDir,
 		&caches,
+		&defaultHostID,
 		&createdAt,
 		&updatedAt,
 		&deletedAt,
@@ -235,6 +241,9 @@ func scanProject(row projectScanner) (domain.Project, error) {
 		},
 		RepositoryURL: repository,
 		BaseBranch:    baseBranch,
+		// NULL 还原为空值，表示项目没有默认执行节点；已不存在的节点标识原样保留，
+		// 使项目仍可打开并清除或重新选择。
+		DefaultHostID: defaultHostID.String,
 		DeletedAt:     fromMillisPtr(deletedAt),
 	}, nil
 }

@@ -45,6 +45,11 @@ type ProjectResponse struct {
 	Caches []string `json:"caches"`
 	// WorkDir 是生效的容器内项目工作目录。
 	WorkDir string `json:"work_dir"`
+	// DefaultHostID 是项目默认执行节点标识；null 表示没有默认执行节点。
+	//
+	// 未设置与"某个真实节点标识"必须可区分，因此这里使用指针而不是空字符串；
+	// 该字段只是配置偏好，不代表节点当前可用或已通过环境预检。
+	DefaultHostID *string `json:"default_host_id"`
 	// CreatedAt 是项目创建时间。
 	CreatedAt time.Time `json:"created_at"`
 	// UpdatedAt 是项目最后更新时间。
@@ -79,6 +84,11 @@ type CreateProjectRequest struct {
 	Caches []string `json:"caches"`
 	// WorkDir 是容器内项目工作目录，空值使用默认目录。
 	WorkDir string `json:"work_dir"`
+	// DefaultHostID 是默认执行节点标识，可空；省略或空字符串表示不设置默认节点。
+	//
+	// 给出时必须指向存在且未被逻辑删除的执行节点，否则返回 400；服务端不会把不存在
+	// 的标识写进项目配置，也不会替调用方挑选一个节点。
+	DefaultHostID string `json:"default_host_id"`
 }
 
 // UpdateProjectRequest 是修改项目的请求体。
@@ -94,6 +104,12 @@ type UpdateProjectRequest struct {
 	EnvironmentVersion string   `json:"environment_version"`
 	Caches             []string `json:"caches"`
 	WorkDir            string   `json:"work_dir"`
+	// DefaultHostID 是默认执行节点标识。
+	//
+	// 更新是整体替换：省略该字段与传空字符串都表示清除默认节点，服务端不会保留
+	// 更新前的旧节点。给出新的节点标识时必须指向存在且未被逻辑删除的执行节点；
+	// 与项目当前已保存的取值相同则原样保留，使节点下线后项目仍可编辑其它配置。
+	DefaultHostID string `json:"default_host_id"`
 }
 
 // projectHandler 处理项目接口请求。
@@ -218,6 +234,7 @@ func (h *projectHandler) create(w http.ResponseWriter, r *http.Request) {
 		EnvironmentVersion: body.EnvironmentVersion,
 		Caches:             body.Caches,
 		WorkDir:            body.WorkDir,
+		DefaultHostID:      body.DefaultHostID,
 	})
 	if err != nil {
 		h.writeServiceError(w, r, err)
@@ -240,6 +257,7 @@ func (h *projectHandler) update(w http.ResponseWriter, r *http.Request, projectI
 		EnvironmentVersion: body.EnvironmentVersion,
 		Caches:             body.Caches,
 		WorkDir:            body.WorkDir,
+		DefaultHostID:      body.DefaultHostID,
 	})
 	if err != nil {
 		h.writeServiceError(w, r, err)
@@ -274,9 +292,22 @@ func projectResponse(project domain.Project) ProjectResponse {
 		EnvironmentVersion: project.EnvironmentVersion,
 		Caches:             caches,
 		WorkDir:            project.EffectiveWorkDir(),
-		CreatedAt:          project.CreatedAt,
-		UpdatedAt:          project.UpdatedAt,
+		// 没有默认执行节点时输出 null：客户端必须能区分"未设置"与某个真实节点标识。
+		DefaultHostID: optionalTrimmed(project.DefaultHostID),
+		CreatedAt:     project.CreatedAt,
+		UpdatedAt:     project.UpdatedAt,
 	}
+}
+
+// optionalTrimmed 把可空文本转换为 JSON 可表达的指针：空白视为未设置。
+//
+// 用于必须区分"没有值"与"某个真实取值"的字段，避免用空字符串冒充真实标识。
+func optionalTrimmed(value string) *string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	return &trimmed
 }
 
 // writeServiceError 把项目服务错误映射为统一错误响应。
