@@ -4,7 +4,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/domain"
@@ -102,43 +101,17 @@ type codeRecoveryHandler struct {
 
 // newCodeRecoveryHandler 构造处理器。
 //
-// 两个能力都缺失时返回 nil：接口随后返回 503，而不是伪造空结论。
+// 两个能力各自独立装配：核验与续跑资格分别返回"核验服务未初始化"与"续跑资格
+// 服务未初始化"，只有两者都缺失时才由路由前置检查统一返回 503。
 func newCodeRecoveryHandler(
 	containers *app.ContainerService,
 	eligibility *app.ResumeEligibilityService,
 	logger *slog.Logger,
 ) *codeRecoveryHandler {
-	if containers == nil && eligibility == nil {
-		return nil
-	}
 	return &codeRecoveryHandler{
 		containers:  containers,
 		eligibility: eligibility,
 		logger:      logger,
-	}
-}
-
-// serveCodeRecovery 分发任务下代码保存核验与续跑资格请求。
-func (rt *router) serveCodeRecovery(w http.ResponseWriter, r *http.Request) {
-	handler := newCodeRecoveryHandler(rt.containers, rt.resumeEligibility, rt.logger)
-	if handler == nil {
-		writeError(
-			w,
-			r,
-			rt.logger,
-			http.StatusServiceUnavailable,
-			CodeInternal,
-			"代码保存恢复服务未初始化",
-		)
-		return
-	}
-	switch {
-	case matchActionPath(r.URL.Path, resumeEligibilitySegment):
-		handler.serveEligibility(w, r)
-	case matchSubtasksPath(r.URL.Path, codeSaveVerifySegment):
-		handler.verify(w, r)
-	default:
-		writeError(w, r, rt.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
 	}
 }
 
@@ -147,22 +120,12 @@ func (rt *router) serveCodeRecovery(w http.ResponseWriter, r *http.Request) {
 // 该入口与 CLI 的 `agentflow code verify` 语义完全一致：只读核验、幂等、不改状态机。
 // 它不提交、不推送、不合并，也不删除或接管容器。
 func (h *codeRecoveryHandler) verify(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		writeError(w, r, h.logger, http.StatusMethodNotAllowed, CodeMethodNotAllowed,
-			"该接口只支持 POST 请求")
-		return
-	}
 	if h.containers == nil {
 		writeError(w, r, h.logger, http.StatusServiceUnavailable, CodeInternal,
 			"代码保存核验服务未初始化")
 		return
 	}
-	recordID, ok := nestedPathID(r.URL.Path, codeSaveVerifySegment)
-	if !ok {
-		writeError(w, r, h.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
-		return
-	}
+	recordID := pathID(r, paramRecordID)
 	var body CodeSaveVerifyRequest
 	if !decodeOptionalJSONBody(w, r, h.logger, &body) {
 		return
@@ -196,22 +159,12 @@ type CodeSaveVerifyRequest struct {
 
 // serveEligibility 处理 GET /api/v1/tasks/{taskID}/resume-eligibility。
 func (h *codeRecoveryHandler) serveEligibility(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, HEAD")
-		writeError(w, r, h.logger, http.StatusMethodNotAllowed, CodeMethodNotAllowed,
-			"该接口只支持 GET 请求")
-		return
-	}
 	if h.eligibility == nil {
 		writeError(w, r, h.logger, http.StatusServiceUnavailable, CodeInternal,
 			"续跑资格服务未初始化")
 		return
 	}
-	taskID, ok := actionTaskID(r.URL.Path, resumeEligibilitySegment)
-	if !ok {
-		writeError(w, r, h.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
-		return
-	}
+	taskID := pathID(r, paramTaskID)
 	result, err := h.eligibility.Get(r.Context(), taskID)
 	if err != nil {
 		status := http.StatusInternalServerError
@@ -309,40 +262,4 @@ func resumeEligibilityResponse(result app.ResumeEligibility) ResumeEligibilityRe
 		})
 	}
 	return response
-}
-
-// matchSubtasksPath 判断路径是否形如 {taskID}/{segment}/{id}/{action}。
-func matchSubtasksPath(path, action string) bool {
-	_, ok := nestedPathID(path, action)
-	return ok
-}
-
-// nestedPathID 解析 {taskID}/{segment}/{id}/{action} 形状的路径。
-//
-// 它只返回记录标识：任务标识由记录本身校验归属，接口不接受"任意记录的任意任务"。
-func nestedPathID(path, action string) (string, bool) {
-	remainder := strings.TrimPrefix(path, taskPathPrefix)
-	if remainder == path {
-		return "", false
-	}
-	segments := splitPathSegments(remainder)
-	if len(segments) != 4 || segments[3] != action {
-		return "", false
-	}
-	if !validTaskPathID(segments[0]) || !validTaskPathID(segments[2]) {
-		return "", false
-	}
-	return segments[2], true
-}
-
-// isCodeRecoveryPath 判断路径是否属于代码保存恢复接口。
-//
-// 判定按路径段进行：`/api/v1/tasks/{id}/resume-eligibility` 与
-// `/api/v1/tasks/{id}/code-saves/{recordID}/verify-code-save` 两种形状必须与
-// 任务详情、其他任务子资源区分开。
-func isCodeRecoveryPath(path string) bool {
-	if matchActionPath(path, resumeEligibilitySegment) {
-		return true
-	}
-	return matchSubtasksPath(path, codeSaveVerifySegment)
 }

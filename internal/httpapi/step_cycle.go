@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/lingting/agentflow/internal/app"
@@ -42,23 +41,9 @@ type OpenRepairCycleResponse struct {
 //
 // 该入口只登记预算作用域，不启动任何 Agent 调用：开启成功后仍需通过
 // execute-and-validate 执行。这样"重置预算"与"执行"是两个可审计的独立动作。
-func (h *stepExecutionHandler) serveOpenRepairCycle(
-	w http.ResponseWriter,
-	r *http.Request,
-	taskID, stepID string,
-) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		writeError(
-			w,
-			r,
-			h.logger,
-			http.StatusMethodNotAllowed,
-			CodeMethodNotAllowed,
-			"该接口只支持 POST 请求",
-		)
-		return
-	}
+func (h *stepExecutionHandler) serveOpenRepairCycle(w http.ResponseWriter, r *http.Request) {
+	taskID := pathID(r, paramTaskID)
+	stepID := pathID(r, paramStepID)
 	if h.workflow == nil {
 		writeError(
 			w,
@@ -87,28 +72,6 @@ func (h *stepExecutionHandler) serveOpenRepairCycle(
 		PreviousConsumed: result.PreviousConsumed,
 		OpenedAt:         result.OpenedAt,
 	})
-}
-
-// parseOpenRepairCyclePath 判断路径是否指向"显式开启执行周期"动作。
-//
-// 只有 {taskID}/steps/{stepID}/open-repair-cycle 这一种形状成立；其余形状返回
-// false，由执行记录查询或任务处理器给出各自的 404 / 405 语义。
-func parseOpenRepairCyclePath(path string) (taskID, stepID string, ok bool) {
-	remainder := strings.TrimPrefix(path, taskPathPrefix)
-	if remainder == path {
-		return "", "", false
-	}
-	segments := splitPathSegments(remainder)
-	if len(segments) != 4 {
-		return "", "", false
-	}
-	if segments[1] != stepsSegment || segments[3] != openRepairCycleSegment {
-		return "", "", false
-	}
-	if !validTaskPathID(segments[0]) || !validTaskPathID(segments[2]) {
-		return "", "", false
-	}
-	return segments[0], segments[2], true
 }
 
 // RepairCycleEligibilityResponse 是"能否开启新的执行周期"的只读结论。
@@ -153,23 +116,9 @@ type RepairCycleEligibilityResponse struct {
 //
 // 只读：不登记周期、不结束周期、不写事件、不改任务或步骤状态、不领取任务租约、
 // 不启动 Agent，也不产生任何远程副作用。写操作仍然只有 open-repair-cycle。
-func (h *stepExecutionHandler) serveRepairCycleEligibility(
-	w http.ResponseWriter,
-	r *http.Request,
-	taskID, stepID string,
-) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, HEAD")
-		writeError(
-			w,
-			r,
-			h.logger,
-			http.StatusMethodNotAllowed,
-			CodeMethodNotAllowed,
-			"该接口只支持 GET 请求",
-		)
-		return
-	}
+func (h *stepExecutionHandler) serveRepairCycleEligibility(w http.ResponseWriter, r *http.Request) {
+	taskID := pathID(r, paramTaskID)
+	stepID := pathID(r, paramStepID)
 	if h.workflow == nil {
 		writeError(
 			w,
@@ -209,26 +158,4 @@ func (h *stepExecutionHandler) serveRepairCycleEligibility(
 		RemainingAttempts: result.RemainingAttempts,
 		Attempts:          result.Attempts,
 	})
-}
-
-// parseRepairCycleEligibilityPath 判断路径是否指向执行周期资格查询。
-//
-// 只有 {taskID}/steps/{stepID}/repair-cycle-eligibility 这一种形状成立；其余形状
-// 返回 false，由执行记录查询或任务处理器给出各自的 404 / 405 语义。
-func parseRepairCycleEligibilityPath(path string) (taskID, stepID string, ok bool) {
-	remainder := strings.TrimPrefix(path, taskPathPrefix)
-	if remainder == path {
-		return "", "", false
-	}
-	segments := splitPathSegments(remainder)
-	if len(segments) != 4 {
-		return "", "", false
-	}
-	if segments[1] != stepsSegment || segments[3] != repairCycleEligibilitySegment {
-		return "", "", false
-	}
-	if !validTaskPathID(segments[0]) || !validTaskPathID(segments[2]) {
-		return "", "", false
-	}
-	return segments[0], segments[2], true
 }

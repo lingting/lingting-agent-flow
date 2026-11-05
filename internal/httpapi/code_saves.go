@@ -117,59 +117,18 @@ func newCodeSaveListHandler(
 	return &codeSaveListHandler{queries: queries, logger: logger}
 }
 
-// serveCodeSaveList 分发任务下代码保存记录请求。
-func (rt *router) serveCodeSaveList(w http.ResponseWriter, r *http.Request) {
-	handler := newCodeSaveListHandler(rt.codeSaves, rt.logger)
-	taskID, ok := actionTaskID(r.URL.Path, codeSavesSegment)
-	if !ok {
-		writeError(w, r, rt.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
-		return
-	}
-	if handler.queries == nil {
-		writeError(
-			w,
-			r,
-			rt.logger,
-			http.StatusServiceUnavailable,
-			CodeInternal,
-			"代码保存记录查询服务未初始化",
-		)
-		return
-	}
-	handler.list(w, r, taskID)
-}
-
 // list 处理 GET /api/v1/tasks/{taskID}/code-saves。
 //
 // 只读：不建立 SSH / Docker 连接、不核验或处置容器、不执行 Git 命令、不修改代码
 // 保存记录、不推进任务状态，也不触发核验或恢复动作。
-func (h *codeSaveListHandler) list(w http.ResponseWriter, r *http.Request, taskID string) {
-	if !h.allowGet(w, r) {
-		return
-	}
+func (h *codeSaveListHandler) list(w http.ResponseWriter, r *http.Request) {
+	taskID := pathID(r, paramTaskID)
 	records, err := h.queries.ListByTask(r.Context(), taskID)
 	if err != nil {
 		h.writeServiceError(w, r, err)
 		return
 	}
 	writeJSON(w, r, h.logger, http.StatusOK, codeSaveRecordListResponse(records))
-}
-
-// allowGet 校验请求方法，不满足时写出 405 并返回 false。
-func (h *codeSaveListHandler) allowGet(w http.ResponseWriter, r *http.Request) bool {
-	if r.Method == http.MethodGet || r.Method == http.MethodHead {
-		return true
-	}
-	w.Header().Set("Allow", "GET, HEAD")
-	writeError(
-		w,
-		r,
-		h.logger,
-		http.StatusMethodNotAllowed,
-		CodeMethodNotAllowed,
-		"该接口只支持 GET 请求",
-	)
-	return false
 }
 
 // writeServiceError 把应用层错误映射为统一错误响应。
@@ -254,12 +213,4 @@ func codeSaveRecordListEntry(record domain.CodeSaveRecord) CodeSaveRecordListEnt
 		PersistError:          record.PersistError,
 		RecoveryStatus:        record.RecoveryStatus.Normalized().String(),
 	}
-}
-
-// isCodeSaveListPath 判断路径是否指向任务下的代码保存记录列表。
-//
-// 判定按路径段形状进行：只有 `{taskID}/code-saves` 两段属于本接口，
-// `{taskID}/code-saves/{recordID}/verify-code-save` 仍由代码保存恢复处理器处理。
-func isCodeSaveListPath(path string) bool {
-	return matchActionPath(path, codeSavesSegment)
 }

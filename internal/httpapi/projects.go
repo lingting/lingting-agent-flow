@@ -17,8 +17,6 @@ import (
 const (
 	// PathProjects 是项目集合路径。
 	PathProjects = APIPrefix + "/projects"
-	// projectPathPrefix 是单项目路径前缀，实际路径为 {projectPathPrefix}{projectID}。
-	projectPathPrefix = PathProjects + "/"
 )
 
 // maxProjectRequestBytes 是项目请求体的最大字节数。
@@ -126,69 +124,6 @@ func newProjectHandler(projects *app.ProjectService, logger *slog.Logger) *proje
 	return &projectHandler{projects: projects, logger: logger}
 }
 
-// serve 分发项目集合路径与单项目路径的请求。
-//
-// 项目服务未初始化时返回 503：伪造空列表会让调用方以为确实没有项目，而任务又
-// 必须关联项目，最终表现为"建不出任务却看不出原因"。
-func (h *projectHandler) serve(w http.ResponseWriter, r *http.Request) {
-	if h.projects == nil {
-		writeError(w, r, h.logger, http.StatusServiceUnavailable, CodeInternal, "项目服务未初始化")
-		return
-	}
-	if r.URL.Path == PathProjects {
-		switch r.Method {
-		case http.MethodGet, http.MethodHead:
-			h.list(w, r)
-		case http.MethodPost:
-			h.create(w, r)
-		default:
-			w.Header().Set("Allow", "GET, HEAD, POST")
-			writeError(
-				w,
-				r,
-				h.logger,
-				http.StatusMethodNotAllowed,
-				CodeMethodNotAllowed,
-				"该接口只支持 GET 与 POST 请求",
-			)
-		}
-		return
-	}
-	remainder := strings.TrimPrefix(r.URL.Path, projectPathPrefix)
-	if remainder == r.URL.Path || strings.TrimSpace(remainder) == "" {
-		writeError(w, r, h.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
-		return
-	}
-	if !validProjectPathID(remainder) {
-		writeError(w, r, h.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
-		return
-	}
-	switch r.Method {
-	case http.MethodGet, http.MethodHead:
-		h.detail(w, r, remainder)
-	case http.MethodPut:
-		h.update(w, r, remainder)
-	case http.MethodDelete:
-		h.remove(w, r, remainder)
-	default:
-		w.Header().Set("Allow", "GET, HEAD, PUT, DELETE")
-		writeError(
-			w,
-			r,
-			h.logger,
-			http.StatusMethodNotAllowed,
-			CodeMethodNotAllowed,
-			"该接口只支持 GET、PUT 与 DELETE 请求",
-		)
-	}
-}
-
-// validProjectPathID 校验路径中的项目标识不含多余路径段。
-func validProjectPathID(raw string) bool {
-	trimmed := strings.TrimSpace(raw)
-	return trimmed != "" && !strings.Contains(trimmed, "/")
-}
-
 // list 处理 GET /api/v1/projects。
 func (h *projectHandler) list(w http.ResponseWriter, r *http.Request) {
 	projects, err := h.projects.List(r.Context())
@@ -210,7 +145,8 @@ func (h *projectHandler) list(w http.ResponseWriter, r *http.Request) {
 }
 
 // detail 处理 GET /api/v1/projects/{projectID}。
-func (h *projectHandler) detail(w http.ResponseWriter, r *http.Request, projectID string) {
+func (h *projectHandler) detail(w http.ResponseWriter, r *http.Request) {
+	projectID := pathID(r, paramProjectID)
 	project, err := h.projects.Get(r.Context(), projectID)
 	if err != nil {
 		h.writeServiceError(w, r, err)
@@ -244,7 +180,8 @@ func (h *projectHandler) create(w http.ResponseWriter, r *http.Request) {
 }
 
 // update 处理 PUT /api/v1/projects/{projectID}。
-func (h *projectHandler) update(w http.ResponseWriter, r *http.Request, projectID string) {
+func (h *projectHandler) update(w http.ResponseWriter, r *http.Request) {
+	projectID := pathID(r, paramProjectID)
 	var body UpdateProjectRequest
 	if !decodeProjectJSONBody(w, r, h.logger, &body) {
 		return
@@ -269,7 +206,8 @@ func (h *projectHandler) update(w http.ResponseWriter, r *http.Request, projectI
 // remove 处理 DELETE /api/v1/projects/{projectID}。
 //
 // 删除是逻辑删除；成功时返回 204，不返回响应体。历史任务配置不会因此改变。
-func (h *projectHandler) remove(w http.ResponseWriter, r *http.Request, projectID string) {
+func (h *projectHandler) remove(w http.ResponseWriter, r *http.Request) {
+	projectID := pathID(r, paramProjectID)
 	if err := h.projects.Delete(r.Context(), projectID); err != nil {
 		h.writeServiceError(w, r, err)
 		return

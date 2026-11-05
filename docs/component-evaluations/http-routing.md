@@ -1,10 +1,13 @@
 # 组件评估：HTTP 服务、API 路由与静态资源服务
 
-> **状态：审计结论，未实施。**
-> 本轮没有修改任何生产代码、前端代码、`go.mod` / `go.sum` 或现有测试，没有引入 Chi 或任何其他
-> 第三方组件，没有运行任何测试。本文只是替换前的可行性审计记录，结论见第 13 节。
+> **状态：已实施（标准库 ServeMux 路由表）。**
+> 第 1–13 节是替换前的审计结论，保留原文作为判断依据；第 14 节是最小范围建议，第 15 节是重新评估的
+> 触发条件。实际落地内容、删除的旧实现、行为差异与验证情况见 [第 16 节](#16-实施记录)。
+> 实施没有引入任何第三方组件，没有修改 `go.mod` / `go.sum`、前端代码、HTTP Server 生命周期、
+> WebUI 静态资源行为、Request ID 与 SSE 协议，也没有运行任何测试。
 
 - 审计时间：2026-11-05
+- 实施基线：`1178a92aafcdf07cf749177d832da61ef60b09ad`（实施在未提交的工作区上完成，未提交、未推送）
 - 仓库 HEAD：`b00c8b71aaf1a51dfcfa4b5e72a4b0caa8c0625b`（`:fire: 移除预见dockerfile源的操作`）
 - 审计对象：`internal/httpapi`、`internal/httpserver`、`internal/webui`、`internal/server`（HTTP 装配部分）、
   `internal/lifecycle`（仅职责边界）
@@ -19,6 +22,14 @@
 
 ## 0. 一条影响审计结论的外部指令
 
+> **本节的前提在实施阶段已被撤回，不再有效。** 审计时按用户指令允许破坏 SSE，于是本文部分结论按
+> 「SSE 不再作为硬约束」推导。本次实施采用另一条明确约束：**SSE 是当前正式确定的功能，必须完整保留**
+> （`http.Flusher`、帧格式、`Last-Event-ID` 游标、心跳与补发、请求 `Context` 取消、Shutdown 通知、
+> 慢客户端与写入失败处理全部不变，且不得引入会替换 `ResponseWriter` 的中间件包装）。实际落地内容以
+> 第 16 节为准；下文凡标注「SSE 可破坏」的推导都不适用于本次实施。
+
+以下为审计时的原始前提，保留原文以便复核当时的判断依据：
+
 本次审计按用户指令采用以下前提，与 [frontend.md](../frontend.md) 现有的 SSE 描述存在冲突，冲突时以该
 指令为准：
 
@@ -31,7 +42,7 @@
 - 但本轮审计只评估「路由 / 静态资源 / Server 生命周期 / 中间件」的替换可行性；SSE → WebSocket 是独立的
   协议迁移，涉及前端改动与新增依赖，不在本轮实施范围内（见 8.10、12.3）。
 
-本文其余部分描述的是**当前代码的真实行为**（仍然是 SSE）。凡结论依赖「SSE 可破坏」的地方都单独标注。
+审计当时描述的是**当时的代码真实行为**（仍然是 SSE）。凡结论依赖「SSE 可破坏」的地方都单独标注。
 
 ## 1. 结论摘要
 
@@ -618,7 +629,9 @@ Mount / 中间件栈 / RouteContext）本项目一个都不使用；它相同的
 
 ## 14. 如果实施，最小范围
 
-仅作为后续立项的输入，本轮未实施。
+本节是最初的最小范围建议（落笔时未实施），实际实现见第 16 节：`routes.go` 的已经落地的记录结构与
+下面的草稿有两处差别——405 文案字段命名为 `methodNotAllowed`，`serviceFirst` 布尔改为可组合的
+`guard` 前置检查函数（同一条记录既能表达"先查服务"，也能表达"先查路径取值"）。
 
 ### 14.1 新增
 
@@ -674,3 +687,126 @@ type route struct {
 5. Chi 若在未来版本提供「默认 JSON 404/405 + 与标准库一致的按段解码语义 + `GET` 自动匹配 `HEAD`」，
    重新评估 C 方案；当前 v5.5.0 不满足其中任意一项。
 6. Go 标准库若新增可定制的 `ServeMux` NotFound / MethodNotAllowed 钩子，B 方案的适配器可以进一步收缩。
+
+## 16. 实施记录
+
+本节记录实际落地的事实，取代第 14 节的建议稿。
+
+### 16.1 最终采用的方案
+
+- **API 路由：标准库 `http.ServeMux` + 声明式路由表**（`internal/httpapi/routes.go`）。
+  全部 API 路由在一处注册，动态段用 `{taskID}` / `{stepID}` 等通配符表达，路径参数只经
+  `Request.PathValue` 读取。
+- HTTP Server（`internal/httpserver`）、WebUI 静态资源服务（`internal/webui`）、Request ID
+  （`internal/httpapi/requestid.go`）、SSE（`internal/httpapi/event_stream.go`）全部保持原样。
+- 没有引入 Chi 或任何第三方 Router，`go.mod` / `go.sum` 未改动。
+
+### 16.2 路由表的结构与注册方式
+
+路由记录 `apiRoute` 表达四件事：路径模式、允许的方法与其处理函数、405 的 `Allow` 头原文与错误消息
+原文、以及必须在方法判定之前完成的 `guard` 前置检查。注册规则：
+
+- 每个允许的方法注册一条 `"METHOD " + pattern` 模式；`GET` 模式由标准库同时匹配 `HEAD`，**不重复注册
+  `HEAD`**。
+- 同一 pattern 再注册一条**无方法**模式作为兜底：先执行 `guard`，然后写统一 JSON 405。这样
+  `ServeMux` 自带的纯文本 404 / 405 永远不会对外。
+- 兜底 404 显式注册 `/api`、`/api/`，并保留 `/` 兜住其余直接进入 API 处理器的请求；外层
+  `internal/httpserver/routes.go` 的 `IsAPIPath` 分叉保持不变，`/apiary`、`/apix` 仍按页面路径处理。
+- 注册冲突由 `ServeMux` 直接 panic（实现错误），没有 `recover` 包裹。
+
+`guard` 承担两类原有的"方法判定之前"的行为，因此顺序语义被完整保留：
+
+- **先查服务**：`roles`、`projects`、`hosts`、`tasks` 及 `cancel`、执行记录、事件时间线与实时流、
+  `code-saves` 列表与恢复、`start`、`retry`、工作流与计划生成。服务未装配时任何方法都返回 503。
+- **先查方法**：`health`、`system/info`、`settings/config`、全部 `environments` 路由，以及
+  `execute`、`execute-steps`、`execute-and-validate`、`open-repair-cycle`、
+  `repair-cycle-eligibility`、`validate`、`initialize-code`、容器查询与处置。这些接口的 `guard` 只做
+  路径取值校验，服务检查仍留在处理函数内部。
+- 路径取值校验（`validPathID`）也放在 `guard` 里，因此"非法标识 404"仍然先于"方法不支持 405"，与集中
+  路由之前的顺序一致。
+
+### 16.3 迁移的路由范围
+
+覆盖全部现有接口：`health`、`system/info`、`settings/config`、`roles`（集合 + 单角色）、
+`projects`（集合 + 单项目）、`hosts`（集合 + 单节点 + `validate`）、`environments`（集合、`init`、
+环境详情、`versions`、`build`、版本详情、`dockerfile`、`build-log`、`build-status`）、`tasks`（集合、
+详情、`cancel`）、`start`、`retry`、`retry-eligibility`、`resume-eligibility`、`code-saves`、
+`code-saves/{recordID}/verify-code-save`、`containers`、`containers/{containerID}/delete|detach`、
+`events`、`events/stream`、`sessions/{sessionID}`、`steps`、`steps/{stepID}/attempts`、
+`attempts/{attemptID}/sessions`、`steps/{stepID}/validations`、
+`validations/{runID}/feedback`、`steps/{stepID}/execute`、`steps/{stepID}/execute-and-validate`、
+`steps/{stepID}/open-repair-cycle`、`steps/{stepID}/repair-cycle-eligibility`、
+`steps/{stepID}/repair-cycles`、`attempts/{attemptID}/validate`、
+`attempts/{attemptID}/initialize-code`、`execute-steps`、`plan`、`execute-workflow`、
+`cancel-workflow`、`resume-workflow`、`workflow`。
+
+### 16.4 删除的旧实现
+
+- `router.tasksHandler` 的顺序形状分发（含 20 个判定与兜底），以及 `isWorkflowPath`、
+  `isExecutionRecordPath`。
+- `router.environmentsHandler` / `hostsHandler` / `rolesHandler` / `projectsHandler` 等纯转发包装，以及
+  `router.allowGet`。
+- 全部路径形状解析函数：`parseEnvironmentPath`（含 `environmentPathKind` / `environmentPath`）、
+  `parseTaskEventsPath`、`parseTaskEventStreamPath`、`parseRepairCyclesPath`、
+  `parseStepExecutePath`、`parseExecuteStepsPath`、`parseExecuteAndValidatePath`、
+  `parseOpenRepairCyclePath`、`parseRepairCycleEligibilityPath`、`parseValidatePath`、
+  `parseInitializeCodePath`、`parseTaskContainerListPath`、`parseContainerDisposalPath`、
+  `roleIDFromPath`、`actionTaskID`、`nestedPathID`、`splitPathSegments`。
+- 形状判定函数：`isTaskLaunchPath`、`isTaskRetryPath`、`isTaskContainerPath`、`isCodeSaveListPath`、
+  `isCodeRecoveryPath`、`matchActionPath`、`matchStatusPath`、`matchSubtasksPath`。
+- 三份重复的标识校验 `validTaskPathID` / `validProjectPathID` / `validHostPathID`，合并为
+  `validPathID`（保留"空标识与含 `/` 的取值无效"语义），并新增 `pathID` 统一去掉段两侧空白。
+  `pathID` 与集中路由之前 `splitPathSegments` 的裁剪语义对齐，避免同一取值在校验与业务之间出现两种形态。
+- 各处理器内部被集中路由取代的重复方法校验（`allowMethod` / `allowMethods` / `allowGet` 及
+  内联的 `r.Method` 判断），以及 `serveCodeSaveList` / `serveCodeRecovery` / `serveTaskLaunch` /
+  `serveTaskRetry` / `serveTaskContainers` / `serveWorkflow` / `servePlan` / `serveTaskEvents` /
+  `serveStepRepairCycles` / `serveTaskEventStream` 等逐请求重建处理器的分发函数。
+- 保留并继续使用的：`parseEnvironmentVersionNumber`、`environmentRefFromSegments`（业务取值校验，
+  非法取值仍返回 400）、`parseEventStreamCursor`、`writeError` / `writeJSON` / `errorResponse`。
+
+### 16.5 404、405、Allow、HEAD 与依赖优先级
+
+- **JSON 405**：每条已知路径都由路由表兜底处理器给出 405 + `Allow` + 原有中文消息，全部经
+  `writeError` 输出，`Cache-Control: no-store` 与 `Content-Type` 不变。`Allow` 与消息逐条按改动前的
+  字面量保留，没有用格式化函数推导；`environments` 的 `"GET, HEAD"`（逗号+空格）与事件流的
+  `"GET"` + 「事件流只支持 GET 请求」都保持原样。
+- **JSON 404**：未知 `/api` 路径、`/api`、`/api/` 都返回 `CodeNotFound` + `接口不存在: <path>`。
+- **HEAD**：`GET` 模式由标准库同时匹配 HEAD，HEAD 仍走 GET 的处理逻辑，状态码、响应头与"无响应体"
+  语义不变（写出的 JSON 由 `net/http` 按 HEAD 丢弃）。事件流仍只接受真正的 GET：HEAD 落到同一处理函数
+  后被原有的方法判断拒绝为 405 + `Allow: GET`，与改动前一致。
+- **依赖优先级**：见 16.2 的两类 `guard`，逐条核对后保持"服务先于方法"与"方法先于服务"的原有归属。
+
+### 16.6 `%2F` 与未知子路径的归属（行为差异）
+
+- **`%2F`**：`ServeMux` 按编码后的路径段匹配，`%2F` 属于同一段，`PathValue` 返回解码后的 `a/b`。所有
+  标识类参数在 `guard` 里经 `validPathID` 校验，含 `/` 的取值按 `接口不存在` 返回 404，与集中路由之前
+  用解码后的 `r.URL.Path` 切分得到的 404 一致，解码后的取值不会进入业务服务。环境类型、名称与版本号仍
+  环境类型、名称与版本号同样先拒绝含 `/` 的取值（404），再走原有业务校验
+  （`environmentRefFromSegments` / `parseEnvironmentVersionNumber`），其他非法取值仍返回 400，没有被
+  改成 404。
+- **未知子路径**：`/api/v1/tasks/{taskID}/...` 下未注册的形状现在直接落到 JSON 404，不再因为任务服务
+  未初始化而被旧的顺序分发器提前拦截成 503。例如任务服务缺失时 `/api/v1/tasks/x/steps/y/unknown` 由
+  "503 任务服务未初始化"或"503 执行记录服务未初始化"改为 404。这是第 8.9 节记录的预期修正，只影响未知
+  形状；已注册接口在依赖缺失时仍返回各自的 503。
+- **重复斜杠与 `..`**：`ServeMux` 继续先做 `cleanPath` 并 301，与改动前一致（API 一直挂在 `ServeMux`
+  上），本次没有改变这一行为。
+
+### 16.7 保留的边界
+
+- **SSE**：`GET /api/v1/tasks/{taskID}/events/stream` 仍由原来的处理函数直接写 `http.ResponseWriter`，
+  路由表没有包装 `ResponseWriter`，`http.Flusher` 可用；帧格式、`Last-Event-ID` 游标、心跳与补发、
+  请求 `Context` 取消、`RegisterOnShutdown` + Shutdown 通道、慢客户端与写入失败处理都未改动。
+- **Request ID**：`withRequestID` 未改动（仍在最外层包裹整个 mux），继续使用加密随机数生成新标识、
+  不信任外部 `X-Request-Id`、在 Context 中注入同一个 ID，并让响应头与 JSON 错误体保持一致。
+- **WebUI 与 HTTP Server**：`internal/httpserver/server.go`、`internal/httpserver/routes.go`、
+  `internal/webui/*`、`internal/server/server.go` 未改动；静态资源缓存、MIME、nosniff、HEAD、
+  SPA 回退与缺失资源 404 全部不变。
+
+### 16.8 实际执行过的检查
+
+- 对 `internal/httpapi` 下改动的文件执行 `gofmt -w`，随后 `gofmt -l internal/httpapi/` 无输出。
+- `go build ./...`：通过，无输出。
+- `go vet ./...`：通过，无输出。
+- 人工阅读路由表与 `tests/unit/httpapi` 中与路径形状、404 / 405 / Allow / HEAD 相关的用例，逐条核对
+  路径集合、`Allow` 与消息原文。
+- **没有运行任何测试**（`go test` 与整个测试套件都没有执行），也没有新增或修改测试文件。

@@ -96,75 +96,21 @@ type containerHandler struct {
 	logger  *slog.Logger
 }
 
-// isTaskContainerPath 判断路径是否指向任务容器接口。
+// disposalRoute 返回只处置指定动作的处理函数。
 //
-// 判定按路径段形状进行：`{taskID}/containers`（2 段）与
-// `{taskID}/containers/{containerID}/{delete|detach}`（4 段）属于本接口；
-// 其余形状仍由任务处理器给出 404 / 405，不在这里抢占。
-func isTaskContainerPath(path string) bool {
-	_, ok := parseTaskContainerListPath(path)
-	if ok {
-		return true
+// delete 与 detach 是两个独立接口，动作由路由给出，不从请求内容推断。
+func (h *containerHandler) disposalRoute(action string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		h.dispose(w, r, action)
 	}
-	_, _, _, ok = parseContainerDisposalPath(path)
-	return ok
-}
-
-// parseTaskContainerListPath 解析 {taskID}/containers 形状的路径。
-func parseTaskContainerListPath(path string) (string, bool) {
-	taskID, ok := actionTaskID(path, containersSegment)
-	if !ok {
-		return "", false
-	}
-	return taskID, true
-}
-
-// parseContainerDisposalPath 解析 {taskID}/containers/{containerID}/{action} 形状的路径。
-func parseContainerDisposalPath(path string) (taskID, containerID, action string, ok bool) {
-	remainder := strings.TrimPrefix(path, taskPathPrefix)
-	if remainder == path {
-		return "", "", "", false
-	}
-	segments := splitPathSegments(remainder)
-	if len(segments) != 4 || segments[1] != containersSegment {
-		return "", "", "", false
-	}
-	action = segments[3]
-	if action != containerDeleteSegment && action != containerDetachSegment {
-		return "", "", "", false
-	}
-	if !validTaskPathID(segments[0]) || !validTaskPathID(segments[2]) {
-		return "", "", "", false
-	}
-	return segments[0], segments[2], action, true
-}
-
-// serveTaskContainers 分发任务容器的查询与处置请求。
-func (rt *router) serveTaskContainers(w http.ResponseWriter, r *http.Request) {
-	handler := &containerHandler{service: rt.taskContainers, logger: rt.logger}
-	if taskID, ok := parseTaskContainerListPath(r.URL.Path); ok {
-		handler.list(w, r, taskID)
-		return
-	}
-	taskID, containerID, action, ok := parseContainerDisposalPath(r.URL.Path)
-	if !ok {
-		writeError(w, r, rt.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
-		return
-	}
-	handler.dispose(w, r, taskID, containerID, action)
 }
 
 // list 处理 GET /api/v1/tasks/{taskID}/containers。
 //
 // 只读：不建立 SSH / Docker 会话、不修改记录、不推进任务状态。因此容器列表在
 // 服务缺少远程能力时仍然可用，返回的是数据库中的真实登记记录。
-func (h *containerHandler) list(w http.ResponseWriter, r *http.Request, taskID string) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, HEAD")
-		writeError(w, r, h.logger, http.StatusMethodNotAllowed, CodeMethodNotAllowed,
-			"该接口只支持 GET 请求")
-		return
-	}
+func (h *containerHandler) list(w http.ResponseWriter, r *http.Request) {
+	taskID := pathID(r, paramTaskID)
 	if h.service == nil {
 		writeError(w, r, h.logger, http.StatusServiceUnavailable, CodeInternal,
 			"任务容器服务未初始化")
@@ -182,17 +128,9 @@ func (h *containerHandler) list(w http.ResponseWriter, r *http.Request, taskID s
 //
 // 两个动作是两个独立接口，不存在"一个模糊的清理动作"：删除会删除容器（以及服务端
 // 规则允许清理的任务级临时资源），脱离管理只保留现场并放弃自动管理权。
-func (h *containerHandler) dispose(
-	w http.ResponseWriter,
-	r *http.Request,
-	taskID, containerID, action string,
-) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		writeError(w, r, h.logger, http.StatusMethodNotAllowed, CodeMethodNotAllowed,
-			"该接口只支持 POST 请求")
-		return
-	}
+func (h *containerHandler) dispose(w http.ResponseWriter, r *http.Request, action string) {
+	taskID := pathID(r, paramTaskID)
+	containerID := pathID(r, paramContainerID)
 	if h.service == nil {
 		writeError(w, r, h.logger, http.StatusServiceUnavailable, CodeInternal,
 			"任务容器服务未初始化")

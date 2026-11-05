@@ -18,10 +18,8 @@ import (
 const (
 	// PathHosts 是执行节点集合路径。
 	PathHosts = APIPrefix + "/hosts"
-	// hostPathPrefix 是单节点路径前缀，实际路径为 {hostPathPrefix}{hostID}。
-	hostPathPrefix = PathHosts + "/"
-	// hostValidateSuffix 是重新校验动作的子路径。
-	hostValidateSuffix = "/validate"
+	// hostValidateSegment 是重新校验动作的子路径段。
+	hostValidateSegment = "validate"
 )
 
 // maxHostRequestBytes 是执行节点请求体的最大字节数。
@@ -124,71 +122,6 @@ func newHostHandler(hosts *app.ExecutionHostService, logger *slog.Logger) *hostH
 	return &hostHandler{hosts: hosts, logger: logger}
 }
 
-// serve 分发执行节点集合路径与单节点路径的请求。
-func (h *hostHandler) serve(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == PathHosts {
-		switch r.Method {
-		case http.MethodGet, http.MethodHead:
-			h.list(w, r)
-		case http.MethodPost:
-			h.create(w, r)
-		default:
-			w.Header().Set("Allow", "GET, HEAD, POST")
-			writeError(
-				w,
-				r,
-				h.logger,
-				http.StatusMethodNotAllowed,
-				CodeMethodNotAllowed,
-				"该接口只支持 GET 与 POST 请求",
-			)
-		}
-		return
-	}
-	remainder := strings.TrimPrefix(r.URL.Path, hostPathPrefix)
-	if remainder == r.URL.Path || strings.TrimSpace(remainder) == "" {
-		writeError(w, r, h.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
-		return
-	}
-	if strings.HasSuffix(remainder, hostValidateSuffix) {
-		hostID := strings.TrimSuffix(remainder, hostValidateSuffix)
-		if !validHostPathID(hostID) {
-			writeError(w, r, h.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
-			return
-		}
-		h.validate(w, r, hostID)
-		return
-	}
-	if !validHostPathID(remainder) {
-		writeError(w, r, h.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
-		return
-	}
-	switch r.Method {
-	case http.MethodGet, http.MethodHead:
-		h.detail(w, r, remainder)
-	case http.MethodPatch, http.MethodPut:
-		h.update(w, r, remainder)
-	case http.MethodDelete:
-		h.remove(w, r, remainder)
-	default:
-		w.Header().Set("Allow", "GET, HEAD, PATCH, PUT, DELETE")
-		writeError(
-			w,
-			r,
-			h.logger,
-			http.StatusMethodNotAllowed,
-			CodeMethodNotAllowed,
-			"该接口只支持 GET、PATCH、PUT 与 DELETE 请求",
-		)
-	}
-}
-
-// validHostPathID 校验路径中的节点标识不含多余路径段。
-func validHostPathID(raw string) bool {
-	trimmed := strings.TrimSpace(raw)
-	return trimmed != "" && !strings.Contains(trimmed, "/")
-}
-
 // list 处理 GET /api/v1/hosts。
 func (h *hostHandler) list(w http.ResponseWriter, r *http.Request) {
 	hosts, err := h.hosts.List(r.Context())
@@ -204,7 +137,8 @@ func (h *hostHandler) list(w http.ResponseWriter, r *http.Request) {
 }
 
 // detail 处理 GET /api/v1/hosts/{hostID}。
-func (h *hostHandler) detail(w http.ResponseWriter, r *http.Request, hostID string) {
+func (h *hostHandler) detail(w http.ResponseWriter, r *http.Request) {
+	hostID := pathID(r, paramHostID)
 	host, err := h.hosts.Get(r.Context(), hostID)
 	if err != nil {
 		h.writeServiceError(w, r, err)
@@ -235,7 +169,8 @@ func (h *hostHandler) create(w http.ResponseWriter, r *http.Request) {
 }
 
 // update 处理 PATCH 与 PUT /api/v1/hosts/{hostID}。
-func (h *hostHandler) update(w http.ResponseWriter, r *http.Request, hostID string) {
+func (h *hostHandler) update(w http.ResponseWriter, r *http.Request) {
+	hostID := pathID(r, paramHostID)
 	var body UpdateHostRequest
 	if !decodeHostJSONBody(w, r, h.logger, &body) {
 		return
@@ -256,19 +191,8 @@ func (h *hostHandler) update(w http.ResponseWriter, r *http.Request, hostID stri
 // validate 处理 POST /api/v1/hosts/{hostID}/validate。
 //
 // 请求立即返回当前配置与 checking 状态，校验在后台服务中异步执行。
-func (h *hostHandler) validate(w http.ResponseWriter, r *http.Request, hostID string) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", "POST")
-		writeError(
-			w,
-			r,
-			h.logger,
-			http.StatusMethodNotAllowed,
-			CodeMethodNotAllowed,
-			"该接口只支持 POST 请求",
-		)
-		return
-	}
+func (h *hostHandler) validate(w http.ResponseWriter, r *http.Request) {
+	hostID := pathID(r, paramHostID)
 	host, err := h.hosts.Revalidate(r.Context(), hostID)
 	if err != nil {
 		h.writeServiceError(w, r, err)
@@ -280,7 +204,8 @@ func (h *hostHandler) validate(w http.ResponseWriter, r *http.Request, hostID st
 // remove 处理 DELETE /api/v1/hosts/{hostID}。
 //
 // 删除是逻辑删除；成功时返回 204，不返回响应体。
-func (h *hostHandler) remove(w http.ResponseWriter, r *http.Request, hostID string) {
+func (h *hostHandler) remove(w http.ResponseWriter, r *http.Request) {
+	hostID := pathID(r, paramHostID)
 	if _, err := h.hosts.Remove(r.Context(), hostID); err != nil {
 		h.writeServiceError(w, r, err)
 		return

@@ -67,26 +67,6 @@ type StartTaskResponse struct {
 	FinishedAt   time.Time `json:"finished_at,omitempty"`
 }
 
-// serveTaskLaunch 处理 POST /api/v1/tasks/{taskID}/start。
-//
-// 该入口是同步的：只有容器准备、计划生成与工作流启动三件事都得出真实结论后才写出
-// 响应。工作流本身在受生命周期管理的后台推进，因此调用方不能把 202 当作"已完成"。
-func (rt *router) serveTaskLaunch(w http.ResponseWriter, r *http.Request) {
-	handler := newTaskLaunchHandler(rt.taskLaunch, rt.taskLeases, rt.logger)
-	if handler == nil {
-		writeError(
-			w,
-			r,
-			rt.logger,
-			http.StatusServiceUnavailable,
-			CodeInternal,
-			"任务启动服务未初始化",
-		)
-		return
-	}
-	handler.start(w, r)
-}
-
 // taskLaunchHandler 处理统一任务启动接口。
 type taskLaunchHandler struct {
 	launch *app.TaskLaunchService
@@ -94,34 +74,22 @@ type taskLaunchHandler struct {
 	logger *slog.Logger
 }
 
-// newTaskLaunchHandler 构造统一启动接口处理器，服务未初始化时返回 nil。
+// newTaskLaunchHandler 构造统一启动接口处理器。
 //
 // 租约服务是必需依赖：没有任务租约就无法证明调用方持有该任务的执行权，启动流程
-// 会创建容器与调用 Planner，不能在没有所有权的情况下执行。
+// 会创建容器与调用 Planner，不能在没有所有权的情况下执行。依赖缺失时仍返回处理器，
+// 接口由路由前置检查统一给出 503。
 func newTaskLaunchHandler(
 	launch *app.TaskLaunchService,
 	leases *app.TaskLeaseService,
 	logger *slog.Logger,
 ) *taskLaunchHandler {
-	if launch == nil || leases == nil {
-		return nil
-	}
 	return &taskLaunchHandler{launch: launch, leases: leases, logger: logger}
 }
 
 // start 处理一次统一启动请求。
 func (h *taskLaunchHandler) start(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		writeError(w, r, h.logger, http.StatusMethodNotAllowed, CodeMethodNotAllowed,
-			"该接口只支持 POST 请求")
-		return
-	}
-	taskID, ok := actionTaskID(r.URL.Path, startSegment)
-	if !ok {
-		writeError(w, r, h.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
-		return
-	}
+	taskID := pathID(r, paramTaskID)
 	var body StartTaskRequest
 	if !decodeOptionalJSONBody(w, r, h.logger, &body) {
 		return
@@ -307,15 +275,6 @@ func (h *taskLaunchHandler) writeError(w http.ResponseWriter, r *http.Request, e
 		}
 	}
 	writeError(w, r, h.logger, status, code, message)
-}
-
-// isTaskLaunchPath 判断路径是否指向统一任务启动接口。
-//
-// 判定按路径段形状进行：只有 {taskID}/start 属于启动接口，其余形状仍由任务处理器
-// 处理，从而保持它们原有的 405 与 404 语义。
-func isTaskLaunchPath(path string) bool {
-	_, ok := actionTaskID(path, startSegment)
-	return ok
 }
 
 // taskLaunchOwner 生成一次显式启动的领取者标识。

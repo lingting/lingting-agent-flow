@@ -61,39 +61,12 @@ type PlanStepResponse struct {
 	RequiredChecks []string `json:"required_checks"`
 }
 
-// servePlan 处理 POST /api/v1/tasks/{taskID}/plan。
+// plan 处理 POST /api/v1/tasks/{taskID}/plan。
 //
 // 该入口是同步的：只有计划写入数据库或失败收敛完成后才写出响应。计划本身已由服务层
 // 持久化，因此即使响应写入失败，计划与任务状态也不会丢失。
-func (rt *router) servePlan(w http.ResponseWriter, r *http.Request) {
-	handler := newWorkflowHandler(rt.workflow, rt.taskLeases, rt.logger)
-	if handler == nil {
-		writeError(
-			w,
-			r,
-			rt.logger,
-			http.StatusServiceUnavailable,
-			CodeInternal,
-			"工作流编排服务未初始化",
-		)
-		return
-	}
-	handler.plan(w, r)
-}
-
-// plan 处理一次计划生成请求。
 func (h *workflowHandler) plan(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		writeError(w, r, h.logger, http.StatusMethodNotAllowed, CodeMethodNotAllowed,
-			"该接口只支持 POST 请求")
-		return
-	}
-	taskID, ok := actionTaskID(r.URL.Path, planSegment)
-	if !ok {
-		writeError(w, r, h.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
-		return
-	}
+	taskID := pathID(r, paramTaskID)
 	var body PlanRequest
 	if !decodeOptionalJSONBody(w, r, h.logger, &body) {
 		return

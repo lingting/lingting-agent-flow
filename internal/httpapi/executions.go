@@ -223,49 +223,9 @@ type executionHandler struct {
 	logger  *slog.Logger
 }
 
-// serve 按路径分发任务下的执行记录查询请求。
-//
-// 支持的只读查询路径：
-//   - {taskID}/steps
-//   - {taskID}/steps/{stepID}/attempts
-//   - {taskID}/steps/{stepID}/attempts/{attemptID}/sessions
-//   - {taskID}/steps/{stepID}/validations
-//   - {taskID}/steps/{stepID}/validations/{runID}/feedback
-//   - {taskID}/sessions/{sessionID}
-//
-// 其他形状一律按接口不存在处理：执行记录接口不提供任何写操作，因此不注册
-// POST、PATCH、DELETE 等入口。
-func (h *executionHandler) serve(w http.ResponseWriter, r *http.Request) {
-	segments := splitPathSegments(strings.TrimPrefix(r.URL.Path, taskPathPrefix))
-	switch {
-	case len(segments) == 2 && segments[1] == stepsSegment:
-		h.listSteps(w, r, segments[0])
-	case len(segments) == 4 && segments[1] == stepsSegment && segments[3] == attemptsSegment:
-		h.listAttempts(w, r, segments[0], segments[2])
-	case len(segments) == 6 &&
-		segments[1] == stepsSegment &&
-		segments[3] == attemptsSegment &&
-		segments[5] == sessionsSegment:
-		h.listSessions(w, r, segments[0], segments[2], segments[4])
-	case len(segments) == 6 &&
-		segments[1] == stepsSegment &&
-		segments[3] == validationsSegment &&
-		segments[5] == feedbackSegment:
-		h.getValidationFeedback(w, r, segments[0], segments[2], segments[4])
-	case len(segments) == 4 && segments[1] == stepsSegment && segments[3] == validationsSegment:
-		h.listValidations(w, r, segments[0], segments[2])
-	case len(segments) == 3 && segments[1] == sessionsSegment:
-		h.getSession(w, r, segments[0], segments[2])
-	default:
-		writeError(w, r, h.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
-	}
-}
-
 // listSteps 处理 GET /api/v1/tasks/{taskID}/steps。
-func (h *executionHandler) listSteps(w http.ResponseWriter, r *http.Request, taskID string) {
-	if !h.allowGet(w, r) {
-		return
-	}
+func (h *executionHandler) listSteps(w http.ResponseWriter, r *http.Request) {
+	taskID := pathID(r, paramTaskID)
 	request, err := parseExecutionPageQuery(r)
 	if err != nil {
 		h.writeServiceError(w, r, err)
@@ -289,14 +249,9 @@ func (h *executionHandler) listSteps(w http.ResponseWriter, r *http.Request, tas
 }
 
 // listAttempts 处理 GET /api/v1/tasks/{taskID}/steps/{stepID}/attempts。
-func (h *executionHandler) listAttempts(
-	w http.ResponseWriter,
-	r *http.Request,
-	taskID, stepID string,
-) {
-	if !h.allowGet(w, r) {
-		return
-	}
+func (h *executionHandler) listAttempts(w http.ResponseWriter, r *http.Request) {
+	taskID := pathID(r, paramTaskID)
+	stepID := pathID(r, paramStepID)
 	request, err := parseExecutionPageQuery(r)
 	if err != nil {
 		h.writeServiceError(w, r, err)
@@ -320,14 +275,10 @@ func (h *executionHandler) listAttempts(
 }
 
 // listSessions 处理 GET /api/v1/tasks/{taskID}/steps/{stepID}/attempts/{attemptID}/sessions。
-func (h *executionHandler) listSessions(
-	w http.ResponseWriter,
-	r *http.Request,
-	taskID, stepID, attemptID string,
-) {
-	if !h.allowGet(w, r) {
-		return
-	}
+func (h *executionHandler) listSessions(w http.ResponseWriter, r *http.Request) {
+	taskID := pathID(r, paramTaskID)
+	stepID := pathID(r, paramStepID)
+	attemptID := pathID(r, paramAttemptID)
 	request, err := parseExecutionPageQuery(r)
 	if err != nil {
 		h.writeServiceError(w, r, err)
@@ -351,14 +302,9 @@ func (h *executionHandler) listSessions(
 }
 
 // listValidations 处理 GET /api/v1/tasks/{taskID}/steps/{stepID}/validations。
-func (h *executionHandler) listValidations(
-	w http.ResponseWriter,
-	r *http.Request,
-	taskID, stepID string,
-) {
-	if !h.allowGet(w, r) {
-		return
-	}
+func (h *executionHandler) listValidations(w http.ResponseWriter, r *http.Request) {
+	taskID := pathID(r, paramTaskID)
+	stepID := pathID(r, paramStepID)
 	history, err := h.records.ListValidations(r.Context(), taskID, stepID)
 	if err != nil {
 		h.writeServiceError(w, r, err)
@@ -423,37 +369,15 @@ func validatorSessionIDOf(id *domain.ID) string {
 }
 
 // getSession 处理 GET /api/v1/tasks/{taskID}/sessions/{sessionID}。
-func (h *executionHandler) getSession(
-	w http.ResponseWriter,
-	r *http.Request,
-	taskID, sessionID string,
-) {
-	if !h.allowGet(w, r) {
-		return
-	}
+func (h *executionHandler) getSession(w http.ResponseWriter, r *http.Request) {
+	taskID := pathID(r, paramTaskID)
+	sessionID := pathID(r, paramSessionID)
 	session, err := h.records.GetSession(r.Context(), taskID, sessionID)
 	if err != nil {
 		h.writeServiceError(w, r, err)
 		return
 	}
 	writeJSON(w, r, h.logger, http.StatusOK, sessionResponse(session))
-}
-
-// allowGet 校验请求方法，不满足时写出 405 并返回 false。
-func (h *executionHandler) allowGet(w http.ResponseWriter, r *http.Request) bool {
-	if r.Method == http.MethodGet || r.Method == http.MethodHead {
-		return true
-	}
-	w.Header().Set("Allow", "GET, HEAD")
-	writeError(
-		w,
-		r,
-		h.logger,
-		http.StatusMethodNotAllowed,
-		CodeMethodNotAllowed,
-		"该接口只支持 GET 请求",
-	)
-	return false
 }
 
 // writeServiceError 把应用层错误映射为统一错误响应。
@@ -481,20 +405,6 @@ func (h *executionHandler) writeServiceError(w http.ResponseWriter, r *http.Requ
 		message = "服务内部错误"
 	}
 	writeError(w, r, h.logger, status, code, message)
-}
-
-// splitPathSegments 按 / 切分路径，忽略空段。
-func splitPathSegments(raw string) []string {
-	parts := strings.Split(raw, "/")
-	segments := make([]string, 0, len(parts))
-	for _, part := range parts {
-		trimmed := strings.TrimSpace(part)
-		if trimmed == "" {
-			continue
-		}
-		segments = append(segments, trimmed)
-	}
-	return segments
 }
 
 // parseExecutionPageQuery 解析执行记录列表的分页与筛选参数。

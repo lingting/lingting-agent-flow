@@ -120,23 +120,9 @@ type ExecuteAndValidateStepResponse struct {
 //
 // 该入口是同步的：只有开发与验证都收敛并完成收口写入后才写出响应。执行与验证本身
 // 已经由服务层持久化，因此即使响应写入失败，执行记录与验证记录也不会丢失。
-func (h *stepExecutionHandler) serveExecuteAndValidate(
-	w http.ResponseWriter,
-	r *http.Request,
-	taskID, stepID string,
-) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		writeError(
-			w,
-			r,
-			h.logger,
-			http.StatusMethodNotAllowed,
-			CodeMethodNotAllowed,
-			"该接口只支持 POST 请求",
-		)
-		return
-	}
+func (h *stepExecutionHandler) serveExecuteAndValidate(w http.ResponseWriter, r *http.Request) {
+	taskID := pathID(r, paramTaskID)
+	stepID := pathID(r, paramStepID)
 	if h.workflow == nil {
 		writeError(
 			w,
@@ -408,26 +394,4 @@ func workflowFailureMessage(result app.ExecuteAndValidateResult) string {
 		}
 		return "步骤未通过验证（" + string(result.ValidationVerdict) + "）: " + detail
 	}
-}
-
-// parseExecuteAndValidatePath 判断路径是否指向开发—验证闭环动作。
-//
-// 只有 {taskID}/steps/{stepID}/execute-and-validate 这一种形状成立；其余形状返回
-// false，由执行记录查询或任务处理器给出各自的 404 / 405 语义。
-func parseExecuteAndValidatePath(path string) (taskID, stepID string, ok bool) {
-	remainder := strings.TrimPrefix(path, taskPathPrefix)
-	if remainder == path {
-		return "", "", false
-	}
-	segments := splitPathSegments(remainder)
-	if len(segments) != 4 {
-		return "", "", false
-	}
-	if segments[1] != stepsSegment || segments[3] != executeAndValidateSegment {
-		return "", "", false
-	}
-	if !validTaskPathID(segments[0]) || !validTaskPathID(segments[2]) {
-		return "", "", false
-	}
-	return segments[0], segments[2], true
 }

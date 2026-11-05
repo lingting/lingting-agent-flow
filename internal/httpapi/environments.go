@@ -27,10 +27,8 @@ import (
 const (
 	// PathEnvironments 是环境集合路径。
 	PathEnvironments = APIPrefix + "/environments"
-	// environmentPathPrefix 是环境资源路径前缀。
-	environmentPathPrefix = PathEnvironments + "/"
-	// environmentInitPath 是环境工作空间初始化路径。
-	environmentInitPath = PathEnvironments + "/init"
+	// environmentInitSegment 是环境工作空间初始化的子路径段。
+	environmentInitSegment = "init"
 	// environmentVersionsSegment 是版本集合的子路径段。
 	environmentVersionsSegment = "versions"
 	// environmentBuildSegment 是触发构建的子路径段。
@@ -300,64 +298,155 @@ func newEnvironmentHandler(
 	return &environmentHandler{queries: queries, writer: writer, builds: builds, logger: logger}
 }
 
-// serve 分发环境请求。
+// guards 返回环境路由的前置检查。
 //
-// 支持以下形状：
-//
-//	GET  /api/v1/environments?host_id=…
-//	POST /api/v1/environments/init
-//	GET  /api/v1/environments/{type}/{name}?host_id=…
-//	POST /api/v1/environments/{type}/{name}/versions
-//	POST /api/v1/environments/{type}/{name}/build
-//	GET  /api/v1/environments/{type}/{name}/versions/{number}?host_id=…
-//	GET  /api/v1/environments/{type}/{name}/versions/{number}/dockerfile?host_id=…
-//	GET  /api/v1/environments/{type}/{name}/versions/{number}/build-log?host_id=…
-//	GET  /api/v1/environments/{type}/{name}/versions/{number}/build-status?host_id=…
-//
-// 其余形状一律 404；形状正确但取值非法返回 400，不会被伪装成"资源不存在"。
-func (h *environmentHandler) serve(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == PathEnvironments {
-		h.serveList(w, r)
-		return
+// 路径形状由路由模式表达，段值合法性仍按原语义判定：非法环境类型、名称或版本号
+// 返回 400（参数错误），不会被伪装成"接口不存在"。版本相关形状在引用之后校验版本号，
+// 与集中路由之前的核对顺序一致。
+func (h *environmentHandler) guards() (
+	ref func(w http.ResponseWriter, r *http.Request) bool,
+	version func(w http.ResponseWriter, r *http.Request) bool,
+) {
+	ref = func(w http.ResponseWriter, r *http.Request) bool {
+		_, ok := h.requireEnvironmentRef(w, r)
+		return ok
 	}
-	if r.URL.Path == environmentInitPath {
-		h.serveInit(w, r)
-		return
+	version = func(w http.ResponseWriter, r *http.Request) bool {
+		if !ref(w, r) {
+			return false
+		}
+		_, ok := h.requireEnvironmentVersion(w, r)
+		return ok
 	}
-	target := parseEnvironmentPath(r.URL.Path)
-	if !target.matched {
+	return ref, version
+}
+
+// requireEnvironmentRef 解析并校验路径中的环境引用。
+//
+// 环境类型与名称都是业务取值：非法取值按参数错误返回 400，不进入应用层。
+func (h *environmentHandler) requireEnvironmentRef(
+	w http.ResponseWriter,
+	r *http.Request,
+) (domain.EnvironmentRef, bool) {
+	environmentType := pathID(r, paramEnvType)
+	name := pathID(r, paramEnvName)
+	// 单个路径段不可能合法包含 /：ServeMux 会把 %2F 解码成 /，这样的取值既不是合法环境
+	// 类型也不是合法名称，按接口不存在处理，与集中路由之前"解码后段数变化 → 404"一致。
+	if !validPathID(environmentType) || !validPathID(name) {
 		writeError(w, r, h.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
-		return
+		return domain.EnvironmentRef{}, false
 	}
-	if target.err != nil {
-		writeError(w, r, h.logger, http.StatusBadRequest, CodeInvalidRequest, target.err.Error())
-		return
+	ref, err := environmentRefFromSegments(environmentType, name)
+	if err != nil {
+		writeError(w, r, h.logger, http.StatusBadRequest, CodeInvalidRequest, err.Error())
+		return domain.EnvironmentRef{}, false
 	}
-	switch target.kind {
-	case environmentPathDefinition:
-		h.serveDefinition(w, r, target.ref)
-	case environmentPathVersions:
-		h.serveCreateVersion(w, r, target.ref)
-	case environmentPathBuild:
-		h.serveBuild(w, r, target.ref)
-	case environmentPathVersion:
-		h.serveVersion(w, r, target.ref, target.number)
-	case environmentPathDockerfile:
-		h.serveDockerfile(w, r, target.ref, target.number)
-	case environmentPathBuildLog:
-		h.serveBuildLog(w, r, target.ref, target.number)
-	case environmentPathBuildStatus:
-		h.serveBuildStatus(w, r, target.ref, target.number)
-	default:
+	return ref, true
+}
+
+// requireEnvironmentVersion 解析并校验路径中的版本号。
+func (h *environmentHandler) requireEnvironmentVersion(
+	w http.ResponseWriter,
+	r *http.Request,
+) (int, bool) {
+	raw := pathID(r, paramEnvVersion)
+	// 版本号是单个路径段，含 / 的取值（%2F 解码而来）按接口不存在处理。
+	if !validPathID(raw) {
 		writeError(w, r, h.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
+		return 0, false
 	}
+	number, err := parseEnvironmentVersionNumber(raw)
+	if err != nil {
+		writeError(w, r, h.logger, http.StatusBadRequest, CodeInvalidRequest, err.Error())
+		return 0, false
+	}
+	return number, true
+}
+
+// definitionRoute 处理 GET /api/v1/environments/{type}/{name}。
+func (h *environmentHandler) definitionRoute(w http.ResponseWriter, r *http.Request) {
+	ref, ok := h.requireEnvironmentRef(w, r)
+	if !ok {
+		return
+	}
+	h.serveDefinition(w, r, ref)
+}
+
+// createVersionRoute 处理 POST /api/v1/environments/{type}/{name}/versions。
+func (h *environmentHandler) createVersionRoute(w http.ResponseWriter, r *http.Request) {
+	ref, ok := h.requireEnvironmentRef(w, r)
+	if !ok {
+		return
+	}
+	h.serveCreateVersion(w, r, ref)
+}
+
+// buildRoute 处理 POST /api/v1/environments/{type}/{name}/build。
+func (h *environmentHandler) buildRoute(w http.ResponseWriter, r *http.Request) {
+	ref, ok := h.requireEnvironmentRef(w, r)
+	if !ok {
+		return
+	}
+	h.serveBuild(w, r, ref)
+}
+
+// versionRoute 处理 GET /api/v1/environments/{type}/{name}/versions/{number}。
+func (h *environmentHandler) versionRoute(w http.ResponseWriter, r *http.Request) {
+	ref, number, ok := h.versionTarget(w, r)
+	if !ok {
+		return
+	}
+	h.serveVersion(w, r, ref, number)
+}
+
+// dockerfileRoute 处理
+// GET /api/v1/environments/{type}/{name}/versions/{number}/dockerfile。
+func (h *environmentHandler) dockerfileRoute(w http.ResponseWriter, r *http.Request) {
+	ref, number, ok := h.versionTarget(w, r)
+	if !ok {
+		return
+	}
+	h.serveDockerfile(w, r, ref, number)
+}
+
+// buildLogRoute 处理
+// GET /api/v1/environments/{type}/{name}/versions/{number}/build-log。
+func (h *environmentHandler) buildLogRoute(w http.ResponseWriter, r *http.Request) {
+	ref, number, ok := h.versionTarget(w, r)
+	if !ok {
+		return
+	}
+	h.serveBuildLog(w, r, ref, number)
+}
+
+// buildStatusRoute 处理
+// GET /api/v1/environments/{type}/{name}/versions/{number}/build-status。
+func (h *environmentHandler) buildStatusRoute(w http.ResponseWriter, r *http.Request) {
+	ref, number, ok := h.versionTarget(w, r)
+	if !ok {
+		return
+	}
+	h.serveBuildStatus(w, r, ref, number)
+}
+
+// versionTarget 解析并校验版本相关形状的路径参数。
+func (h *environmentHandler) versionTarget(
+	w http.ResponseWriter,
+	r *http.Request,
+) (domain.EnvironmentRef, int, bool) {
+	ref, ok := h.requireEnvironmentRef(w, r)
+	if !ok {
+		return domain.EnvironmentRef{}, 0, false
+	}
+	number, ok := h.requireEnvironmentVersion(w, r)
+	if !ok {
+		return domain.EnvironmentRef{}, 0, false
+	}
+	return ref, number, true
 }
 
 // serveList 处理 GET /api/v1/environments。
 func (h *environmentHandler) serveList(w http.ResponseWriter, r *http.Request) {
-	if !h.allowMethods(w, r, "GET, HEAD") {
-		return
-	}
 	if !h.requireQueries(w, r) {
 		return
 	}
@@ -389,9 +478,6 @@ func (h *environmentHandler) serveDefinition(
 	r *http.Request,
 	ref domain.EnvironmentRef,
 ) {
-	if !h.allowMethods(w, r, "GET, HEAD") {
-		return
-	}
 	if !h.requireQueries(w, r) {
 		return
 	}
@@ -414,9 +500,6 @@ func (h *environmentHandler) serveVersion(
 	ref domain.EnvironmentRef,
 	number int,
 ) {
-	if !h.allowMethods(w, r, "GET, HEAD") {
-		return
-	}
 	if !h.requireQueries(w, r) {
 		return
 	}
@@ -438,9 +521,6 @@ func (h *environmentHandler) serveVersion(
 
 // serveInit 处理 POST /api/v1/environments/init。
 func (h *environmentHandler) serveInit(w http.ResponseWriter, r *http.Request) {
-	if !h.allowMethods(w, r, "POST") {
-		return
-	}
 	if h.writer == nil {
 		writeError(
 			w,
@@ -476,9 +556,6 @@ func (h *environmentHandler) serveCreateVersion(
 	r *http.Request,
 	ref domain.EnvironmentRef,
 ) {
-	if !h.allowMethods(w, r, "POST") {
-		return
-	}
 	if h.writer == nil {
 		writeError(
 			w,
@@ -516,9 +593,6 @@ func (h *environmentHandler) serveBuild(
 	r *http.Request,
 	ref domain.EnvironmentRef,
 ) {
-	if !h.allowMethods(w, r, "POST") {
-		return
-	}
 	if h.writer == nil || h.builds == nil {
 		writeError(
 			w,
@@ -578,9 +652,6 @@ func (h *environmentHandler) serveDockerfile(
 	ref domain.EnvironmentRef,
 	number int,
 ) {
-	if !h.allowMethods(w, r, "GET, HEAD") {
-		return
-	}
 	if h.writer == nil {
 		writeError(
 			w,
@@ -624,9 +695,6 @@ func (h *environmentHandler) serveBuildLog(
 	ref domain.EnvironmentRef,
 	number int,
 ) {
-	if !h.allowMethods(w, r, "GET, HEAD") {
-		return
-	}
 	if h.writer == nil {
 		writeError(
 			w,
@@ -674,9 +742,6 @@ func (h *environmentHandler) serveBuildStatus(
 	ref domain.EnvironmentRef,
 	number int,
 ) {
-	if !h.allowMethods(w, r, "GET, HEAD") {
-		return
-	}
 	if !h.requireQueries(w, r) {
 		return
 	}
@@ -732,29 +797,6 @@ func (h *environmentHandler) serveBuildStatus(
 	}
 }
 
-// allowMethods 校验请求方法，不满足时写出 405 并返回 false。
-func (h *environmentHandler) allowMethods(
-	w http.ResponseWriter,
-	r *http.Request,
-	allow string,
-) bool {
-	for _, method := range strings.Split(allow, ",") {
-		if r.Method == strings.TrimSpace(method) {
-			return true
-		}
-	}
-	w.Header().Set("Allow", allow)
-	writeError(
-		w,
-		r,
-		h.logger,
-		http.StatusMethodNotAllowed,
-		CodeMethodNotAllowed,
-		"该接口只支持 "+allow+" 请求",
-	)
-	return false
-}
-
 // requireQueries 确认只读查询服务已装配。
 func (h *environmentHandler) requireQueries(w http.ResponseWriter, r *http.Request) bool {
 	if h.queries != nil {
@@ -782,109 +824,6 @@ func (h *environmentHandler) requireHostID(w http.ResponseWriter, r *http.Reques
 		return "", false
 	}
 	return hostID, true
-}
-
-// environmentPathKind 是环境接口路径的业务形状。
-type environmentPathKind int
-
-// 环境接口路径形状取值。
-//
-// 零值是"未匹配任何形状"，因此路径解析失败时不需要额外分支：调用方只看 matched。
-const (
-	// environmentPathDefinition 是 {type}/{name}。
-	environmentPathDefinition environmentPathKind = iota
-	// environmentPathVersions 是 {type}/{name}/versions。
-	environmentPathVersions
-	// environmentPathBuild 是 {type}/{name}/build。
-	environmentPathBuild
-	// environmentPathVersion 是 {type}/{name}/versions/{number}。
-	environmentPathVersion
-	// environmentPathDockerfile 是 {type}/{name}/versions/{number}/dockerfile。
-	environmentPathDockerfile
-	// environmentPathBuildLog 是 {type}/{name}/versions/{number}/build-log。
-	environmentPathBuildLog
-	// environmentPathBuildStatus 是 {type}/{name}/versions/{number}/build-status。
-	environmentPathBuildStatus
-)
-
-// environmentPath 是一条环境接口路径的解析结果。
-type environmentPath struct {
-	// matched 表示路径形状确实属于环境接口。
-	matched bool
-	// kind 是匹配到的资源形状。
-	kind environmentPathKind
-	// ref 是解析出的环境引用。
-	ref domain.EnvironmentRef
-	// number 是版本号，仅版本相关形状有效。
-	number int
-	// err 表示路径形状正确但取值非法（环境类型、名称或版本号）。
-	err error
-}
-
-// parseEnvironmentPath 解析 {type}/{name}[/…] 形状的路径。
-//
-// 解析严格按路径段数量与位置进行，并区分两类失败：
-//   - 形状不符（段数不对、缺少 versions 段、未知子资源名）：matched=false，按 404 处理；
-//   - 形状正确但取值非法（未知环境类型、非法名称、非法版本号）：err 非空，按 400 处理。
-//
-// 这样既不会把形状错误的路径误当作合法资源，也不会把参数错误伪装成"资源不存在"。
-func parseEnvironmentPath(path string) environmentPath {
-	remainder := strings.TrimPrefix(path, environmentPathPrefix)
-	if remainder == path {
-		return environmentPath{}
-	}
-	segments := splitPathSegments(remainder)
-	if len(segments) < 2 || len(segments) > 5 {
-		return environmentPath{}
-	}
-	ref, err := environmentRefFromSegments(segments[0], segments[1])
-	if err != nil {
-		return environmentPath{matched: true, err: err}
-	}
-	switch len(segments) {
-	case 2:
-		return environmentPath{kind: environmentPathDefinition, matched: true, ref: ref}
-	case 3:
-		switch segments[2] {
-		case environmentVersionsSegment:
-			return environmentPath{kind: environmentPathVersions, matched: true, ref: ref}
-		case environmentBuildSegment:
-			return environmentPath{kind: environmentPathBuild, matched: true, ref: ref}
-		default:
-			return environmentPath{}
-		}
-	case 4:
-		number, numberErr := parseEnvironmentVersionNumber(segments[3])
-		if numberErr != nil {
-			return environmentPath{matched: true, ref: ref, err: numberErr}
-		}
-		return environmentPath{
-			kind:    environmentPathVersion,
-			matched: true,
-			ref:     ref,
-			number:  number,
-		}
-	default:
-		if segments[2] != environmentVersionsSegment {
-			return environmentPath{}
-		}
-		number, numberErr := parseEnvironmentVersionNumber(segments[3])
-		if numberErr != nil {
-			return environmentPath{matched: true, ref: ref, err: numberErr}
-		}
-		var kind environmentPathKind
-		switch segments[4] {
-		case environmentDockerfileSegment:
-			kind = environmentPathDockerfile
-		case environmentBuildLogSegment:
-			kind = environmentPathBuildLog
-		case environmentBuildStatusSegment:
-			kind = environmentPathBuildStatus
-		default:
-			return environmentPath{}
-		}
-		return environmentPath{kind: kind, matched: true, ref: ref, number: number}
-	}
 }
 
 // parseEnvironmentVersionNumber 解析并校验版本号路径段。

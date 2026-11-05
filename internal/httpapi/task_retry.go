@@ -74,61 +74,25 @@ type RetryEligibilityResponse struct {
 	Summary string `json:"summary"`
 }
 
-// isTaskRetryPath 判断路径是否指向任务显式重试接口。
-//
-// 判定按路径段形状进行：只有 {taskID}/retry 与 {taskID}/retry-eligibility 属于重试
-// 接口，其余形状仍由任务处理器处理，从而保持它们原有的 405 与 404 语义。
-func isTaskRetryPath(path string) bool {
-	if _, ok := actionTaskID(path, retrySegment); ok {
-		return true
-	}
-	_, ok := actionTaskID(path, retryEligibilitySegment)
-	return ok
-}
-
-// serveTaskRetry 分发显式重试与重试资格查询请求。
-func (rt *router) serveTaskRetry(w http.ResponseWriter, r *http.Request) {
-	if rt.taskRetry == nil {
-		writeError(
-			w,
-			r,
-			rt.logger,
-			http.StatusServiceUnavailable,
-			CodeInternal,
-			"任务重试服务未初始化",
-		)
-		return
-	}
-	handler := &taskRetryHandler{service: rt.taskRetry, logger: rt.logger}
-	if taskID, ok := actionTaskID(r.URL.Path, retryEligibilitySegment); ok {
-		handler.eligibility(w, r, taskID)
-		return
-	}
-	taskID, ok := actionTaskID(r.URL.Path, retrySegment)
-	if !ok {
-		writeError(w, r, rt.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
-		return
-	}
-	handler.retry(w, r, taskID)
-}
-
 // taskRetryHandler 处理显式重试接口。
 type taskRetryHandler struct {
 	service *app.TaskRetryService
 	logger  *slog.Logger
 }
 
+// newTaskRetryHandler 构造显式重试处理器。
+//
+// 服务缺失时仍返回处理器：接口由路由前置检查统一给出 503，而不是让请求落到 404。
+func newTaskRetryHandler(service *app.TaskRetryService, logger *slog.Logger) *taskRetryHandler {
+	return &taskRetryHandler{service: service, logger: logger}
+}
+
 // retry 处理 POST /api/v1/tasks/{taskID}/retry。
 //
 // 该入口是同步的：只有任务被重开、启动流程得出真实结论后才写出响应。工作流本身在
 // 受生命周期管理的后台推进，因此调用方不能把 202 当作"已完成"。
-func (h *taskRetryHandler) retry(w http.ResponseWriter, r *http.Request, taskID string) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		writeError(w, r, h.logger, http.StatusMethodNotAllowed, CodeMethodNotAllowed,
-			"该接口只支持 POST 请求")
-		return
-	}
+func (h *taskRetryHandler) retry(w http.ResponseWriter, r *http.Request) {
+	taskID := pathID(r, paramTaskID)
 	var body RetryTaskRequest
 	if !decodeOptionalJSONBody(w, r, h.logger, &body) {
 		return
@@ -149,13 +113,8 @@ func (h *taskRetryHandler) retry(w http.ResponseWriter, r *http.Request, taskID 
 // eligibility 处理 GET /api/v1/tasks/{taskID}/retry-eligibility。
 //
 // 只读：它不领取租约、不写任何状态，使用户能在执行重试之前看到阻塞项。
-func (h *taskRetryHandler) eligibility(w http.ResponseWriter, r *http.Request, taskID string) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, HEAD")
-		writeError(w, r, h.logger, http.StatusMethodNotAllowed, CodeMethodNotAllowed,
-			"该接口只支持 GET 请求")
-		return
-	}
+func (h *taskRetryHandler) eligibility(w http.ResponseWriter, r *http.Request) {
+	taskID := pathID(r, paramTaskID)
 	decision, err := h.service.Eligibility(r.Context(), taskID)
 	if err != nil {
 		writeRetryError(w, r, h.logger, err)

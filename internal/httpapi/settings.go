@@ -16,9 +16,6 @@ const PathSettingsConfig = APIPrefix + "/settings/config"
 // 请求期间不重新读取配置文件，也不触发磁盘扫描、远程连接、Docker 操作或配置重载。
 // 快照缺失时返回 503，不返回伪造的默认配置。
 func (rt *router) settingsConfigHandler(w http.ResponseWriter, r *http.Request) {
-	if !rt.allowGet(w, r) {
-		return
-	}
 	if rt.runtimeConfig == nil {
 		writeError(
 			w,

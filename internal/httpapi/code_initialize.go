@@ -99,23 +99,10 @@ func newCodeInitializeHandler(
 //
 // 该入口是同步的：只有容器内 Git 操作结束、初始化记录进入终态后才写出响应。
 // 执行本身已经由服务层持久化，因此即使响应写入失败，记录与事件也不会丢失。
-func (h *codeInitializeHandler) serve(
-	w http.ResponseWriter,
-	r *http.Request,
-	taskID, stepID, attemptID string,
-) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		writeError(
-			w,
-			r,
-			h.logger,
-			http.StatusMethodNotAllowed,
-			CodeMethodNotAllowed,
-			"该接口只支持 POST 请求",
-		)
-		return
-	}
+func (h *codeInitializeHandler) serve(w http.ResponseWriter, r *http.Request) {
+	taskID := pathID(r, paramTaskID)
+	stepID := pathID(r, paramStepID)
+	attemptID := pathID(r, paramAttemptID)
 	if h.service == nil {
 		writeError(
 			w,
@@ -282,30 +269,4 @@ func (h *codeInitializeHandler) writeServiceError(
 		message = "服务内部错误"
 	}
 	writeError(w, r, h.logger, status, code, message)
-}
-
-// parseInitializeCodePath 判断路径是否指向代码初始化动作。
-//
-// 只有 {taskID}/steps/{stepID}/attempts/{attemptID}/initialize-code 这一种形状成立；
-// 其余形状返回 false，由执行记录查询或任务处理器给出各自的 404 / 405 语义。
-func parseInitializeCodePath(path string) (taskID, stepID, attemptID string, ok bool) {
-	remainder := strings.TrimPrefix(path, taskPathPrefix)
-	if remainder == path {
-		return "", "", "", false
-	}
-	segments := splitPathSegments(remainder)
-	if len(segments) != 6 {
-		return "", "", "", false
-	}
-	if segments[1] != stepsSegment ||
-		segments[3] != attemptsSegment ||
-		segments[5] != initializeCodeSegment {
-		return "", "", "", false
-	}
-	if !validTaskPathID(segments[0]) ||
-		!validTaskPathID(segments[2]) ||
-		!validTaskPathID(segments[4]) {
-		return "", "", "", false
-	}
-	return segments[0], segments[2], segments[4], true
 }

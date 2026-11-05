@@ -98,10 +98,8 @@ func newHistoryHandler(history *app.HistoryQueryService, logger *slog.Logger) *h
 }
 
 // listEvents 处理 GET /api/v1/tasks/{taskID}/events。
-func (h *historyHandler) listEvents(w http.ResponseWriter, r *http.Request, taskID string) {
-	if !h.allowGet(w, r) {
-		return
-	}
+func (h *historyHandler) listEvents(w http.ResponseWriter, r *http.Request) {
+	taskID := pathID(r, paramTaskID)
 	request, err := parseEventTimelineQuery(r)
 	if err != nil {
 		h.writeServiceError(w, r, err)
@@ -127,14 +125,9 @@ func (h *historyHandler) listEvents(w http.ResponseWriter, r *http.Request, task
 }
 
 // listRepairCycles 处理 GET /api/v1/tasks/{taskID}/steps/{stepID}/repair-cycles。
-func (h *historyHandler) listRepairCycles(
-	w http.ResponseWriter,
-	r *http.Request,
-	taskID, stepID string,
-) {
-	if !h.allowGet(w, r) {
-		return
-	}
+func (h *historyHandler) listRepairCycles(w http.ResponseWriter, r *http.Request) {
+	taskID := pathID(r, paramTaskID)
+	stepID := pathID(r, paramStepID)
 	history, err := h.history.ListStepRepairCycles(r.Context(), taskID, stepID)
 	if err != nil {
 		h.writeServiceError(w, r, err)
@@ -150,23 +143,6 @@ func (h *historyHandler) listRepairCycles(
 		Records: records,
 		Total:   len(records),
 	})
-}
-
-// allowGet 校验请求方法，不满足时写出 405 并返回 false。
-func (h *historyHandler) allowGet(w http.ResponseWriter, r *http.Request) bool {
-	if r.Method == http.MethodGet || r.Method == http.MethodHead {
-		return true
-	}
-	w.Header().Set("Allow", "GET, HEAD")
-	writeError(
-		w,
-		r,
-		h.logger,
-		http.StatusMethodNotAllowed,
-		CodeMethodNotAllowed,
-		"该接口只支持 GET 请求",
-	)
-	return false
 }
 
 // writeServiceError 把应用层错误映射为统一错误响应。
@@ -268,74 +244,4 @@ func repairCycleResponse(cycle domain.RepairCycle) RepairCycleResponse {
 		OpenedAt:    cycle.OpenedAt,
 		ClosedAt:    cycle.ClosedAt,
 	}
-}
-
-// parseTaskEventsPath 判断路径是否指向任务事件时间线。
-func parseTaskEventsPath(path string) (taskID string, ok bool) {
-	remainder := strings.TrimPrefix(path, taskPathPrefix)
-	if remainder == path {
-		return "", false
-	}
-	segments := splitPathSegments(remainder)
-	if len(segments) != 2 || segments[1] != eventsSegment {
-		return "", false
-	}
-	if !validTaskPathID(segments[0]) {
-		return "", false
-	}
-	return segments[0], true
-}
-
-// parseRepairCyclesPath 判断路径是否指向步骤修复周期历史。
-func parseRepairCyclesPath(path string) (taskID, stepID string, ok bool) {
-	remainder := strings.TrimPrefix(path, taskPathPrefix)
-	if remainder == path {
-		return "", "", false
-	}
-	segments := splitPathSegments(remainder)
-	if len(segments) != 4 {
-		return "", "", false
-	}
-	if segments[1] != stepsSegment || segments[3] != repairCyclesSegment {
-		return "", "", false
-	}
-	if !validTaskPathID(segments[0]) || !validTaskPathID(segments[2]) {
-		return "", "", false
-	}
-	return segments[0], segments[2], true
-}
-
-// serveTaskEvents 分发任务事件时间线请求。
-//
-// 历史查询服务为空时返回 503，而不是伪造空列表：空历史与"查询服务未装配"
-// 是两件完全不同的事实。
-func (rt *router) serveTaskEvents(w http.ResponseWriter, r *http.Request, taskID string) {
-	if rt.history == nil || rt.history.history == nil {
-		writeError(
-			w,
-			r,
-			rt.logger,
-			http.StatusServiceUnavailable,
-			CodeInternal,
-			"历史查询服务未初始化",
-		)
-		return
-	}
-	rt.history.listEvents(w, r, taskID)
-}
-
-// serveStepRepairCycles 分发步骤修复周期历史请求。
-func (rt *router) serveStepRepairCycles(w http.ResponseWriter, r *http.Request, taskID, stepID string) {
-	if rt.history == nil || rt.history.history == nil {
-		writeError(
-			w,
-			r,
-			rt.logger,
-			http.StatusServiceUnavailable,
-			CodeInternal,
-			"历史查询服务未初始化",
-		)
-		return
-	}
-	rt.history.listRepairCycles(w, r, taskID, stepID)
 }

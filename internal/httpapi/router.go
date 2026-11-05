@@ -3,7 +3,6 @@ package httpapi
 import (
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/lingting/agentflow/internal/app"
 )
@@ -141,48 +140,28 @@ func NewHandler(deps Deps) http.Handler {
 			deps.TaskLeases,
 			logger,
 		),
-		workflow:          deps.Workflow,
-		validation:        newValidationHandler(deps.Validation, logger),
-		codeInit:          newCodeInitializeHandler(deps.CodeInitialize, logger),
-		taskLaunch:        deps.TaskLaunch,
-		taskLeases:        deps.TaskLeases,
-		containers:        deps.Containers,
-		codeSaves:         deps.CodeSaveQueries,
-		resumeEligibility: deps.ResumeEligibility,
-		history:           newHistoryHandler(deps.History, logger),
-		eventStream:       newEventStreamHandler(deps.History, logger, deps.Shutdown),
-		taskRetry:         deps.TaskRetry,
-		taskContainers:    deps.TaskContainers,
-		logger:            logger,
+		workflow:     newWorkflowHandler(deps.Workflow, deps.TaskLeases, logger),
+		validation:   newValidationHandler(deps.Validation, logger),
+		codeInit:     newCodeInitializeHandler(deps.CodeInitialize, logger),
+		taskLaunch:   newTaskLaunchHandler(deps.TaskLaunch, deps.TaskLeases, logger),
+		codeRecovery: newCodeRecoveryHandler(deps.Containers, deps.ResumeEligibility, logger),
+		codeSaves:    newCodeSaveListHandler(deps.CodeSaveQueries, logger),
+		taskRetry:    newTaskRetryHandler(deps.TaskRetry, logger),
+		taskContainers: &containerHandler{
+			service: deps.TaskContainers,
+			logger:  logger,
+		},
+		history:     newHistoryHandler(deps.History, logger),
+		eventStream: newEventStreamHandler(deps.History, logger, deps.Shutdown),
+		logger:      logger,
 	}
-	mux := http.NewServeMux()
-	// 角色接口同时注册集合路径与单角色路径：集合只支持列表查询，单角色支持读取完整配置
-	// 与更新可编辑字段。角色集合固定为四个，因此不存在角色新增与删除路径。
-	mux.HandleFunc(PathRoles, router.rolesHandler)
-	mux.HandleFunc(rolePathPrefix, router.rolesHandler)
-	// 项目接口同时注册集合路径与单项目路径：集合支持列表与创建，单项目支持详情、
-	// 整体更新与逻辑删除。
-	mux.HandleFunc(PathProjects, router.projectsHandler)
-	mux.HandleFunc(projectPathPrefix, router.projectsHandler)
-	// 环境接口同时注册集合路径与 "{type}/{name}/…" 子路径：集合路径支持列表，
-	// 子路径按段形状分发到环境详情、版本、Dockerfile、构建与构建日志处理器。
-	mux.HandleFunc(PathEnvironments, router.environmentsHandler)
-	mux.HandleFunc(environmentPathPrefix, router.environmentsHandler)
-	mux.HandleFunc(PathHealth, router.healthHandler)
-	mux.HandleFunc(PathSystemInfo, router.systemInfoHandler)
-	// 基础运行配置是独立的只读接口：它描述运行参数，不与构建信息混合。
-	mux.HandleFunc(PathSettingsConfig, router.settingsConfigHandler)
-	// 任务集合路径与单任务路径分别注册：ServeMux 会按更具体的模式优先匹配。
-	mux.HandleFunc(PathTasks, router.tasksHandler)
-	mux.HandleFunc(taskPathPrefix, router.tasksHandler)
-	// 执行节点集合路径与单节点路径分别注册，与任务接口保持一致。
-	mux.HandleFunc(PathHosts, router.hostsHandler)
-	mux.HandleFunc(hostPathPrefix, router.hostsHandler)
-	mux.HandleFunc("/", router.notFoundHandler)
-	return withRequestID(mux)
+	return withRequestID(router.newMux())
 }
 
-// router 持有 API 处理器依赖。
+// router 持有 API 处理器。
+//
+// 每个字段都是一个已经装配好的处理器：服务依赖缺失的判定发生在路由前置检查里，
+// 处理器本身不再承担"服务是否可用"的分发职责。
 type router struct {
 	// roles 处理角色配置的查询与更新；服务未初始化时接口返回 503。
 	roles *roleHandler
@@ -194,25 +173,26 @@ type router struct {
 	runtimeConfig *app.RuntimeConfig
 	tasks         *taskHandler
 	hosts         *hostHandler
-	// environments 处理环境只读查询；服务未初始化时接口返回 503。
+	// environments 处理环境查询与写路径；服务未初始化时接口返回 503。
 	environments *environmentHandler
 	executions   *executionHandler
 	stepExec     *stepExecutionHandler
-	workflow     *app.TaskWorkflowService
-	validation   *validationHandler
-	codeInit     *codeInitializeHandler
-	taskLaunch   *app.TaskLaunchService
-	taskLeases   *app.TaskLeaseService
-	containers   *app.ContainerService
-	// codeSaves 是代码保存记录只读查询服务，为空时列表接口返回服务不可用。
+	// workflow 处理任务级工作流与计划生成，缺失依赖时接口返回 503。
+	workflow   *workflowHandler
+	validation *validationHandler
+	codeInit   *codeInitializeHandler
+	// taskLaunch 处理统一任务启动，缺失依赖时接口返回 503。
+	taskLaunch *taskLaunchHandler
+	// codeRecovery 处理代码保存核验与续跑资格，缺失依赖时接口返回 503。
+	codeRecovery *codeRecoveryHandler
+	// codeSaves 处理代码保存记录只读列表，为空时列表接口返回服务不可用。
 	//
-	// 它与 containers 分开持有：列表查询只依赖存储，不要求 SSH / Docker。
-	codeSaves         *app.CodeSaveQueryService
-	resumeEligibility *app.ResumeEligibilityService
-	// taskRetry 是任务显式重试服务，为空时重试接口返回服务不可用。
-	taskRetry *app.TaskRetryService
-	// taskContainers 提供任务容器的查询与显式处置，为空时接口返回服务不可用。
-	taskContainers *app.TaskContainerDisposalService
+	// 它与 codeRecovery 分开持有：列表查询只依赖存储，不要求 SSH / Docker。
+	codeSaves *codeSaveListHandler
+	// taskRetry 处理任务显式重试与重试资格，为空时接口返回服务不可用。
+	taskRetry *taskRetryHandler
+	// taskContainers 处理任务容器的查询与显式处置，为空时接口返回服务不可用。
+	taskContainers *containerHandler
 	// history 处理事件时间线与修复周期历史的只读查询。
 	history *historyHandler
 	// eventStream 提供任务事件的只读实时流，为空时该接口返回服务不可用。
@@ -220,232 +200,10 @@ type router struct {
 	logger      *slog.Logger
 }
 
-// tasksHandler 分发任务集合路径与单任务路径的请求。
-//
-// 任务服务未初始化时返回 503，而不是让请求落到 404 或前端页面上。
-func (rt *router) tasksHandler(w http.ResponseWriter, r *http.Request) {
-	// 统一任务启动先于任务服务的可用性判定：它有自己的服务依赖，任务管理服务
-	// 未初始化不应让启动接口返回"任务服务未初始化"这类误导性错误。
-	if isTaskLaunchPath(r.URL.Path) {
-		rt.serveTaskLaunch(w, r)
-		return
-	}
-	// 显式重试同样先于任务服务的可用性判定：它只依赖重试服务与统一启动流程，
-	// 任务管理服务未初始化不应让重试接口返回误导性错误。
-	if isTaskRetryPath(r.URL.Path) {
-		rt.serveTaskRetry(w, r)
-		return
-	}
-	// 任务容器查询与处置挂在单任务之下，形状与任务详情、其他子资源都不重叠：
-	// 先判定它们，未知形状仍由任务处理器给出 404 / 405。
-	if isTaskContainerPath(r.URL.Path) {
-		rt.serveTaskContainers(w, r)
-		return
-	}
-	// 代码保存记录列表只依赖存储层查询服务，与任务管理服务无关：把它放在任务服务
-	// 可用性判定之前，依赖缺失时才会得到"代码保存记录查询服务未初始化"而不是
-	// 误导性的"任务服务未初始化"。
-	//
-	// 该判定只匹配 {taskID}/code-saves 两段形状；{taskID}/code-saves/{recordID}/
-	// verify-code-save 是 4 段，仍由后面的 isCodeRecoveryPath 接走。
-	if isCodeSaveListPath(r.URL.Path) {
-		rt.serveCodeSaveList(w, r)
-		return
-	}
-	// 事件时间线与修复周期历史是纯粹的历史读取：它们只依赖历史查询服务，不建立
-	// SSH / Docker 会话，也不读写任何执行状态。因此与其他子资源一样先于任务服务
-	// 可用性判定，依赖缺失时返回"历史查询服务未初始化"。
-	//
-	// 三者都是只读形状（{taskID}/events、{taskID}/events/stream 与
-	// {taskID}/steps/{stepID}/repair-cycles），与下面的写操作路径段不重叠。
-	//
-	// 实时流必须先于历史查询判定：历史形状只匹配两段路径，两者其实不会互相吞掉，
-	// 但按"更具体的形状先判定"的统一习惯放置，避免以后调整形状时出现顺序依赖。
-	if taskID, ok := parseTaskEventStreamPath(r.URL.Path); ok {
-		rt.serveTaskEventStream(w, r, taskID)
-		return
-	}
-	if taskID, ok := parseTaskEventsPath(r.URL.Path); ok {
-		rt.serveTaskEvents(w, r, taskID)
-		return
-	}
-	if taskID, stepID, ok := parseRepairCyclesPath(r.URL.Path); ok {
-		rt.serveStepRepairCycles(w, r, taskID, stepID)
-		return
-	}
-	if rt.tasks == nil || rt.tasks.tasks == nil {
-		writeError(
-			w,
-			r,
-			rt.logger,
-			http.StatusServiceUnavailable,
-			CodeInternal,
-			"任务服务未初始化",
-		)
-		return
-	}
-	if r.URL.Path == PathTasks {
-		switch r.Method {
-		case http.MethodGet, http.MethodHead:
-			rt.tasks.list(w, r)
-		case http.MethodPost:
-			rt.tasks.create(w, r)
-		default:
-			w.Header().Set("Allow", "GET, HEAD, POST")
-			writeError(
-				w,
-				r,
-				rt.logger,
-				http.StatusMethodNotAllowed,
-				CodeMethodNotAllowed,
-				"该接口只支持 GET 与 POST 请求",
-			)
-		}
-		return
-	}
-	// 执行周期资格查询与"显式开启执行周期"共享 {taskID}/steps/{stepID} 前缀，
-	// 且都以 repair-cycle 开头。资格查询是只读的，与后面的执行记录查询形状不重叠，
-	// 但必须先于 isExecutionRecordPath 判定，否则会被当成 steps 下的未知资源返回 404。
-	if taskID, stepID, ok := parseRepairCycleEligibilityPath(r.URL.Path); ok {
-		rt.stepExec.serveRepairCycleEligibility(w, r, taskID, stepID)
-		return
-	}
-	// 开发—验证闭环与单步骤执行共享 {taskID}/steps/{stepID} 前缀，且都是写操作，
-	// 因此必须先判定闭环形状，再判定单步骤执行形状。
-	if taskID, stepID, ok := parseOpenRepairCyclePath(r.URL.Path); ok {
-		rt.stepExec.serveOpenRepairCycle(w, r, taskID, stepID)
-		return
-	}
-	if taskID, stepID, ok := parseExecuteAndValidatePath(r.URL.Path); ok {
-		rt.stepExec.serveExecuteAndValidate(w, r, taskID, stepID)
-		return
-	}
-	// 步骤执行动作与执行记录共享 {taskID}/steps 前缀，因此必须先判定具体形状：
-	// 执行是写操作，交给步骤执行处理器；其余 steps 路径仍按只读查询处理。
-	if taskID, stepID, ok := parseStepExecutePath(r.URL.Path); ok {
-		rt.stepExec.serve(w, r, taskID, stepID)
-		return
-	}
-	// 任务级工作流的动作路径与状态查询同样挂在单任务路径之下，必须先于任务处理器判定，
-	// 否则它们会被当作未知子路径返回 404。
-	// 计划生成与工作流动作同样挂在单任务路径之下，必须先于任务处理器判定。
-
-	// 代码保存核验与续跑资格同样挂在单任务路径之下：续跑资格是只读查询，
-	// 核验是幂等的只读动作，两者都必须先于任务处理器判定。
-	if isCodeRecoveryPath(r.URL.Path) {
-		rt.serveCodeRecovery(w, r)
-		return
-	}
-	if matchActionPath(r.URL.Path, planSegment) {
-		rt.servePlan(w, r)
-		return
-	}
-	if isWorkflowPath(r.URL.Path) {
-		rt.serveWorkflow(w, r)
-		return
-	}
-	// 顺序执行挂在单任务路径之下，同样是写操作，必须先于只读查询与任务处理器判定。
-	if taskID, ok := parseExecuteStepsPath(r.URL.Path); ok {
-		rt.stepExec.serveSteps(w, r, taskID)
-		return
-	}
-	// 验证动作与执行记录共享 {taskID}/steps/{stepID}/attempts 前缀，同样必须先判定
-	// 具体形状：验证是写操作，其余 attempts 路径仍按只读查询处理。
-	if taskID, stepID, attemptID, ok := parseValidatePath(r.URL.Path); ok {
-		rt.validation.serve(w, r, taskID, stepID, attemptID)
-		return
-	}
-	// 代码初始化同样是挂在 attempts 之下的写操作，必须先于只读执行记录判定。
-	if taskID, stepID, attemptID, ok := parseInitializeCodePath(r.URL.Path); ok {
-		rt.codeInit.serve(w, r, taskID, stepID, attemptID)
-		return
-	}
-	// 执行记录路径（steps / attempts / sessions）与单任务路径共享前缀，
-	// 因此先判定是否属于执行记录形状，再交给任务处理器。
-	if isExecutionRecordPath(r.URL.Path) {
-		if rt.executions == nil || rt.executions.records == nil {
-			writeError(
-				w,
-				r,
-				rt.logger,
-				http.StatusServiceUnavailable,
-				CodeInternal,
-				"执行记录服务未初始化",
-			)
-			return
-		}
-		rt.executions.serve(w, r)
-		return
-	}
-	rt.tasks.serve(w, r)
-}
-
-// isWorkflowPath 判断路径是否指向任务级工作流接口。
-//
-// 判定按路径段形状进行：只有 {taskID}/{execute-workflow|cancel-workflow|
-// resume-workflow|workflow} 属于工作流接口，其余形状仍由任务处理器处理。
-func isWorkflowPath(path string) bool {
-	if matchActionPath(path, executeWorkflowSegment) ||
-		matchActionPath(path, cancelWorkflowSegment) ||
-		matchActionPath(path, resumeWorkflowSegment) {
-		return true
-	}
-	return matchStatusPath(path)
-}
-
-// isExecutionRecordPath 判断路径是否指向任务下的执行记录资源。
-//
-// 判定依据第二段是否是执行记录资源名：单任务动作（例如 cancel）与未知子路径
-// 都留给任务处理器，从而保持它们原有的 405 与 404 语义。
-func isExecutionRecordPath(path string) bool {
-	remainder := strings.TrimPrefix(path, taskPathPrefix)
-	if remainder == path {
-		return false
-	}
-	segments := splitPathSegments(remainder)
-	if len(segments) < 2 {
-		return false
-	}
-	switch segments[1] {
-	case stepsSegment, sessionsSegment:
-		return true
-	default:
-		return false
-	}
-}
-
-// environmentsHandler 分发环境集合路径与版本子路径的请求。
-//
-// 环境查询服务未初始化时返回 503，而不是让请求落到 404 或前端页面上，也不伪造空列表。
-func (rt *router) environmentsHandler(w http.ResponseWriter, r *http.Request) {
-	rt.environments.serve(w, r)
-}
-
-// hostsHandler 分发执行节点集合路径与单节点路径的请求。
-//
-// 执行节点服务未初始化时返回 503，而不是让请求落到 404 或前端页面上。
-func (rt *router) hostsHandler(w http.ResponseWriter, r *http.Request) {
-	if rt.hosts == nil || rt.hosts.hosts == nil {
-		writeError(
-			w,
-			r,
-			rt.logger,
-			http.StatusServiceUnavailable,
-			CodeInternal,
-			"执行节点服务未初始化",
-		)
-		return
-	}
-	rt.hosts.serve(w, r)
-}
-
 // healthHandler 处理健康检查请求。
 //
 // 只有整体状态为 ok 时返回 200；存在不可用依赖时返回 503，前端据此显示未连接。
 func (rt *router) healthHandler(w http.ResponseWriter, r *http.Request) {
-	if !rt.allowGet(w, r) {
-		return
-	}
 	if rt.health == nil {
 		writeError(w, r, rt.logger, http.StatusServiceUnavailable, CodeInternal, "健康检查服务未初始化")
 		return
@@ -458,25 +216,8 @@ func (rt *router) healthHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, r, rt.logger, status, health)
 }
 
-// rolesHandler 处理角色集合路径与单角色路径的请求。
-//
-// 角色服务未初始化时返回 503，而不是伪造空列表。
-func (rt *router) rolesHandler(w http.ResponseWriter, r *http.Request) {
-	rt.roles.serve(w, r)
-}
-
-// projectsHandler 处理项目集合路径与单项目路径的请求。
-//
-// 项目服务未初始化时返回 503，而不是伪造空列表。
-func (rt *router) projectsHandler(w http.ResponseWriter, r *http.Request) {
-	rt.projects.serve(w, r)
-}
-
 // systemInfoHandler 处理系统信息请求。
 func (rt *router) systemInfoHandler(w http.ResponseWriter, r *http.Request) {
-	if !rt.allowGet(w, r) {
-		return
-	}
 	if rt.systemInfo == nil {
 		writeError(w, r, rt.logger, http.StatusServiceUnavailable, CodeInternal, "系统信息服务未初始化")
 		return
@@ -485,23 +226,9 @@ func (rt *router) systemInfoHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // notFoundHandler 返回统一格式的 404。
+//
+// 它同时兜住 /api、/api/ 与其余未注册路径：未知 API 请求只得到 JSON 错误，
+// 不会落到前端的 SPA 回退上。
 func (rt *router) notFoundHandler(w http.ResponseWriter, r *http.Request) {
 	writeError(w, r, rt.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
-}
-
-// allowGet 校验请求方法，不满足时写出 405 并返回 false。
-func (rt *router) allowGet(w http.ResponseWriter, r *http.Request) bool {
-	if r.Method == http.MethodGet || r.Method == http.MethodHead {
-		return true
-	}
-	w.Header().Set("Allow", "GET, HEAD")
-	writeError(
-		w,
-		r,
-		rt.logger,
-		http.StatusMethodNotAllowed,
-		CodeMethodNotAllowed,
-		"该接口只支持 GET 请求",
-	)
-	return false
 }

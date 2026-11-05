@@ -122,38 +122,6 @@ type WorkflowStatusResponse struct {
 	Steps []WorkflowStepResponse `json:"steps"`
 }
 
-// serveWorkflow 分发任务级工作流的启动、取消、恢复与状态查询请求。
-//
-// 路径形状固定为 {taskID}/execute-workflow、{taskID}/cancel-workflow、
-// {taskID}/resume-workflow 与 {taskID}/workflow；其余形状返回 false，由任务处理器
-// 给出各自的 404 与 405 语义。
-func (rt *router) serveWorkflow(w http.ResponseWriter, r *http.Request) {
-	handler := newWorkflowHandler(rt.workflow, rt.taskLeases, rt.logger)
-	if handler == nil {
-		writeError(
-			w,
-			r,
-			rt.logger,
-			http.StatusServiceUnavailable,
-			CodeInternal,
-			"工作流编排服务未初始化",
-		)
-		return
-	}
-	switch {
-	case matchActionPath(r.URL.Path, executeWorkflowSegment):
-		handler.start(w, r)
-	case matchActionPath(r.URL.Path, cancelWorkflowSegment):
-		handler.cancel(w, r)
-	case matchActionPath(r.URL.Path, resumeWorkflowSegment):
-		handler.resume(w, r)
-	case matchStatusPath(r.URL.Path):
-		handler.status(w, r)
-	default:
-		writeError(w, r, rt.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
-	}
-}
-
 // workflowHandler 处理工作流相关接口。
 type workflowHandler struct {
 	workflow *app.TaskWorkflowService
@@ -161,18 +129,16 @@ type workflowHandler struct {
 	logger   *slog.Logger
 }
 
-// newWorkflowHandler 构造工作流接口处理器，服务未初始化时返回 nil。
+// newWorkflowHandler 构造工作流接口处理器。
 //
 // 租约服务是启动与恢复的必需依赖：没有任务租约就无法证明调用方持有该任务的执行权，
-// 而这两个动作都会真实调用 Agent 与 Git。
+// 而这两个动作都会真实调用 Agent 与 Git。依赖缺失时仍返回处理器，接口由路由前置检查
+// 统一给出 503。
 func newWorkflowHandler(
 	workflow *app.TaskWorkflowService,
 	leases *app.TaskLeaseService,
 	logger *slog.Logger,
 ) *workflowHandler {
-	if workflow == nil || leases == nil {
-		return nil
-	}
 	return &workflowHandler{workflow: workflow, leases: leases, logger: logger}
 }
 
@@ -181,17 +147,7 @@ func newWorkflowHandler(
 // 该入口立即返回执行记录的真实初始状态：编排在受生命周期管理的后台推进，HTTP 请求
 // 不承担整个开发周期。
 func (h *workflowHandler) start(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		writeError(w, r, h.logger, http.StatusMethodNotAllowed, CodeMethodNotAllowed,
-			"该接口只支持 POST 请求")
-		return
-	}
-	taskID, ok := actionTaskID(r.URL.Path, executeWorkflowSegment)
-	if !ok {
-		writeError(w, r, h.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
-		return
-	}
+	taskID := pathID(r, paramTaskID)
 	var body StartWorkflowRequest
 	if !decodeOptionalJSONBody(w, r, h.logger, &body) {
 		return
@@ -225,17 +181,7 @@ func (h *workflowHandler) start(w http.ResponseWriter, r *http.Request) {
 
 // cancel 处理 POST /api/v1/tasks/{taskID}/cancel-workflow。
 func (h *workflowHandler) cancel(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		writeError(w, r, h.logger, http.StatusMethodNotAllowed, CodeMethodNotAllowed,
-			"该接口只支持 POST 请求")
-		return
-	}
-	taskID, ok := actionTaskID(r.URL.Path, cancelWorkflowSegment)
-	if !ok {
-		writeError(w, r, h.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
-		return
-	}
+	taskID := pathID(r, paramTaskID)
 	result, err := h.workflow.CancelWorkflow(r.Context(), taskID)
 	if err != nil {
 		h.writeError(w, r, err)
@@ -246,17 +192,7 @@ func (h *workflowHandler) cancel(w http.ResponseWriter, r *http.Request) {
 
 // resume 处理 POST /api/v1/tasks/{taskID}/resume-workflow。
 func (h *workflowHandler) resume(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		writeError(w, r, h.logger, http.StatusMethodNotAllowed, CodeMethodNotAllowed,
-			"该接口只支持 POST 请求")
-		return
-	}
-	taskID, ok := actionTaskID(r.URL.Path, resumeWorkflowSegment)
-	if !ok {
-		writeError(w, r, h.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
-		return
-	}
+	taskID := pathID(r, paramTaskID)
 	var body ResumeWorkflowRequest
 	if !decodeOptionalJSONBody(w, r, h.logger, &body) {
 		return
@@ -289,17 +225,7 @@ func (h *workflowHandler) resume(w http.ResponseWriter, r *http.Request) {
 
 // status 处理 GET /api/v1/tasks/{taskID}/workflow。
 func (h *workflowHandler) status(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, HEAD")
-		writeError(w, r, h.logger, http.StatusMethodNotAllowed, CodeMethodNotAllowed,
-			"该接口只支持 GET 请求")
-		return
-	}
-	taskID, ok := statusTaskID(r.URL.Path)
-	if !ok {
-		writeError(w, r, h.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
-		return
-	}
+	taskID := pathID(r, paramTaskID)
 	result, err := h.workflow.GetWorkflowStatus(r.Context(), taskID)
 	if err != nil {
 		h.writeError(w, r, err)
@@ -495,50 +421,6 @@ func workflowTimeString(at *time.Time) string {
 		return ""
 	}
 	return at.UTC().Format(time.RFC3339Nano)
-}
-
-// matchActionPath 判断路径是否指向任务下的工作流动作。
-func matchActionPath(path, action string) bool {
-	_, ok := actionTaskID(path, action)
-	return ok
-}
-
-// actionTaskID 解析 {taskID}/{action} 形状的路径。
-func actionTaskID(path, action string) (string, bool) {
-	remainder := strings.TrimPrefix(path, taskPathPrefix)
-	if remainder == path {
-		return "", false
-	}
-	segments := splitPathSegments(remainder)
-	if len(segments) != 2 || segments[1] != action {
-		return "", false
-	}
-	if !validTaskPathID(segments[0]) {
-		return "", false
-	}
-	return segments[0], true
-}
-
-// matchStatusPath 判断路径是否指向任务的工作流状态查询。
-func matchStatusPath(path string) bool {
-	_, ok := statusTaskID(path)
-	return ok
-}
-
-// statusTaskID 解析 {taskID}/workflow 形状的路径。
-func statusTaskID(path string) (string, bool) {
-	remainder := strings.TrimPrefix(path, taskPathPrefix)
-	if remainder == path {
-		return "", false
-	}
-	segments := splitPathSegments(remainder)
-	if len(segments) != 2 || segments[1] != workflowSegment {
-		return "", false
-	}
-	if !validTaskPathID(segments[0]) {
-		return "", false
-	}
-	return segments[0], true
 }
 
 // claimForWorkflow 为一次显式工作流操作领取任务执行权。

@@ -17,9 +17,6 @@ import (
 // 不存在角色新增与删除入口。
 const PathRoles = APIPrefix + "/roles"
 
-// rolePathPrefix 是单角色路径前缀，供路由注册使用。
-const rolePathPrefix = PathRoles + "/"
-
 // maxRoleRequestBytes 是角色配置请求体的最大字节数。
 const maxRoleRequestBytes = 64 << 10
 
@@ -113,60 +110,6 @@ func newRoleHandler(roles *app.RoleService, logger *slog.Logger) *roleHandler {
 	return &roleHandler{roles: roles, logger: logger}
 }
 
-// serve 分发角色接口请求。
-//
-// 角色服务未初始化时返回 503：伪造空列表会让调用方以为数据库中确实没有角色。
-func (h *roleHandler) serve(w http.ResponseWriter, r *http.Request) {
-	if h.roles == nil {
-		writeError(w, r, h.logger, http.StatusServiceUnavailable, CodeInternal, "角色服务未初始化")
-		return
-	}
-	if r.URL.Path == PathRoles {
-		h.serveCollection(w, r)
-		return
-	}
-	roleID, ok := roleIDFromPath(r.URL.Path)
-	if !ok {
-		writeError(w, r, h.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
-		return
-	}
-	switch r.Method {
-	case http.MethodGet, http.MethodHead:
-		h.detail(w, r, roleID)
-	case http.MethodPut:
-		h.update(w, r, roleID)
-	default:
-		w.Header().Set("Allow", "GET, HEAD, PUT")
-		writeError(
-			w,
-			r,
-			h.logger,
-			http.StatusMethodNotAllowed,
-			CodeMethodNotAllowed,
-			"该接口只支持 GET 与 PUT 请求",
-		)
-	}
-}
-
-// serveCollection 处理角色集合路径，只支持列表查询。
-func (h *roleHandler) serveCollection(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet, http.MethodHead:
-		h.list(w, r)
-	default:
-		// 角色集合固定，集合路径不提供新增：POST 与其他方法一律拒绝。
-		w.Header().Set("Allow", "GET, HEAD")
-		writeError(
-			w,
-			r,
-			h.logger,
-			http.StatusMethodNotAllowed,
-			CodeMethodNotAllowed,
-			"该接口只支持 GET 请求",
-		)
-	}
-}
-
 // list 处理 GET /api/v1/roles。
 //
 // 已禁用角色保留在结果中并如实返回 enabled=false，便于诊断；创建任务时的角色
@@ -185,7 +128,8 @@ func (h *roleHandler) list(w http.ResponseWriter, r *http.Request) {
 }
 
 // detail 处理 GET /api/v1/roles/{roleID}。
-func (h *roleHandler) detail(w http.ResponseWriter, r *http.Request, roleID string) {
+func (h *roleHandler) detail(w http.ResponseWriter, r *http.Request) {
+	roleID := pathID(r, paramRoleID)
 	role, err := h.roles.Get(r.Context(), roleID)
 	if err != nil {
 		h.writeServiceError(w, r, err)
@@ -197,7 +141,8 @@ func (h *roleHandler) detail(w http.ResponseWriter, r *http.Request, roleID stri
 // update 处理 PUT /api/v1/roles/{roleID}。
 //
 // 响应返回重新读取的真实保存结果，调用方据此刷新展示，不需要自行推测保存后的状态。
-func (h *roleHandler) update(w http.ResponseWriter, r *http.Request, roleID string) {
+func (h *roleHandler) update(w http.ResponseWriter, r *http.Request) {
+	roleID := pathID(r, paramRoleID)
 	var request UpdateRoleRequest
 	if !decodeJSONBodyWithLimit(w, r, h.logger, &request, maxRoleRequestBytes) {
 		return
@@ -266,21 +211,6 @@ func updateToolsPolicyOf(
 		AllowTools:  request.AllowTools,
 		DenyTools:   request.DenyTools,
 	}, nil
-}
-
-// roleIDFromPath 解析单角色路径中的角色标识。
-//
-// 只接受 /api/v1/roles/{roleID} 这一段形状：更深或更浅的路径仍由调用方给出 404。
-func roleIDFromPath(path string) (string, bool) {
-	remainder := strings.TrimPrefix(path, rolePathPrefix)
-	if remainder == path {
-		return "", false
-	}
-	segments := splitPathSegments(remainder)
-	if len(segments) != 1 {
-		return "", false
-	}
-	return segments[0], true
 }
 
 // roleResponse 把领域角色转换为列表项表示。

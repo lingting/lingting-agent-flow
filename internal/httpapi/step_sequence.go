@@ -3,7 +3,6 @@ package httpapi
 import (
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/lingting/agentflow/internal/app"
@@ -72,19 +71,8 @@ type ExecuteStepsStepResponse struct {
 //
 // 该入口是同步的：只有已执行的步骤全部进入终态后才写出响应。执行本身已经由服务层
 // 持久化，因此即使响应写入失败，执行记录与状态也不会丢失。
-func (h *stepExecutionHandler) serveSteps(w http.ResponseWriter, r *http.Request, taskID string) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		writeError(
-			w,
-			r,
-			h.logger,
-			http.StatusMethodNotAllowed,
-			CodeMethodNotAllowed,
-			"该接口只支持 POST 请求",
-		)
-		return
-	}
+func (h *stepExecutionHandler) serveSteps(w http.ResponseWriter, r *http.Request) {
+	taskID := pathID(r, paramTaskID)
 	if h.executor == nil {
 		writeError(
 			w,
@@ -185,23 +173,4 @@ func executeStepsResponse(result app.StepSequenceResult) ExecuteStepsResponse {
 	}
 	response.Success = success
 	return response
-}
-
-// parseExecuteStepsPath 判断路径是否指向顺序执行动作。
-//
-// 只接受 {taskID}/execute-steps 这一种形状：其余形状返回 false，由任务处理器给出
-// 各自的 404 与 405 语义。
-func parseExecuteStepsPath(path string) (taskID string, ok bool) {
-	remainder := strings.TrimPrefix(path, taskPathPrefix)
-	if remainder == path {
-		return "", false
-	}
-	segments := splitPathSegments(remainder)
-	if len(segments) != 2 || segments[1] != executeStepsSegment {
-		return "", false
-	}
-	if !validTaskPathID(segments[0]) {
-		return "", false
-	}
-	return segments[0], true
 }

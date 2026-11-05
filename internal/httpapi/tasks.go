@@ -20,10 +20,8 @@ import (
 const (
 	// PathTasks 是任务集合路径。
 	PathTasks = APIPrefix + "/tasks"
-	// taskPathPrefix 是单任务路径前缀，实际路径为 {taskPathPrefix}{taskID}。
-	taskPathPrefix = PathTasks + "/"
-	// cancelSuffix 是取消动作的子路径。
-	cancelSuffix = "/cancel"
+	// cancelSegment 是取消动作的子路径段。
+	cancelSegment = "cancel"
 )
 
 // maxTaskRequestBytes 是任务请求体的最大字节数。
@@ -134,9 +132,6 @@ type taskHandler struct {
 
 // create 处理 POST /api/v1/tasks。
 func (h *taskHandler) create(w http.ResponseWriter, r *http.Request) {
-	if !h.allowMethod(w, r, http.MethodPost) {
-		return
-	}
 	var body CreateTaskRequest
 	if !decodeJSONBody(w, r, h.logger, &body) {
 		return
@@ -172,9 +167,6 @@ func (h *taskHandler) create(w http.ResponseWriter, r *http.Request) {
 
 // list 处理 GET /api/v1/tasks。
 func (h *taskHandler) list(w http.ResponseWriter, r *http.Request) {
-	if !h.allowMethod(w, r, http.MethodGet) {
-		return
-	}
 	request, err := parseTaskPageQuery(r)
 	if err != nil {
 		h.writeServiceError(w, r, err)
@@ -199,10 +191,8 @@ func (h *taskHandler) list(w http.ResponseWriter, r *http.Request) {
 }
 
 // detail 处理 GET /api/v1/tasks/{taskID}。
-func (h *taskHandler) detail(w http.ResponseWriter, r *http.Request, taskID string) {
-	if !h.allowMethod(w, r, http.MethodGet) {
-		return
-	}
+func (h *taskHandler) detail(w http.ResponseWriter, r *http.Request) {
+	taskID := pathID(r, paramTaskID)
 	task, err := h.tasks.GetTaskForAPI(r.Context(), taskID)
 	if err != nil {
 		h.writeServiceError(w, r, err)
@@ -233,10 +223,8 @@ func (h *taskHandler) taskResponseWithDerivedCloseout(
 }
 
 // cancel 处理 POST /api/v1/tasks/{taskID}/cancel。
-func (h *taskHandler) cancel(w http.ResponseWriter, r *http.Request, taskID string) {
-	if !h.allowMethod(w, r, http.MethodPost) {
-		return
-	}
+func (h *taskHandler) cancel(w http.ResponseWriter, r *http.Request) {
+	taskID := pathID(r, paramTaskID)
 	task, err := h.tasks.CancelTaskForAPI(r.Context(), taskID)
 	if err != nil {
 		h.writeServiceError(w, r, err)
@@ -253,83 +241,13 @@ func (h *taskHandler) cancel(w http.ResponseWriter, r *http.Request, taskID stri
 // remove 处理 DELETE /api/v1/tasks/{taskID}。
 //
 // 删除是逻辑删除，只标记 deleted_at；成功时返回 204，不返回响应体。
-func (h *taskHandler) remove(w http.ResponseWriter, r *http.Request, taskID string) {
-	if !h.allowMethod(w, r, http.MethodDelete) {
-		return
-	}
+func (h *taskHandler) remove(w http.ResponseWriter, r *http.Request) {
+	taskID := pathID(r, paramTaskID)
 	if err := h.tasks.DeleteTask(r.Context(), taskID); err != nil {
 		h.writeServiceError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// serve 按路径与方法分发单任务请求。
-func (h *taskHandler) serve(w http.ResponseWriter, r *http.Request) {
-	remainder := strings.TrimPrefix(r.URL.Path, taskPathPrefix)
-	if remainder == r.URL.Path || strings.TrimSpace(remainder) == "" {
-		// 空标识或路径尾部多余斜杠：按接口不存在处理，避免与集合路径混淆。
-		writeError(w, r, h.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
-		return
-	}
-	if strings.HasSuffix(remainder, cancelSuffix) {
-		taskID := strings.TrimSuffix(remainder, cancelSuffix)
-		if !validTaskPathID(taskID) {
-			writeError(w, r, h.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
-			return
-		}
-		h.cancel(w, r, taskID)
-		return
-	}
-	if !validTaskPathID(remainder) {
-		writeError(w, r, h.logger, http.StatusNotFound, CodeNotFound, "接口不存在: "+r.URL.Path)
-		return
-	}
-	switch r.Method {
-	case http.MethodGet, http.MethodHead:
-		h.detail(w, r, remainder)
-	case http.MethodDelete:
-		h.remove(w, r, remainder)
-	default:
-		w.Header().Set("Allow", "GET, HEAD, DELETE")
-		writeError(
-			w,
-			r,
-			h.logger,
-			http.StatusMethodNotAllowed,
-			CodeMethodNotAllowed,
-			"该接口只支持 GET 与 DELETE 请求",
-		)
-	}
-}
-
-// validTaskPathID 校验路径中的任务标识不含多余路径段。
-func validTaskPathID(raw string) bool {
-	trimmed := strings.TrimSpace(raw)
-	return trimmed != "" && !strings.Contains(trimmed, "/")
-}
-
-// allowMethod 校验请求方法，不满足时写出 405 并返回 false。
-func (h *taskHandler) allowMethod(w http.ResponseWriter, r *http.Request, methods ...string) bool {
-	for _, method := range methods {
-		if r.Method == method {
-			return true
-		}
-		if method == http.MethodGet && r.Method == http.MethodHead {
-			return true
-		}
-	}
-	allowed := strings.Join(methods, ", ")
-	w.Header().Set("Allow", allowed)
-	writeError(
-		w,
-		r,
-		h.logger,
-		http.StatusMethodNotAllowed,
-		CodeMethodNotAllowed,
-		"该接口只支持 "+allowed+" 请求",
-	)
-	return false
 }
 
 // taskNameAndDescription 读取任务对应需求的标题与描述。

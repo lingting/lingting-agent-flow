@@ -78,14 +78,10 @@ type ValidationCheckFeedbackResponse struct {
 // 只读：不创建反馈、不发起 Agent 调用、不执行检查命令，也不改动任务、步骤或验证
 // 状态。没有反馈时返回 404，而不是返回一个空反馈对象——空反馈会让调用方误以为
 // "上一轮验证没有失败"。
-func (h *executionHandler) getValidationFeedback(
-	w http.ResponseWriter,
-	r *http.Request,
-	taskID, stepID, runID string,
-) {
-	if !h.allowGet(w, r) {
-		return
-	}
+func (h *executionHandler) getValidationFeedback(w http.ResponseWriter, r *http.Request) {
+	taskID := pathID(r, paramTaskID)
+	stepID := pathID(r, paramStepID)
+	runID := pathID(r, paramRunID)
 	feedback, err := h.records.GetValidationFailureFeedback(r.Context(), taskID, stepID, runID)
 	if err != nil {
 		h.writeServiceError(w, r, err)

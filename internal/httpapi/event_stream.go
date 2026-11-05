@@ -67,25 +67,6 @@ func newEventStreamHandler(
 	return &eventStreamHandler{history: history, logger: logger, shutdown: shutdown}
 }
 
-// parseTaskEventStreamPath 判断路径是否指向任务事件实时流。
-//
-// 判定按路径段数量与段名进行，不使用前缀匹配：`{taskID}/events` 的历史查询仍由
-// `parseTaskEventsPath` 处理，两个形状互不影响。
-func parseTaskEventStreamPath(path string) (taskID string, ok bool) {
-	remainder := strings.TrimPrefix(path, taskPathPrefix)
-	if remainder == path {
-		return "", false
-	}
-	segments := splitPathSegments(remainder)
-	if len(segments) != 3 || segments[1] != eventsSegment || segments[2] != eventStreamSegment {
-		return "", false
-	}
-	if !validTaskPathID(segments[0]) {
-		return "", false
-	}
-	return segments[0], true
-}
-
 // parseEventStreamCursor 解析断线恢复游标。
 //
 // 优先级为 Last-Event-ID 请求头、`last_event_id` 查询参数：前者是浏览器自动重连
@@ -106,28 +87,15 @@ func parseEventStreamCursor(r *http.Request) (cursor int64, hasCursor bool, err 
 	return parsed, true, nil
 }
 
-// serveTaskEventStream 分发任务事件实时流请求。
-func (rt *router) serveTaskEventStream(w http.ResponseWriter, r *http.Request, taskID string) {
-	if rt.eventStream == nil || rt.eventStream.history == nil {
-		writeError(
-			w,
-			r,
-			rt.logger,
-			http.StatusServiceUnavailable,
-			CodeInternal,
-			"历史查询服务未初始化",
-		)
-		return
-	}
-	rt.eventStream.streamTaskEvents(w, r, taskID)
-}
-
 // streamTaskEvents 处理 GET /api/v1/tasks/{taskID}/events/stream。
 //
 // 响应头一旦写出就无法再改成普通 JSON 错误响应，因此全部可以判定的错误（方法、
 // 流式能力、游标、任务归属）都在写响应头之前处理；流开始之后的错误只结束连接并
 // 记录服务端诊断信息。
-func (h *eventStreamHandler) streamTaskEvents(w http.ResponseWriter, r *http.Request, taskID string) {
+func (h *eventStreamHandler) streamTaskEvents(w http.ResponseWriter, r *http.Request) {
+	taskID := pathID(r, paramTaskID)
+	// GET 方法模式由标准库同时匹配 HEAD，而事件流只接受真正的 GET：HEAD 没有可
+	// 增量刷新的响应体，继续按"事件流只支持 GET"拒绝，保持原有状态码与 Allow。
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
 		writeError(
