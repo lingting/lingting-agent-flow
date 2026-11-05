@@ -271,71 +271,6 @@ func (b PlanningSessionRoleBinding) Complete() bool {
 		strings.TrimSpace(b.PlannerSessionID) != ""
 }
 
-// PlanningSessionLeaseStore 保存规划会话的跨进程执行租约。
-//
-// 规划调用（容器准备、角色会话绑定、Pi 执行与 Session 归档）必须由同一个执行者独占：
-// 进程内互斥只在单个 Server 内有效，两个 Server 连接同一个数据库时仍可能同时对同一个
-// 规划会话发起调用。租约把这份归属变成数据库事实，并由领取代次（epoch）提供栅栏。
-//
-// 三个操作都必须由单条条件语句完成，不允许"先查询判断空闲，再无条件写入"：两步方案在
-// 并发领取时会让两个执行者都认为自己是持有者。
-type PlanningSessionLeaseStore interface {
-	// AcquirePlanningSessionLease 以原子条件写入领取规划会话租约。
-	//
-	// 语义固定为：
-	//   - 没有租约行时创建一行，代次从 1 开始；
-	//   - 当前租约已显式释放（owner 为空）或已过期时允许领取，且代次在同一语句内递增；
-	//   - 当前租约仍有效时返回 storage.ErrConflict，调用方不得把冲突当作领取成功；
-	//   - 返回的 handle 是数据库确认过的执行权身份，包含存储层分配的代次。
-	AcquirePlanningSessionLease(
-		ctx context.Context,
-		request PlanningSessionLeaseRequest,
-	) (domain.PlanningSessionLeaseHandle, error)
-	// RenewPlanningSessionLease 以 owner + epoch 为条件延长规划会话租约。
-	//
-	// 只有"同一 owner、同一代次、仍未过期"三者同时成立才续期；租约过期、已被接管或
-	// 数据库不可用都返回 storage.ErrConflict（进程内无法再确认持有权时不得继续执行）。
-	RenewPlanningSessionLease(
-		ctx context.Context,
-		request PlanningSessionLeaseRenewRequest,
-	) error
-	// ReleasePlanningSessionLease 释放由指定租约身份持有的规划会话租约。
-	//
-	// 条件同时覆盖 owner、epoch 与"仍未过期"：过期租约不得通过迟到释放重新清空，旧代次
-	// 也不得释放新持有者的租约。释放只清空 owner / operation / 到期时间并保留代次，因此
-	// 下一次领取继续递增。没有命中任何记录时返回 false 与 storage.ErrConflict：调用方
-	// 不得把"没释放任何东西"当成本次执行者已成功解锁。
-	ReleasePlanningSessionLease(
-		ctx context.Context,
-		handle domain.PlanningSessionLeaseHandle,
-		at time.Time,
-	) (bool, error)
-}
-
-// PlanningSessionLeaseRequest 是一次规划会话租约领取请求。
-type PlanningSessionLeaseRequest struct {
-	// PlanningSessionID 是被领取的规划会话。
-	PlanningSessionID domain.ID
-	// Owner 是领取者标识，由服务端生成且每次领取唯一。
-	Owner string
-	// Operation 是本次操作类型，只用于诊断与审计，不设数据库取值白名单。
-	Operation domain.PlanningLeaseOperation
-	// TTL 是租约有效期，必须大于 0。
-	TTL time.Duration
-	// At 是领取时间，零值使用当前时间。
-	At time.Time
-}
-
-// PlanningSessionLeaseRenewRequest 是一次规划会话租约续期请求。
-type PlanningSessionLeaseRenewRequest struct {
-	// Handle 是本次领取的身份，必须来自成功的 AcquirePlanningSessionLease。
-	Handle domain.PlanningSessionLeaseHandle
-	// TTL 是新的租约有效期，必须大于 0。
-	TTL time.Duration
-	// At 是续期时间，零值使用当前时间。
-	At time.Time
-}
-
 // AppendPlanningMessageRequest 是一次"追加规划消息"的输入。
 //
 // 它不包含序号与标识：序号由存储层在事务内分配，标识由领域层构造，从而保证调用方
@@ -434,52 +369,11 @@ type TaskStore interface {
 		expected []domain.TaskStatus,
 		at time.Time,
 	) error
-	// AcquireTaskLease 以原子条件更新领取任务租约，并返回本次领取的身份。
-	//
-	// 条件同时覆盖"未被删除""状态属于请求中的集合""租约空闲 / 已过期 / 已由同一
-	// owner 持有"，由单条 UPDATE 判定，因此并发领取最多只有一个成功；其余返回
-	// storage.ErrConflict。领取成功时领取代次在同一语句内原子递增。
-	//
-	// Statuses 必须显式给出：空集合返回 storage.ErrInvalidData，不再回退到包含
-	// failed / paused / recovery_required 的默认集合。
-	AcquireTaskLease(
-		ctx context.Context,
-		request TaskLeaseRequest,
-	) (domain.TaskLeaseHandle, error)
-	// RenewTaskLease 以 owner + epoch 为条件延长租约。
-	//
-	// 租约已过期、已被接管或任务已被删除时返回 storage.ErrConflict：调用方必须按
-	// "执行权已丢失"停止推进，不得用迟到续期恢复所有权。
-	RenewTaskLease(ctx context.Context, request TaskLeaseRenewRequest) error
-	// ReleaseTaskLease 释放由指定租约身份持有的租约。
-	//
-	// 返回 false 表示没有命中任何记录（owner 或代次不匹配、租约已被接管），此时
-	// 同时返回 storage.ErrConflict：调用方不得把"没释放任何东西"当成释放成功。
-	ReleaseTaskLease(
-		ctx context.Context,
-		handle domain.TaskLeaseHandle,
-		at time.Time,
-	) (bool, error)
-	// UpdateTaskLeaseGuard 在任务仍由 handle 持有且状态属于 expected 时写入任务。
-	//
-	// 它是执行期状态写入的栅栏：条件包含 status、lease_owner 与 lease_epoch，
-	// 因此旧代次的迟到写入无法覆盖新领取者的记录。
-	UpdateTaskLeaseGuard(
-		ctx context.Context,
-		task domain.Task,
-		expected []domain.TaskStatus,
-		handle domain.TaskLeaseHandle,
-	) error
-	// AppendTaskLeaseEvent 在一个事务内追加领取或释放事件。
-	//
-	// 事件写入失败时整体回滚，避免留下"有效租约但没有审计痕迹"的现场。
-	AppendTaskLeaseEvent(ctx context.Context, event domain.Event) (domain.Event, error)
 	// UpdateTaskCancellation 在任务状态仍属于 expected 时写入取消请求。
 	//
 	// 它只更新取消相关列（status、cancel_requested、cancel_requested_at、
 	// final_result、failure_summary、finished_at、updated_at），不触碰
-	// lease_owner / lease_epoch / lease_expires_at：取消是用户意图，不是执行权
-	// 交接，因此既不能要求持有租约，也绝不能抹掉并发执行者的租约。
+	// 取消列与任务状态：取消是用户意图，不是执行权交接。
 	//
 	// 状态不匹配时返回 storage.ErrConflict，调用方不得假定取消已被记录。
 	UpdateTaskCancellation(
@@ -487,33 +381,6 @@ type TaskStore interface {
 		task domain.Task,
 		expected []domain.TaskStatus,
 	) error
-}
-
-// TaskLeaseRequest 是一次任务租约领取请求。
-type TaskLeaseRequest struct {
-	// TaskID 是目标任务。
-	TaskID domain.ID
-	// Owner 是执行者标识，必须非空。
-	Owner string
-	// TTL 是租约有效期，必须大于 0。
-	TTL time.Duration
-	// Statuses 是允许领取的状态集合，必须显式给出。
-	//
-	// 空集合返回 storage.ErrInvalidData：默认集合会包含 failed / paused /
-	// recovery_required，使自动调度绕过 P2 的核验门控。
-	Statuses []domain.TaskStatus
-	// At 是领取时间，零值使用当前时间。
-	At time.Time
-}
-
-// TaskLeaseRenewRequest 是一次任务租约续期请求。
-type TaskLeaseRenewRequest struct {
-	// Handle 是本次领取的身份，必须来自成功的 AcquireTaskLease。
-	Handle domain.TaskLeaseHandle
-	// TTL 是新的租约有效期，必须大于 0。
-	TTL time.Duration
-	// At 是续期时间，零值使用当前时间。
-	At time.Time
 }
 
 // StepStore 保存 Planner 生成的结构化开发步骤。
@@ -621,7 +488,7 @@ type StartAttemptRequest struct {
 	// BudgetScopeID 是本次尝试所属的执行周期标识。
 	//
 	// 只有用户显式开启的新周期才会传入不同的取值：恢复与重复调用必须复用同一个
-	// 标识，因此修复预算可以跨进程保持一致。
+	// 标识，因此修复预算在进程重启后仍然一致。
 	BudgetScopeID domain.ID
 	// At 是尝试的开始时间，零值使用当前时间。
 	At time.Time
@@ -1139,9 +1006,6 @@ type Tx interface {
 	// PlanningSessionStore 提供规划会话、消息与方案版本的读写；规划会话不进入
 	// Task 执行记录。
 	PlanningSessionStore
-	// PlanningSessionLeaseStore 提供规划会话的跨进程执行租约；它与规划会话的业务状态
-	// 无关，只表达"谁正在占用这个会话的运行时资源"。
-	PlanningSessionLeaseStore
 	StepStore
 	AttemptStore
 	SessionStore
@@ -1160,8 +1024,6 @@ type Tx interface {
 	StepExecutionStore
 	// WorkflowRunStore 提供任务级工作流执行记录的追加与推进。
 	WorkflowRunStore
-	// WorkflowRunLeaseStore 提供执行权的延长，与状态写入分离。
-	WorkflowRunLeaseStore
 	// RepairCycleStore 提供开发执行周期的登记与查询，是修复预算的持久化依据。
 	RepairCycleStore
 }

@@ -12,6 +12,9 @@
   配置中的本机私钥文件。
 - 任务执行命令是 HTTP 客户端：它们调用 `agentflow server` 的接口并轮询真实进度，不在 CLI 进程内装配
   SSH、容器、Git 或 Pi 能力；服务不可达时直接失败并提示启动服务，不会退回本机执行。
+- 同一份服务端数据目录只允许一个 `agentflow server` 进程：它启动时用数据库文件旁的
+  `<database_path>.server.lock` 取得独占文件锁，第二个进程立即失败并提示先停止已有服务端。
+  需要执行任务时不要启动第二个服务端，直接对已有服务调用任务命令即可。
 
 ## 2. 基础命令
 
@@ -19,7 +22,7 @@
 |---|---|
 | `agentflow config validate` | 校验配置文件的结构与取值 |
 | `agentflow version` | 输出构建信息 |
-| `agentflow server` | 启动 AgentFlow 服务（HTTP API、内嵌 Web 页面与后台服务） |
+| `agentflow server` | 启动 AgentFlow 服务（HTTP API、内嵌 Web 页面与后台服务）；同一份数据目录只允许一个进程 |
 
 ## 3. host —— 执行节点
 

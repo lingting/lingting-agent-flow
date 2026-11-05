@@ -71,15 +71,14 @@ type StepExecuteRequest struct {
 	//
 	// 该字段只由应用层内部使用，不通过 HTTP 请求体暴露。
 	DeferCompletion bool
-	// Grant 是本次执行持有的任务执行权凭据。
+	// Grant 是本次执行持有的任务执行凭据。
 	//
-	// 任务租约保护整个 Task 的执行权，步骤占用保护单次 Step 的执行登记：两者职责
-	// 不同、都不能替代对方。凭据非空时，占用步骤与写入任务终态都附带 owner + epoch
-	// 条件，因此旧代次的执行者无法在任务被接管后继续推进；为空表示调用方没有任务
-	// 执行权，此时只用状态条件写入。
+	// 任务执行凭据保护整个 Task 的执行权，步骤占用保护单次 Step 的执行登记：两者职责
+	// 不同、都不能替代对方。凭据非空时，占用步骤与写入任务终态前会核验执行权仍有效；
+	// 为空表示本次调用由服务自行取得执行权。
 	//
 	// 该字段只由应用层内部使用，不通过 HTTP 请求体暴露。
-	Grant *WorkflowExecutionGrant
+	Grant *TaskExecutionGrant
 }
 
 // StepExecutionResult 是一次单步骤执行的结果。
@@ -144,16 +143,6 @@ type StepExecutorTaskRepository interface {
 		ctx context.Context,
 		task domain.Task,
 		expected []domain.TaskStatus,
-	) error
-	// UpdateTaskLeaseGuard 在仍持有任务执行权时写入任务状态。
-	//
-	// 它是"旧代次的执行者不得覆盖新执行者状态"的落点：条件包含 status + owner +
-	// epoch，任一不匹配都返回 storage.ErrConflict。
-	UpdateTaskLeaseGuard(
-		ctx context.Context,
-		task domain.Task,
-		expected []domain.TaskStatus,
-		handle domain.TaskLeaseHandle,
 	) error
 }
 
@@ -231,6 +220,11 @@ type StepExecutorOptions struct {
 	Now func() time.Time
 	// DefaultTimeout 覆盖未配置超时时的默认调用超时。
 	DefaultTimeout time.Duration
+	// Coordination 是任务执行的进程内协调器，必填。
+	//
+	// 它与调度器、启动、重试、单步骤闭环与工作流编排共用同一个实例：同一任务不会被
+	// 两个入口同时推进。
+	Coordination *TaskExecutionCoordinator
 }
 
 // StepExecutor 是单个 Step 的执行协调器。
@@ -251,12 +245,15 @@ type StepExecutor struct {
 	logger         *slog.Logger
 	now            func() time.Time
 	defaultTimeout time.Duration
+	// coordination 按任务串行化执行入口，与其余执行入口共用同一实例。
+	coordination *TaskExecutionCoordinator
 	// running 记录本进程内正在执行的步骤，用于快速拒绝重复请求。
 	//
-	// 它是第一道防线而不是一致性保证：真正的占用由数据库条件更新完成。
+	// 它只回答"这个步骤是否正在执行"：任务级的互斥由 coordination 承担，真正的步骤
+	// 占用由数据库条件更新完成。
 	running *stepExecutionRegistry
 	// sequences 记录本进程内正在顺序执行的任务，用于拒绝同一任务的两个顺序执行
-	// 请求交错推进。跨进程的并发仍由步骤占用的事务条件更新拒绝。
+	// 请求交错推进。任务级互斥由 coordination 承担。
 	sequences *stepExecutionRegistry
 	// lifecycle 管理后台服务状态与在途执行，使 Server 停止时能取消并等待收敛。
 	lifecycle lifecycleState
@@ -272,6 +269,9 @@ func NewStepExecutor(options StepExecutorOptions) (*StepExecutor, error) {
 	}
 	if options.Sessions == nil {
 		return nil, fmt.Errorf("步骤执行协调器初始化失败: 会话服务不能为空")
+	}
+	if options.Coordination == nil {
+		return nil, fmt.Errorf("步骤执行协调器初始化失败: 任务执行协调器不能为空")
 	}
 	logger := options.Logger
 	if logger == nil {
@@ -293,6 +293,7 @@ func NewStepExecutor(options StepExecutorOptions) (*StepExecutor, error) {
 		logger:         logger,
 		now:            now,
 		defaultTimeout: timeout,
+		coordination:   options.Coordination,
 		running:        newStepExecutionRegistry(),
 		sequences:      newStepExecutionRegistry(),
 	}, nil
@@ -324,6 +325,20 @@ func (e *StepExecutor) Execute(
 	if err != nil {
 		return StepExecutionResult{}, err
 	}
+	// 执行权按任务串行：同一任务不会被另一个执行入口同时推进。
+	grant, ownsGrant, grantErr := acquireTaskGrant(
+		e.coordination,
+		task.ID,
+		request.Grant,
+		ErrStepExecutionConflict,
+	)
+	if grantErr != nil {
+		return StepExecutionResult{}, grantErr
+	}
+	if ownsGrant {
+		defer e.coordination.Release(grant)
+	}
+	request.Grant = &grant
 	step, err := e.loadStep(ctx, task, stepID)
 	if err != nil {
 		return StepExecutionResult{}, err
@@ -422,8 +437,8 @@ type runAttemptRequest struct {
 	gitBefore *domain.GitWorktreeState
 	// deferCompletion 表示只完成开发阶段，由闭环协调器收口步骤状态。
 	deferCompletion bool
-	// grant 是本次执行持有的任务执行权凭据，为空表示没有任务租约。
-	grant *WorkflowExecutionGrant
+	// grant 是本次执行持有的任务执行凭据，为空表示本次写入不核验执行权。
+	grant *TaskExecutionGrant
 }
 
 // checkPrerequisites 校验指定步骤的全部前序步骤是否已完成。
@@ -723,8 +738,11 @@ func (e *StepExecutor) beginExecution(
 	container domain.Container,
 	scope domain.RepairBudgetScope,
 	scopeID domain.ID,
-	grant *WorkflowExecutionGrant,
+	grant *TaskExecutionGrant,
 ) (storage.StepExecutionStart, error) {
+	if err := checkGrantHeld(task.ID, grant); err != nil {
+		return storage.StepExecutionStart{}, err
+	}
 	started, err := e.store.BeginStepExecution(ctx, storage.StepExecutionStartRequest{
 		TaskID:             task.ID,
 		StepID:             step.ID,
@@ -735,7 +753,6 @@ func (e *StepExecutor) beginExecution(
 		InputDigest:        digestStepExecution(task, step),
 		BudgetScope:        scope,
 		BudgetScopeID:      scopeID,
-		Lease:              leaseOf(grant),
 		At:                 e.now(),
 	})
 	if err != nil {
@@ -791,7 +808,7 @@ func parseStepExecutionID(label, raw string) (domain.ID, error) {
 // stepExecutionRegistry 记录本进程内正在执行的步骤。
 //
 // 它只用于快速拒绝同一进程内的重复请求与观测在途数量；数据库条件更新才是
-// 唯一的一致性保证，跨进程并发同样会被拒绝。
+// 唯一的一致性保证，并发的迟到写入同样会被拒绝。
 type stepExecutionRegistry struct {
 	mu      sync.Mutex
 	entries map[domain.ID]struct{}

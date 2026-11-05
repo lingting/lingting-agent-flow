@@ -219,7 +219,7 @@ func (f *e2eFixture) assemble(t *testing.T) {
 	}
 	executor, err := app.NewStepExecutor(app.StepExecutorOptions{
 		Store: f.db, Containers: containers, Sessions: sessions,
-		Git: containers, Logger: f.logger.Slog(),
+		Git: containers, Coordination: app.NewTaskExecutionCoordinator(), Logger: f.logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造步骤执行器失败: %v", err)
@@ -239,14 +239,16 @@ func (f *e2eFixture) assemble(t *testing.T) {
 		t.Fatalf("构造验证引擎失败: %v", err)
 	}
 	stepFlow, err := app.NewStepWorkflowService(app.StepWorkflowOptions{
-		Steps: executor, Validation: validation, Store: f.db, Cycles: f.db, Logger: f.logger.Slog(),
+		Steps: executor, Validation: validation, Store: f.db, Cycles: f.db,
+		Coordination: app.NewTaskExecutionCoordinator(), Logger: f.logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造单步骤闭环失败: %v", err)
 	}
 	workflow, err := app.NewTaskWorkflowService(app.TaskWorkflowOptions{
 		Store: f.db, Steps: stepFlow, Containers: containers,
-		CodeSaver: containers, Sessions: sessions, Logger: f.logger.Slog(),
+		CodeSaver: containers, Sessions: sessions,
+		Coordination: app.NewTaskExecutionCoordinator(), Logger: f.logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造任务级编排器失败: %v", err)
@@ -254,7 +256,8 @@ func (f *e2eFixture) assemble(t *testing.T) {
 	launch, err := app.NewTaskLaunchService(app.TaskLaunchOptions{
 		Store: f.db, Environments: execution, Containers: containers,
 		Planner: workflow, Workspace: initWorkspace, Workflow: workflow,
-		Logger: f.logger.Slog(),
+		Coordination: app.NewTaskExecutionCoordinator(),
+		Logger:       f.logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造统一启动服务失败: %v", err)

@@ -259,10 +259,11 @@ func newPlanFixture(t *testing.T, options planOptions) *planFixture {
 		agentReplies: []fakeAgentReply{planReply(options)},
 	}
 	serviceOptions := app.TaskWorkflowOptions{
-		Store:      store,
-		Steps:      &taskWorkflowRunner{db: db},
-		Containers: containers,
-		Logger:     logger.Slog(),
+		Store:        store,
+		Steps:        &taskWorkflowRunner{db: db},
+		Containers:   containers,
+		Coordination: app.NewTaskExecutionCoordinator(),
+		Logger:       logger.Slog(),
 	}
 	if !options.noSessions {
 		sessions, sessionErr := app.NewSessionService(db, workspace.SessionRoot(), logger.Slog())
@@ -691,11 +692,12 @@ func TestRecoverPlanGenerationConvergesPlanningTasks(t *testing.T) {
 				t.Fatalf("构造会话服务失败: %v", err)
 			}
 			restarted, err := app.NewTaskWorkflowService(app.TaskWorkflowOptions{
-				Store:      fixture.db,
-				Steps:      &taskWorkflowRunner{db: fixture.db},
-				Containers: &taskWorkflowContainer{running: true},
-				Sessions:   sessions,
-				Logger:     logger.Slog(),
+				Store:        fixture.db,
+				Steps:        &taskWorkflowRunner{db: fixture.db},
+				Containers:   &taskWorkflowContainer{running: true},
+				Coordination: app.NewTaskExecutionCoordinator(),
+				Sessions:     sessions,
+				Logger:       logger.Slog(),
 			})
 			if err != nil {
 				t.Fatalf("构造工作流编排器失败: %v", err)

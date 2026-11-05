@@ -156,7 +156,6 @@ func TestDecideTaskRetryEligibilityAllowsCleanFailure(t *testing.T) {
 	decision := domain.DecideTaskRetryEligibility(domain.TaskRetryInput{
 		Task:  task,
 		Steps: []domain.Step{retryStep(t, task, domain.StepStatusFailed)},
-		Now:   retryAt,
 	})
 	if !decision.Allowed {
 		t.Fatalf("干净的失败任务应当允许重试，实际拒绝: %v", decision.Rejections)
@@ -203,16 +202,6 @@ func TestDecideTaskRetryEligibilityRejectsBlockingFacts(t *testing.T) {
 				input.Task.Status = domain.TaskStatusDeveloping
 			},
 			want: domain.TaskRetryRejectionStatusNotRetryable,
-		},
-		{
-			name: "租约仍有效",
-			mutate: func(t *testing.T, input *domain.TaskRetryInput) {
-				expires := retryAt.Add(time.Minute)
-				input.Task.LeaseOwner = "worker"
-				input.Task.LeaseEpoch = 2
-				input.Task.LeaseExpiresAt = &expires
-			},
-			want: domain.TaskRetryRejectionLeaseHeld,
 		},
 		{
 			name: "仍有未结束执行记录",
@@ -282,7 +271,6 @@ func TestDecideTaskRetryEligibilityRejectsBlockingFacts(t *testing.T) {
 			input := domain.TaskRetryInput{
 				Task:  task,
 				Steps: []domain.Step{retryStep(t, task, domain.StepStatusFailed)},
-				Now:   retryAt,
 			}
 			testCase.mutate(t, &input)
 			decision := domain.DecideTaskRetryEligibility(input)
@@ -315,18 +303,12 @@ func TestDecideTaskRetryEligibilityCollectsAllReasons(t *testing.T) {
 	task.CancelRequested = true
 	now := retryAt
 	task.CancelRequestedAt = &now
-	expires := retryAt.Add(time.Minute)
-	task.LeaseOwner = "worker"
-	task.LeaseEpoch = 3
-	task.LeaseExpiresAt = &expires
 	decision := domain.DecideTaskRetryEligibility(domain.TaskRetryInput{
 		Task:  task,
 		Steps: []domain.Step{retryStep(t, task, domain.StepStatusFailed)},
-		Now:   retryAt,
 	})
 	for _, reason := range []domain.TaskRetryRejection{
 		domain.TaskRetryRejectionCancelRequested,
-		domain.TaskRetryRejectionLeaseHeld,
 	} {
 		if !decision.Reject(reason) {
 			t.Fatalf("拒绝原因缺少 %s: %v", reason, decision.Rejections)

@@ -169,7 +169,7 @@ type RepairLoopInput struct {
 	// Budget 是本次循环所属执行周期的持久化预算事实。
 	//
 	// 它由 DecideRepairBudget 依据 Attempt 的预算作用域计算得出，不是进程内计数：
-	// 进程重启后重新读取历史记录会得到同一个值，因此修复上限可以跨进程保持。
+	// 进程重启后重新读取历史记录会得到同一个值，因此修复上限在重启后保持不变。
 	Budget RepairBudget
 	// HasBudget 表示 Budget 是否来自已读取的持久化历史。
 	//

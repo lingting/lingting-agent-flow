@@ -242,8 +242,7 @@ export function retryTaskStatusLabel(status: string, dict: Record<string, string
  *
  * 规则固定：
  *   - 请求返回成功只说明"服务端完成了本次操作"，不等于任务成功；
- *   - `workflow_started=true` 才是"工作流真的启动了"，此时展示真实任务状态、执行记录与
- *     执行代次；
+ *   - `workflow_started=true` 才是"工作流真的启动了"，此时展示真实任务状态与执行记录；
  *   - 否则一律按"任务已重开但工作流未启动"展示真实任务状态与失败阶段 / 原因，绝不显示为
  *     "重试已开始"；
  *   - 缺失的可选字段用中性说明，未知状态值原样保留，不由其他字段推断成功。
@@ -261,7 +260,6 @@ export function describeRetryResult(
   const previous = retryTaskStatusLabel(String(result.previous_status ?? ""), options.statusLabels);
   const details = [
     `任务状态：重试前 ${previous} → 当前 ${status}`,
-    `执行代次：${result.lease_epoch}`,
   ];
   if (isRealTime(result.started_at)) {
     details.push(`开始时间：${new Date(result.started_at as string).toLocaleString()}`);

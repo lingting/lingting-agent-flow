@@ -65,7 +65,7 @@ type PlanDraft struct {
 // CheckPlanGenerationStart 校验任务是否允许开始一次计划生成。
 //
 // 校验只读：它不修改任何状态，也不创建任何记录。真正的占用由调用方以任务状态
-// 条件更新完成（planning 是跨进程的并发闸门）。
+// 条件更新完成（planning 是并发写入的闸门）。
 //
 // 返回的错误类别用于接口映射：状态不允许属于冲突，配置或环境缺失属于前置条件未满足。
 func CheckPlanGenerationStart(task Task, steps []Step) error {

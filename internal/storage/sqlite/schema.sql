@@ -140,8 +140,6 @@ END;
 --
 --   * 同一需求可以拥有多次执行记录；历史任务不允许通过删除重建实现重试；
 --   * config_json 保存任务配置快照，禁止出现私钥、密码或 Token；
---   * lease_owner / lease_expires_at / lease_epoch 构成执行租约，(owner, epoch) 唯一
---     确定一次领取，旧代次的迟到写入由条件更新拒绝；
 --   * deleted_at 标记逻辑删除。
 CREATE TABLE tasks (
     id                   TEXT    PRIMARY KEY NOT NULL,
@@ -162,9 +160,6 @@ CREATE TABLE tasks (
     idempotency_key      TEXT    CHECK (
         idempotency_key IS NULL OR length(trim(idempotency_key)) > 0
     ),
-    lease_owner          TEXT,
-    lease_expires_at     INTEGER CHECK (lease_expires_at IS NULL OR lease_expires_at > 0),
-    lease_epoch          INTEGER NOT NULL DEFAULT 0 CHECK (lease_epoch >= 0),
     created_at           INTEGER NOT NULL,
     started_at           INTEGER,
     finished_at          INTEGER,
@@ -173,12 +168,7 @@ CREATE TABLE tasks (
     -- 取消请求必须同时记录请求时间。
     CHECK (cancel_requested = 0 OR cancel_requested_at IS NOT NULL),
     -- 关联尝试时必须同时指定步骤。
-    CHECK (current_attempt_id IS NULL OR current_step_id IS NOT NULL),
-    -- 持有租约时必须记录到期时间。
-    CHECK (
-        lease_owner IS NULL
-        OR (length(trim(lease_owner)) > 0 AND lease_expires_at IS NOT NULL)
-    )
+    CHECK (current_attempt_id IS NULL OR current_step_id IS NOT NULL)
 );
 
 CREATE INDEX idx_tasks_requirement ON tasks (requirement_id, created_at);
@@ -736,7 +726,7 @@ CREATE INDEX idx_validation_feedbacks_task
 --   * tasks.status 表达任务的业务阶段，workflow_runs.status 表达"这一次编排执行是否在
 --     推进"，两者不能互相替代；
 --   * 当前游标是恢复的唯一依据，plan_digest 用于判断计划是否已重新生成；
---   * worker_id + lease_expires_at 识别"进程已退出但记录仍停留在 running"的残留；
+--   * 停留在 running 的记录表示进程在推进期间退出，启动恢复按进程中断现场收敛；
 --   * revision 是乐观并发版本号。
 CREATE TABLE workflow_runs (
     id                      TEXT    PRIMARY KEY NOT NULL,
@@ -752,8 +742,6 @@ CREATE TABLE workflow_runs (
     total_steps             INTEGER NOT NULL DEFAULT 0 CHECK (total_steps >= 0),
     cancel_requested        INTEGER NOT NULL DEFAULT 0,
     cancel_requested_at     INTEGER,
-    worker_id               TEXT,
-    lease_expires_at        INTEGER,
     error_class             TEXT,
     error_summary           TEXT,
     revision                INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
@@ -764,8 +752,7 @@ CREATE TABLE workflow_runs (
     -- 跨字段一致性：以下约束描述字段组合，不是枚举取值白名单。
     CHECK (completed_steps <= total_steps),
     CHECK (current_attempt_id IS NULL OR current_step_id IS NOT NULL),
-    CHECK (cancel_requested = 0 OR cancel_requested_at IS NOT NULL),
-    CHECK (worker_id IS NULL OR lease_expires_at IS NOT NULL)
+    CHECK (cancel_requested = 0 OR cancel_requested_at IS NOT NULL)
 );
 
 -- 同一任务同一时刻最多一条未结束的执行记录：并发启动由唯一约束拒绝，而不是只依赖
@@ -915,31 +902,3 @@ CREATE TABLE planning_revisions (
 CREATE UNIQUE INDEX idx_planning_revisions_number
     ON planning_revisions (planning_session_id, revision_number);
 
--- planning_session_leases：规划会话的跨进程执行租约。
---
---   * planning_session_id 是主键，因此"每个规划会话最多一个持有者"由主键约束保证；
---   * epoch 每次成功领取时原子递增，(owner, epoch) 唯一确定一次领取；
---   * 释放时不删行，只清空 owner / operation / lease_expires_at 并保留 epoch；
---   * operation 只是诊断与审计分类，不设取值白名单；
---   * 组合一致性：持有中必须同时具备 owner、operation 与到期时间，释放后三者同时为空。
-CREATE TABLE planning_session_leases (
-    planning_session_id TEXT    PRIMARY KEY NOT NULL CHECK (length(trim(planning_session_id)) > 0),
-    owner               TEXT,
-    operation           TEXT,
-    epoch               INTEGER NOT NULL DEFAULT 0 CHECK (epoch >= 0),
-    lease_expires_at    INTEGER,
-    updated_at          INTEGER NOT NULL CHECK (updated_at > 0),
-    CHECK (
-        (owner IS NULL AND operation IS NULL AND lease_expires_at IS NULL)
-        OR (
-            owner IS NOT NULL AND length(trim(owner)) > 0
-            AND operation IS NOT NULL AND length(trim(operation)) > 0
-            AND lease_expires_at IS NOT NULL AND lease_expires_at > 0
-        )
-    )
-);
-
--- 持有中的租约按到期时间检索：过期即可被接管，已释放的行不进入索引。
-CREATE INDEX idx_planning_session_leases_expiry
-    ON planning_session_leases (lease_expires_at)
-    WHERE owner IS NOT NULL;

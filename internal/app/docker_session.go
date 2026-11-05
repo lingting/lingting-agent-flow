@@ -26,6 +26,23 @@ type DockerServiceOptions struct {
 	QueryTimeout time.Duration
 	// MutateTimeout 覆盖变更命令超时，零值使用默认值。
 	MutateTimeout time.Duration
+	// BuildLocks 是同一进程内共享的"节点 + 环境"构建互斥集合。
+	//
+	// 同一 Server 进程会构造多个 EnvironmentService（HTTP 后台构建与任务启动中的
+	// 镜像准备），它们必须注入同一个实例；为空时该实例使用自己的集合，只适用于
+	// 只有一个环境服务实例的运行方式。
+	BuildLocks *EnvironmentBuildLocks
+}
+
+// remoteDockerService 是环境、镜像与容器服务共用的远程会话建立逻辑。
+type remoteDockerService struct {
+	ssh           *SSHService
+	store         storage.Store
+	logger        *logging.Logger
+	queryTimeout  time.Duration
+	mutateTimeout time.Duration
+	// buildLocks 是同一进程内共享的"节点 + 环境"构建互斥集合。
+	buildLocks *EnvironmentBuildLocks
 }
 
 // remoteDocker 是一次远程 Docker 会话：已认证连接、SFTP 通道、命令执行器与目录布局。
@@ -60,15 +77,6 @@ func (r *remoteDocker) close(ctx context.Context, logger *logging.Logger) {
 	}
 }
 
-// remoteDockerService 是环境、镜像与容器服务共用的远程会话建立逻辑。
-type remoteDockerService struct {
-	ssh           *SSHService
-	store         storage.Store
-	logger        *logging.Logger
-	queryTimeout  time.Duration
-	mutateTimeout time.Duration
-}
-
 // newRemoteDockerService 构造远程 Docker 服务公共依赖。
 func newRemoteDockerService(options DockerServiceOptions) (*remoteDockerService, error) {
 	if options.Store == nil {
@@ -83,7 +91,19 @@ func newRemoteDockerService(options DockerServiceOptions) (*remoteDockerService,
 		logger:        options.Logger,
 		queryTimeout:  options.QueryTimeout,
 		mutateTimeout: options.MutateTimeout,
+		buildLocks:    resolveBuildLocks(options.BuildLocks),
 	}, nil
+}
+
+// resolveBuildLocks 返回本次使用的构建互斥集合。
+//
+// 未注入共享实例时创建私有实例：只有一个环境服务实例的运行方式仍然需要互斥，而多个
+// 实例共享同一份集合必须由装配方显式注入。
+func resolveBuildLocks(locks *EnvironmentBuildLocks) *EnvironmentBuildLocks {
+	if locks != nil {
+		return locks
+	}
+	return NewEnvironmentBuildLocks()
 }
 
 // sessionOptions 约束一次远程会话的建立方式。

@@ -152,7 +152,7 @@ func (c *RepairCycle) Close(at time.Time) error {
 // RepairAttemptFacts 是一次 Attempt 对预算判定有意义的持久化事实。
 //
 // 它刻意只包含"读到的记录本身"，不包含任何派生或推测值：预算判定必须是
-// 持久化事实的纯函数，才能跨进程得到一致结论。
+// 持久化事实的纯函数，才能在进程重启后得到一致结论。
 type RepairAttemptFacts struct {
 	// ID 是尝试标识，仅用于诊断。
 	ID ID
@@ -180,7 +180,7 @@ func (f RepairAttemptFacts) ConsumesBudget() bool {
 
 // Unresolved 判断该尝试是否表示"结果不确定、必须先核验"的现场。
 //
-// running 不在此列：它由执行占用（Step.CurrentAttemptID + 租约）负责表达，
+// running 不在此列：它由执行占用（Step.CurrentAttemptID）负责表达，
 // 并由占用准入拒绝第二个执行者。
 func (f RepairAttemptFacts) Unresolved() bool {
 	switch f.Status {

@@ -725,8 +725,6 @@ func TestTaskResponseDoesNotExposeInternalFields(t *testing.T) {
 	recorder := fixture.send(t, http.MethodGet, httpapi.PathTasks+"/"+created.ID, nil)
 	body := recorder.Body.String()
 	for _, forbidden := range []string{
-		"lease_owner",
-		"lease_expires_at",
 		"idempotency_key",
 		"container_id",
 		"repository_path",

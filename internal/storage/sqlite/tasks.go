@@ -15,11 +15,11 @@ import (
 const taskColumns = `id, requirement_id, status, host_id, config_json, repository_path,
 	base_ref, worktree_path, container_id, current_step_id, current_attempt_id,
 	cancel_requested, cancel_requested_at, final_result, failure_summary,
-	idempotency_key, lease_owner, lease_expires_at, lease_epoch, deleted_at, created_at,
+	idempotency_key, deleted_at, created_at,
 	started_at, finished_at, updated_at`
 
 // taskInsertCount 是写入任务时的参数个数。
-const taskInsertCount = 24
+const taskInsertCount = 21
 
 // taskStore 实现 storage.TaskStore。
 type taskStore struct {
@@ -61,8 +61,7 @@ UPDATE tasks SET
 	status = ?, host_id = ?, config_json = ?, repository_path = ?, base_ref = ?,
 	worktree_path = ?, container_id = ?, current_step_id = ?, current_attempt_id = ?,
 	cancel_requested = ?, cancel_requested_at = ?, final_result = ?, failure_summary = ?,
-	idempotency_key = ?, lease_owner = ?, lease_expires_at = ?, lease_epoch = ?,
-	deleted_at = ?, started_at = ?, finished_at = ?, updated_at = ?
+	idempotency_key = ?, deleted_at = ?, started_at = ?, finished_at = ?, updated_at = ?
 WHERE id = ?`
 	result, err := s.q.ExecContext(
 		ctx,
@@ -81,9 +80,6 @@ WHERE id = ?`
 		nullIfBlank(string(record.task.FinalResult)),
 		nullIfBlank(record.task.FailureSummary),
 		nullIfBlank(record.task.IdempotencyKey),
-		nullIfBlank(record.task.LeaseOwner),
-		toMillisPtr(record.task.LeaseExpiresAt),
-		record.task.LeaseEpoch,
 		toMillisPtr(record.task.DeletedAt),
 		toMillisPtr(record.task.StartedAt),
 		toMillisPtr(record.task.FinishedAt),
@@ -132,9 +128,6 @@ func (s taskStore) UpdateTaskIfStatus(
 		nullIfBlank(string(record.task.FinalResult)),
 		nullIfBlank(record.task.FailureSummary),
 		nullIfBlank(record.task.IdempotencyKey),
-		nullIfBlank(record.task.LeaseOwner),
-		toMillisPtr(record.task.LeaseExpiresAt),
-		record.task.LeaseEpoch,
 		toMillisPtr(record.task.DeletedAt),
 		toMillisPtr(record.task.StartedAt),
 		toMillisPtr(record.task.FinishedAt),
@@ -150,8 +143,7 @@ UPDATE tasks SET
 	status = ?, host_id = ?, config_json = ?, repository_path = ?, base_ref = ?,
 	worktree_path = ?, container_id = ?, current_step_id = ?, current_attempt_id = ?,
 	cancel_requested = ?, cancel_requested_at = ?, final_result = ?, failure_summary = ?,
-	idempotency_key = ?, lease_owner = ?, lease_expires_at = ?, lease_epoch = ?,
-	deleted_at = ?, started_at = ?, finished_at = ?, updated_at = ?
+	idempotency_key = ?, deleted_at = ?, started_at = ?, finished_at = ?, updated_at = ?
 WHERE id = ? AND status IN (` + strings.Join(conditions, ", ") + `)`
 	result, err := s.q.ExecContext(ctx, statement, args...)
 	if err != nil {
@@ -175,9 +167,9 @@ WHERE id = ? AND status IN (` + strings.Join(conditions, ", ") + `)`
 
 // UpdateTaskCancellation 在任务状态仍属于 expected 时写入取消请求。
 //
-// 与 UpdateTaskIfStatus 的区别只有一处：本方法不写租约列。取消是用户意图而不是
-// 执行权交接，写租约列会让"取消"与"调度器刚领取"互相覆盖——取消可能抹掉新执行者
-// 的 owner/epoch，新执行者也可能抹掉取消意图。
+// 与 UpdateTaskIfStatus 的区别只有一处：本方法只写取消相关列，因此不会把一次普通状态
+// 写入携带的其他字段（工作区、容器、执行游标等）一并覆盖。取消是用户意图，不是执行权
+// 交接。
 func (s taskStore) UpdateTaskCancellation(
 	ctx context.Context,
 	task domain.Task,
@@ -369,345 +361,6 @@ WHERE id = ? AND deleted_at IS NULL
 	return nil
 }
 
-// AcquireTaskLease 以原子条件更新领取任务租约，并返回本次领取的代次。
-//
-// 语义固定为：
-//   - 条件是"任务未被删除 + 状态属于给定集合 + 租约空闲 / 已过期 / 已由同一 owner
-//     持有"，三者由同一条 UPDATE 判定，因此并发领取最多只有一个成功；
-//   - 状态集合为空时直接返回参数错误：默认集合会包含 failed / paused /
-//     recovery_required，依赖它会让自动调度重放未经核验的现场；
-//   - 领取成功时 lease_epoch 在同一语句内原子加一，旧代次的迟到写入因此被拒绝；
-//   - 返回的 TaskLeaseHandle 是数据库确认过的所有权身份，调用方不得自行构造。
-func (s taskStore) AcquireTaskLease(
-	ctx context.Context,
-	request storage.TaskLeaseRequest,
-) (domain.TaskLeaseHandle, error) {
-	if err := request.TaskID.Validate(); err != nil {
-		return domain.TaskLeaseHandle{}, err
-	}
-	owner := strings.TrimSpace(request.Owner)
-	if owner == "" {
-		return domain.TaskLeaseHandle{}, wrapError(
-			"领取任务租约",
-			errors.Join(storage.ErrInvalidData, errors.New("执行者标识不能为空")),
-		)
-	}
-	if request.TTL <= 0 {
-		return domain.TaskLeaseHandle{}, wrapError(
-			"领取任务租约",
-			errors.Join(storage.ErrInvalidData, errors.New("租约有效期必须大于 0")),
-		)
-	}
-	if len(request.Statuses) == 0 {
-		// 可领取状态必须由调用方显式给出：默认值会包含 failed / paused /
-		// recovery_required，使自动调度绕过 P2 的核验门控。
-		return domain.TaskLeaseHandle{}, wrapError(
-			"领取任务租约",
-			errors.Join(
-				storage.ErrInvalidData,
-				errors.New("可领取状态集合不能为空，必须显式指定"),
-			),
-		)
-	}
-	at := request.At
-	if at.IsZero() {
-		at = time.Now().UTC()
-	}
-	nowMillis := toMillis(at)
-	expiresAt := toMillis(at.Add(request.TTL))
-	conditions := make([]string, 0, len(request.Statuses))
-	args := make([]any, 0, len(request.Statuses)+6)
-	args = append(args, owner, expiresAt, nowMillis, toIDParam(request.TaskID))
-	for _, status := range request.Statuses {
-		conditions = append(conditions, "?")
-		args = append(args, string(status))
-	}
-	statement := `
-UPDATE tasks SET lease_owner = ?, lease_expires_at = ?, lease_epoch = lease_epoch + 1,
-	updated_at = ?
-WHERE id = ? AND deleted_at IS NULL AND status IN (` + strings.Join(conditions, ", ") + `)
-  AND (
-      lease_owner IS NULL
-      OR lease_expires_at IS NULL
-      OR lease_expires_at <= ?
-      OR lease_owner = ?
-  )`
-	args = append(args, nowMillis, owner)
-	result, err := s.q.ExecContext(ctx, statement, args...)
-	if err != nil {
-		return domain.TaskLeaseHandle{}, wrapError("领取任务租约", err)
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return domain.TaskLeaseHandle{}, wrapError("领取任务租约", err)
-	}
-	if affected == 0 {
-		return domain.TaskLeaseHandle{}, wrapError(
-			"领取任务租约",
-			errors.Join(
-				storage.ErrConflict,
-				errors.New("任务状态不允许开始或租约仍被其他执行者持有: "+request.TaskID.String()),
-			),
-		)
-	}
-	epoch, err := s.readLeaseEpoch(ctx, request.TaskID, owner)
-	if err != nil {
-		return domain.TaskLeaseHandle{}, err
-	}
-	return domain.TaskLeaseHandle{TaskID: request.TaskID, Owner: owner, Epoch: epoch}, nil
-}
-
-// readLeaseEpoch 读取刚写入的领取代次。
-//
-// 代次由数据库在同一语句内递增，调用方无法预先知道结果，因此必须回读。条件同时
-// 覆盖 owner 与租约有效期：若在读取之前租约已被他人接管，回读不会命中，此时领取
-// 按失败处理，绝不返回一个不属于本次调用的代次。
-func (s taskStore) readLeaseEpoch(
-	ctx context.Context,
-	id domain.ID,
-	owner string,
-) (int64, error) {
-	const statement = `
-SELECT lease_epoch FROM tasks
-WHERE id = ? AND lease_owner = ? AND lease_expires_at IS NOT NULL`
-	var epoch int64
-	err := s.q.QueryRowContext(ctx, statement, toIDParam(id), owner).Scan(&epoch)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return 0, wrapError(
-				"读取领取代次",
-				errors.Join(
-					storage.ErrConflict,
-					errors.New("领取成功后租约已被接管: "+id.String()),
-				),
-			)
-		}
-		return 0, wrapError("读取领取代次", err)
-	}
-	if epoch < 1 {
-		return 0, wrapError(
-			"读取领取代次",
-			errors.Join(storage.ErrInvalidData, errors.New("领取代次必须大于 0")),
-		)
-	}
-	return epoch, nil
-}
-
-// RenewTaskLease 以 owner + epoch 为条件延长任务租约。
-//
-// 只有"仍是同一代次、仍在有效期内、任务未被删除"才允许续期：租约一旦过期，
-// 旧持有者就不得通过迟到续期把执行权抢回来，必须由新的原子领取建立新代次。
-// 影响行数为 0 返回 storage.ErrConflict，调用方必须按"执行权已丢失"处理。
-func (s taskStore) RenewTaskLease(
-	ctx context.Context,
-	request storage.TaskLeaseRenewRequest,
-) error {
-	if err := request.Handle.Validate(); err != nil {
-		return err
-	}
-	if request.TTL <= 0 {
-		return wrapError(
-			"续期任务租约",
-			errors.Join(storage.ErrInvalidData, errors.New("租约有效期必须大于 0")),
-		)
-	}
-	at := request.At
-	if at.IsZero() {
-		at = time.Now().UTC()
-	}
-	nowMillis := toMillis(at)
-	expiresAt := toMillis(at.Add(request.TTL))
-	const statement = `
-UPDATE tasks SET lease_expires_at = ?, updated_at = ?
-WHERE id = ? AND deleted_at IS NULL
-  AND lease_owner = ? AND lease_epoch = ?
-  AND lease_expires_at IS NOT NULL AND lease_expires_at > ?`
-	result, err := s.q.ExecContext(
-		ctx,
-		statement,
-		expiresAt,
-		nowMillis,
-		toIDParam(request.Handle.TaskID),
-		request.Handle.Owner,
-		request.Handle.Epoch,
-		nowMillis,
-	)
-	if err != nil {
-		return wrapError("续期任务租约", err)
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return wrapError("续期任务租约", err)
-	}
-	if affected == 0 {
-		return wrapError(
-			"续期任务租约",
-			errors.Join(
-				storage.ErrConflict,
-				errors.New("租约已过期或已转移到其他代次: "+request.Handle.TaskID.String()),
-			),
-		)
-	}
-	return nil
-}
-
-// ReleaseTaskLease 释放由指定租约身份持有的任务租约。
-//
-// 条件同时覆盖 owner 与 epoch：旧代次无法释放新持有者的租约。没有命中任何记录时
-// 返回 storage.ErrConflict 与 false，调用方不得据此认为名额已经空出。
-func (s taskStore) ReleaseTaskLease(
-	ctx context.Context,
-	handle domain.TaskLeaseHandle,
-	at time.Time,
-) (bool, error) {
-	if err := handle.Validate(); err != nil {
-		return false, err
-	}
-	const statement = `
-UPDATE tasks SET lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
-WHERE id = ? AND lease_owner = ? AND lease_epoch = ?`
-	result, err := s.q.ExecContext(
-		ctx,
-		statement,
-		toMillis(at),
-		toIDParam(handle.TaskID),
-		handle.Owner,
-		handle.Epoch,
-	)
-	if err != nil {
-		return false, wrapError("释放任务租约", err)
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return false, wrapError("释放任务租约", err)
-	}
-	if affected == 0 {
-		return false, wrapError(
-			"释放任务租约",
-			errors.Join(
-				storage.ErrConflict,
-				errors.New("租约已不属于本次领取: "+handle.TaskID.String()),
-			),
-		)
-	}
-	return true, nil
-}
-
-// UpdateTaskLeaseGuard 在任务租约仍由 handle 持有且状态属于 expected 时写入任务。
-//
-// 它是执行期状态写入的 fencing 落点：条件同时覆盖状态、owner 与 epoch，因此旧代次
-// 的迟到写入无法覆盖新领取者的记录。与 UpdateTaskIfStatus 的分工是：
-//   - 执行者推进自己领取的任务 → 本方法（要求仍持有执行权）；
-//   - 用户或恢复流程推进任务（取消、删除、启动恢复收敛）→ UpdateTaskIfStatus。
-func (s taskStore) UpdateTaskLeaseGuard(
-	ctx context.Context,
-	task domain.Task,
-	expected []domain.TaskStatus,
-	handle domain.TaskLeaseHandle,
-) error {
-	if err := handle.Validate(); err != nil {
-		return err
-	}
-	if len(expected) == 0 {
-		return wrapError(
-			"条件更新任务（租约栅栏）",
-			errors.Join(storage.ErrInvalidData, errors.New("期望状态集合不能为空")),
-		)
-	}
-	record, err := encodeTask(task)
-	if err != nil {
-		return err
-	}
-	conditions := make([]string, 0, len(expected))
-	args := make([]any, 0, len(expected)+25)
-	args = append(
-		args,
-		string(record.task.Status),
-		toIDPtrParam(record.task.HostID),
-		record.configJSON,
-		record.task.RepositoryPath,
-		record.task.BaseRef,
-		sqlNullString(record.task.WorktreePath),
-		nullIfBlank(record.task.ContainerID),
-		toIDPtrParam(record.task.CurrentStepID),
-		toIDPtrParam(record.task.CurrentAttemptID),
-		toBoolInt(record.task.CancelRequested),
-		toMillisPtr(record.task.CancelRequestedAt),
-		nullIfBlank(string(record.task.FinalResult)),
-		nullIfBlank(record.task.FailureSummary),
-		nullIfBlank(record.task.IdempotencyKey),
-		nullIfBlank(record.task.LeaseOwner),
-		toMillisPtr(record.task.LeaseExpiresAt),
-		record.task.LeaseEpoch,
-		toMillisPtr(record.task.DeletedAt),
-		toMillisPtr(record.task.StartedAt),
-		toMillisPtr(record.task.FinishedAt),
-		toMillis(record.task.UpdatedAt),
-		toIDParam(record.task.ID),
-	)
-	for _, status := range expected {
-		conditions = append(conditions, "?")
-		args = append(args, string(status))
-	}
-	args = append(args, handle.Owner, handle.Epoch)
-	statement := `
-UPDATE tasks SET
-	status = ?, host_id = ?, config_json = ?, repository_path = ?, base_ref = ?,
-	worktree_path = ?, container_id = ?, current_step_id = ?, current_attempt_id = ?,
-	cancel_requested = ?, cancel_requested_at = ?, final_result = ?, failure_summary = ?,
-	idempotency_key = ?, lease_owner = ?, lease_expires_at = ?, lease_epoch = ?,
-	deleted_at = ?, started_at = ?, finished_at = ?, updated_at = ?
-WHERE id = ? AND status IN (` + strings.Join(conditions, ", ") + `)
-  AND lease_owner = ? AND lease_epoch = ?`
-	result, err := s.q.ExecContext(ctx, statement, args...)
-	if err != nil {
-		return wrapError("条件更新任务（租约栅栏）", err)
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return wrapError("条件更新任务（租约栅栏）", err)
-	}
-	if affected == 0 {
-		return wrapError(
-			"条件更新任务（租约栅栏）",
-			errors.Join(
-				storage.ErrConflict,
-				errors.New("任务状态已变更或执行权已转移，拒绝过期更新: "+task.ID.String()),
-			),
-		)
-	}
-	return nil
-}
-
-// AppendTaskLeaseEvent 在一个事务内追加领取或释放事件。
-//
-// 事件与租约写入必须同事务：领取成功却没有事件会让"谁在何时领取"无法追溯，
-// 而事件写入失败又会让数据库里留下一个没有审计痕迹的有效租约。事件写入失败时
-// 整体回滚，因此不存在"看起来领取成功"的中间状态。
-func (s taskStore) AppendTaskLeaseEvent(
-	ctx context.Context,
-	event domain.Event,
-) (domain.Event, error) {
-	withTx, ok := s.q.(transactioner)
-	if !ok {
-		// 已在事务内：复用当前事务，原子性由调用方的事务边界保证。
-		return eventStore{q: s.q}.AppendEvent(ctx, event)
-	}
-	var stored domain.Event
-	err := withTx.runInTx(ctx, func(tx queryer) error {
-		written, writeErr := eventStore{q: tx}.AppendEvent(ctx, event)
-		if writeErr != nil {
-			return writeErr
-		}
-		stored = written
-		return nil
-	})
-	if err != nil {
-		return domain.Event{}, err
-	}
-	return stored, nil
-}
-
 // taskFilterConditions 把筛选条件转换为 SQL 条件片段与绑定参数。
 //
 // 条件全部使用占位符，用户输入只通过参数绑定传入；已逻辑删除的任务默认排除。
@@ -816,9 +469,6 @@ func taskInsertArgs(record taskRecord) []any {
 		nullIfBlank(string(task.FinalResult)),
 		nullIfBlank(task.FailureSummary),
 		nullIfBlank(task.IdempotencyKey),
-		nullIfBlank(task.LeaseOwner),
-		toMillisPtr(task.LeaseExpiresAt),
-		task.LeaseEpoch,
 		toMillisPtr(task.DeletedAt),
 		toMillis(task.CreatedAt),
 		toMillisPtr(task.StartedAt),
@@ -845,9 +495,6 @@ func scanTask(row scanner) (*domain.Task, error) {
 		finalResult       sql.NullString
 		failureSummary    sql.NullString
 		idempotencyKey    sql.NullString
-		leaseOwner        sql.NullString
-		leaseExpiresAt    sql.NullInt64
-		leaseEpoch        int64
 		deletedAt         sql.NullInt64
 		createdAt         int64
 		startedAt         sql.NullInt64
@@ -871,9 +518,6 @@ func scanTask(row scanner) (*domain.Task, error) {
 		&finalResult,
 		&failureSummary,
 		&idempotencyKey,
-		&leaseOwner,
-		&leaseExpiresAt,
-		&leaseEpoch,
 		&deletedAt,
 		&createdAt,
 		&startedAt,
@@ -896,9 +540,6 @@ func scanTask(row scanner) (*domain.Task, error) {
 	task.FinalResult = domain.TaskResult(finalResult.String)
 	task.FailureSummary = failureSummary.String
 	task.IdempotencyKey = idempotencyKey.String
-	task.LeaseOwner = leaseOwner.String
-	task.LeaseExpiresAt = fromMillisPtr(leaseExpiresAt)
-	task.LeaseEpoch = leaseEpoch
 	task.DeletedAt = fromMillisPtr(deletedAt)
 	task.CreatedAt = fromMillis(createdAt)
 	task.StartedAt = fromMillisPtr(startedAt)

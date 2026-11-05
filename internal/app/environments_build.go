@@ -68,7 +68,7 @@ func (s *EnvironmentService) Build(
 		request.MachineID,
 		false,
 		func(ctx context.Context, session *remoteDocker) error {
-			unlock := s.locks.Lock(lockKey(session.host.ID, request.Ref))
+			unlock := s.buildLocks.Lock(session.host.ID, request.Ref)
 			defer unlock()
 			built, err := s.buildLocked(ctx, session, request)
 			if err != nil {

@@ -284,11 +284,12 @@ func (f *restartFixture) startService(
 		t.Fatalf("构造会话服务失败: %v", err)
 	}
 	service, err := app.NewTaskWorkflowService(app.TaskWorkflowOptions{
-		Store:      store,
-		Steps:      runner,
-		Containers: containers,
-		Sessions:   sessions,
-		Logger:     f.logger.Slog(),
+		Store:        store,
+		Steps:        runner,
+		Containers:   containers,
+		Sessions:     sessions,
+		Coordination: app.NewTaskExecutionCoordinator(),
+		Logger:       f.logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造工作流编排器失败: %v", err)
@@ -547,7 +548,7 @@ func writeStaleRun(
 	if err != nil {
 		t.Fatalf("构造执行记录失败: %v", err)
 	}
-	if err := run.Start("dead-worker", time.Millisecond, fixture.now.Add(-time.Hour)); err != nil {
+	if err := run.Start(fixture.now.Add(-time.Hour)); err != nil {
 		t.Fatalf("模拟残留执行失败: %v", err)
 	}
 	if err := fixture.db.CreateWorkflowRun(fixture.ctx, run); err != nil {
@@ -714,11 +715,12 @@ func TestConcurrentRecoveryConvergesOnce(t *testing.T) {
 				return
 			}
 			service, err := app.NewTaskWorkflowService(app.TaskWorkflowOptions{
-				Store:      fixture.db,
-				Steps:      &fakeRunner{},
-				Containers: &fakeContainer{running: true},
-				Sessions:   sessions,
-				Logger:     fixture.logger.Slog(),
+				Store:        fixture.db,
+				Steps:        &fakeRunner{},
+				Containers:   &fakeContainer{running: true},
+				Sessions:     sessions,
+				Coordination: app.NewTaskExecutionCoordinator(),
+				Logger:       fixture.logger.Slog(),
 			})
 			if err != nil {
 				errs[index] = err

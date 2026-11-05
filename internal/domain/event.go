@@ -67,18 +67,15 @@ const (
 	// 服务启动扫描到"仍有结果不明的外部 Git 副作用"时追加：它只记录现场与需要的
 	// 动作，不推进任务状态，也不重放 commit / push / merge。
 	EventTypeCodeSaveRecoveryRequired EventType = "code_save.recovery_required"
-	// 任务租约领取与释放事件。
+	// 任务执行权领取事件。
 	//
-	// 它们记录"谁在哪一代次、什么时刻取得了任务执行权、以及何时释放"。领取事件与
-	// 租约写入在同一事务内完成，因此不会出现"有效租约但没有审计痕迹"的现场；
-	// 释放事件在租约释放成功后追加，用于追溯名额释放。
-	EventTypeTaskClaimed  EventType = "task.claimed"
-	EventTypeTaskReleased EventType = "task.lease_released"
+	// 它记录"调度器在哪一刻取得了这个任务的执行权"：执行权本身是进程内登记，事件只
+	// 提供可追溯的审计轨迹。
+	EventTypeTaskClaimed EventType = "task.claimed"
 	// 任务显式重试事件。
 	//
-	// 它记录"用户把一个失败任务重开为新的执行周期"：包含重开前的状态、取得的新领取
-	// 代次与领取者。重试是用户的显式决定，因此必须留下可追溯的审计记录，不能只改
-	// 一行状态。
+	// 它记录"用户把一个失败任务重开为新的执行周期"：包含重开前的状态与重开后的状态。
+	// 重试是用户的显式决定，因此必须留下可追溯的审计记录，不能只改一行状态。
 	EventTypeTaskRetried EventType = "task.retried"
 )
 
@@ -123,7 +120,6 @@ var knownEventTypes = []EventType{
 	EventTypeRepairCycleOpened,
 	EventTypeCodeSaveRecoveryRequired,
 	EventTypeTaskClaimed,
-	EventTypeTaskReleased,
 	EventTypeTaskRetried,
 }
 

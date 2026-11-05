@@ -193,10 +193,6 @@ type WorkflowRun struct {
 	CancelRequested bool `json:"cancel_requested"`
 	// CancelRequestedAt 是取消请求时间。
 	CancelRequestedAt *time.Time `json:"cancel_requested_at,omitempty"`
-	// WorkerID 是当前持有执行权的进程标识。
-	WorkerID string `json:"worker_id,omitempty"`
-	// LeaseExpiresAt 是执行权到期时间，用于识别已退出进程留下的残留。
-	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
 	// ErrorClass 是最近一次停止的错误分类。
 	ErrorClass string `json:"error_class,omitempty"`
 	// ErrorSummary 是最近一次停止的原因摘要。
@@ -319,19 +315,17 @@ func (r *WorkflowRun) Transition(next WorkflowRunStatus, at time.Time) error {
 	return nil
 }
 
-// Start 把工作流推进到 running 并记录执行者与租约。
-func (r *WorkflowRun) Start(workerID string, lease time.Duration, at time.Time) error {
+// Start 把工作流推进到 running。
+//
+// 执行权不在记录中表达：服务端只允许一个进程运行，同一任务的在途执行由进程内的任务
+// 协调器登记；记录只描述编排进度本身。
+func (r *WorkflowRun) Start(at time.Time) error {
 	if r == nil {
 		return invalidField("WorkflowRun", "", "实体为空")
 	}
 	now := normalizeTime(at)
 	if err := r.Transition(WorkflowRunRunning, now); err != nil {
 		return err
-	}
-	r.WorkerID = strings.TrimSpace(workerID)
-	if lease > 0 {
-		expires := now.Add(lease)
-		r.LeaseExpiresAt = &expires
 	}
 	if r.StartedAt == nil {
 		r.StartedAt = &now
@@ -417,8 +411,6 @@ func (r *WorkflowRun) Stop(
 	r.Stage = WorkflowStageStopped
 	r.ErrorClass = strings.TrimSpace(errorClass)
 	r.ErrorSummary = strings.TrimSpace(summary)
-	r.WorkerID = ""
-	r.LeaseExpiresAt = nil
 	r.UpdatedAt = now
 	return nil
 }
@@ -432,8 +424,6 @@ func (r *WorkflowRun) Fail(errorClass, summary string, at time.Time) error {
 	r.Stage = WorkflowStageStopped
 	r.ErrorClass = strings.TrimSpace(errorClass)
 	r.ErrorSummary = strings.TrimSpace(summary)
-	r.WorkerID = ""
-	r.LeaseExpiresAt = nil
 	r.UpdatedAt = now
 	return nil
 }
@@ -447,8 +437,6 @@ func (r *WorkflowRun) Complete(summary string, at time.Time) error {
 	r.Stage = WorkflowStageFinalize
 	r.ErrorClass = ""
 	r.ErrorSummary = strings.TrimSpace(summary)
-	r.WorkerID = ""
-	r.LeaseExpiresAt = nil
 	r.CurrentStepID = nil
 	r.CurrentAttemptID = nil
 	r.UpdatedAt = now
@@ -485,76 +473,8 @@ func (r *WorkflowRun) Cancel(summary string, at time.Time) error {
 	r.Stage = WorkflowStageStopped
 	r.ErrorClass = ""
 	r.ErrorSummary = strings.TrimSpace(summary)
-	r.WorkerID = ""
-	r.LeaseExpiresAt = nil
 	r.UpdatedAt = now
 	return nil
-}
-
-// RenewLease 延长执行权，使仍在推进的长任务不会被误判为已退出。
-//
-// 续租的条件是"仍然是同一次执行、仍然由同一个执行者持有、仍然处于 running"：
-//   - 状态不是 running（blocked / recovery_required / 终态）一律拒绝续租，
-//     已停止或已结束的记录不得被后台心跳重新延长租约；
-//   - 执行者标识不匹配说明执行权已经转移给其他进程，原执行者必须停止推进，
-//     而不是继续延长一个它已经不再拥有的租约；
-//   - 租约字段缺失说明执行权已经失效，同样拒绝。
-//
-// 该方法是纯领域操作：不读数据库、不启动 goroutine。调用方必须用带版本号前置
-// 条件的写入持久化结果，冲突时按"已失去执行权"处理。
-func (r *WorkflowRun) RenewLease(workerID string, lease time.Duration, at time.Time) error {
-	if r == nil {
-		return invalidField("WorkflowRun", "", "实体为空")
-	}
-	if lease <= 0 {
-		return invalidField("WorkflowRun", "lease_expires_at", "续租时长必须大于 0")
-	}
-	if r.Status != WorkflowRunRunning {
-		return fmt.Errorf(
-			"%w: 执行记录当前状态 %s 不持有执行权，不能续租",
-			ErrInvalidState,
-			r.Status,
-		)
-	}
-	owner := strings.TrimSpace(workerID)
-	if owner == "" {
-		return invalidField("WorkflowRun", "worker_id", "执行者标识不能为空")
-	}
-	if r.WorkerID != owner {
-		return fmt.Errorf(
-			"%w: 执行权已不属于 %s（当前 %s），不能续租",
-			ErrInvalidState,
-			owner,
-			r.WorkerID,
-		)
-	}
-	if r.LeaseExpiresAt == nil {
-		return fmt.Errorf("%w: 执行记录没有有效租约，不能续租", ErrInvalidState)
-	}
-	now := normalizeTime(at)
-	expires := now.Add(lease)
-	r.LeaseExpiresAt = &expires
-	r.UpdatedAt = now
-	return nil
-}
-
-// HoldsExecution 判断给定执行者在给定时刻是否仍然持有该记录的执行权。
-//
-// 它与 LeaseActive 的区别是同时校验执行者：租约有效但已换人时，原执行者必须
-// 认为自己的执行权已经丢失，不得继续推进副作用。
-func (r WorkflowRun) HoldsExecution(workerID string, at time.Time) bool {
-	if strings.TrimSpace(workerID) == "" || r.WorkerID != strings.TrimSpace(workerID) {
-		return false
-	}
-	return r.LeaseActive(at)
-}
-
-// LeaseActive 判断执行权在给定时刻是否仍然有效。
-func (r WorkflowRun) LeaseActive(at time.Time) bool {
-	if strings.TrimSpace(r.WorkerID) == "" || r.LeaseExpiresAt == nil {
-		return false
-	}
-	return r.LeaseExpiresAt.After(normalizeTime(at))
 }
 
 // executableSteps 返回计划中可自动推进的步骤（规划阶段与开发步骤），按序号升序。

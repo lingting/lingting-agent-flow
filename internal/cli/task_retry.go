@@ -28,7 +28,7 @@ func newTaskRetryCommand(a *app.App) *cobra.Command {
 		Short: "显式重试失败任务，开启一次新的执行周期",
 		Long: "向本地 API 发起 POST /api/v1/tasks/{taskID}/retry，由服务端按持久化事实判定：\n" +
 			"  1. 只有 failed 任务允许重试，且必须没有取消请求；\n" +
-			"  2. 任务租约仍有效、仍有未结束执行记录、仍有被占用步骤或结果不确定的步骤时拒绝；\n" +
+			"  2. 仍有未结束执行记录、仍有被占用步骤或结果不确定的步骤时拒绝；\n" +
 			"  3. 仍有未核验的外部副作用（commit / push / merge）时拒绝，必须先执行 code verify；\n" +
 			"  4. 通过判定后先领取任务执行权，再把任务重开为 preparing 并交接给统一启动流程。\n" +
 			"重试不覆盖历史：旧 Attempt、Session、WorkflowRun 与代码保存记录全部保留，\n" +

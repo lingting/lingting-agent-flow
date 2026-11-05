@@ -32,17 +32,6 @@ var (
 	ErrPlanningRuntimeFailed = errors.New("app: 规划运行时执行失败")
 	// ErrPlanningRuntimeNotPersisted 表示远程副作用已发生，但会话关联未能写入数据库。
 	ErrPlanningRuntimeNotPersisted = errors.New("app: 规划运行时结果未能持久化")
-	// ErrPlanningRuntimeBusy 表示同一规划会话正被另一个执行者占用（含其他 Server 实例）。
-	//
-	// 它与 ErrPlanningRuntimeConflict 分开表达：现场不一致要求重新读取并核验远程资源，
-	// 而"被占用"只说明当前不能进入运行时准备或释放，稍后重试即可。
-	ErrPlanningRuntimeBusy = errors.New("app: 规划运行环境正在被其他执行者占用")
-	// ErrPlanningRuntimeLeaseLost 表示本次操作已失去规划会话租约。
-	ErrPlanningRuntimeLeaseLost = errors.New("app: 规划运行环境租约已丢失")
-	// ErrPlanningRuntimeLeaseUnavailable 表示规划会话租约的数据库操作失败。
-	//
-	// 它与 ErrPlanningRuntimeBusy 分开表达：数据库不可用是可重试的运行时故障，不是竞争。
-	ErrPlanningRuntimeLeaseUnavailable = errors.New("app: 规划运行环境租约不可用")
 )
 
 // PlanningRuntimeStage 是规划运行环境的失败阶段。
@@ -76,8 +65,6 @@ const (
 	PlanningRuntimeStageReleaseSnapshot PlanningRuntimeStage = "release_snapshot"
 	// PlanningRuntimeStageClearBinding 表示清空会话的运行时绑定。
 	PlanningRuntimeStageClearBinding PlanningRuntimeStage = "clear_binding"
-	// PlanningRuntimeStageLease 表示取得或收尾规划会话租约。
-	PlanningRuntimeStageLease PlanningRuntimeStage = "lease"
 )
 
 // PlanningRuntimeError 是带阶段的规划运行时错误。
@@ -125,8 +112,8 @@ func planningRuntimeFailure(
 //   - 按固定 commit SHA 准备项目代码快照卷，并创建只读规划容器；
 //   - 同一会话复用同一份快照与同一个规划容器，不同会话互相隔离；
 //   - 只释放本会话自己拥有的容器与快照卷；
-//   - Prepare 与 Release 都先取得同一规划会话的持久化租约，与 PlanningAgentService 的
-//     RunRole 共享同一把锁，因此两个 Server 实例不会同时准备、执行或释放同一个会话。
+//   - Prepare 与 Release 都按规划会话串行，与 PlanningAgentService 的 RunRole 共享
+//     同一个协调器实例，因此同一会话不会同时准备、执行或释放。
 //
 // 它不推进 PlanningSession 状态、不执行 AI 调用、不写 PlanningMessage / Revision，
 // 也不进入任务执行、代码保存或提交合并流程。运行环境准备成功不等于会话进入
@@ -138,13 +125,11 @@ type PlanningRuntimeService struct {
 	containers *ContainerService
 	// release 是释放路径使用的容器能力：生产中包装 containers，测试可注入受控替身。
 	release PlanningRuntimeReleasePort
-	// leases 是规划会话的跨进程执行租约：Prepare 与 Release 必须与 RunRole 竞争同一把锁。
-	leases *PlanningSessionLeaseService
-	// locks 按规划会话串行化 Prepare / Release：同一会话不得并发创建第二个容器。
+	// coordination 按规划会话串行化 Prepare / Release：同一会话不得并发创建第二个容器。
 	//
-	// 它只保证单进程内排队，跨进程互斥由 leases 承担；两者同时生效，同进程的第二个
-	// 操作在第一个操作持租期间会先排队，而不是立即拿到"正被占用"。
-	locks keyedMutex
+	// 它与 PlanningAgentService 共用同一个实例，因此角色调用与运行环境操作互斥：一个
+	// 入口执行 Pi 时另一个入口不能删除容器与快照卷。
+	coordination *PlanningSessionCoordinator
 }
 
 // PlanningRuntimeServiceOptions 是构造规划运行时服务的输入。
@@ -155,8 +140,11 @@ type PlanningRuntimeServiceOptions struct {
 	//
 	// 释放路径只有一种情况可以缺省它：调用方显式提供了 ReleasePort。
 	Containers *ContainerService
-	// Leases 是规划会话的跨进程执行租约入口，必填。
-	Leases *PlanningSessionLeaseService
+	// Coordination 是规划会话的进程内协调器，必填。
+	//
+	// 它与 PlanningAgentService 共用同一个实例：RunRole、Prepare 与 Release 必须串行
+	// 同一会话，否则一个入口准备容器时另一个入口可以执行 Pi 或释放资源。
+	Coordination *PlanningSessionCoordinator
 	// ReleasePort 覆盖释放路径使用的容器能力，零值时包装 Containers。
 	//
 	// 它只是依赖测试缝隙：生产装配总是留空，释放路径因此在生产中始终由 ContainerService
@@ -171,13 +159,13 @@ func NewPlanningRuntimeService(
 	if options.Store == nil {
 		return nil, fmt.Errorf("规划运行时初始化失败: 存储不能为空")
 	}
-	if options.Leases == nil {
-		return nil, fmt.Errorf("规划运行时初始化失败: 规划会话租约服务不能为空")
+	if options.Coordination == nil {
+		return nil, fmt.Errorf("规划运行时初始化失败: 规划会话协调器不能为空")
 	}
 	service := &PlanningRuntimeService{
-		store:      options.Store,
-		containers: options.Containers,
-		leases:     options.Leases,
+		store:        options.Store,
+		containers:   options.Containers,
+		coordination: options.Coordination,
 	}
 	switch {
 	case options.ReleasePort != nil:
@@ -241,14 +229,14 @@ type ReleasePlanningRuntimeResult struct {
 
 // Prepare 准备或复用规划运行环境。
 //
-// 执行顺序固定为：取得规划会话租约 → 校验会话与项目 → 校验执行节点与环境版本 →
-// 持久化执行节点 → 准备并核验固定 commit 快照 → 持久化 commit → 创建或复用规划容器 →
-// 持久化容器关联 → 释放租约。远程副作用之前的失败不会留下任何资源，远程副作用之后的
-// 失败不会清空已写入的定位信息。
+// 执行顺序固定为：按会话串行 → 校验会话与项目 → 校验执行节点与环境版本 → 持久化执行
+// 节点 → 准备并核验固定 commit 快照 → 持久化 commit → 创建或复用规划容器 → 持久化
+// 容器关联 → 释放会话锁。远程副作用之前的失败不会留下任何资源，远程副作用之后的失败
+// 不会清空已写入的定位信息。
 //
-// 租约覆盖整个准备过程：另一个实例既不能同时准备同一个会话的运行环境，也不能在本实例
-// 准备期间释放它的容器与快照卷。已经持有租约的调用方（`RunRole`）走 prepareHeld，不会
-// 重复领取。
+// 会话锁覆盖整个准备过程：另一个入口既不能同时准备同一个会话的运行环境，也不能在准备
+// 期间释放它的容器与快照卷。已经持有会话锁的调用方（`RunRole`）走 prepareHeld，不会
+// 重复加锁。
 func (s *PlanningRuntimeService) Prepare(
 	ctx context.Context,
 	request PreparePlanningRuntimeRequest,
@@ -262,36 +250,19 @@ func (s *PlanningRuntimeService) Prepare(
 			err,
 		)
 	}
-	unlock := s.locks.Lock(sessionID.String())
+	unlock := s.coordination.Lock(sessionID)
 	defer unlock()
 	// 排队期间调用方取消：还没有取得执行权，如实按取消返回。
 	if err := ctx.Err(); err != nil {
 		return detail, fmt.Errorf("准备规划运行环境在取得执行权之前被取消: %w", err)
 	}
-	lease, err := s.leases.Acquire(ctx, sessionID, domain.PlanningLeaseOperationPrepare)
-	if err != nil {
-		return detail, planningRuntimeLeaseFailure(
-			err,
-			PlanningRuntimeStageLease,
-			"准备规划运行环境",
-		)
-	}
-	defer func() {
-		if settleErr := lease.Settle(); settleErr != nil {
-			err = errors.Join(err, planningRuntimeLeaseFailure(
-				settleErr,
-				PlanningRuntimeStageLease,
-				"准备规划运行环境的租约收尾",
-			))
-		}
-	}()
-	return s.prepareRuntime(lease.Context(), sessionID, hostID)
+	return s.prepareRuntime(ctx, sessionID, hostID)
 }
 
-// prepareHeld 在调用方已经持有本会话租约时准备运行环境。
+// prepareHeld 在调用方已经持有本会话锁时准备运行环境。
 //
-// 它既不领取也不释放租约：RunRole 已经取得执行权，内部准备只负责原有准备流程。因此不会
-// 出现嵌套领取、自锁，也不会把调用方仍然需要的租约提前释放。
+// 它既不取锁也不解锁：RunRole 已经持有会话锁，内部准备只负责原有准备流程，因此不会
+// 出现重复加锁或自锁。
 func (s *PlanningRuntimeService) prepareHeld(
 	ctx context.Context,
 	request PreparePlanningRuntimeRequest,
@@ -309,7 +280,7 @@ func (s *PlanningRuntimeService) prepareHeld(
 	return s.prepareRuntime(ctx, sessionID, hostID)
 }
 
-// prepareRuntime 执行已取得规划会话租约的准备流程。
+// prepareRuntime 执行已取得会话锁的准备流程。
 func (s *PlanningRuntimeService) prepareRuntime(
 	ctx context.Context,
 	sessionID domain.ID,
@@ -501,11 +472,11 @@ func (s *PlanningRuntimeService) prepareRuntime(
 
 // Release 释放本规划会话自己拥有的规划容器与快照卷。
 //
-// 顺序固定为：取得规划会话租约 → 删除规划容器 → 确认已删除或已不存在 → 删除本会话快照卷
-// → 确认删除 → 清空会话的运行时绑定 → 释放租约。任一步失败都保留数据库中的定位信息
+// 顺序固定为：按会话串行 → 删除规划容器 → 确认已删除或已不存在 → 删除本会话快照卷 →
+// 确认删除 → 清空会话的运行时绑定 → 释放会话锁。任一步失败都保留数据库中的定位信息
 // （HostID / ContainerID / SourceCommit），不做自动重试，也不删除任何不属于本会话的资源。
 //
-// 租约必须先取得再动手：另一个实例正在执行 Pi 或归档时不得删除容器与快照卷，而"先删除
+// 会话锁必须先取得再动手：另一个入口正在执行 Pi 或归档时不得删除容器与快照卷，而"先删除
 // 再检查"会让在途调用在半途丢失运行环境。
 func (s *PlanningRuntimeService) Release(
 	ctx context.Context,
@@ -520,33 +491,16 @@ func (s *PlanningRuntimeService) Release(
 			err,
 		)
 	}
-	unlock := s.locks.Lock(sessionID.String())
+	unlock := s.coordination.Lock(sessionID)
 	defer unlock()
 	// 排队期间调用方取消：还没有取得执行权，如实按取消返回。
 	if err := ctx.Err(); err != nil {
 		return result, fmt.Errorf("释放规划运行环境在取得执行权之前被取消: %w", err)
 	}
-	lease, err := s.leases.Acquire(ctx, sessionID, domain.PlanningLeaseOperationRelease)
-	if err != nil {
-		return result, planningRuntimeLeaseFailure(
-			err,
-			PlanningRuntimeStageLease,
-			"释放规划运行环境",
-		)
-	}
-	defer func() {
-		if settleErr := lease.Settle(); settleErr != nil {
-			err = errors.Join(err, planningRuntimeLeaseFailure(
-				settleErr,
-				PlanningRuntimeStageLease,
-				"释放规划运行环境的租约收尾",
-			))
-		}
-	}()
-	return s.releaseRuntime(lease.Context(), sessionID)
+	return s.releaseRuntime(ctx, sessionID)
 }
 
-// releaseRuntime 执行已取得规划会话租约的释放流程。
+// releaseRuntime 执行已取得会话锁的释放流程。
 func (s *PlanningRuntimeService) releaseRuntime(
 	ctx context.Context,
 	sessionID domain.ID,

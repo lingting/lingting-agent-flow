@@ -162,7 +162,7 @@ type Attempt struct {
 	// BudgetScopeID 是本次尝试所属的执行周期标识。
 	//
 	// 只有用户显式开启的新周期才会写入不同的取值：进程重启、HTTP 重试与 workflow
-	// 恢复都必须复用同一个标识，因此修复预算可以跨进程保持一致。
+	// 恢复都必须复用同一个标识，因此修复预算在进程重启后仍然一致。
 	BudgetScopeID ID `json:"budget_scope_id,omitempty"`
 	// GitBranch 是本次执行所在的工作区分支名，未采集时为空。
 	GitBranch string `json:"git_branch,omitempty"`

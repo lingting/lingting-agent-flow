@@ -78,12 +78,11 @@ func (s *retryAPITaskStore) ListCodeSaveRecordsByTask(
 	return append([]domain.CodeSaveRecord(nil), s.codeSaves...), nil
 }
 
-// UpdateTaskLeaseGuard 记录一次任务写入。
-func (s *retryAPITaskStore) UpdateTaskLeaseGuard(
+// UpdateTaskIfStatus 记录一次任务写入。
+func (s *retryAPITaskStore) UpdateTaskIfStatus(
 	ctx context.Context,
 	task domain.Task,
 	expected []domain.TaskStatus,
-	handle domain.TaskLeaseHandle,
 ) error {
 	if s.updateErr != nil {
 		return s.updateErr
@@ -91,48 +90,6 @@ func (s *retryAPITaskStore) UpdateTaskLeaseGuard(
 	s.writes++
 	s.task = task
 	return nil
-}
-
-// AcquireTaskLease 记录一次领取并返回代次 1。
-func (s *retryAPITaskStore) AcquireTaskLease(
-	ctx context.Context,
-	request storage.TaskLeaseRequest,
-) (domain.TaskLeaseHandle, error) {
-	s.task.LeaseOwner = request.Owner
-	s.task.LeaseEpoch = 1
-	expires := request.At.Add(request.TTL)
-	s.task.LeaseExpiresAt = &expires
-	return domain.TaskLeaseHandle{TaskID: request.TaskID, Owner: request.Owner, Epoch: 1}, nil
-}
-
-// RenewTaskLease 忽略续期。
-func (s *retryAPITaskStore) RenewTaskLease(
-	ctx context.Context,
-	request storage.TaskLeaseRenewRequest,
-) error {
-	return nil
-}
-
-// ReleaseTaskLease 清除受控记录上的租约。
-func (s *retryAPITaskStore) ReleaseTaskLease(
-	ctx context.Context,
-	handle domain.TaskLeaseHandle,
-	at time.Time,
-) (bool, error) {
-	if s.task.LeaseOwner != handle.Owner || s.task.LeaseEpoch != handle.Epoch {
-		return false, storage.ErrConflict
-	}
-	s.task.LeaseOwner = ""
-	s.task.LeaseExpiresAt = nil
-	return true, nil
-}
-
-// AppendTaskLeaseEvent 忽略租约事件写入。
-func (s *retryAPITaskStore) AppendTaskLeaseEvent(
-	ctx context.Context,
-	event domain.Event,
-) (domain.Event, error) {
-	return event, nil
 }
 
 // AppendEvent 忽略事件写入。
@@ -174,15 +131,11 @@ func retryAPIHandler(
 	if err != nil {
 		t.Fatalf("构造日志器失败: %v", err)
 	}
-	leases, err := app.NewTaskLeaseService(app.TaskLeaseOptions{Store: store})
-	if err != nil {
-		t.Fatalf("构造任务租约服务失败: %v", err)
-	}
 	retry, err := app.NewTaskRetryService(app.TaskRetryOptions{
-		Store:  store,
-		Leases: leases,
-		Launch: launch,
-		Logger: logger.Slog(),
+		Store:        store,
+		Coordination: app.NewTaskExecutionCoordinator(),
+		Launch:       launch,
+		Logger:       logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造任务重试服务失败: %v", err)

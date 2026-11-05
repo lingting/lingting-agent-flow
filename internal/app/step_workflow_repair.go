@@ -53,6 +53,21 @@ func (s *StepWorkflowService) ExecuteAndValidate(
 	if err != nil {
 		return ExecuteAndValidateResult{}, err
 	}
+	// 闭环覆盖开发与验证两段：执行权在整段周期内保持有效，步骤级 running 只是补充
+	// 去重。调用方已持有执行权时复用它，不再次申请登记。
+	grant, ownsGrant, grantErr := acquireTaskGrant(
+		s.coordination,
+		task.ID,
+		request.Grant,
+		ErrStepExecutionConflict,
+	)
+	if grantErr != nil {
+		return ExecuteAndValidateResult{}, grantErr
+	}
+	if ownsGrant {
+		defer s.coordination.Release(grant)
+	}
+	request.Grant = &grant
 	step, err := s.loadStep(ctx, task, stepID)
 	if err != nil {
 		return ExecuteAndValidateResult{}, err
@@ -267,7 +282,7 @@ func (s *StepWorkflowService) executeRepairRound(
 		BudgetScopeID: cycle.ID,
 		// 开发成功只进入 verifying：此时既没有通过验证，也没有失败。
 		DeferCompletion: true,
-		// 任务执行权随闭环传入：开发阶段的任务终态写入因此附带租约栅栏。
+		// 任务执行权随闭环传入：开发阶段的任务终态写入因此会先核验执行权。
 		Grant: request.Grant,
 	})
 	result = applyDeveloperResult(result, developer)

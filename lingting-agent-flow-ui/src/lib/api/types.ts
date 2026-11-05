@@ -1652,7 +1652,7 @@ export type RetryTaskRequest = {
 /**
  * 一次显式重试的结果，与 Go 端 `httpapi.RetryTaskResponse` 一致（成功时为 202）。
  *
- * 结构显式区分四件事：重试前的状态、当前真实状态、新执行代次，以及编排是否真的启动。
+ * 结构显式区分三件事：重试前的状态、当前真实状态，以及编排是否真的启动。
  * `workflow_started=false` 表示任务已进入新周期但没有启动编排，不得展示为"重试已开始"。
  * 请求成功也不代表任务业务成功：最终结论与收尾闭环仍是独立事实。
  */
@@ -1662,10 +1662,6 @@ export type RetryTaskResponse = {
   previous_status: TaskStatus | (string & {});
   /** 重试结束后读取到的任务真实状态 */
   task_status: TaskStatus | (string & {});
-  /** 本次重试取得的任务领取代次，用于区分执行周期 */
-  lease_epoch: number;
-  /** 本次重试的领取者标识 */
-  lease_owner: string;
   /** 本次重试是否真的启动了工作流推进 */
   workflow_started: boolean;
   /** 启动后的执行记录；未启动时缺省，不得由前端补造 */

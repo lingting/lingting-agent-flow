@@ -377,10 +377,11 @@ func (w *launchWorkspaceStub) RecoverInterrupted(ctx context.Context) error {
 func (f *launchFixture) workflowService(t *testing.T) *app.TaskWorkflowService {
 	t.Helper()
 	service, err := app.NewTaskWorkflowService(app.TaskWorkflowOptions{
-		Store:      f.db,
-		Steps:      &fakeRunner{},
-		Containers: &fakeContainer{running: true},
-		Logger:     f.logger.Slog(),
+		Store:        f.db,
+		Steps:        &fakeRunner{},
+		Containers:   &fakeContainer{running: true},
+		Coordination: app.NewTaskExecutionCoordinator(),
+		Logger:       f.logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造工作流编排器失败: %v", err)
@@ -424,6 +425,7 @@ func (f *launchFixture) launchService(
 		Planner:      planner,
 		Workspace:    workspace,
 		Workflow:     workflow,
+		Coordination: app.NewTaskExecutionCoordinator(),
 		Logger:       f.logger.Slog(),
 	})
 	if err != nil {
@@ -619,7 +621,7 @@ func TestRecoverStepOccupancyKeepsActiveRunOccupancy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造执行记录失败: %v", err)
 	}
-	if err := run.Start("worker-live", time.Hour, fixture.now); err != nil {
+	if err := run.Start(fixture.now); err != nil {
 		t.Fatalf("登记执行权失败: %v", err)
 	}
 	if err := fixture.db.CreateWorkflowRun(fixture.ctx, run); err != nil {

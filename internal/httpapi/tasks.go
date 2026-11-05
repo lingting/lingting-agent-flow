@@ -31,7 +31,7 @@ const maxTaskRequestBytes = 64 << 10
 
 // TaskResponse 是任务的对外表示。
 //
-// 只暴露管理 API 需要的字段：执行期内部字段（租约、幂等键、容器关联等）不对外
+// 只暴露管理 API 需要的字段：执行期内部字段（执行权登记、幂等键、容器关联等）不对外
 // 输出，避免把尚未稳定的执行模型固化进管理接口。
 type TaskResponse struct {
 	ID          string `json:"id"`

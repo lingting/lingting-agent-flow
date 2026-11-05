@@ -403,7 +403,7 @@ func TestWorkflowRunRequestCancelIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("创建工作流记录失败: %v", err)
 	}
-	if err := run.Start("worker-1", time.Minute, workflowRunAt); err != nil {
+	if err := run.Start(workflowRunAt); err != nil {
 		t.Fatalf("启动工作流失败: %v", err)
 	}
 	if err := run.RequestCancel(workflowRunAt); err != nil {
@@ -435,8 +435,11 @@ func TestWorkflowRunRequestCancelIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestWorkflowRunLeaseExpiry 校验执行权过期判断。
-func TestWorkflowRunLeaseExpiry(t *testing.T) {
+// TestWorkflowRunStartRecordsRunningState 校验启动只推进状态与阶段。
+//
+// 执行权不在记录中表达：服务端只允许一个进程运行，同一任务的在途执行由进程内协调器
+// 登记，记录只描述编排进度本身。
+func TestWorkflowRunStartRecordsRunningState(t *testing.T) {
 	t.Parallel()
 	taskID := domain.NewID()
 	step := workflowStep(t, taskID, 1, "第一步")
@@ -444,16 +447,13 @@ func TestWorkflowRunLeaseExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("创建工作流记录失败: %v", err)
 	}
-	if run.LeaseActive(workflowRunAt) {
-		t.Fatal("未启动的记录不应持有执行权")
-	}
-	if err := run.Start("worker-1", 5*time.Minute, workflowRunAt); err != nil {
+	if err := run.Start(workflowRunAt); err != nil {
 		t.Fatalf("启动工作流失败: %v", err)
 	}
-	if !run.LeaseActive(workflowRunAt.Add(time.Minute)) {
-		t.Fatal("租约有效期内应视为持有执行权")
+	if run.Status != domain.WorkflowRunRunning {
+		t.Fatalf("启动后状态应为 running，实际 %s", run.Status)
 	}
-	if run.LeaseActive(workflowRunAt.Add(10 * time.Minute)) {
-		t.Fatal("租约过期后不应视为持有执行权")
+	if run.StartedAt == nil {
+		t.Fatal("启动后必须记录开始时间")
 	}
 }

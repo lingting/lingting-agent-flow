@@ -440,11 +440,6 @@ type taskWorkflowOptions struct {
 	session func(session domain.Session) domain.Session
 	// hostStatus 覆盖执行节点校验状态，空值表示 normal。
 	hostStatus domain.ValidationStatus
-	// lease 覆盖执行权有效期，零值使用服务默认值。
-	//
-	// 短租约配合阻塞的闭环替身，可以在毫秒级完成"单次调用跨越租约"的确定性验证，
-	// 不需要长时间 Sleep。
-	lease time.Duration
 }
 
 // newTaskWorkflowFixture 在工作空间中准备一套可启动工作流的测试数据。
@@ -570,9 +565,7 @@ func newTaskWorkflowFixture(t *testing.T, options taskWorkflowOptions) *taskWork
 	if options.codeSaver {
 		serviceOptions.CodeSaver = codeSaver
 	}
-	if options.lease > 0 {
-		serviceOptions.Lease = options.lease
-	}
+	serviceOptions.Coordination = app.NewTaskExecutionCoordinator()
 	service, err := app.NewTaskWorkflowService(serviceOptions)
 	if err != nil {
 		t.Fatalf("构造工作流编排器失败: %v", err)
@@ -1346,7 +1339,7 @@ func TestWorkflowRecoveryOnServerRestart(t *testing.T) {
 				t.Fatalf("构造执行记录失败: %v", err)
 			}
 			// 模拟上一次进程退出时留下的 running 残留：执行权已过期。
-			if err := run.Start("dead-worker", time.Millisecond, time.Now().UTC().Add(-time.Hour)); err != nil {
+			if err := run.Start(time.Now().UTC().Add(-time.Hour)); err != nil {
 				t.Fatalf("模拟残留执行失败: %v", err)
 			}
 			existing = run
@@ -1380,7 +1373,7 @@ func TestWorkflowRecoveryKeepsLiveLease(t *testing.T) {
 			if err != nil {
 				t.Fatalf("构造执行记录失败: %v", err)
 			}
-			if err := run.Start("live-worker", time.Hour, time.Now().UTC()); err != nil {
+			if err := run.Start(time.Now().UTC()); err != nil {
 				t.Fatalf("模拟在途执行失败: %v", err)
 			}
 			existing = run
@@ -1407,7 +1400,7 @@ func TestWorkflowRecoveryCancelsRequested(t *testing.T) {
 			if err != nil {
 				t.Fatalf("构造执行记录失败: %v", err)
 			}
-			if err := run.Start("dead-worker", time.Millisecond, time.Now().UTC().Add(-time.Hour)); err != nil {
+			if err := run.Start(time.Now().UTC().Add(-time.Hour)); err != nil {
 				t.Fatalf("模拟残留执行失败: %v", err)
 			}
 			if err := run.RequestCancel(time.Now().UTC()); err != nil {

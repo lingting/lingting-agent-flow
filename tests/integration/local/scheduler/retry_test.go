@@ -1,8 +1,8 @@
 // 任务显式重试的集成测试。
 //
-// 用例使用真实 SQLite、正式迁移、真实 app.TaskRetryService / app.TaskLeaseService，
-// 只把统一启动端口替换为受控替身。断言对象是数据库里真实留下的任务状态、租约
-// owner/epoch、事件与历史执行记录。
+// 用例使用真实 SQLite、正式迁移、真实 app.TaskRetryService，
+// 只把统一启动端口替换为受控替身。断言对象是数据库里真实留下的任务状态、事件与
+// 历史执行记录。
 package scheduler_test
 
 import (
@@ -23,7 +23,7 @@ type retryRecorder struct {
 	// launched 是按调用顺序记录的任务标识。
 	launched []domain.ID
 	// grants 是每次启动收到的执行权凭据。
-	grants []app.WorkflowExecutionGrant
+	grants []app.TaskExecutionGrant
 	// failure 是注入的启动失败。
 	failure error
 	// workflowStarted 决定替身是否声明工作流已启动。
@@ -66,11 +66,11 @@ func (r *retryRecorder) count() int {
 }
 
 // grant 返回第 index 次启动收到的凭据。
-func (r *retryRecorder) grant(index int) app.WorkflowExecutionGrant {
+func (r *retryRecorder) grant(index int) app.TaskExecutionGrant {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if index >= len(r.grants) {
-		return app.WorkflowExecutionGrant{}
+		return app.TaskExecutionGrant{}
 	}
 	return r.grants[index]
 }
@@ -82,11 +82,11 @@ func (f *schedulerFixture) newRetryService(
 ) *app.TaskRetryService {
 	t.Helper()
 	service, err := app.NewTaskRetryService(app.TaskRetryOptions{
-		Store:  f.db,
-		Leases: f.leases,
-		Launch: launch,
-		Logger: f.logger.Slog(),
-		Now:    func() time.Time { return f.now },
+		Store:        f.db,
+		Coordination: f.coordinator,
+		Launch:       launch,
+		Logger:       f.logger.Slog(),
+		Now:          func() time.Time { return f.now },
 	})
 	if err != nil {
 		t.Fatalf("构造任务重试服务失败: %v", err)
@@ -119,13 +119,10 @@ func TestRetryFailedTaskStartsNewCycle(t *testing.T) {
 	if recorder.count() != 1 {
 		t.Fatalf("重试必须交接给统一启动流程，实际调用 %d 次", recorder.count())
 	}
-	// 执行权必须是新的代次，且随启动流程一起传递。
+	// 执行权随启动流程一起传递，且属于同一任务。
 	grant := recorder.grant(0)
-	if grant.Lease.TaskID != task.ID {
-		t.Fatalf("启动流程收到的执行权不属于该任务: %+v", grant.Lease)
-	}
-	if grant.Lease.Epoch <= before.LeaseEpoch {
-		t.Fatalf("重试必须建立在新代次之上: %d → %d", before.LeaseEpoch, grant.Lease.Epoch)
+	if !grant.Valid() || grant.TaskID() != task.ID {
+		t.Fatalf("启动流程收到的执行权不属于该任务: %s", grant.TaskID())
 	}
 	// 数据库事实：任务已离开 failed，上一周期的结论与占用被清空。
 	stored := fixture.task(t, task.ID)
@@ -175,44 +172,6 @@ func TestRetryRejectsNonFailedTask(t *testing.T) {
 	}
 	if stored := fixture.task(t, task.ID); stored.Status != domain.TaskStatusPlanned {
 		t.Fatalf("拒绝重试时任务状态不得变化，实际 %s", stored.Status)
-	}
-}
-
-// TestRetryRejectsLiveLease 验证租约仍有效时不能重试。
-//
-// 有效租约说明仍有执行者持有执行权：此时接管会在未知现场上重放外部操作。
-func TestRetryRejectsLiveLease(t *testing.T) {
-	t.Parallel()
-	fixture := newSchedulerFixture(t)
-	task := fixture.queuedTask(t, domain.PriorityNormal, fixture.now)
-	fixture.moveTaskTo(t, task.ID, domain.TaskStatusPlanned)
-	fixture.writeStep(t, task.ID, 1)
-	fixture.moveToFailed(t, task.ID)
-	// 一个仍有效的租约（例如另一个执行者刚刚领取）。
-	claim, err := fixture.leases.Claim(fixture.ctx, app.TaskClaimRequest{
-		TaskID:   task.ID,
-		Owner:    "live-worker",
-		Statuses: []domain.TaskStatus{domain.TaskStatusFailed},
-	})
-	if err != nil {
-		t.Fatalf("领取执行权失败: %v", err)
-	}
-	recorder := &retryRecorder{workflowStarted: true}
-	service := fixture.newRetryService(t, recorder)
-	_, err = service.Retry(fixture.ctx, task.ID.String(), app.TaskRetryRequest{})
-	if err == nil {
-		t.Fatal("租约仍有效时不得重试")
-	}
-	if !errors.Is(err, app.ErrTaskRetryConflict) {
-		t.Fatalf("应返回状态冲突，实际 %v", err)
-	}
-	if recorder.count() != 0 {
-		t.Fatal("拒绝重试时不得调用启动流程")
-	}
-	// 他人租约不得被清除。
-	stored := fixture.task(t, task.ID)
-	if stored.LeaseOwner != claim.Handle.Owner || stored.LeaseEpoch != claim.Handle.Epoch {
-		t.Fatalf("拒绝重试不得清除他人租约: %+v", stored)
 	}
 }
 
@@ -291,11 +250,11 @@ func TestRetryRejectsRecoveryResidue(t *testing.T) {
 	}
 }
 
-// TestRetryReleasesLeaseOnLaunchFailure 验证启动失败后租约被释放。
+// TestRetryReleasesExecutionOnLaunchFailure 验证启动失败后执行权被释放。
 //
-// 除服务停止以外的失败都释放本次领取，使用户可以再次发起显式重试；任务停在
-// preparing 说明它确实进入了新周期。
-func TestRetryReleasesLeaseOnLaunchFailure(t *testing.T) {
+// 失败必须释放本次取得的执行权，使同一任务可以再次被显式重试；任务停在 preparing
+// 说明它确实进入了新周期。
+func TestRetryReleasesExecutionOnLaunchFailure(t *testing.T) {
 	t.Parallel()
 	fixture := newSchedulerFixture(t)
 	task := fixture.queuedTask(t, domain.PriorityNormal, fixture.now)
@@ -312,32 +271,8 @@ func TestRetryReleasesLeaseOnLaunchFailure(t *testing.T) {
 	if !errors.Is(err, app.ErrTaskRetryFailed) {
 		t.Fatalf("应返回重试流程未成功，实际 %v", err)
 	}
-	stored := fixture.task(t, task.ID)
-	if stored.LeaseActive(fixture.now) {
-		t.Fatalf("非服务停止的失败必须释放租约: %+v", stored)
-	}
-	if stored.LeaseOwner != "" {
-		t.Fatalf("释放后不得留下 owner: %+v", stored)
-	}
-}
-
-// TestRetryKeepsLeaseOnServiceStop 验证服务停止时不释放无法确认的租约。
-func TestRetryKeepsLeaseOnServiceStop(t *testing.T) {
-	t.Parallel()
-	fixture := newSchedulerFixture(t)
-	task := fixture.queuedTask(t, domain.PriorityNormal, fixture.now)
-	fixture.moveTaskTo(t, task.ID, domain.TaskStatusPlanned)
-	fixture.writeStep(t, task.ID, 1)
-	fixture.moveToFailed(t, task.ID)
-	recorder := &retryRecorder{failure: app.ErrTaskLaunchStopped}
-	service := fixture.newRetryService(t, recorder)
-	_, err := service.Retry(fixture.ctx, task.ID.String(), app.TaskRetryRequest{})
-	if err == nil {
-		t.Fatal("服务停止必须如实返回错误")
-	}
-	stored := fixture.task(t, task.ID)
-	if !stored.LeaseActive(fixture.now) {
-		t.Fatalf("服务停止时不得释放无法确认的租约: %+v", stored)
+	if fixture.coordinator.Held(task.ID) {
+		t.Fatal("启动失败后必须释放任务执行权")
 	}
 }
 
@@ -402,10 +337,8 @@ func TestRetryEligibilityIsReadOnly(t *testing.T) {
 		t.Fatalf("干净的失败任务应当允许重试，实际拒绝: %v", decision.Rejections)
 	}
 	after := fixture.task(t, task.ID)
-	if after.Status != before.Status ||
-		after.LeaseOwner != before.LeaseOwner ||
-		after.LeaseEpoch != before.LeaseEpoch {
-		t.Fatalf("资格查询不得改写任务或租约: %+v → %+v", before, after)
+	if after.Status != before.Status {
+		t.Fatalf("资格查询不得改写任务: %s → %s", before.Status, after.Status)
 	}
 	if recorder.count() != 0 {
 		t.Fatal("资格查询不得调用启动流程")
@@ -423,8 +356,6 @@ func TestRetryKeepsHistoricalRecords(t *testing.T) {
 		t,
 		fixture.task(t, task.ID),
 		[]domain.Step{step},
-		"old-worker",
-		fixture.now.Add(-time.Minute),
 	)
 	// 执行记录已经结束（旧周期收尾），任务进入 failed。
 	if err := run.Fail("developer_failed", "上一次执行失败", fixture.now); err != nil {
@@ -460,12 +391,11 @@ type failingRetryStore struct {
 	app.TaskRetryStore
 }
 
-// UpdateTaskLeaseGuard 返回受控失败。
-func (s *failingRetryStore) UpdateTaskLeaseGuard(
+// UpdateTaskIfStatus 返回受控失败。
+func (s *failingRetryStore) UpdateTaskIfStatus(
 	ctx context.Context,
 	task domain.Task,
 	expected []domain.TaskStatus,
-	handle domain.TaskLeaseHandle,
 ) error {
 	return errors.New("数据库写入失败")
 }
@@ -481,11 +411,11 @@ func TestRetryDoesNotFakeSuccessOnDatabaseError(t *testing.T) {
 
 	recorder := &retryRecorder{workflowStarted: true}
 	service, err := app.NewTaskRetryService(app.TaskRetryOptions{
-		Store:  &failingRetryStore{TaskRetryStore: fixture.db},
-		Leases: fixture.leases,
-		Launch: recorder,
-		Logger: fixture.logger.Slog(),
-		Now:    func() time.Time { return fixture.now },
+		Store:        &failingRetryStore{TaskRetryStore: fixture.db},
+		Coordination: fixture.coordinator,
+		Launch:       recorder,
+		Logger:       fixture.logger.Slog(),
+		Now:          func() time.Time { return fixture.now },
 	})
 	if err != nil {
 		t.Fatalf("构造任务重试服务失败: %v", err)

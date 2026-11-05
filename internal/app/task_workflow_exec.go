@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
-	"github.com/lingting/agentflow/internal/storage"
 )
 
 // workflowExecution 是一次在途执行的可选参数。
@@ -22,9 +21,8 @@ type workflowExecution struct {
 	resumed bool
 	// grant 是本次执行的任务执行权凭据。
 	//
-	// 它让工作流执行租约成为任务租约在执行阶段的续期视图：心跳同时续租两者，
-	// 任何一方失效都立即停止推进。
-	grant WorkflowExecutionGrant
+	// 它是本次执行持有的任务执行权凭据：执行权覆盖整个推进过程，结束时释放。
+	grant TaskExecutionGrant
 }
 
 // cancelRegistry 记录在途工作流的取消函数，使取消请求能传播到实际执行。
@@ -84,74 +82,15 @@ func (s *TaskWorkflowService) cancelInFlight(taskID domain.ID) {
 	}
 }
 
-// tryLock 非阻塞地取得任务级互斥锁。
-//
-// 它用于在创建执行记录之前拒绝重复请求：并发启动不会各自写入一条 running 记录。
-func (m *keyedTaskMutex) tryLock(key string) (func(), bool) {
-	m.mu.Lock()
-	if m.locks == nil {
-		m.locks = make(map[string]*keyedTaskLock)
-	}
-	entry, ok := m.locks[key]
-	if !ok {
-		entry = &keyedTaskLock{}
-		m.locks[key] = entry
-	}
-	if entry.refs > 0 {
-		// 已有持有者：不等待，直接拒绝，避免 HTTP 请求长期阻塞。
-		m.mu.Unlock()
-		return nil, false
-	}
-	entry.refs++
-	m.mu.Unlock()
-
-	entry.mu.Lock()
-	return func() {
-		entry.mu.Unlock()
-		m.mu.Lock()
-		entry.refs--
-		if entry.refs <= 0 {
-			delete(m.locks, key)
-		}
-		m.mu.Unlock()
-	}, true
-}
-
-// lockWithin 在限定时间内取得任务级互斥锁。
-//
-// 它用于"恢复"这类可能与上一次执行收尾重叠的请求：状态已经落盘为 blocked 时，上一次
-// 推进可能仍在释放锁，短暂等待比直接报冲突更符合用户预期；超过时限仍返回冲突。
-func (m *keyedTaskMutex) lockWithin(
-	ctx context.Context,
-	key string,
-	timeout time.Duration,
-) (func(), bool) {
-	deadline := time.Now().Add(timeout)
-	for {
-		if unlock, ok := m.tryLock(key); ok {
-			return unlock, true
-		}
-		if time.Now().After(deadline) || ctx.Err() != nil {
-			return nil, false
-		}
-		select {
-		case <-ctx.Done():
-			return nil, false
-		case <-time.After(20 * time.Millisecond):
-		}
-	}
-}
-
 // launch 在受生命周期管理的后台 goroutine 中推进工作流。
 //
-// unlock 是调用方在创建执行记录之前取得的任务级互斥锁，由后台 goroutine 负责释放：
-// 这样"启动"与"推进"之间不存在其他请求插入的窗口。
+// 执行权由调用方在创建执行记录之前取得，由后台 goroutine 在推进结束时释放：这样
+// "启动"与"推进"之间不存在其他入口插入的窗口。
 func (s *TaskWorkflowService) launch(
 	run domain.WorkflowRun,
 	exec workflowExecution,
-	unlock func(),
 ) {
-	go s.drive(run, exec, unlock)
+	go s.drive(run, exec)
 }
 
 // drive 执行工作流主循环。
@@ -164,9 +103,9 @@ func (s *TaskWorkflowService) launch(
 func (s *TaskWorkflowService) drive(
 	run domain.WorkflowRun,
 	exec workflowExecution,
-	unlock func(),
 ) {
-	defer unlock()
+	// 执行权覆盖整个推进过程，结束时（无论成功、阻塞或恢复态）在这里释放。
+	defer s.coordination.Release(exec.grant)
 	ctx, finish, err := s.beginRun(context.Background())
 	if err != nil {
 		// 服务已停止：记录保持原状，由启动恢复流程按数据库事实处理。
@@ -186,27 +125,7 @@ func (s *TaskWorkflowService) drive(
 	unregister := s.cancels.register(run.TaskID.String(), cancelRun)
 	defer unregister()
 
-	// 续租在独立 goroutine 中周期性执行：单次 Agent 调用可能长达数十分钟，
-	// 一次性写入的租约会在调用尚未结束时过期，使另一个进程把仍在推进的执行
-	// 误判为已退出（B6）。停止续租的唯一途径是结束本次推进，因此 defer 是安全的。
-	stopHeartbeat := s.startLeaseHeartbeat(runCtx, cancelRun, run, exec.grant)
-	defer stopHeartbeat()
 	state := s.advance(runCtx, run, exec)
-	// 工作流结束后释放任务租约：名额只在真正执行期间被占用，任务进入 blocked /
-	// recovery_required 时也必须释放，否则它会被自己的租约挡在候选池之外直到过期。
-	//
-	// 释放使用未取消的上下文并核对 owner + epoch：若执行权已被接管，释放会返回冲突
-	// 并只记录日志，不会误删新持有者的租约。
-	releaseCtx := context.WithoutCancel(ctx)
-	if releaseErr := s.releaseTaskLease(releaseCtx, exec.grant, taskLeaseReleaseReason(state)); releaseErr != nil {
-		s.logger.WarnContext(
-			releaseCtx,
-			"工作流结束后释放任务租约失败，名额将受租约有效期约束",
-			slog.String("task_id", state.TaskID.String()),
-			slog.String("status", string(state.Status)),
-			slog.String("error", errorSummary(releaseErr)),
-		)
-	}
 	s.logger.InfoContext(
 		context.WithoutCancel(ctx),
 		"任务级工作流执行已结束",
@@ -217,121 +136,6 @@ func (s *TaskWorkflowService) drive(
 		slog.Int("completed_steps", state.CompletedSteps),
 		slog.Int("total_steps", state.TotalSteps),
 	)
-}
-
-// startLeaseHeartbeat 启动周期性续租，返回停止函数。
-//
-// 语义固定为：
-//   - 续租以"仍是同一个执行者、仍在 running"为条件，因此不会延长已停止、已取消
-//     或已完成的记录，也不会覆盖其他执行者的租约；
-//   - 续租失败（记录已进入终态、执行权已转移、数据库不可用）视为**失去执行权**：
-//     立即取消本次推进的上下文，让上层按真实原因收敛，而不是继续执行副作用；
-//   - 停止函数会等待续租 goroutine 退出，因此服务关闭后不会留下后台写入；
-//   - 进程崩溃时 goroutine 随进程消失，租约自然过期，其他服务仍可据此恢复。
-//
-// 续租间隔取租约时长的三分之一：这样即使连续两次续租失败，租约也还有余量，
-// 不会因为一次瞬时数据库错误就让另一个进程提前接管。
-func (s *TaskWorkflowService) startLeaseHeartbeat(
-	ctx context.Context,
-	cancel context.CancelCauseFunc,
-	run domain.WorkflowRun,
-	grant WorkflowExecutionGrant,
-) func() {
-	interval := s.leaseInterval()
-	if interval <= 0 {
-		return func() {}
-	}
-	stop := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				// 任务租约与工作流租约必须同时维持：只续其中一方会让"任务已被
-				// 接管、执行记录仍显示有效"的两套所有权重新出现。
-				if err := s.renewTaskLease(ctx, grant); err != nil {
-					s.logger.WarnContext(
-						ctx,
-						"任务租约续期失败，停止工作流推进",
-						slog.String("run_id", run.ID.String()),
-						slog.String("task_id", run.TaskID.String()),
-						slog.String("error", errorSummary(err)),
-					)
-					cancel(errWorkflowLeaseLost)
-					return
-				}
-				if !s.renewLease(ctx, run) {
-					cancel(errWorkflowLeaseLost)
-					return
-				}
-			}
-		}
-	}()
-	return func() {
-		close(stop)
-		<-done
-	}
-}
-
-// leaseInterval 返回续租间隔。
-func (s *TaskWorkflowService) leaseInterval() time.Duration {
-	if s.lease <= 0 {
-		return 0
-	}
-	interval := s.lease / 3
-	if interval < minLeaseRenewInterval {
-		interval = minLeaseRenewInterval
-	}
-	return interval
-}
-
-// renewLease 延长一次租约，返回是否仍然持有执行权。
-//
-// 续租成功说明本次执行仍然有权继续推进副作用；任何失败都必须让调用方停止推进：
-// 数据库不可用时继续执行会让结果无法落库，执行权已转移时继续执行会覆盖新执行者。
-func (s *TaskWorkflowService) renewLease(ctx context.Context, run domain.WorkflowRun) bool {
-	now := s.now()
-	renewal := run
-	if err := renewal.RenewLease(run.WorkerID, s.lease, now); err != nil {
-		// 领域层拒绝续租说明本地状态已不满足执行权条件：不覆盖数据库，按失去执行权处理。
-		s.logger.WarnContext(
-			ctx,
-			"工作流执行权续租被拒绝",
-			slog.String("run_id", run.ID.String()),
-			slog.String("task_id", run.TaskID.String()),
-			slog.String("status", string(run.Status)),
-			slog.String("error", errorSummary(err)),
-		)
-		return false
-	}
-	expires := renewal.LeaseExpiresAt
-	if expires == nil {
-		return false
-	}
-	err := s.store.RenewWorkflowRunLease(ctx, storage.WorkflowRunLeaseRenewRequest{
-		RunID:          run.ID,
-		WorkerID:       run.WorkerID,
-		LeaseExpiresAt: *expires,
-		At:             now,
-	})
-	if err != nil {
-		s.logger.WarnContext(
-			ctx,
-			"工作流执行权续租失败，停止推进",
-			slog.String("run_id", run.ID.String()),
-			slog.String("task_id", run.TaskID.String()),
-			slog.String("error", errorSummary(err)),
-		)
-		return false
-	}
-	return true
 }
 
 // advance 推进工作流直到出现终止条件。
@@ -663,7 +467,7 @@ func (s *TaskWorkflowService) finalize(
 	writeCtx context.Context,
 	run domain.WorkflowRun,
 	steps []domain.Step,
-	grant WorkflowExecutionGrant,
+	grant TaskExecutionGrant,
 ) domain.WorkflowRun {
 	if err := run.SetStage(domain.WorkflowStageFinalize, nil, nil, s.now()); err != nil {
 		return s.failRun(writeCtx, run, "finalize", err)
@@ -710,7 +514,7 @@ func (s *TaskWorkflowService) applyCloseout(
 	task domain.Task,
 	decision domain.WorkflowCloseoutDecision,
 	errorClass, summary string,
-	grant WorkflowExecutionGrant,
+	grant TaskExecutionGrant,
 ) domain.WorkflowRun {
 	payload := map[string]any{
 		"run_id":          run.ID.String(),
@@ -728,7 +532,7 @@ func (s *TaskWorkflowService) applyCloseout(
 		return s.stopWithEvent(writeCtx, run, decision.Status, errorClass, summary, eventType, payload)
 	}
 	// 收尾写入顺序固定为"执行记录 → 任务"，执行记录的条件写入是栅栏：
-	//   - 写入失败说明本次执行已经失去执行权（版本冲突、租约已转移）或数据库不可用，
+	//   - 写入失败说明本次执行已经失去执行权（版本冲突、执行权已释放）或数据库不可用，
 	//     此时绝不能继续写任务成功终态，否则会在没有执行权的情况下伪造任务成功；
 	//   - 写入成功后才允许推进任务，此时任务写入失败只会留下
 	//     "执行记录 completed + 任务 recovery_required"，即"未完成"，
@@ -829,7 +633,7 @@ func (s *TaskWorkflowService) markTaskRecoveryRequired(
 func (s *TaskWorkflowService) completeTask(
 	ctx context.Context,
 	task domain.Task,
-	grant *WorkflowExecutionGrant,
+	grant *TaskExecutionGrant,
 ) (domain.Task, error) {
 	now := s.now()
 	for _, next := range taskCompletionPath(task.Status) {
@@ -1014,7 +818,7 @@ func (s *TaskWorkflowService) cancelTask(ctx context.Context, taskID domain.ID) 
 // 写入失败时才会走到这里。此时内存副本已经进入终态，任何状态机迁移都会被拒绝，
 // 因此不能再用本地对象覆盖数据库：
 //   - 先重新读取数据库中的真实记录，把停止状态写在真实值之上；
-//   - 该写入同样失败时保留 running 现场并记录日志，由启动恢复按租约过期收敛；
+//   - 该写入同样失败时保留 running 现场并记录日志，由启动恢复按进程中断收敛；
 //   - 任何情况下都不写 "工作流已完成" 事件。
 //
 // 注意：调用本方法时任务**尚未**被推进到成功终态（收尾顺序已改为"先执行记录、
@@ -1370,24 +1174,4 @@ func idPtr(id domain.ID) *domain.ID {
 	}
 	value := id
 	return &value
-}
-
-// taskLeaseReleaseReason 返回任务租约释放原因。
-//
-// 原因只用于事件追溯：它不参与任何业务判定，也不能替代真实状态。
-func taskLeaseReleaseReason(state domain.WorkflowRun) string {
-	switch state.Status {
-	case domain.WorkflowRunCompleted:
-		return "workflow_completed"
-	case domain.WorkflowRunCancelled:
-		return "workflow_cancelled"
-	case domain.WorkflowRunFailed:
-		return "workflow_failed"
-	case domain.WorkflowRunBlocked:
-		return "workflow_blocked"
-	case domain.WorkflowRunRecoveryRequired:
-		return "workflow_recovery_required"
-	default:
-		return "workflow_stopped"
-	}
 }

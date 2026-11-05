@@ -76,14 +76,6 @@ func (h *workflowHandler) plan(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, r, err)
 		return
 	}
-	// 计划生成会真实调用 Planner：显式入口同样必须经过统一领取。
-	grant, release, err := h.claimForWorkflow(r, taskID, domain.ExplicitPlanningStatuses())
-	if err != nil {
-		h.writeError(w, r, err)
-		return
-	}
-	defer release()
-	request.Grant = grant
 	result, err := h.workflow.GeneratePlan(r.Context(), request)
 	if err != nil {
 		// 失败结果仍包含可用的诊断信息（会话、阶段、真实任务状态），但接口必须以

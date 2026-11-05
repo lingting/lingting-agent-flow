@@ -296,22 +296,6 @@ func (s *deliveryStore) UpdateTaskIfStatus(
 	return s.TaskWorkflowStore.UpdateTaskIfStatus(ctx, task, expected)
 }
 
-// UpdateTaskLeaseGuard 与 UpdateTaskIfStatus 记录同一份写入顺序。
-//
-// 收尾的成功终态写入经过租约栅栏接口，顺序不变量因此必须在两个入口上都成立。
-func (s *deliveryStore) UpdateTaskLeaseGuard(
-	ctx context.Context,
-	task domain.Task,
-	expected []domain.TaskStatus,
-	handle domain.TaskLeaseHandle,
-) error {
-	s.writes = append(s.writes, "task:"+string(task.Status))
-	if s.failTaskUpdateStatus != "" && task.Status == s.failTaskUpdateStatus {
-		return errors.New("任务状态写入失败")
-	}
-	return s.TaskWorkflowStore.UpdateTaskLeaseGuard(ctx, task, expected, handle)
-}
-
 // writeOrder 返回写入顺序的快照。
 func (s *deliveryStore) writeOrder() []string {
 	return append([]string(nil), s.writes...)
@@ -531,11 +515,12 @@ func (f *deliveryFixture) assemble(t *testing.T, options deliveryOptions) {
 		},
 	}
 	executor, err := app.NewStepExecutor(app.StepExecutorOptions{
-		Store:      f.db,
-		Containers: containers,
-		Sessions:   sessions,
-		Git:        gitPort,
-		Logger:     f.logger.Slog(),
+		Store:        f.db,
+		Containers:   containers,
+		Sessions:     sessions,
+		Git:          gitPort,
+		Coordination: app.NewTaskExecutionCoordinator(),
+		Logger:       f.logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造步骤执行协调器失败: %v", err)
@@ -552,11 +537,12 @@ func (f *deliveryFixture) assemble(t *testing.T, options deliveryOptions) {
 	}
 	f.validation = validation
 	stepFlow, err := app.NewStepWorkflowService(app.StepWorkflowOptions{
-		Steps:      executor,
-		Validation: validation,
-		Store:      f.db,
-		Cycles:     f.db,
-		Logger:     f.logger.Slog(),
+		Steps:        executor,
+		Validation:   validation,
+		Store:        f.db,
+		Cycles:       f.db,
+		Coordination: app.NewTaskExecutionCoordinator(),
+		Logger:       f.logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造单步骤闭环协调器失败: %v", err)
@@ -572,10 +558,11 @@ func (f *deliveryFixture) assemble(t *testing.T, options deliveryOptions) {
 	codeSaver := &deliveryCodeSaver{record: options.codeSaveRecord, err: options.codeSaveErr}
 	f.codeSaver = codeSaver
 	workflowOptions := app.TaskWorkflowOptions{
-		Store:      store,
-		Steps:      stepFlow,
-		Containers: containers,
-		Logger:     f.logger.Slog(),
+		Store:        store,
+		Steps:        stepFlow,
+		Containers:   containers,
+		Coordination: app.NewTaskExecutionCoordinator(),
+		Logger:       f.logger.Slog(),
 	}
 	if options.codeSaver {
 		workflowOptions.CodeSaver = codeSaver
@@ -1407,12 +1394,13 @@ func (f *deliveryFixture) restartWorkflow(t *testing.T) *app.TaskWorkflowService
 		t.Fatalf("停止编排器失败: %v", err)
 	}
 	workflow, err := app.NewTaskWorkflowService(app.TaskWorkflowOptions{
-		Store:      f.store,
-		Steps:      f.stepFlow,
-		Containers: f.containers,
-		CodeSaver:  f.codeSaver,
-		Sessions:   f.sessions,
-		Logger:     f.logger.Slog(),
+		Store:        f.store,
+		Steps:        f.stepFlow,
+		Containers:   f.containers,
+		CodeSaver:    f.codeSaver,
+		Sessions:     f.sessions,
+		Coordination: app.NewTaskExecutionCoordinator(),
+		Logger:       f.logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("重新构造编排器失败: %v", err)

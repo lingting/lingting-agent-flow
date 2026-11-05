@@ -181,11 +181,11 @@ type finalizeRequest struct {
 	// gitBefore 与 gitAfter 是执行前后的 Git 工作区状态，为空表示本次没有采集。
 	gitBefore *domain.GitWorktreeState
 	gitAfter  *domain.GitWorktreeState
-	// grant 是本次执行持有的任务执行权凭据，为空表示没有任务租约。
+	// grant 是本次执行持有的任务执行凭据，为空表示本次写入不核验执行权。
 	//
 	// 非空时任务终态写入附带 owner + epoch 条件：旧代次的执行者无法在任务被接管
 	// 之后把成功或失败终态写到新执行者的记录上。
-	grant *WorkflowExecutionGrant
+	grant *TaskExecutionGrant
 }
 
 // finalizeOutcome 描述最终状态写入的结果。
@@ -483,7 +483,7 @@ func (e *StepExecutor) persistCancelledTask(
 	ctx context.Context,
 	task domain.Task,
 	expected domain.TaskStatus,
-	grant *WorkflowExecutionGrant,
+	grant *TaskExecutionGrant,
 ) (domain.Task, error) {
 	if err := updateTaskGuarded(ctx, e.store, task, []domain.TaskStatus{expected}, grant); err != nil {
 		if errors.Is(err, storage.ErrConflict) {
@@ -503,7 +503,7 @@ func (e *StepExecutor) persistTaskStatus(
 	ctx context.Context,
 	task domain.Task,
 	next, expected domain.TaskStatus,
-	grant *WorkflowExecutionGrant,
+	grant *TaskExecutionGrant,
 ) error {
 	if task.Status != next {
 		if err := task.Transition(next, e.now()); err != nil {

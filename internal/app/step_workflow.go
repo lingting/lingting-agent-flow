@@ -88,12 +88,12 @@ type ExecuteAndValidateRequest struct {
 	ValidationTimeout time.Duration
 	// Grant 是本次闭环持有的任务执行权凭据。
 	//
-	// 闭环会连续修改同一份工作区、容器与步骤状态，因此必须由任务租约覆盖整个
+	// 闭环会连续修改同一份工作区、容器与步骤状态，因此必须由任务执行权覆盖整个
 	// 周期，而不是只在开始时检查一次。凭据为空表示调用方没有任务执行权（例如
-	// 任务级编排器已自行持有），此时开发阶段退化为状态条件写入。
+	// 任务级编排器已自行持有），此时本次调用会自行取得它。
 	//
 	// 该字段只由应用层内部使用，不通过 HTTP 请求体暴露。
-	Grant *WorkflowExecutionGrant
+	Grant *TaskExecutionGrant
 }
 
 // ExecuteAndValidateResult 是一次开发—验证闭环的结果。
@@ -224,6 +224,11 @@ type StepWorkflowOptions struct {
 	Now func() time.Time
 	// DefaultValidationTimeout 覆盖未指定验证超时时的默认值。
 	DefaultValidationTimeout time.Duration
+	// Coordination 是任务执行的进程内协调器，必填。
+	//
+	// 它与调度器、启动、重试、单步骤执行与工作流编排共用同一个实例：同一任务不会被
+	// 两个入口同时推进。
+	Coordination *TaskExecutionCoordinator
 }
 
 // StepWorkflowService 是单步骤"开发 → 验证"闭环协调器。
@@ -246,10 +251,11 @@ type StepWorkflowService struct {
 	now    func() time.Time
 	// defaultValidationTimeout 是整次验证的默认总超时。
 	defaultValidationTimeout time.Duration
+	// coordination 按任务串行化执行入口，与其余执行入口共用同一实例。
+	coordination *TaskExecutionCoordinator
 	// running 记录本进程内正在闭环执行的步骤，用于快速拒绝重复请求。
 	//
-	// 它是第一道防线而不是一致性保证：步骤在开发阶段由数据库条件更新占用，并在
-	// 验证阶段保持占用，跨进程并发同样会被拒绝。
+	// 它只回答"这个步骤是否正在闭环"：任务级的互斥由 coordination 承担。
 	running *stepExecutionRegistry
 	// lifecycle 管理后台服务状态与在途闭环，使 Server 停止时能取消并等待收敛。
 	lifecycle lifecycleState
@@ -268,6 +274,9 @@ func NewStepWorkflowService(options StepWorkflowOptions) (*StepWorkflowService, 
 	}
 	if options.Cycles == nil {
 		return nil, fmt.Errorf("闭环协调器初始化失败: 执行周期存储不能为空")
+	}
+	if options.Coordination == nil {
+		return nil, fmt.Errorf("闭环协调器初始化失败: 任务执行协调器不能为空")
 	}
 	logger := options.Logger
 	if logger == nil {
@@ -289,6 +298,7 @@ func NewStepWorkflowService(options StepWorkflowOptions) (*StepWorkflowService, 
 		logger:                   logger,
 		now:                      now,
 		defaultValidationTimeout: timeout,
+		coordination:             options.Coordination,
 		running:                  newStepExecutionRegistry(),
 	}, nil
 }

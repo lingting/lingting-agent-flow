@@ -27,9 +27,9 @@ type StartWorkflowRequest struct {
 	ValidationTimeout time.Duration
 	// Grant 是本次执行的任务执行权凭据。
 	//
-	// 它只能由任务领取产生（TaskLeaseService.Claim），不接受调用方构造的
-	// owner / epoch：任务租约是唯一所有权令牌，工作流执行租约是它的续期视图。
-	Grant WorkflowExecutionGrant
+	// 它只能由任务执行权登记产生，不接受调用方构造：执行权是唯一所有权令牌，
+	// 工作流推进与它绑定。
+	Grant TaskExecutionGrant
 }
 
 // ResumeWorkflowRequest 是恢复一次已停止工作流执行的输入。
@@ -45,7 +45,7 @@ type ResumeWorkflowRequest struct {
 	Timeout           time.Duration
 	ValidationTimeout time.Duration
 	// Grant 是本次执行的任务执行权凭据，语义与启动时相同。
-	Grant WorkflowExecutionGrant
+	Grant TaskExecutionGrant
 }
 
 // WorkflowRunView 是一次工作流执行的对外表示。
@@ -158,18 +158,12 @@ func (s *TaskWorkflowService) StartWorkflow(
 	if err := s.checkCodeSaveRecovery(ctx, task); err != nil {
 		return WorkflowRunView{}, err
 	}
-	// 任务租约是唯一所有权令牌：没有有效的任务执行权就不能建立工作流执行。
-	grant, refreshed, releaseGrant, grantErr := s.ensureGrant(
-		ctx,
-		task,
-		request.Grant,
-		workflowClaimStatuses(),
-	)
+	// 执行权是唯一所有权令牌：没有有效的任务执行权就不能建立工作流执行。
+	grant, releaseGrant, grantErr := s.acquireGrant(ctx, task, request.Grant)
 	if grantErr != nil {
 		return WorkflowRunView{}, grantErr
 	}
-	task = refreshed
-	// 启动成功后租约由工作流在结束时释放；启动失败时立即释放，避免占住名额。
+	// 启动成功后执行权由工作流在结束时释放；启动失败时立即释放。
 	launched := false
 	defer func() {
 		if !launched {
@@ -177,25 +171,9 @@ func (s *TaskWorkflowService) StartWorkflow(
 		}
 	}()
 	request.Grant = grant
-	if err := s.checkTaskLease(ctx, task, request.Grant); err != nil {
+	if err := s.checkTaskExecution(ctx, task, request.Grant); err != nil {
 		return WorkflowRunView{}, err
 	}
-	// 进程内以任务为键串行化：并发启动不会各自创建一条执行记录。
-	// 跨进程并发仍由 workflow_runs 的部分唯一索引拒绝。
-	unlock, acquired := s.taskLocks.tryLock(task.ID.String())
-	if !acquired {
-		return WorkflowRunView{}, fmt.Errorf(
-			"%w: 任务 %s 已有工作流在推进",
-			ErrWorkflowConflict,
-			task.ID,
-		)
-	}
-	unlocked := false
-	defer func() {
-		if !unlocked {
-			unlock()
-		}
-	}()
 	run, err := domain.NewWorkflowRun(task.ID, steps, s.now())
 	if err != nil {
 		return WorkflowRunView{}, fmt.Errorf("%w: %w", ErrWorkflowPrerequisite, err)
@@ -220,16 +198,13 @@ func (s *TaskWorkflowService) StartWorkflow(
 		"run_id":      run.ID.String(),
 		"steps":       run.TotalSteps,
 		"plan_digest": run.PlanDigest,
-		"lease_owner": request.Grant.Lease.Owner,
-		"lease_epoch": request.Grant.Lease.Epoch,
 	})
 	s.launch(run, workflowExecution{
 		prompt:            request.Prompt,
 		timeout:           request.Timeout,
 		validationTimeout: request.ValidationTimeout,
 		grant:             request.Grant,
-	}, unlock)
-	unlocked = true
+	})
 	launched = true
 	return workflowRunView(run, s.CodeSaverAvailable()), nil
 }
@@ -293,30 +268,9 @@ func (s *TaskWorkflowService) ResumeWorkflow(
 	if err := s.checkCodeSaveRecovery(ctx, task); err != nil {
 		return WorkflowRunView{}, err
 	}
-	grant, refreshed, releaseGrant, grantErr := s.ensureGrant(
-		ctx,
-		task,
-		request.Grant,
-		workflowClaimStatuses(),
-	)
-	if grantErr != nil {
-		return WorkflowRunView{}, grantErr
-	}
-	task = refreshed
-	launched := false
-	defer func() {
-		if !launched {
-			releaseGrant()
-		}
-	}()
-	request.Grant = grant
-	// 恢复同样必须持有任务执行权：任务租约是唯一令牌，工作流执行租约只是它的续期视图。
-	if err := s.checkTaskLease(ctx, task, request.Grant); err != nil {
-		return WorkflowRunView{}, err
-	}
 	// 恢复可能与上一次执行的收尾重叠：状态已经落盘为 blocked 时，上一次推进可能仍在
-	// 释放任务锁，短暂等待比直接报冲突更符合用户预期；超过时限仍返回冲突。
-	unlock, acquired := s.taskLocks.lockWithin(ctx, task.ID.String(), resumeLockTimeout)
+	// 释放执行权，短暂等待比直接报冲突更符合用户预期；超过时限仍返回冲突。
+	grant, acquired := s.coordination.AcquireWithin(ctx, task.ID, resumeLockTimeout)
 	if !acquired {
 		return WorkflowRunView{}, fmt.Errorf(
 			"%w: 任务 %s 已有工作流在推进",
@@ -324,12 +278,17 @@ func (s *TaskWorkflowService) ResumeWorkflow(
 			task.ID,
 		)
 	}
-	unlocked := false
+	launched := false
 	defer func() {
-		if !unlocked {
-			unlock()
+		if !launched {
+			s.coordination.Release(grant)
 		}
 	}()
+	request.Grant = grant
+	// 恢复同样必须持有任务执行权：执行权是唯一令牌。
+	if err := s.checkTaskExecution(ctx, task, request.Grant); err != nil {
+		return WorkflowRunView{}, err
+	}
 	// 恢复同样先持久化"正在执行"：写入失败时直接返回错误，不启动后台推进。
 	run, err = s.beginRunRecord(ctx, run, request.Grant)
 	if err != nil {
@@ -339,8 +298,6 @@ func (s *TaskWorkflowService) ResumeWorkflow(
 		"run_id":          run.ID.String(),
 		"completed_steps": run.CompletedSteps,
 		"total_steps":     run.TotalSteps,
-		"lease_owner":     request.Grant.Lease.Owner,
-		"lease_epoch":     request.Grant.Lease.Epoch,
 	})
 	s.launch(run, workflowExecution{
 		prompt:            request.Prompt,
@@ -348,8 +305,7 @@ func (s *TaskWorkflowService) ResumeWorkflow(
 		validationTimeout: request.ValidationTimeout,
 		resumed:           true,
 		grant:             request.Grant,
-	}, unlock)
-	unlocked = true
+	})
 	launched = true
 	return workflowRunView(run, s.CodeSaverAvailable()), nil
 }
@@ -413,7 +369,7 @@ func (s *TaskWorkflowService) CancelWorkflow(
 	// "用户不再希望这个任务继续推进"。只写其中一层时，进程若在两次写入之间退出，
 	// 重启后就只能看到一半意图（B5）。
 	//
-	// 顺序固定为"先执行记录、后任务"：执行记录层是并发闸门，写入成功后其他进程
+	// 顺序固定为"先执行记录、后任务"：执行记录层是并发闸门，写入成功后其他入口
 	// 无法再启动新的编排；任务层写入失败时执行记录层的意图仍然有效，由启动恢复
 	// 的取消意图协调补齐（recoverCancellationIntents）。
 	s.recordTaskCancelIntent(ctx, task.ID)
@@ -554,9 +510,12 @@ func (s *TaskWorkflowService) GetWorkflowStatus(
 func (s *TaskWorkflowService) beginRunRecord(
 	ctx context.Context,
 	run domain.WorkflowRun,
-	grant WorkflowExecutionGrant,
+	grant TaskExecutionGrant,
 ) (domain.WorkflowRun, error) {
-	if err := run.Start(grant.workflowOwner(), s.lease, s.now()); err != nil {
+	if err := checkGrantHeld(run.TaskID, &grant); err != nil {
+		return run, err
+	}
+	if err := run.Start(s.now()); err != nil {
 		return run, fmt.Errorf("%w: %w", ErrWorkflowConflict, err)
 	}
 	persisted, err := s.persistRun(ctx, run)
@@ -944,7 +903,7 @@ func (s *TaskWorkflowService) writeRecoveredTask(
 			)
 		}
 		if current.Status == task.Status {
-			// 状态已经等于目标值：同一次收敛已由其他进程写入。
+			// 状态已经等于目标值：同一次收敛已由其他入口写入。
 			return false, nil
 		}
 		return false, fmt.Errorf(
@@ -1014,8 +973,8 @@ func convergeCancellingTask(
 // recoverUnfinished 在服务启动时处理未结束的执行记录。
 //
 // 处理方式严格依据数据库事实：
-//   - 停留在 running 的记录说明上一次进程已经退出：租约有效期内不动，过期后把现场
-//     收敛为 blocked（可恢复）并记录原因，不自动重放 Pi 调用；
+//   - 停留在 running 的记录说明上一次进程已经退出：按进程中断把现场收敛为 blocked
+//     （可恢复）并记录原因，不自动重放 Pi 调用；
 //   - pending / blocked / recovery_required 的记录保持原状，等待用户显式恢复；
 //   - 已记录取消请求的记录收敛为 cancelled，因为执行者已经不存在。
 //
@@ -1107,10 +1066,8 @@ func (s *TaskWorkflowService) recoverRun(
 		// 取消请求可能已落库但任务层尚未同步（B5）：这里补齐任务层意图。
 		return s.convergeCancelIntent(ctx, persisted.TaskID)
 	case domain.WorkflowRunRunning:
-		if run.LeaseActive(now) {
-			// 租约仍然有效：可能有其他进程正在推进，不抢占也不改写。
-			return nil
-		}
+		// 服务端只允许一个进程运行：启动阶段本进程尚未持有任何任务执行权，因此数据库
+		// 中停留在 running 的记录一定是上一个进程退出时留下的现场，按进程中断收敛。
 		if err := run.Stop(
 			domain.WorkflowRunBlocked,
 			"worker_interrupted",
@@ -1131,11 +1088,8 @@ func (s *TaskWorkflowService) recoverRun(
 		})
 		return nil
 	case domain.WorkflowRunPending:
-		// 记录已登记但从未真正开始推进（例如阶段写入失败）：租约到期后收敛为可恢复
-		// 的 blocked，避免一条永久 pending 的记录阻塞该任务的后续执行。
-		if run.UpdatedAt.After(now.Add(-s.lease)) {
-			return nil
-		}
+		// 记录已登记但从未真正开始推进（例如阶段写入失败）：启动阶段没有执行者，
+		// 直接收敛为可恢复的 blocked，避免一条永久 pending 的记录阻塞该任务的后续执行。
 		if err := run.Stop(
 			domain.WorkflowRunBlocked,
 			"not_started",

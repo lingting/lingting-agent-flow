@@ -7,7 +7,6 @@ package domain_test
 import (
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
 )
@@ -37,7 +36,7 @@ func completedRun(t *testing.T, taskID domain.ID) domain.WorkflowRun {
 	if err != nil {
 		t.Fatalf("构造执行记录失败: %v", err)
 	}
-	if err := run.Start("worker", time.Minute, workflowRunAt); err != nil {
+	if err := run.Start(workflowRunAt); err != nil {
 		t.Fatalf("登记执行权失败: %v", err)
 	}
 	if err := run.Complete("完成", workflowRunAt); err != nil {
@@ -54,7 +53,7 @@ func runningRun(t *testing.T, taskID domain.ID) domain.WorkflowRun {
 	if err != nil {
 		t.Fatalf("构造执行记录失败: %v", err)
 	}
-	if err := run.Start("worker", time.Hour, workflowRunAt); err != nil {
+	if err := run.Start(workflowRunAt); err != nil {
 		t.Fatalf("登记执行权失败: %v", err)
 	}
 	return run
@@ -68,7 +67,6 @@ func TestDecideTaskCloseoutViewCombinations(t *testing.T) {
 	running := runningRun(t, taskID)
 	blocked := completed
 	blocked.Status = domain.WorkflowRunBlocked
-	now := workflowRunAt.Add(time.Minute)
 
 	cases := []struct {
 		name string
@@ -147,7 +145,6 @@ func TestDecideTaskCloseoutViewCombinations(t *testing.T) {
 			got := domain.DecideTaskCloseoutView(domain.TaskCloseoutViewInput{
 				Task: testCase.task,
 				Run:  testCase.run,
-				Now:  now,
 			})
 			if got != testCase.want {
 				t.Fatalf("派生结论不正确: 期望 %s，实际 %s", testCase.want, got)
@@ -174,7 +171,6 @@ func TestTaskCloseoutInconsistentNeedsAttention(t *testing.T) {
 func TestDecideTaskCloseoutRecoveryStalledInSaving(t *testing.T) {
 	t.Parallel()
 	task := closeoutTask(t, domain.TaskStatusSaving)
-	now := workflowRunAt.Add(time.Minute)
 	cases := []struct {
 		name   string
 		run    *domain.WorkflowRun
@@ -234,7 +230,6 @@ func TestDecideTaskCloseoutRecoveryStalledInSaving(t *testing.T) {
 				Task:     task,
 				Run:      testCase.run,
 				Decision: testCase.decide,
-				Now:      now,
 			})
 			if testCase.want == "" {
 				if result.Needed {
@@ -258,7 +253,6 @@ func TestDecideTaskCloseoutRecoveryStalledInSaving(t *testing.T) {
 // TestDecideTaskCloseoutRecoveryIgnoresOtherStatuses 验证只处理收尾阶段。
 func TestDecideTaskCloseoutRecoveryIgnoresOtherStatuses(t *testing.T) {
 	t.Parallel()
-	now := workflowRunAt.Add(time.Minute)
 	for _, status := range []domain.TaskStatus{
 		domain.TaskStatusQueued,
 		domain.TaskStatusDeveloping,
@@ -269,7 +263,6 @@ func TestDecideTaskCloseoutRecoveryIgnoresOtherStatuses(t *testing.T) {
 		task := closeoutTask(t, status)
 		result := domain.DecideTaskCloseoutRecovery(domain.TaskCloseoutRecoveryInput{
 			Task: task,
-			Now:  now,
 		})
 		if result.Needed {
 			t.Fatalf("状态 %s 不属于收尾停滞，不应被本入口收敛", status)

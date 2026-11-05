@@ -226,11 +226,13 @@ func newWorkflowAPIFixture(t *testing.T) *workflowAPIFixture {
 		t.Fatalf("更新任务失败: %v", err)
 	}
 	port := &workflowAPIPort{checkStarted: true, sessions: db}
+	coordinator := app.NewTaskExecutionCoordinator()
 	executor, err := app.NewStepExecutor(app.StepExecutorOptions{
-		Store:      db,
-		Containers: port,
-		Sessions:   sessions,
-		Logger:     logger.Slog(),
+		Store:        db,
+		Containers:   port,
+		Sessions:     sessions,
+		Coordination: coordinator,
+		Logger:       logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造步骤执行协调器失败: %v", err)
@@ -245,11 +247,12 @@ func newWorkflowAPIFixture(t *testing.T) *workflowAPIFixture {
 		t.Fatalf("构造验证引擎失败: %v", err)
 	}
 	workflow, err := app.NewStepWorkflowService(app.StepWorkflowOptions{
-		Steps:      executor,
-		Validation: validation,
-		Store:      db,
-		Cycles:     db,
-		Logger:     logger.Slog(),
+		Steps:        executor,
+		Validation:   validation,
+		Store:        db,
+		Cycles:       db,
+		Coordination: coordinator,
+		Logger:       logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造闭环协调器失败: %v", err)
@@ -281,14 +284,6 @@ func newWorkflowAPIFixture(t *testing.T) *workflowAPIFixture {
 	if err != nil {
 		t.Fatalf("构造执行记录服务失败: %v", err)
 	}
-	// 闭环入口同样需要任务租约：它是与任务级工作流共用的唯一所有权令牌。
-	leases, err := app.NewTaskLeaseService(app.TaskLeaseOptions{
-		Store:  db,
-		Logger: logger.Slog(),
-	})
-	if err != nil {
-		t.Fatalf("构造任务租约服务失败: %v", err)
-	}
 	handler := httpapi.NewHandler(httpapi.Deps{
 		Health:           app.NewHealthService(db),
 		SystemInfo:       func() app.SystemInfo { return app.SystemInfo{Version: "test"} },
@@ -297,7 +292,6 @@ func newWorkflowAPIFixture(t *testing.T) *workflowAPIFixture {
 		StepExecutor:     executor,
 		Validation:       validation,
 		StepWorkflow:     workflow,
-		TaskLeases:       leases,
 	})
 	return &workflowAPIFixture{
 		handler: handler,

@@ -74,7 +74,7 @@ func (s *PlanningAgentService) preparePlanningAgentRuntime(
 			ErrPlanningAgentInvalidInput,
 		)
 	}
-	// 调用方（RunRole）已经持有本会话租约：内部的准备流程复用它，不重复领取。
+	// 调用方（RunRole）已经持有本会话锁：内部的准备流程复用它，不重复加锁。
 	detail, err := s.runtime.prepareHeld(ctx, PreparePlanningRuntimeRequest{
 		PlanningSessionID: session.ID.String(),
 		HostID:            hostID,

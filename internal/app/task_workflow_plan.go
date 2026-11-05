@@ -42,7 +42,7 @@ type GeneratePlanRequest struct {
 	//
 	// 计划生成会创建 Session 并调用 Planner，属于真实副作用，因此必须在持有任务
 	// 执行权时进行；凭据只能由任务领取产生。
-	Grant WorkflowExecutionGrant
+	Grant TaskExecutionGrant
 }
 
 // PlanGenerationResult 是一次计划生成的结果。
@@ -76,7 +76,7 @@ type PlanGenerationResult struct {
 //
 // 语义固定为：
 //   - 只接受状态允许规划、没有已保存计划、没有未结束工作流的任务；
-//   - 先以任务状态条件更新进入 planning，这是跨进程的并发闸门；
+//   - 先以任务状态条件更新进入 planning，这是并发写入的闸门；
 //   - Planner 调用使用独立 Session，会话记录在进程启动之前写入；
 //   - 输出必须解析为结构化计划并通过确定性校验，否则任务不会进入 planned；
 //   - 计划步骤与任务状态在同一事务内写入，不会留下"计划已保存但状态未推进"的半成品；
@@ -126,17 +126,11 @@ func (s *TaskWorkflowService) GeneratePlan(
 	if err := s.checkContainerReady(ctx, task); err != nil {
 		return PlanGenerationResult{}, err
 	}
-	grant, refreshed, releaseGrant, grantErr := s.ensureGrant(
-		ctx,
-		task,
-		request.Grant,
-		planClaimStatuses(),
-	)
+	grant, releaseGrant, grantErr := s.acquireGrant(ctx, task, request.Grant)
 	if grantErr != nil {
 		return PlanGenerationResult{}, grantErr
 	}
-	task = refreshed
-	// 计划生成是同步操作：无论成功失败都在返回时释放本次自行领取的租约。
+	// 计划生成是同步操作：无论成功失败都在返回时释放本次自行取得的执行权。
 	// 调用方提供了凭据时 releaseGrant 为空操作，释放责任属于凭据持有者。
 	defer releaseGrant()
 	request.Grant = grant
@@ -154,17 +148,6 @@ func (s *TaskWorkflowService) GeneratePlan(
 	if err != nil {
 		return PlanGenerationResult{}, err
 	}
-	// 进程内以任务为键拒绝重复请求；跨进程并发仍由下面的状态条件更新拒绝。
-	unlock, acquired := s.taskLocks.tryLock(task.ID.String())
-	if !acquired {
-		return PlanGenerationResult{}, fmt.Errorf(
-			"%w: 任务 %s 正在生成计划",
-			ErrWorkflowConflict,
-			task.ID,
-		)
-	}
-	defer unlock()
-
 	runCtx, finishRun, runErr := s.beginRun(ctx)
 	if runErr != nil {
 		return PlanGenerationResult{}, runErr
@@ -402,23 +385,24 @@ func (s *TaskWorkflowService) loadDeveloperRole(
 
 // beginPlanning 以状态条件更新把任务推进到 planning。
 //
-// 这是跨进程的并发闸门：两个规划请求最多只有一个能完成该迁移，另一个得到状态冲突，
+// 这是并发写入的闸门：两个规划请求最多只有一个能完成该迁移，另一个得到状态冲突，
 // 因此不会出现两个 Planner 同时为同一任务生成计划。
 func (s *TaskWorkflowService) beginPlanning(
 	ctx context.Context,
 	task domain.Task,
-	grant WorkflowExecutionGrant,
+	grant TaskExecutionGrant,
 ) (domain.Task, error) {
 	previous := task.Status
 	if err := task.Transition(domain.TaskStatusPlanning, s.now()); err != nil {
 		return task, fmt.Errorf("%w: %w", ErrWorkflowConflict, err)
 	}
-	// 写入附带 owner + epoch 条件：执行权在规划开始前被接管时，这条迁移不会生效。
-	if err := s.store.UpdateTaskLeaseGuard(
+	if err := checkGrantHeld(task.ID, &grant); err != nil {
+		return task, err
+	}
+	if err := s.store.UpdateTaskIfStatus(
 		ctx,
 		task,
 		[]domain.TaskStatus{previous},
-		grant.Lease,
 	); err != nil {
 		if errors.Is(err, storage.ErrConflict) {
 			return task, fmt.Errorf(

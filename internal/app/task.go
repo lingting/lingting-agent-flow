@@ -430,8 +430,8 @@ func (s *TaskService) Detail(ctx context.Context, taskID string) (TaskDetail, er
 //   - 其他未结束状态：只记录取消请求并推进到 cancelling，实际停止由执行者确认；
 //   - 终态：返回状态冲突，不会把已结束的任务改写。
 //
-// 写入必须带状态前置条件：无条件的整行写入会覆盖同一时间由调度器领取的租约
-// （lease_owner / lease_epoch），使新执行者失去执行权却继续推进现场。
+// 写入必须带状态前置条件：无条件的整行写入会覆盖同一时间由调度器推进的状态，使
+// 正在执行的现场被旧快照覆盖。
 func (s *TaskService) CancelTask(ctx context.Context, taskID string) (domain.Task, error) {
 	task, err := s.GetTask(ctx, taskID)
 	if err != nil {

@@ -75,7 +75,7 @@ func TestStepOccupancyConvergesAfterRunBlocked(t *testing.T) {
 		t.Fatalf("构造执行记录失败: %v", err)
 	}
 	// 租约已经过期：说明持有者没有续租，进程已经退出。
-	if err := run.Start("worker-crashed", time.Minute, fixture.now.Add(-time.Hour)); err != nil {
+	if err := run.Start(fixture.now.Add(-time.Hour)); err != nil {
 		t.Fatalf("登记执行权失败: %v", err)
 	}
 	if err := fixture.db.CreateWorkflowRun(fixture.ctx, run); err != nil {
@@ -142,7 +142,7 @@ func TestStepOccupancyKeepsLiveLeaseOwner(t *testing.T) {
 		t.Fatalf("构造执行记录失败: %v", err)
 	}
 	// 租约仍然有效：另一个进程可能正在推进同一任务。
-	if err := run.Start("worker-live", time.Hour, fixture.now); err != nil {
+	if err := run.Start(fixture.now); err != nil {
 		t.Fatalf("登记执行权失败: %v", err)
 	}
 	if err := fixture.db.CreateWorkflowRun(fixture.ctx, run); err != nil {
@@ -186,7 +186,7 @@ func TestStepOccupancyConvergedTaskCanLaunch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造执行记录失败: %v", err)
 	}
-	if err := run.Start("worker-crashed", time.Minute, fixture.now.Add(-time.Hour)); err != nil {
+	if err := run.Start(fixture.now.Add(-time.Hour)); err != nil {
 		t.Fatalf("登记执行权失败: %v", err)
 	}
 	if err := fixture.db.CreateWorkflowRun(fixture.ctx, run); err != nil {
@@ -285,9 +285,10 @@ func TestStepOccupancyReadFailureDoesNotConverge(t *testing.T) {
 		activeRunErr:    errors.New("数据库读取失败"),
 	}
 	service, err := app.NewTaskLaunchService(app.TaskLaunchOptions{
-		Store:      store,
-		Containers: &launchContainers{usable: true},
-		Logger:     fixture.logger.Slog(),
+		Store:        store,
+		Containers:   &launchContainers{usable: true},
+		Coordination: app.NewTaskExecutionCoordinator(),
+		Logger:       fixture.logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造启动服务失败: %v", err)

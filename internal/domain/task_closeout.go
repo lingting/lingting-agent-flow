@@ -3,7 +3,6 @@ package domain
 import (
 	"fmt"
 	"strings"
-	"time"
 )
 
 // TaskCloseoutState 是"任务结论是否已经闭环"的派生结论。
@@ -41,8 +40,6 @@ type TaskCloseoutViewInput struct {
 	Task Task
 	// Run 是最近一次工作流执行记录，没有执行记录时为空。
 	Run *WorkflowRun
-	// Now 是判定执行权是否仍然有效的时刻。
-	Now time.Time
 }
 
 // DecideTaskCloseoutView 依据持久化事实派生任务结论的闭环状态。
@@ -54,9 +51,9 @@ type TaskCloseoutViewInput struct {
 //     a. final_result 不是 succeeded → unconfirmed；
 //     b. 没有执行记录 → inconsistent（无法证明收尾闭环）；
 //     c. 执行记录 completed → confirmed；
-//     d. 执行记录 running 且租约有效 → pending；
+//     d. 执行记录 running → pending；
 //     e. 其余 → inconsistent；
-//  4. 执行记录 running 且租约有效 → pending；
+//  4. 执行记录 running → pending；
 //  5. 其余 → unconfirmed。
 //
 // 该函数是纯函数：不读数据库、不启动进程。
@@ -79,13 +76,13 @@ func DecideTaskCloseoutView(input TaskCloseoutViewInput) TaskCloseoutState {
 		switch {
 		case run.Status == WorkflowRunCompleted:
 			return TaskCloseoutConfirmed
-		case run.Status == WorkflowRunRunning && run.LeaseActive(input.Now):
+		case run.Status == WorkflowRunRunning:
 			return TaskCloseoutPending
 		default:
 			return TaskCloseoutInconsistent
 		}
 	}
-	if run != nil && run.Status == WorkflowRunRunning && run.LeaseActive(input.Now) {
+	if run != nil && run.Status == WorkflowRunRunning {
 		return TaskCloseoutPending
 	}
 	return TaskCloseoutUnconfirmed
@@ -140,8 +137,6 @@ type TaskCloseoutRecoveryInput struct {
 	// 只有在 Run 已处于 completed 时才需要它：此时执行记录无法再被改写，
 	// 任务能否收口只能由重新计算的证据决定。
 	Decision WorkflowCloseoutDecision
-	// Now 是判定执行权是否仍然有效的时刻。
-	Now time.Time
 }
 
 // TaskCloseoutRecoveryDecision 是一次收尾停滞恢复的结论。
@@ -165,7 +160,7 @@ type TaskCloseoutRecoveryDecision struct {
 //
 // 规则（顺序固定）：
 //  1. 任务已删除或不是 verifying / saving → 不处理；
-//  2. 执行记录 running 且租约有效 → 不处理：仍有执行者在推进；
+//  2. 执行记录 running → 不处理：仍有执行者在推进；
 //  3. 执行记录 completed 且重算结论为 completed → 补写任务成功终态；
 //  4. 执行记录 completed 但证据不成立 → recovery_required / evidence_missing；
 //  5. 其余（blocked / recovery_required / failed / 无记录）→
@@ -183,7 +178,7 @@ func DecideTaskCloseoutRecovery(input TaskCloseoutRecoveryInput) TaskCloseoutRec
 		return TaskCloseoutRecoveryDecision{}
 	}
 	run := input.Run
-	if run != nil && run.Status == WorkflowRunRunning && run.LeaseActive(input.Now) {
+	if run != nil && run.Status == WorkflowRunRunning {
 		return TaskCloseoutRecoveryDecision{
 			ErrorClass: "closeout_in_progress",
 			Summary:    "工作流仍在推进收尾，恢复不会抢占",

@@ -43,16 +43,24 @@ func (s *TaskLaunchService) Launch(
 	if err != nil {
 		return TaskLaunchResult{}, err
 	}
-	// 进程内以任务为键拒绝重复请求；跨进程并发仍由各阶段自身的条件更新拒绝。
-	unlock, acquired := s.taskLocks.tryLock(task.ID.String())
-	if !acquired {
-		return TaskLaunchResult{}, fmt.Errorf(
-			"%w: 任务 %s 正在启动中",
-			ErrTaskLaunchConflict,
-			task.ID,
-		)
+	// 执行权按任务串行：同一任务不会被另一个执行入口同时推进，启动阶段全程持有它。
+	grant, ownsGrant, grantErr := acquireTaskGrant(
+		s.coordination,
+		task.ID,
+		&request.Grant,
+		ErrTaskLaunchConflict,
+	)
+	if grantErr != nil {
+		return TaskLaunchResult{}, grantErr
 	}
-	defer unlock()
+	// 启动成功时执行权由工作流在结束时释放，失败时立即释放。
+	releaseOwnGrant := ownsGrant
+	defer func() {
+		if releaseOwnGrant {
+			s.coordination.Release(grant)
+		}
+	}()
+	request.Grant = grant
 
 	runCtx, finishRun, runErr := s.beginLaunch(ctx)
 	if runErr != nil {
@@ -65,50 +73,9 @@ func (s *TaskLaunchService) Launch(
 		Stage:     domain.TaskLaunchStageValidate,
 		StartedAt: s.now(),
 	}
-	// 调用方未提供执行权凭据时由服务自行领取：任务租约仍是唯一所有权令牌，
-	// 只是领取者变成服务本身，而不是另立一套 owner。
-	grant, refreshed, releaseGrant, grantErr := s.ensureGrant(runCtx, task, request.Grant)
-	if grantErr != nil {
-		return s.failLaunch(result, domain.TaskLaunchStageValidate, grantErr)
+	if err := s.checkLaunchExecution(runCtx, task, grant); err != nil {
+		return s.failLaunch(result, domain.TaskLaunchStageValidate, err)
 	}
-	task = refreshed
-	request.Grant = grant
-	// 启动成功时租约由工作流在执行阶段继续持有，失败时立即释放，避免占住名额。
-	releaseOwnGrant := true
-	defer func() {
-		if releaseOwnGrant {
-			releaseGrant()
-		}
-	}()
-	if err := request.Grant.Validate(); err != nil {
-		return s.failLaunch(result, domain.TaskLaunchStageValidate, fmt.Errorf(
-			"%w: %w",
-			ErrTaskLaunchPrerequisite,
-			err,
-		))
-	}
-	if request.Grant.Lease.TaskID != task.ID {
-		return s.failLaunch(result, domain.TaskLaunchStageValidate, fmt.Errorf(
-			"%w: 执行权属于任务 %s，与目标任务 %s 不一致",
-			ErrTaskLaunchPrerequisite,
-			request.Grant.Lease.TaskID,
-			task.ID,
-		))
-	}
-	if !domain.TaskHoldsLease(task, request.Grant.Lease, s.now()) {
-		return s.failLaunch(result, domain.TaskLaunchStageValidate, fmt.Errorf(
-			"%w: 任务 %s 的执行权不属于本次领取（owner %s，代次 %d）",
-			ErrTaskLaunchConflict,
-			task.ID,
-			request.Grant.Lease.Owner,
-			request.Grant.Lease.Epoch,
-		))
-	}
-	// 启动阶段可能持续数十分钟：在整段流程中维持任务租约，否则任务会在准备过程中
-	// 被其他执行者接管，而本地流程仍在远程执行副作用。
-	stopHeartbeat := s.startLeaseHeartbeat(runCtx, request.Grant)
-	defer stopHeartbeat()
-
 	input, err := s.loadLaunchInput(runCtx, task)
 	if err != nil {
 		return s.failLaunch(result, domain.TaskLaunchStageValidate, err)
@@ -199,7 +166,7 @@ func (s *TaskLaunchService) Launch(
 		if startErr != nil {
 			return s.failLaunch(result, domain.TaskLaunchStageWorkflow, startErr)
 		}
-		// 工作流已经接手任务租约：启动流程不再释放它。
+		// 工作流已经接手执行权：启动流程不再释放它。
 		releaseOwnGrant = false
 	default:
 		return s.failLaunch(
@@ -427,7 +394,7 @@ func (s *TaskLaunchService) planTask(
 	taskID domain.ID,
 	prompt string,
 	timeout time.Duration,
-	grant WorkflowExecutionGrant,
+	grant TaskExecutionGrant,
 ) (PlanGenerationResult, error) {
 	if s.planner == nil {
 		return PlanGenerationResult{}, fmt.Errorf(
@@ -454,7 +421,7 @@ func (s *TaskLaunchService) startWorkflow(
 	taskID domain.ID,
 	prompt string,
 	timeout, validationTimeout time.Duration,
-	grant WorkflowExecutionGrant,
+	grant TaskExecutionGrant,
 ) (WorkflowRunView, error) {
 	if s.workflow == nil {
 		return WorkflowRunView{}, fmt.Errorf(
@@ -555,122 +522,34 @@ func (s *TaskLaunchService) ensureNoPendingContainer(
 	return nil
 }
 
-// startLeaseHeartbeat 在启动期间周期性续租任务租约，返回停止函数。
+// checkLaunchExecution 核验本次启动仍然持有任务执行权，且任务现场允许继续启动。
 //
-// 续租失败只记录日志并取消启动上下文：本地流程立即停止推进，由上层按真实阶段
-// 收敛。未提供续租能力时返回空停止函数——此时执行权在阶段边界仍会被核验，但长
-// 阶段可能因租约自然过期而失去执行权，因此生产接线必须提供该能力。
-func (s *TaskLaunchService) startLeaseHeartbeat(
-	ctx context.Context,
-	grant WorkflowExecutionGrant,
-) func() {
-	if s.leases == nil {
-		return func() {}
-	}
-	interval := s.leases.RenewInterval()
-	if interval <= 0 {
-		return func() {}
-	}
-	stop := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if err := s.leases.Renew(ctx, grant.Lease); err != nil {
-					s.logger.WarnContext(
-						ctx,
-						"启动阶段任务租约续期失败",
-						slog.String("task_id", grant.Lease.TaskID.String()),
-						slog.String("error", errorSummary(err)),
-					)
-					return
-				}
-			}
-		}
-	}()
-	return func() {
-		close(stop)
-		<-done
-	}
-}
-
-// ensureGrant 返回本次启动使用的执行权凭据。
-//
-// 调用方未提供凭据时由启动服务自行领取；提供了凭据时不做任何领取，避免一次启动
-// 产生两个 owner。返回的 release 只在凭据由本方法领取时真正释放租约。
-func (s *TaskLaunchService) ensureGrant(
+// 执行权在整段启动流程中有效，因此每个可能产生远程副作用的阶段之前都要用它复核；
+// 任务被删除或已请求取消时一律停止，不继续创建容器或调用 Agent。
+func (s *TaskLaunchService) checkLaunchExecution(
 	ctx context.Context,
 	task domain.Task,
-	grant WorkflowExecutionGrant,
-) (WorkflowExecutionGrant, domain.Task, func(), error) {
-	if grant.Lease.TaskID != "" {
-		return grant, task, func() {}, nil
+	grant TaskExecutionGrant,
+) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: %w", ErrTaskLaunchStopped, err)
 	}
-	handle, err := s.store.AcquireTaskLease(ctx, storage.TaskLeaseRequest{
-		TaskID:   task.ID,
-		Owner:    "launch-" + domain.NewID().String(),
-		TTL:      s.leaseTTL(),
-		Statuses: domain.ExplicitLaunchStatuses(),
-		At:       s.now(),
-	})
-	if err != nil {
-		if errors.Is(err, storage.ErrConflict) {
-			return WorkflowExecutionGrant{}, task, nil, fmt.Errorf(
-				"%w: 任务 %s 已被其他执行者持有",
-				ErrTaskLaunchConflict,
-				task.ID,
-			)
-		}
-		return WorkflowExecutionGrant{}, task, nil, fmt.Errorf("领取任务租约失败: %w", err)
+	if !grant.Valid() || grant.TaskID() != task.ID || !grant.Held() {
+		return fmt.Errorf(
+			"%w: 任务 %s 的执行权已不属于本次启动",
+			ErrTaskLaunchConflict,
+			task.ID,
+		)
 	}
-	// 重新读取任务：租约刚由本方法写入，调用方手上的快照还没有 owner / epoch，
-	// 用它做执行权判定会误判为"不持有"。
-	refreshed, loadErr := s.loadTask(ctx, task.ID)
-	if loadErr != nil {
-		_, releaseErr := s.store.ReleaseTaskLease(context.WithoutCancel(ctx), handle, s.now())
-		if releaseErr != nil {
-			s.logger.WarnContext(
-				ctx,
-				"读取任务失败后释放任务租约失败",
-				slog.String("task_id", task.ID.String()),
-				slog.String("error", errorSummary(releaseErr)),
-			)
-		}
-		return WorkflowExecutionGrant{}, task, nil, loadErr
+	if task.Deleted() {
+		return fmt.Errorf("%w: 任务 %s", ErrTaskLaunchNotFound, task.ID)
 	}
-	task = refreshed
-	acquired := WorkflowExecutionGrant{Lease: handle, TTL: s.leaseTTL()}
-	release := func() {
-		releaseCtx := context.WithoutCancel(ctx)
-		_, releaseErr := s.store.ReleaseTaskLease(releaseCtx, handle, s.now())
-		if releaseErr != nil {
-			s.logger.WarnContext(
-				releaseCtx,
-				"释放启动流程自行领取的任务租约失败，名额将受租约有效期约束",
-				slog.String("task_id", task.ID.String()),
-				slog.String("error", errorSummary(releaseErr)),
-			)
-		}
+	if task.CancelRequested {
+		return fmt.Errorf(
+			"%w: 任务 %s 已请求取消，不能继续启动",
+			ErrTaskLaunchConflict,
+			task.ID,
+		)
 	}
-	return acquired, task, release, nil
-}
-
-// leaseTTL 返回启动流程使用的租约有效期。
-//
-// 它来自租约服务的建议值：未提供续租能力时取默认有效期，避免无限期占用名额。
-func (s *TaskLaunchService) leaseTTL() time.Duration {
-	if s.leases != nil {
-		if ttl := s.leases.RenewInterval() * 3; ttl > 0 {
-			return ttl
-		}
-	}
-	return defaultTaskLeaseTTL
+	return nil
 }

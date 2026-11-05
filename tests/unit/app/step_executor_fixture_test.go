@@ -392,11 +392,12 @@ func newStepExecutorFixtureWithStart(
 		gitCapability = gitPort
 	}
 	executor, err := app.NewStepExecutor(app.StepExecutorOptions{
-		Store:      store,
-		Containers: containers,
-		Sessions:   sessions,
-		Git:        gitCapability,
-		Logger:     logger.Slog(),
+		Store:        store,
+		Containers:   containers,
+		Sessions:     sessions,
+		Git:          gitCapability,
+		Coordination: app.NewTaskExecutionCoordinator(),
+		Logger:       logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造步骤执行协调器失败: %v", err)

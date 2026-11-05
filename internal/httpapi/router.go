@@ -66,11 +66,6 @@ type Deps struct {
 	CodeInitialize *app.CodeInitializeService
 	// TaskLaunch 是统一任务启动服务，为空时启动接口返回服务不可用。
 	TaskLaunch *app.TaskLaunchService
-	// TaskLeases 是任务租约服务，为启动与工作流接口提供统一的任务执行权。
-	//
-	// 为空时启动与工作流接口返回服务不可用：没有任务租约就无法证明调用方持有
-	// 该任务的执行权，也就不能执行任何有副作用的阶段。
-	TaskLeases *app.TaskLeaseService
 	// Containers 是容器服务，提供代码保存的只读核验能力。
 	//
 	// 为空时核验接口返回服务不可用，而不是伪造"核验已通过"。
@@ -137,13 +132,12 @@ func NewHandler(deps Deps) http.Handler {
 		stepExec: newStepExecutionHandler(
 			deps.StepExecutor,
 			deps.StepWorkflow,
-			deps.TaskLeases,
 			logger,
 		),
-		workflow:     newWorkflowHandler(deps.Workflow, deps.TaskLeases, logger),
+		workflow:     newWorkflowHandler(deps.Workflow, logger),
 		validation:   newValidationHandler(deps.Validation, logger),
 		codeInit:     newCodeInitializeHandler(deps.CodeInitialize, logger),
-		taskLaunch:   newTaskLaunchHandler(deps.TaskLaunch, deps.TaskLeases, logger),
+		taskLaunch:   newTaskLaunchHandler(deps.TaskLaunch, logger),
 		codeRecovery: newCodeRecoveryHandler(deps.Containers, deps.ResumeEligibility, logger),
 		codeSaves:    newCodeSaveListHandler(deps.CodeSaveQueries, logger),
 		taskRetry:    newTaskRetryHandler(deps.TaskRetry, logger),

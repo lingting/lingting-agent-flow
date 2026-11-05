@@ -198,11 +198,12 @@ func (f *budgetFixture) assemble(t *testing.T, options budgetOptions) {
 		t.Fatalf("构造会话服务失败: %v", err)
 	}
 	executor, err := app.NewStepExecutor(app.StepExecutorOptions{
-		Store:      f.db,
-		Containers: f.ports,
-		Sessions:   sessions,
-		Git:        f.ports,
-		Logger:     f.logger.Slog(),
+		Store:        f.db,
+		Containers:   f.ports,
+		Sessions:     sessions,
+		Git:          f.ports,
+		Coordination: app.NewTaskExecutionCoordinator(),
+		Logger:       f.logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造步骤执行协调器失败: %v", err)
@@ -219,11 +220,12 @@ func (f *budgetFixture) assemble(t *testing.T, options budgetOptions) {
 		t.Fatalf("构造验证引擎失败: %v", err)
 	}
 	service, err := app.NewStepWorkflowService(app.StepWorkflowOptions{
-		Steps:      executor,
-		Validation: validation,
-		Store:      f.storeOf(options),
-		Cycles:     f.db,
-		Logger:     f.logger.Slog(),
+		Steps:        executor,
+		Validation:   validation,
+		Store:        f.storeOf(options),
+		Cycles:       f.db,
+		Coordination: app.NewTaskExecutionCoordinator(),
+		Logger:       f.logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造闭环协调器失败: %v", err)
@@ -883,11 +885,12 @@ func newBudgetServiceFor(t *testing.T, fixture *budgetFixture) *app.StepWorkflow
 		t.Fatalf("构造会话服务失败: %v", err)
 	}
 	executor, err := app.NewStepExecutor(app.StepExecutorOptions{
-		Store:      fixture.db,
-		Containers: fixture.ports,
-		Sessions:   sessions,
-		Git:        fixture.ports,
-		Logger:     fixture.logger.Slog(),
+		Store:        fixture.db,
+		Containers:   fixture.ports,
+		Sessions:     sessions,
+		Git:          fixture.ports,
+		Coordination: app.NewTaskExecutionCoordinator(),
+		Logger:       fixture.logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造步骤执行协调器失败: %v", err)
@@ -902,11 +905,12 @@ func newBudgetServiceFor(t *testing.T, fixture *budgetFixture) *app.StepWorkflow
 		t.Fatalf("构造验证引擎失败: %v", err)
 	}
 	service, err := app.NewStepWorkflowService(app.StepWorkflowOptions{
-		Steps:      executor,
-		Validation: validation,
-		Store:      fixture.db,
-		Cycles:     fixture.db,
-		Logger:     fixture.logger.Slog(),
+		Steps:        executor,
+		Validation:   validation,
+		Store:        fixture.db,
+		Cycles:       fixture.db,
+		Coordination: app.NewTaskExecutionCoordinator(),
+		Logger:       fixture.logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造闭环协调器失败: %v", err)

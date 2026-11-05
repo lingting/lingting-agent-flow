@@ -22,10 +22,10 @@ tests/                    全部测试代码（见 testing.md）
 | 目录 | 职责 |
 |---|---|
 | `internal/domain/` | 实体、状态、状态迁移与业务规则；不依赖数据库、HTTP、Agent 运行时、外部进程 |
-| `internal/app/` | 应用服务，CLI 与 HTTP 的共同入口；编排领域能力，不含协议细节 |
+| `internal/app/` | 应用服务，CLI 与 HTTP 的共同入口；编排领域能力，不含协议细节；进程内任务与规划会话协调器也在这里 |
 | `internal/httpapi/` | HTTP 路由与处理器，只做协议转换与 SSE 推送 |
 | `internal/httpserver/` | HTTP 服务器装配与请求分发 |
-| `internal/server/` | 统一服务装配：配置、数据库、后台服务与 HTTP 服务器 |
+| `internal/server/` | 统一服务装配：配置、服务端进程锁（`<database_path>.server.lock`）、数据库、后台服务与 HTTP 服务器 |
 | `internal/cli/` | Cobra 命令实现，只做参数解析、结果输出与退出码转换 |
 | `internal/lifecycle/` | 后台服务注册、启动、故障传播与逆序停止 |
 | `internal/config/` | 配置结构与 YAML 加载、校验 |

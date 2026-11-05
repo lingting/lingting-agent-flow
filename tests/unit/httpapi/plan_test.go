@@ -182,11 +182,12 @@ func newPlanAPIFixture(t *testing.T, finalText string) *planAPIFixture {
 		t.Fatalf("构造会话服务失败: %v", err)
 	}
 	service, err := app.NewTaskWorkflowService(app.TaskWorkflowOptions{
-		Store:      db,
-		Steps:      &taskWorkflowAPIRunner{db: db},
-		Containers: &planAPIContainer{finalText: finalText},
-		Sessions:   sessions,
-		Logger:     logger.Slog(),
+		Store:        db,
+		Steps:        &taskWorkflowAPIRunner{db: db},
+		Containers:   &planAPIContainer{finalText: finalText},
+		Sessions:     sessions,
+		Coordination: app.NewTaskExecutionCoordinator(),
+		Logger:       logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造工作流编排器失败: %v", err)
@@ -207,18 +208,13 @@ func newPlanAPIFixture(t *testing.T, finalText string) *planAPIFixture {
 	if err != nil {
 		t.Fatalf("构造任务服务失败: %v", err)
 	}
-	leases, err := app.NewTaskLeaseService(app.TaskLeaseOptions{Store: db})
-	if err != nil {
-		t.Fatalf("构造任务租约服务失败: %v", err)
-	}
 	return &planAPIFixture{
 		db:      db,
 		service: service,
 		handler: httpapi.NewHandler(httpapi.Deps{
-			Tasks:      tasks,
-			Workflow:   service,
-			TaskLeases: leases,
-			Logger:     logger.Slog(),
+			Tasks:    tasks,
+			Workflow: service,
+			Logger:   logger.Slog(),
 		}),
 		task: task,
 		ctx:  ctx,

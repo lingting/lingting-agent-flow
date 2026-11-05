@@ -37,7 +37,7 @@ type RetryTaskRequest struct {
 
 // RetryTaskResponse 是一次显式重试的结果。
 //
-// 结构显式区分四件事：重试前的状态、当前真实状态、新执行代次，以及编排是否真的启动。
+// 结构显式区分三件事：重试前的状态、当前真实状态，以及编排是否真的启动。
 // `workflow_started` 为 false 时任务已进入新周期但没有启动编排，调用方不得把它当作
 // 已开始执行。
 type RetryTaskResponse struct {
@@ -46,10 +46,6 @@ type RetryTaskResponse struct {
 	PreviousStatus string `json:"previous_status"`
 	// TaskStatus 是重试结束后读取到的任务真实状态。
 	TaskStatus string `json:"task_status"`
-	// LeaseEpoch 是本次重试取得的任务领取代次，用于区分执行周期。
-	LeaseEpoch int64 `json:"lease_epoch"`
-	// LeaseOwner 是本次重试的领取者标识。
-	LeaseOwner string `json:"lease_owner"`
 	// WorkflowStarted 表示本次重试真的启动了工作流推进。
 	WorkflowStarted bool `json:"workflow_started"`
 	// Run 是启动后的执行记录，未启动时为空。
@@ -112,7 +108,7 @@ func (h *taskRetryHandler) retry(w http.ResponseWriter, r *http.Request) {
 
 // eligibility 处理 GET /api/v1/tasks/{taskID}/retry-eligibility。
 //
-// 只读：它不领取租约、不写任何状态，使用户能在执行重试之前看到阻塞项。
+// 只读：它不取任务执行权、不写任何状态，使用户能在执行重试之前看到阻塞项。
 func (h *taskRetryHandler) eligibility(w http.ResponseWriter, r *http.Request) {
 	taskID := pathID(r, paramTaskID)
 	decision, err := h.service.Eligibility(r.Context(), taskID)
@@ -161,8 +157,6 @@ func retryTaskResponse(result app.TaskRetryResult) RetryTaskResponse {
 		TaskID:          result.TaskID.String(),
 		PreviousStatus:  string(result.PreviousStatus),
 		TaskStatus:      string(result.TaskStatus),
-		LeaseEpoch:      result.Epoch,
-		LeaseOwner:      result.Owner,
 		WorkflowStarted: result.WorkflowStarted,
 		FailureStage:    result.FailureStage,
 		Failure:         result.Failure,
@@ -190,17 +184,14 @@ func writeRetryError(
 	code := CodeInternal
 	switch {
 	case errors.Is(err, app.ErrTaskRetryConflict),
-		errors.Is(err, app.ErrTaskLeaseConflict),
 		errors.Is(err, storage.ErrConflict):
 		status = http.StatusConflict
 		code = CodeConflict
 	case errors.Is(err, app.ErrTaskRetryNotFound),
-		errors.Is(err, app.ErrTaskLeaseNotFound),
 		errors.Is(err, storage.ErrNotFound):
 		status = http.StatusNotFound
 		code = CodeNotFound
-	case errors.Is(err, app.ErrTaskRetryPrerequisite),
-		errors.Is(err, app.ErrTaskLeaseInvalid):
+	case errors.Is(err, app.ErrTaskRetryPrerequisite):
 		status = http.StatusPreconditionFailed
 		code = CodePreconditionFailed
 	case errors.Is(err, app.ErrTaskRetryFailed):

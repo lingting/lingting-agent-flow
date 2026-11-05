@@ -69,8 +69,6 @@ function sampleEligibility(overrides: Record<string, unknown> = {}) {
 /** 一份重试响应样本，字段与 Go 端 `httpapi.RetryTaskResponse` 一致 */
 function sampleRetry(overrides: Record<string, unknown> = {}) {
   return {
-    lease_epoch: 3,
-    lease_owner: "retry-1",
     previous_status: "failed",
     run: sampleRun({ run_id: "run-retry-1" }),
     task_id: "task-1",
@@ -284,7 +282,6 @@ test.describe("重试资格与入口可用性", () => {
     // 真实响应：任务已被重开且工作流已启动
     await expect(page.getByText("重试已重开任务并启动工作流")).toBeVisible();
     await expect(page.getByText(/run-retry-1/)).toBeVisible();
-    await expect(page.getByText(/执行代次：3/)).toBeVisible();
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toContain("/api/v1/tasks/task-1/retry");
     // 只发送服务端支持的执行参数：默认不附加任何额外字段

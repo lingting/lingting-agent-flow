@@ -140,6 +140,10 @@ make release                                         # 单文件生产构建：�
 
 客户端的实际使用方式见 [cli.md](cli.md)；测试的目录、工作空间与真实依赖开关见 [testing.md](testing.md)。
 
+同一份数据目录只允许一个 `agentflow server` 进程：它在启动时用数据库文件旁的 `<database_path>.server.lock`
+取得独占文件锁，第二个进程立即失败并给出锁文件路径。锁文件属于运行期数据，`*.server.lock` 已被
+`.gitignore` 忽略；排查"服务端启动失败"时先确认没有遗留的服务端进程，而不是删除锁文件。
+
 ## 改动流程
 
 1. 确认改动属于哪一层，按 [workspace.md](workspace.md) 的依赖方向选择位置。
@@ -175,7 +179,7 @@ make release                                         # 单文件生产构建：�
    响应中的 `status_terminal` / `status_active`，避免同一状态在不同层表达不一致。
 5. 收尾结论只在 `domain.DecideWorkflowCloseout` 修改；不得因为"步骤都通过了"就跳过代码保存与会话归档
    判定。
-6. 恢复逻辑必须继续依据数据库事实：新增恢复路径同样不得重放 Pi 调用，也不得抢占有效租约。
+6. 恢复逻辑必须继续依据数据库事实：新增恢复路径同样不得重放 Pi 调用，也不得抢占仍在推进的现场。
 7. 编排器实现了 `Name/Start/Stop` 并注册进 `internal/lifecycle`：新增后台协程必须挂在它下面，Server
    关闭时会先停止新请求，再等待在途工作收敛。
 8. 新增接口路径必须落在 `/api/v1/tasks/{taskID}/` 之下，并在 `router.go` 的 `isWorkflowPath` 中登记；

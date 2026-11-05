@@ -35,8 +35,6 @@ const (
 	TaskQueueRejectionCancelRequested TaskQueueRejection = "cancel_requested"
 	// TaskQueueRejectionStatusNotQueueable 表示任务状态不属于自动调度集合。
 	TaskQueueRejectionStatusNotQueueable TaskQueueRejection = "status_not_queueable"
-	// TaskQueueRejectionLeaseHeld 表示任务租约仍被另一个有效持有者持有。
-	TaskQueueRejectionLeaseHeld TaskQueueRejection = "lease_held"
 	// TaskQueueRejectionActiveWorkflowRun 表示任务存在未结束的工作流执行记录。
 	TaskQueueRejectionActiveWorkflowRun TaskQueueRejection = "active_workflow_run"
 	// TaskQueueRejectionStepOccupied 表示存在仍被占用的步骤。
@@ -83,8 +81,6 @@ type TaskQueueInput struct {
 	Steps []Step
 	// CodeSaveRecords 是该任务的代码保存记录，用于判定是否仍有未核验的外部副作用。
 	CodeSaveRecords []CodeSaveRecord
-	// Now 是判定租约与占用是否仍然有效的时刻。
-	Now time.Time
 }
 
 // TaskQueueAdmission 是自动调度准入结论。
@@ -133,12 +129,11 @@ func (a TaskQueueAdmission) Summary() string {
 //  8. 仍有未核验的外部副作用 → 拒绝（P2 门控，复用 DecideTaskCodeSaveResume）；
 //  9. 启动前置条件未满足 → 拒绝（复用 CheckTaskLaunchStart，不重复实现）。
 //
-// 租约归属不参与准入：它属于领取仲裁（DecideTaskClaim）。业务准入回答"该任务是否
-// 属于队列候选池"，领取仲裁回答"这一次由谁真正拿到执行权"，两者混在一起会让
-// "同一执行者重复领取"（租约由他自己持有）无法表达。
-//
 // 该函数是纯函数：不读数据库、不写状态、不产生任何远程副作用。调用方不得在别处
 // 复制同一套准入判定，否则"谁能被调度"会出现第二份实现。
+//
+// "这一次由谁真正执行"不在本函数内判定：服务端只允许一个进程运行，执行权由进程内的
+// 任务协调器按任务互斥登记，不在数据库中表达。
 func DecideTaskQueueAdmission(input TaskQueueInput) TaskQueueAdmission {
 	admission := TaskQueueAdmission{}
 	task := input.Task
@@ -157,9 +152,6 @@ func DecideTaskQueueAdmission(input TaskQueueInput) TaskQueueAdmission {
 	if err := checkQueuePriority(input.Requirement); err != nil {
 		admission.Rejections = append(admission.Rejections, TaskQueueRejectionPriorityUnknown)
 	}
-	// 租约持有不在这里判定：它是领取仲裁（DecideTaskClaim）的职责。准入回答
-	// "这个任务是否属于队列候选池"，仲裁回答"这一次由谁真正拿到执行权"。
-	// 把租约混进准入会让"同一执行者重复领取"无法表达（租约由他自己持有）。
 	if input.ActiveWorkflowRun != nil {
 		admission.Rejections = append(
 			admission.Rejections,
@@ -294,76 +286,6 @@ func SortTaskQueueOrderKeys(keys []TaskQueueOrderKey) {
 	})
 }
 
-// TaskClaimDecision 是"当前执行者能否领取该任务"的结论。
-type TaskClaimDecision struct {
-	// Allowed 表示可以尝试领取。
-	//
-	// 允许不等于成功：真正的仲裁由存储层的原子条件更新完成，成功与否只能由
-	// 重新读取后的 TaskHoldsExecution 判定。两个执行者在同一份快照上可以都被
-	// 允许尝试，但不可能都成为持有者。
-	Allowed bool
-	// Takeover 表示本次领取建立在"上一个持有者的租约已过期"之上。
-	Takeover bool
-	// Rejection 是拒绝原因，允许时为空。
-	Rejection TaskQueueRejection
-	// Admission 是业务准入结论，始终填写，便于区分"准入不通过"与"租约被抢占"。
-	Admission TaskQueueAdmission
-}
-
-// DecideTaskClaim 判断指定执行者能否领取该任务。
-//
-// 领取的前置条件 = 业务准入通过 + 执行者标识非空 + 租约空闲 / 已过期 / 已由本人持有。
-// 领取失败不得推进任务状态，也不得启动工作流：本函数不修改任何状态，真正的占用
-// 必须由存储层在单个条件更新内完成。
-func DecideTaskClaim(
-	input TaskQueueInput,
-	owner string,
-) (TaskClaimDecision, error) {
-	trimmed := strings.TrimSpace(owner)
-	if trimmed == "" {
-		return TaskClaimDecision{}, invalidField(
-			"TaskClaim",
-			"owner",
-			"执行者标识不能为空",
-		)
-	}
-	admission := DecideTaskQueueAdmission(input)
-	decision := TaskClaimDecision{Admission: admission}
-	if !admission.Admitted {
-		decision.Rejection = admission.Rejections[0]
-		return decision, nil
-	}
-	now := input.Now
-	switch {
-	case input.Task.LeaseActive(now) && input.Task.LeaseOwner == trimmed:
-		// 同一执行者重复领取是幂等的：租约仍然有效，不需要换手。
-		decision.Allowed = true
-	case input.Task.LeaseActive(now):
-		decision.Rejection = TaskQueueRejectionLeaseHeld
-	default:
-		// 租约为空或已过期：可以领取。过期说明原持有者没有续租，本次是接管。
-		decision.Allowed = true
-		decision.Takeover = input.Task.LeaseOwner != "" || input.Task.LeaseExpiresAt != nil
-	}
-	return decision, nil
-}
-
-// TaskHoldsExecution 判断指定执行者在给定时刻是否仍持有该任务的执行权。
-//
-// 这是任务级 fencing 判据：领取成功之后，每一次可能产生副作用或状态迁移的推进
-// 都必须先通过它。执行者标识不匹配（执行权已转移）或租约已过期（原持有者没有
-// 续租）时一律返回 false，原执行者必须立即停止推进，而不是继续写入。
-//
-// 它只读记录本身，不读数据库：调用方必须先重新读取数据库中的最新记录再判定，
-// 用本地内存对象自检没有意义。
-func TaskHoldsExecution(task Task, owner string, at time.Time) bool {
-	trimmed := strings.TrimSpace(owner)
-	if trimmed == "" || task.LeaseOwner != trimmed {
-		return false
-	}
-	return task.LeaseActive(at)
-}
-
 // TaskExecutionHandover 是"任务领取 → 工作流执行"交接的判定结论。
 type TaskExecutionHandover struct {
 	// Allowed 表示允许为该任务建立或恢复工作流执行记录。
@@ -374,23 +296,19 @@ type TaskExecutionHandover struct {
 	Detail string
 }
 
-// DecideTaskExecutionHandover 判断当前执行者能否把任务领取交接给工作流执行。
+// DecideTaskExecutionHandover 判断能否为任务建立或恢复工作流执行。
 //
 // 交接规则固定为：
 //  1. 任务已被删除 → 拒绝；
 //  2. 任务已请求取消 → 拒绝（取消意图优先于推进）；
-//  3. 执行者不再持有有效任务租约 → 拒绝（租约是调度名额与执行权的唯一令牌）；
-//  4. 存在由其他执行者持有有效执行权的工作流执行记录 → 拒绝；
-//  5. 任务状态不允许推进步骤 → 拒绝（复用 TaskStatus.AllowsStepExecution）。
+//  3. 存在仍在推进的工作流执行记录 → 拒绝（同一任务不允许两条执行记录同时推进）；
+//  4. 任务状态不允许推进步骤 → 拒绝（复用 TaskStatus.AllowsStepExecution）。
 //
-// 第 3 条是本契约的核心：WorkflowRun 的执行租约不是独立的所有权来源，它是任务
-// 租约在执行阶段的续期视图。当前代码尚未建立这条关联（StartWorkflow 不检查任务
-// 租约），P3-M2 必须补上，否则"任务领取"与"工作流推进"会是两套互不相干的所有权。
+// 执行权本身不由本函数判定：服务端只允许一个进程运行，同一任务不会有两个执行者，
+// 进程内执行权由任务协调器登记。本函数只回答"数据库中的现场是否允许建立执行记录"。
 func DecideTaskExecutionHandover(
 	task Task,
 	activeRun *WorkflowRun,
-	owner string,
-	at time.Time,
 ) TaskExecutionHandover {
 	if task.Deleted() {
 		return TaskExecutionHandover{
@@ -404,17 +322,10 @@ func DecideTaskExecutionHandover(
 			Detail: "任务已请求取消，不能建立工作流执行",
 		}
 	}
-	if !TaskHoldsExecution(task, owner, at) {
-		return TaskExecutionHandover{
-			Reason: TaskQueueRejectionLeaseHeld,
-			Detail: "当前执行者不持有有效任务租约，不能建立工作流执行",
-		}
-	}
-	if activeRun != nil && !activeRun.HoldsExecution(owner, at) &&
-		taskQueueRunHoldsExecution(activeRun, at) {
+	if taskQueueRunHoldsExecution(activeRun) {
 		return TaskExecutionHandover{
 			Reason: TaskQueueRejectionActiveWorkflowRun,
-			Detail: "任务已有其他执行者持有有效执行权的工作流执行记录",
+			Detail: "任务已有仍在推进的工作流执行记录",
 		}
 	}
 	if !task.Status.AllowsStepExecution() {
@@ -426,13 +337,13 @@ func DecideTaskExecutionHandover(
 	return TaskExecutionHandover{Allowed: true}
 }
 
-// taskQueueRunHoldsExecution 判断工作流执行记录在给定时刻是否仍持有执行权。
+// taskQueueRunHoldsExecution 判断工作流执行记录是否仍在推进。
 //
-// 与 task_launch.go 的 workflowRunOwnsExecution 的区别：cancel_requested 也算
-// 持有执行权。取消请求已记录但实际停止尚未确认时，执行者仍然在推进收尾，此时
-// 抢占同一任务会与取消收敛互相覆盖。
-func taskQueueRunHoldsExecution(run *WorkflowRun, at time.Time) bool {
-	if run == nil || !run.LeaseActive(at) {
+// 与 task_launch.go 的 workflowRunOwnsExecution 的区别：cancel_requested 也算仍在
+// 推进。取消请求已记录但实际停止尚未确认时，执行者仍然在推进收尾，此时抢占同一任务
+// 会与取消收敛互相覆盖。
+func taskQueueRunHoldsExecution(run *WorkflowRun) bool {
+	if run == nil {
 		return false
 	}
 	return run.Status == WorkflowRunRunning || run.Status == WorkflowRunCancelRequested
@@ -448,30 +359,21 @@ type TaskSlotState string
 const (
 	// TaskSlotIdle 表示不占名额，且不需要人工处理（新任务、已结束任务）。
 	TaskSlotIdle TaskSlotState = "idle"
-	// TaskSlotClaimed 表示已领取但尚未建立工作流执行记录，占用一个名额。
-	TaskSlotClaimed TaskSlotState = "claimed"
-	// TaskSlotExecuting 表示工作流执行记录持有有效执行权，占用一个名额。
+	// TaskSlotExecuting 表示存在仍在推进的工作流执行记录，占用一个名额。
 	TaskSlotExecuting TaskSlotState = "executing"
-	// TaskSlotFinalizing 表示已进入收尾阶段且仍持有执行权，占用一个名额。
-	TaskSlotFinalizing TaskSlotState = "finalizing"
 	// TaskSlotAwaitingHuman 表示等待人工处理，不占名额也不得自动领取。
 	TaskSlotAwaitingHuman TaskSlotState = "awaiting_human"
-	// TaskSlotIndeterminate 表示租约已失效但结论无法确认，不占名额也不得自动重试。
+	// TaskSlotIndeterminate 表示执行记录与任务状态都无法确认结论，不占名额也不得自动重试。
 	TaskSlotIndeterminate TaskSlotState = "indeterminate"
 )
 
 // OccupiesSlot 判断该状态是否占用一个调度名额。
 //
-// 名额只由"仍持有执行权的执行"占用：领取阶段的令牌是任务租约，执行阶段的令牌是
-// 任务租约与工作流执行租约。等待人工与结论不明的任务不占名额，否则调度器会被
-// 一堆无法自动推进的任务占满。
+// 名额只由"仍在推进的执行"占用：执行阶段的令牌是工作流执行记录的运行状态。领取但
+// 尚未建立执行记录的任务由调度器自己的在途登记计入，不在数据库事实里表达。等待人工与
+// 结论不明的任务不占名额，否则调度器会被一堆无法自动推进的任务占满。
 func (s TaskSlotState) OccupiesSlot() bool {
-	switch s {
-	case TaskSlotClaimed, TaskSlotExecuting, TaskSlotFinalizing:
-		return true
-	default:
-		return false
-	}
+	return s == TaskSlotExecuting
 }
 
 // AllowsAutomaticClaim 判断该状态是否允许调度器自动领取。
@@ -488,39 +390,29 @@ type TaskSlotInput struct {
 	Task Task
 	// ActiveWorkflowRun 是任务当前未结束的工作流执行记录，没有时为空。
 	ActiveWorkflowRun *WorkflowRun
-	// Now 是判定租约是否仍然有效的时刻。
-	Now time.Time
 }
 
 // DecideTaskSlotState 依据持久化事实计算任务的名额归属状态。
 //
 // 规则顺序固定：
 //  1. 已被逻辑删除或已进入终态 → 空闲；
-//  2. 任务租约有效 → 已领取（这是"领取成功但尚未建立执行记录"的名额表达）；
-//  3. 工作流执行记录持有有效执行权 → 执行中；
-//  4. 任务处于收尾阶段（verifying / saving）且仍持有执行权 → 收尾中；
-//  5. 执行记录处于 blocked / recovery_required，或任务处于 paused / failed /
+//  2. 工作流执行记录仍在推进 → 执行中（这是名额的真实占用）；
+//  3. 执行记录处于 blocked / recovery_required，或任务处于 paused / failed /
 //     recovery_required → 等待人工；
-//  6. 其余情况（租约失效但仍处于中间状态、pending 记录超窗、步骤残留占用）
+//  4. 其余情况（中间状态但没有执行记录、pending 记录超窗、步骤残留占用）
 //     → 结论不明，必须人工核验，不得自动重试。
 //
-// 第 6 条是本函数与"失败"的分界线：结果无法确认既不是成功也不是失败，把它当作
+// 第 4 条是本函数与"失败"的分界线：结果无法确认既不是成功也不是失败，把它当作
 // 普通失败任务立即重试会重放未经核验的外部副作用。
+//
+// "已领取但尚未建立执行记录"不在本函数内表达：服务端只允许一个进程运行，这段窗口由
+// 调度器自己的在途登记计入名额。
 func DecideTaskSlotState(input TaskSlotInput) TaskSlotState {
 	task := input.Task
 	if task.Deleted() || task.Status.IsTerminal() {
 		return TaskSlotIdle
 	}
-	now := input.Now
-	if task.LeaseActive(now) {
-		switch task.Status {
-		case TaskStatusVerifying, TaskStatusSaving:
-			return TaskSlotFinalizing
-		default:
-			return TaskSlotClaimed
-		}
-	}
-	if taskQueueRunHoldsExecution(input.ActiveWorkflowRun, now) {
+	if taskQueueRunHoldsExecution(input.ActiveWorkflowRun) {
 		return TaskSlotExecuting
 	}
 	if input.ActiveWorkflowRun != nil {

@@ -64,21 +64,7 @@ func queueInput(t *testing.T, priority domain.Priority) domain.TaskQueueInput {
 	return domain.TaskQueueInput{
 		Task:        task,
 		Requirement: &requirement,
-		Now:         queueAt,
 	}
-}
-
-// leaseTask 返回一条持有指定租约的任务记录。
-func leaseTask(
-	t *testing.T,
-	owner string,
-	expiresAt time.Time,
-) domain.Task {
-	t.Helper()
-	task := queueTask(t, queueAt)
-	task.LeaseOwner = owner
-	task.LeaseExpiresAt = &expiresAt
-	return task
 }
 
 // TestTaskStatusAllowsAutomaticScheduling 校验自动调度候选集合只包含 queued。
@@ -242,30 +228,6 @@ func TestDecideTaskQueueAdmissionRejectsDeletedAndCancelled(t *testing.T) {
 			t.Fatalf("拒绝原因缺少 cancel_requested: %v", admission.Rejections)
 		}
 	})
-}
-
-// TestDecideTaskQueueAdmissionIgnoresLeaseOwnership 校验准入不判定租约归属。
-//
-// 租约归属属于领取仲裁：把租约混进准入会让"同一执行者重复领取"无法表达。候选池
-// 只回答"是否属于队列"，"这一次由谁拿到执行权"由 DecideTaskClaim 回答。
-func TestDecideTaskQueueAdmissionIgnoresLeaseOwnership(t *testing.T) {
-	t.Parallel()
-	for _, name := range []string{"有效租约", "过期租约"} {
-		name := name
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			input := queueInput(t, domain.PriorityNormal)
-			expiresAt := queueAt.Add(time.Minute)
-			if name == "过期租约" {
-				expiresAt = queueAt.Add(-time.Minute)
-			}
-			input.Task = leaseTask(t, "worker-a", expiresAt)
-			admission := domain.DecideTaskQueueAdmission(input)
-			if !admission.Admitted {
-				t.Fatalf("租约归属不应影响准入，实际拒绝: %v", admission.Rejections)
-			}
-		})
-	}
 }
 
 // TestDecideTaskQueueAdmissionRejectsActiveRunAndResidue 校验执行现场残留排除候选。
@@ -578,224 +540,19 @@ func TestNewTaskQueueOrderKeyRejectsUnknownPriority(t *testing.T) {
 	}
 }
 
-// TestDecideTaskClaimRejectsInvalidOwner 校验领取必须带执行者标识。
-func TestDecideTaskClaimRejectsInvalidOwner(t *testing.T) {
-	t.Parallel()
-	for _, owner := range []string{"", "   "} {
-		if _, err := domain.DecideTaskClaim(queueInput(t, domain.PriorityNormal), owner); err == nil {
-			t.Fatalf("空执行者标识 %q 必须被拒绝", owner)
-		}
-	}
-}
-
-// TestDecideTaskClaimAllowsFreeAndExpiredLease 校验空闲与过期租约都可以领取。
-func TestDecideTaskClaimAllowsFreeAndExpiredLease(t *testing.T) {
-	t.Parallel()
-	t.Run("无租约", func(t *testing.T) {
-		t.Parallel()
-		decision, err := domain.DecideTaskClaim(
-			queueInput(t, domain.PriorityNormal),
-			"worker-a",
-		)
-		if err != nil {
-			t.Fatalf("领取判定失败: %v", err)
-		}
-		if !decision.Allowed {
-			t.Fatalf("空闲租约应当允许领取，拒绝原因: %s", decision.Rejection)
-		}
-		if decision.Takeover {
-			t.Fatal("没有上一个持有者时不应标记为接管")
-		}
-	})
-	t.Run("过期租约", func(t *testing.T) {
-		t.Parallel()
-		input := queueInput(t, domain.PriorityNormal)
-		input.Task = leaseTask(t, "worker-a", queueAt.Add(-time.Minute))
-		decision, err := domain.DecideTaskClaim(input, "worker-b")
-		if err != nil {
-			t.Fatalf("领取判定失败: %v", err)
-		}
-		if !decision.Allowed {
-			t.Fatalf("过期租约应当允许接管，拒绝原因: %s", decision.Rejection)
-		}
-		if !decision.Takeover {
-			t.Fatal("上一个持有者的租约过期时必须标记为接管")
-		}
-	})
-}
-
-// TestDecideTaskClaimRejectsLiveLeaseOfOtherOwner 校验有效租约属于他人时拒绝领取。
-func TestDecideTaskClaimRejectsLiveLeaseOfOtherOwner(t *testing.T) {
-	t.Parallel()
-	input := queueInput(t, domain.PriorityNormal)
-	input.Task = leaseTask(t, "worker-a", queueAt.Add(time.Minute))
-	decision, err := domain.DecideTaskClaim(input, "worker-b")
-	if err != nil {
-		t.Fatalf("领取判定失败: %v", err)
-	}
-	if decision.Allowed {
-		t.Fatal("租约属于其他执行者时不得允许领取")
-	}
-	// 业务准入本身是通过的：拒绝来自租约仲裁而不是准入，两者必须能区分。
-	if !decision.Admission.Admitted {
-		t.Fatalf("本例的准入应当通过，实际拒绝: %v", decision.Admission.Rejections)
-	}
-	if decision.Rejection != domain.TaskQueueRejectionLeaseHeld {
-		t.Fatalf("拒绝原因应为 lease_held，实际 %s", decision.Rejection)
-	}
-}
-
-// TestDecideTaskClaimIsIdempotentForSameOwner 校验同一执行者重复领取是幂等的。
-func TestDecideTaskClaimIsIdempotentForSameOwner(t *testing.T) {
-	t.Parallel()
-	input := queueInput(t, domain.PriorityNormal)
-	input.Task = leaseTask(t, "worker-a", queueAt.Add(time.Minute))
-	decision, err := domain.DecideTaskClaim(input, "worker-a")
-	if err != nil {
-		t.Fatalf("领取判定失败: %v", err)
-	}
-	if !decision.Allowed {
-		t.Fatalf("同一执行者重复领取应当允许，拒绝原因: %s", decision.Rejection)
-	}
-	if decision.Takeover {
-		t.Fatal("同一执行者重复领取不应标记为接管")
-	}
-}
-
-// TestDecideTaskClaimRejectsInadmissibleTask 校验准入不通过时不得领取。
-func TestDecideTaskClaimRejectsInadmissibleTask(t *testing.T) {
-	t.Parallel()
-	input := queueInput(t, domain.PriorityNormal)
-	input.Task.Status = domain.TaskStatusRecoveryRequired
-	decision, err := domain.DecideTaskClaim(input, "worker-a")
-	if err != nil {
-		t.Fatalf("领取判定失败: %v", err)
-	}
-	if decision.Allowed {
-		t.Fatal("准入不通过的任务不得被领取")
-	}
-	if decision.Rejection != domain.TaskQueueRejectionStatusNotQueueable {
-		t.Fatalf("拒绝原因应为 status_not_queueable，实际 %s", decision.Rejection)
-	}
-}
-
-// TestDecideTaskClaimCompetingOwnersCannotBothHold 校验两个竞争者在同一快照上不可能都持有执行权。
+// TestDecideTaskExecutionHandover 覆盖"任务 → 工作流执行"的交接判定。
 //
-// 这条用例只证明领域判据自洽：第二个竞争者在第一个竞争者真正写入租约后的记录上
-// 必须被拒绝。它**不**证明并发领取在数据库中安全——两个进程可能读到同一份快照，
-// 因此原子性必须由存储层的条件更新保证，见 P3-M2 的验收要求。
-func TestDecideTaskClaimCompetingOwnersCannotBothHold(t *testing.T) {
-	t.Parallel()
-	snapshot := queueInput(t, domain.PriorityNormal)
-	first, err := domain.DecideTaskClaim(snapshot, "worker-a")
-	if err != nil {
-		t.Fatalf("第一个执行者领取判定失败: %v", err)
-	}
-	if !first.Allowed {
-		t.Fatalf("第一个执行者应当允许领取，拒绝原因: %s", first.Rejection)
-	}
-	// 模拟"第一个执行者的领取已经落库"。
-	claimed := snapshot
-	claimed.Task.LeaseOwner = "worker-a"
-	expiresAt := queueAt.Add(time.Minute)
-	claimed.Task.LeaseExpiresAt = &expiresAt
-	second, err := domain.DecideTaskClaim(claimed, "worker-b")
-	if err != nil {
-		t.Fatalf("第二个执行者领取判定失败: %v", err)
-	}
-	if second.Allowed {
-		t.Fatal("第一个执行者已持有租约时，第二个执行者不得被判定为可以领取")
-	}
-	if !domain.TaskHoldsExecution(claimed.Task, "worker-a", queueAt) {
-		t.Fatal("第一个执行者必须被判定为持有执行权")
-	}
-	if domain.TaskHoldsExecution(claimed.Task, "worker-b", queueAt) {
-		t.Fatal("第二个执行者不得被判定为持有执行权")
-	}
-}
-
-// TestTaskHoldsExecution 覆盖空租约、有效租约、过期租约与执行者不匹配。
-func TestTaskHoldsExecution(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name     string
-		task     func(t *testing.T) domain.Task
-		owner    string
-		at       time.Time
-		expected bool
-	}{
-		{
-			name:     "空租约不持有执行权",
-			task:     func(t *testing.T) domain.Task { return queueTask(t, queueAt) },
-			owner:    "worker-a",
-			at:       queueAt,
-			expected: false,
-		},
-		{
-			name: "有效租约且标识一致时持有",
-			task: func(t *testing.T) domain.Task {
-				return leaseTask(t, "worker-a", queueAt.Add(time.Minute))
-			},
-			owner:    "worker-a",
-			at:       queueAt,
-			expected: true,
-		},
-		{
-			name: "有效租约但标识不一致时不持有",
-			task: func(t *testing.T) domain.Task {
-				return leaseTask(t, "worker-a", queueAt.Add(time.Minute))
-			},
-			owner:    "worker-b",
-			at:       queueAt,
-			expected: false,
-		},
-		{
-			name: "租约到期后不再持有",
-			task: func(t *testing.T) domain.Task {
-				return leaseTask(t, "worker-a", queueAt)
-			},
-			owner:    "worker-a",
-			at:       queueAt.Add(time.Millisecond),
-			expected: false,
-		},
-		{
-			name: "空执行者标识一律不持有",
-			task: func(t *testing.T) domain.Task {
-				return leaseTask(t, "", queueAt.Add(time.Minute))
-			},
-			owner:    "",
-			at:       queueAt,
-			expected: false,
-		},
-	}
-	for _, testCase := range cases {
-		testCase := testCase
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
-			actual := domain.TaskHoldsExecution(
-				testCase.task(t),
-				testCase.owner,
-				testCase.at,
-			)
-			if actual != testCase.expected {
-				t.Fatalf("期望 %v，实际 %v", testCase.expected, actual)
-			}
-		})
-	}
-}
-
-// TestDecideTaskExecutionHandover 覆盖"任务领取 → 工作流执行"的交接判定。
+// 执行权本身由进程内协调器登记，因此本判定只回答"数据库中的现场是否允许建立执行
+// 记录"：删除、取消、仍在推进的执行记录与不可推进的状态。
 func TestDecideTaskExecutionHandover(t *testing.T) {
 	t.Parallel()
-	// held 返回"已领取且已进入可推进步骤的状态"，这是交接真正发生的现场：
-	// queued 只是候选池成员，领取之后必须先完成环境准备与计划，才允许建立工作流。
-	held := func(t *testing.T) domain.Task {
+	planned := func(t *testing.T) domain.Task {
 		t.Helper()
-		task := leaseTask(t, "worker-a", queueAt.Add(time.Minute))
+		task := queueTask(t, queueAt)
 		task.Status = domain.TaskStatusPlanned
 		return task
 	}
-	runningRun := func(t *testing.T, owner string) *domain.WorkflowRun {
+	runningRun := func(t *testing.T) *domain.WorkflowRun {
 		t.Helper()
 		task := queueTask(t, queueAt)
 		step := queueStep(t, task.ID, 1, domain.StepStatusPending)
@@ -803,7 +560,7 @@ func TestDecideTaskExecutionHandover(t *testing.T) {
 		if err != nil {
 			t.Fatalf("构造执行记录失败: %v", err)
 		}
-		if err := run.Start(owner, time.Minute, queueAt); err != nil {
+		if err := run.Start(queueAt); err != nil {
 			t.Fatalf("启动执行记录失败: %v", err)
 		}
 		return &run
@@ -812,82 +569,59 @@ func TestDecideTaskExecutionHandover(t *testing.T) {
 		name     string
 		task     func(t *testing.T) domain.Task
 		run      func(t *testing.T) *domain.WorkflowRun
-		owner    string
 		expected bool
 		reason   domain.TaskQueueRejection
 	}{
 		{
-			name:  "持有租约且无执行记录时允许交接",
-			task:  held,
-			run:   func(t *testing.T) *domain.WorkflowRun { return nil },
-			owner: "worker-a", expected: true,
+			name:     "允许建立执行记录",
+			task:     planned,
+			expected: true,
 		},
 		{
-			name:  "不持有任务租约时拒绝交接",
-			task:  func(t *testing.T) domain.Task { return queueTask(t, queueAt) },
-			run:   func(t *testing.T) *domain.WorkflowRun { return nil },
-			owner: "worker-a", expected: false,
-			reason: domain.TaskQueueRejectionLeaseHeld,
-		},
-		{
-			name: "租约已过期时拒绝交接",
+			name: "已被逻辑删除时拒绝交接",
 			task: func(t *testing.T) domain.Task {
-				return leaseTask(t, "worker-a", queueAt.Add(-time.Minute))
+				task := planned(t)
+				deletedAt := queueAt
+				task.DeletedAt = &deletedAt
+				return task
 			},
-			run:   func(t *testing.T) *domain.WorkflowRun { return nil },
-			owner: "worker-a", expected: false,
-			reason: domain.TaskQueueRejectionLeaseHeld,
+			reason: domain.TaskQueueRejectionDeleted,
 		},
 		{
 			name: "已请求取消时拒绝交接",
 			task: func(t *testing.T) domain.Task {
-				task := held(t)
+				task := planned(t)
 				requestedAt := queueAt
 				task.CancelRequested = true
 				task.CancelRequestedAt = &requestedAt
 				return task
 			},
-			run:   func(t *testing.T) *domain.WorkflowRun { return nil },
-			owner: "worker-a", expected: false,
 			reason: domain.TaskQueueRejectionCancelRequested,
 		},
 		{
-			name: "已被逻辑删除时拒绝交接",
+			name:     "仍有推进中的执行记录时拒绝交接",
+			task:     planned,
+			run:      runningRun,
+			reason:   domain.TaskQueueRejectionActiveWorkflowRun,
+			expected: false,
+		},
+		{
+			name: "状态不允许推进步骤时拒绝",
 			task: func(t *testing.T) domain.Task {
-				task := held(t)
-				task.Status = domain.TaskStatusCompleted
-				deletedAt := queueAt
-				task.DeletedAt = &deletedAt
-				return task
+				return queueTask(t, queueAt)
 			},
-			run:   func(t *testing.T) *domain.WorkflowRun { return nil },
-			owner: "worker-a", expected: false,
-			reason: domain.TaskQueueRejectionDeleted,
-		},
-		{
-			name:  "其他执行者持有有效执行权时拒绝交接",
-			task:  held,
-			run:   func(t *testing.T) *domain.WorkflowRun { return runningRun(t, "worker-b") },
-			owner: "worker-a", expected: false,
-			reason: domain.TaskQueueRejectionActiveWorkflowRun,
-		},
-		{
-			name:  "同一执行者持有执行权时允许交接",
-			task:  held,
-			run:   func(t *testing.T) *domain.WorkflowRun { return runningRun(t, "worker-a") },
-			owner: "worker-a", expected: true,
+			reason: domain.TaskQueueRejectionStatusNotQueueable,
 		},
 	}
 	for _, testCase := range cases {
 		testCase := testCase
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
-			handover := domain.DecideTaskExecutionHandover(
-				testCase.task(t),
-				testCase.run(t),
-				testCase.owner,
-				queueAt,
-			)
+			var run *domain.WorkflowRun
+			if testCase.run != nil {
+				run = testCase.run(t)
+			}
+			handover := domain.DecideTaskExecutionHandover(testCase.task(t), run)
 			if handover.Allowed != testCase.expected {
 				t.Fatalf(
 					"期望允许 %v，实际 %v（原因 %s）",
@@ -903,24 +637,21 @@ func TestDecideTaskExecutionHandover(t *testing.T) {
 	}
 }
 
-// TestDecideTaskExecutionHandoverRejectsStatusWithoutStepExecution 校验状态与执行权不一致时拒绝。
-func TestDecideTaskExecutionHandoverRejectsStatusWithoutStepExecution(t *testing.T) {
-	t.Parallel()
-	task := leaseTask(t, "worker-a", queueAt.Add(time.Minute))
-	// 持有有效租约但状态不允许推进步骤：租约与状态不一致，交接必须拒绝。
-	task.Status = domain.TaskStatusQueued
-	handover := domain.DecideTaskExecutionHandover(task, nil, "worker-a", queueAt)
-	if handover.Allowed {
-		t.Fatal("queued 任务持有租约时仍不得直接建立工作流执行")
-	}
-	if handover.Reason != domain.TaskQueueRejectionStatusNotQueueable {
-		t.Fatalf("拒绝原因期望 status_not_queueable，实际 %s", handover.Reason)
-	}
-}
-
 // TestTaskSlotStateOccupancy 校验名额归属判定覆盖各阶段。
 func TestTaskSlotStateOccupancy(t *testing.T) {
 	t.Parallel()
+	runningRun := func(t *testing.T, task domain.Task, status domain.StepStatus) *domain.WorkflowRun {
+		t.Helper()
+		step := queueStep(t, task.ID, 1, status)
+		run, err := domain.NewWorkflowRun(task.ID, []domain.Step{step}, queueAt)
+		if err != nil {
+			t.Fatalf("构造执行记录失败: %v", err)
+		}
+		if err := run.Start(queueAt); err != nil {
+			t.Fatalf("启动执行记录失败: %v", err)
+		}
+		return &run
+	}
 	cases := []struct {
 		name     string
 		input    func(t *testing.T) domain.TaskSlotInput
@@ -929,7 +660,7 @@ func TestTaskSlotStateOccupancy(t *testing.T) {
 		{
 			name: "新任务不占名额",
 			input: func(t *testing.T) domain.TaskSlotInput {
-				return domain.TaskSlotInput{Task: queueTask(t, queueAt), Now: queueAt}
+				return domain.TaskSlotInput{Task: queueTask(t, queueAt)}
 			},
 			expected: domain.TaskSlotIdle,
 		},
@@ -938,34 +669,28 @@ func TestTaskSlotStateOccupancy(t *testing.T) {
 			input: func(t *testing.T) domain.TaskSlotInput {
 				task := queueTask(t, queueAt)
 				task.Status = domain.TaskStatusCompleted
-				return domain.TaskSlotInput{Task: task, Now: queueAt}
+				return domain.TaskSlotInput{Task: task}
 			},
 			expected: domain.TaskSlotIdle,
 		},
 		{
-			name: "领取成功但尚无执行记录时占名额",
+			name: "推进中的执行记录占名额",
 			input: func(t *testing.T) domain.TaskSlotInput {
-				task := leaseTask(t, "worker-a", queueAt.Add(time.Minute))
-				task.Status = domain.TaskStatusPreparing
-				return domain.TaskSlotInput{Task: task, Now: queueAt}
+				task := queueTask(t, queueAt)
+				task.Status = domain.TaskStatusDeveloping
+				return domain.TaskSlotInput{
+					Task:              task,
+					ActiveWorkflowRun: runningRun(t, task, domain.StepStatusDeveloping),
+				}
 			},
-			expected: domain.TaskSlotClaimed,
-		},
-		{
-			name: "收尾阶段仍持有执行权时占名额",
-			input: func(t *testing.T) domain.TaskSlotInput {
-				task := leaseTask(t, "worker-a", queueAt.Add(time.Minute))
-				task.Status = domain.TaskStatusSaving
-				return domain.TaskSlotInput{Task: task, Now: queueAt}
-			},
-			expected: domain.TaskSlotFinalizing,
+			expected: domain.TaskSlotExecuting,
 		},
 		{
 			name: "失败任务等待人工且不占名额",
 			input: func(t *testing.T) domain.TaskSlotInput {
 				task := queueTask(t, queueAt)
 				task.Status = domain.TaskStatusFailed
-				return domain.TaskSlotInput{Task: task, Now: queueAt}
+				return domain.TaskSlotInput{Task: task}
 			},
 			expected: domain.TaskSlotAwaitingHuman,
 		},
@@ -974,16 +699,16 @@ func TestTaskSlotStateOccupancy(t *testing.T) {
 			input: func(t *testing.T) domain.TaskSlotInput {
 				task := queueTask(t, queueAt)
 				task.Status = domain.TaskStatusPaused
-				return domain.TaskSlotInput{Task: task, Now: queueAt}
+				return domain.TaskSlotInput{Task: task}
 			},
 			expected: domain.TaskSlotAwaitingHuman,
 		},
 		{
-			name: "租约失效仍停在中间状态时结论不明",
+			name: "中间状态没有执行记录时结论不明",
 			input: func(t *testing.T) domain.TaskSlotInput {
-				task := leaseTask(t, "worker-a", queueAt.Add(-time.Minute))
+				task := queueTask(t, queueAt)
 				task.Status = domain.TaskStatusDeveloping
-				return domain.TaskSlotInput{Task: task, Now: queueAt}
+				return domain.TaskSlotInput{Task: task}
 			},
 			expected: domain.TaskSlotIndeterminate,
 		},
@@ -1009,9 +734,7 @@ func TestTaskSlotStateOnlyIdleAllowsAutomaticClaim(t *testing.T) {
 		claim    bool
 	}{
 		{domain.TaskSlotIdle, false, true},
-		{domain.TaskSlotClaimed, true, false},
 		{domain.TaskSlotExecuting, true, false},
-		{domain.TaskSlotFinalizing, true, false},
 		{domain.TaskSlotAwaitingHuman, false, false},
 		{domain.TaskSlotIndeterminate, false, false},
 	}
@@ -1032,12 +755,12 @@ func TestTaskSlotStateOnlyIdleAllowsAutomaticClaim(t *testing.T) {
 // TestDecideTaskSlotStateDoesNotTreatIndeterminateAsFailure 校验结论不明不得退化为普通失败。
 //
 // 结果无法确认的任务既不占名额也不能自动重试：把它当作 failed 会立刻重放未经核验的
-// 外部副作用，正是 P2 明确禁止的行为。
+// 外部副作用，正是恢复门控明确禁止的行为。
 func TestDecideTaskSlotStateDoesNotTreatIndeterminateAsFailure(t *testing.T) {
 	t.Parallel()
-	task := leaseTask(t, "worker-a", queueAt.Add(-time.Minute))
+	task := queueTask(t, queueAt)
 	task.Status = domain.TaskStatusVerifying
-	state := domain.DecideTaskSlotState(domain.TaskSlotInput{Task: task, Now: queueAt})
+	state := domain.DecideTaskSlotState(domain.TaskSlotInput{Task: task})
 	if state == domain.TaskSlotAwaitingHuman {
 		t.Fatal("结论不明的现场不应被归类为等待人工处理的普通失败")
 	}
@@ -1046,42 +769,6 @@ func TestDecideTaskSlotStateDoesNotTreatIndeterminateAsFailure(t *testing.T) {
 	}
 	if state.AllowsAutomaticClaim() {
 		t.Fatal("结论不明的任务不得被自动领取")
-	}
-}
-
-// TestDecideTaskSlotStateUsesWorkflowRunLease 校验执行阶段的名额由执行记录租约决定。
-func TestDecideTaskSlotStateUsesWorkflowRunLease(t *testing.T) {
-	t.Parallel()
-	task := queueTask(t, queueAt)
-	task.Status = domain.TaskStatusDeveloping
-	step := queueStep(t, task.ID, 1, domain.StepStatusDeveloping)
-	run, err := domain.NewWorkflowRun(task.ID, []domain.Step{step}, queueAt)
-	if err != nil {
-		t.Fatalf("构造执行记录失败: %v", err)
-	}
-	if err := run.Start("worker-a", time.Minute, queueAt); err != nil {
-		t.Fatalf("启动执行记录失败: %v", err)
-	}
-	state := domain.DecideTaskSlotState(domain.TaskSlotInput{
-		Task:              task,
-		ActiveWorkflowRun: &run,
-		Now:               queueAt,
-	})
-	if state != domain.TaskSlotExecuting {
-		t.Fatalf("执行记录持有有效执行权时应为 executing，实际 %s", state)
-	}
-	// 执行权过期后名额不再被占用，但结论仍不是"可自动领取"。
-	later := queueAt.Add(2 * time.Minute)
-	expired := domain.DecideTaskSlotState(domain.TaskSlotInput{
-		Task:              task,
-		ActiveWorkflowRun: &run,
-		Now:               later,
-	})
-	if expired.OccupiesSlot() {
-		t.Fatalf("执行权过期后不应继续占用名额，实际 %s", expired)
-	}
-	if expired.AllowsAutomaticClaim() {
-		t.Fatalf("执行权过期后不得自动领取，实际 %s", expired)
 	}
 }
 
@@ -1095,7 +782,7 @@ func TestDecideTaskSlotStateBlockedRunAwaitsHuman(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造执行记录失败: %v", err)
 	}
-	if err := run.Start("worker-a", time.Minute, queueAt); err != nil {
+	if err := run.Start(queueAt); err != nil {
 		t.Fatalf("启动执行记录失败: %v", err)
 	}
 	if err := run.Stop(domain.WorkflowRunBlocked, "verification_failed", "验证未通过", queueAt); err != nil {
@@ -1104,7 +791,6 @@ func TestDecideTaskSlotStateBlockedRunAwaitsHuman(t *testing.T) {
 	state := domain.DecideTaskSlotState(domain.TaskSlotInput{
 		Task:              task,
 		ActiveWorkflowRun: &run,
-		Now:               queueAt,
 	})
 	if state != domain.TaskSlotAwaitingHuman {
 		t.Fatalf("阻塞的执行记录应等待人工处理，实际 %s", state)

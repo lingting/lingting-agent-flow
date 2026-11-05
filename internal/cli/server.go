@@ -28,7 +28,9 @@ func newServerCommand(a *app.App) *cobra.Command {
 			"随后提供 /api 接口与内嵌的前端页面，默认只监听 " + config.DefaultServerHost + ":" +
 			fmt.Sprint(config.DefaultServerPort) + "。\n" +
 			"可用 --address 或配置文件的 server 段覆盖监听地址，用 server.shutdown_timeout_seconds\n" +
-			"设置优雅关闭超时。数据库初始化失败时服务不会启动。",
+			"设置优雅关闭超时。数据库初始化失败时服务不会启动。\n" +
+			"同一份数据目录只允许一个服务端进程：它用 <database_path>.server.lock 取得独占文件锁，\n" +
+			"已有实例在运行时立即失败并提示先停止已有服务端。",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runServer(cmd, a, configPath, address, requireWebUI)
@@ -60,6 +62,7 @@ func runServer(cmd *cobra.Command, a *app.App, configPath, address string, requi
 		StepExecutorFactory: func(
 			store storage.Store,
 			cfg *config.Config,
+			coordination *app.TaskExecutionCoordinator,
 		) (*app.StepExecutor, error) {
 			sessions, sessionsErr := app.NewSessionService(
 				store,
@@ -87,8 +90,9 @@ func runServer(cmd *cobra.Command, a *app.App, configPath, address string, requi
 				Sessions:   sessions,
 				// Git 工作区状态采集复用同一容器服务的只读核验能力：
 				// 记录到的分支与 HEAD 必须与代码保存看到的是同一个工作区。
-				Git:    containers,
-				Logger: a.Logger().Slog(),
+				Git:          containers,
+				Coordination: coordination,
+				Logger:       a.Logger().Slog(),
 			})
 		},
 		ValidationFactory: func(
@@ -160,6 +164,7 @@ func runServer(cmd *cobra.Command, a *app.App, configPath, address string, requi
 			store storage.Store,
 			cfg *config.Config,
 			steps *app.StepWorkflowService,
+			coordination *app.TaskExecutionCoordinator,
 		) (*app.TaskWorkflowService, error) {
 			sshService, sshErr := app.NewSSHService(store, a.Logger(), sshOptionsFrom(cfg))
 			if sshErr != nil {
@@ -189,8 +194,9 @@ func runServer(cmd *cobra.Command, a *app.App, configPath, address string, requi
 				// 代码保存复用已有实现：编排器不构造 Git 命令。
 				CodeSaver: containers,
 				// 计划生成复用同一会话服务：每次 Planner 调用写入独立会话记录。
-				Sessions: sessions,
-				Logger:   a.Logger().Slog(),
+				Sessions:     sessions,
+				Coordination: coordination,
+				Logger:       a.Logger().Slog(),
 			})
 		},
 		TaskLaunchFactory: func(
@@ -198,7 +204,8 @@ func runServer(cmd *cobra.Command, a *app.App, configPath, address string, requi
 			cfg *config.Config,
 			workflow *app.TaskWorkflowService,
 			steps *app.StepWorkflowService,
-			leases *app.TaskLeaseService,
+			coordination *app.TaskExecutionCoordinator,
+			buildLocks *app.EnvironmentBuildLocks,
 		) (*app.TaskLaunchService, error) {
 			sshService, sshErr := app.NewSSHService(store, a.Logger(), sshOptionsFrom(cfg))
 			if sshErr != nil {
@@ -213,9 +220,10 @@ func runServer(cmd *cobra.Command, a *app.App, configPath, address string, requi
 				return nil, containersErr
 			}
 			environments, environmentsErr := app.NewEnvironmentService(app.DockerServiceOptions{
-				SSH:    sshService,
-				Store:  store,
-				Logger: a.Logger(),
+				SSH:        sshService,
+				Store:      store,
+				Logger:     a.Logger(),
+				BuildLocks: buildLocks,
 			})
 			if environmentsErr != nil {
 				return nil, environmentsErr
@@ -251,21 +259,22 @@ func runServer(cmd *cobra.Command, a *app.App, configPath, address string, requi
 				// 计划生成与工作流编排复用编排器：启动服务不重复实现它们。
 				Planner: workflow,
 				// 工作区初始化复用任务级协调器：它发生在任何 Step / Attempt 之前。
-				Workspace: workspace,
-				Workflow:  workflow,
-				Logger:    a.Logger().Slog(),
+				Workspace:    workspace,
+				Workflow:     workflow,
+				Coordination: coordination,
+				Logger:       a.Logger().Slog(),
 			})
 		},
 		TaskSchedulerFactory: func(
 			store storage.Store,
 			cfg *config.Config,
-			leases *app.TaskLeaseService,
+			coordination *app.TaskExecutionCoordinator,
 			launch *app.TaskLaunchService,
 		) (*app.TaskScheduler, error) {
 			return app.NewTaskScheduler(app.TaskSchedulerOptions{
-				Store:  store,
-				Leases: leases,
-				Launch: launch,
+				Store:        store,
+				Coordination: coordination,
+				Launch:       launch,
 				// 并发上限复用既有配置：不新增第二套并发配置。
 				MaxConcurrentTasks: cfg.Scheduler.MaxConcurrentTasks,
 				Logger:             a.Logger().Slog(),

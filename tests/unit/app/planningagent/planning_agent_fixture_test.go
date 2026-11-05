@@ -11,7 +11,6 @@ import (
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
-	"github.com/lingting/agentflow/internal/storage"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
 	"github.com/lingting/agentflow/tests/internal/testkit"
 )
@@ -50,8 +49,8 @@ type planningFixture struct {
 	roles *app.RoleService
 	// sessionRoot 是本机 Session 根目录，两个实例必须指向同一份归档目录。
 	sessionRoot string
-	// leases 是本现场使用的规划会话租约服务。
-	leases *app.PlanningSessionLeaseService
+	// coordination 是本现场使用的规划会话协调器。
+	coordination *app.PlanningSessionCoordinator
 }
 
 // fixtureOptions 允许用例调整构造参数。
@@ -64,10 +63,6 @@ type fixtureOptions struct {
 	hold time.Duration
 	// ignoreCancel 表示替身忽略取消信号，用于验证停止超时返回真实错误。
 	ignoreCancel bool
-	// leaseTTL 覆盖租约有效期，零值使用生产默认值；用例用较短 TTL 验证续期与失效。
-	leaseTTL time.Duration
-	// leaseStore 允许包裹租约存储（故障注入），为空时直接使用测试数据库。
-	leaseStore func(store storage.PlanningSessionLeaseStore) storage.PlanningSessionLeaseStore
 }
 
 // newPlanningFixture 在测试工作空间中准备规划会话并构造规划 Agent 服务。
@@ -166,17 +161,13 @@ func newPlanningFixture(t *testing.T, options fixtureOptions) *planningFixture {
 		port.track(container, session.ID.String())
 		targets = append(targets, planningTarget{session: session, container: container})
 	}
-	leaseStore := storage.PlanningSessionLeaseStore(db)
-	if options.leaseStore != nil {
-		leaseStore = options.leaseStore(db)
-	}
-	leases := newLeaseService(t, leaseStore, options.leaseTTL)
+	coordination := app.NewPlanningSessionCoordinator()
 	service, err := app.NewPlanningAgentService(app.PlanningAgentServiceOptions{
-		Store:       db,
-		Roles:       roles,
-		Containers:  port,
-		Leases:      leases,
-		SessionRoot: workspace.SessionRoot(),
+		Store:        db,
+		Roles:        roles,
+		Containers:   port,
+		Coordination: coordination,
+		SessionRoot:  workspace.SessionRoot(),
 	})
 	if err != nil {
 		t.Fatalf("构造规划 Agent 服务失败: %v", err)
@@ -194,92 +185,19 @@ func newPlanningFixture(t *testing.T, options fixtureOptions) *planningFixture {
 		})
 	}
 	return &planningFixture{
-		service:     service,
-		port:        port,
-		targets:     targets,
-		db:          db,
-		roles:       roles,
-		sessionRoot: workspace.SessionRoot(),
-		leases:      leases,
+		service:      service,
+		port:         port,
+		targets:      targets,
+		db:           db,
+		roles:        roles,
+		sessionRoot:  workspace.SessionRoot(),
+		coordination: coordination,
 	}
-}
-
-// newLeaseService 构造规划会话租约服务，ttl 为零时使用生产默认值。
-func newLeaseService(
-	t *testing.T,
-	store storage.PlanningSessionLeaseStore,
-	ttl time.Duration,
-) *app.PlanningSessionLeaseService {
-	t.Helper()
-	leases, err := app.NewPlanningSessionLeaseService(app.PlanningLeaseOptions{Store: store, TTL: ttl})
-	if err != nil {
-		t.Fatalf("构造规划会话租约服务失败: %v", err)
-	}
-	return leases
-}
-
-// newInstance 在同一个测试数据库上构造另一个独立的规划 Agent 服务实例。
-//
-// 两个实例各自持有进程内互斥，只有数据库租约共享：这正是"两个 Server 连接同一个数据库"
-// 的现场，进程内 mutex 无法阻止竞争。
-func (f *planningFixture) newInstance(
-	t *testing.T,
-	port app.PlanningAgentContainerPort,
-	leases *app.PlanningSessionLeaseService,
-) *app.PlanningAgentService {
-	t.Helper()
-	if leases == nil {
-		leases = f.leases
-	}
-	service, err := app.NewPlanningAgentService(app.PlanningAgentServiceOptions{
-		Store:       f.db,
-		Roles:       f.roles,
-		Containers:  port,
-		Leases:      leases,
-		SessionRoot: f.sessionRoot,
-	})
-	if err != nil {
-		t.Fatalf("构造第二个规划 Agent 服务实例失败: %v", err)
-	}
-	startCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if startErr := service.Start(startCtx); startErr != nil {
-		t.Fatalf("启动第二个规划 Agent 服务实例失败: %v", startErr)
-	}
-	t.Cleanup(func() {
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer stopCancel()
-		if stopErr := service.Stop(stopCtx); stopErr != nil {
-			t.Errorf("停止第二个规划 Agent 服务实例失败: %v", stopErr)
-		}
-	})
-	return service
-}
-
-// newRuntime 在同一测试数据库上构造规划运行时服务。
-//
-// 只注入释放能力：这些用例验证的是 Prepare / Release 与 RunRole 的租约边界，
-// 不创建真实容器，也不建立通用容器模拟框架。
-func (f *planningFixture) newRuntime(
-	t *testing.T,
-	port app.PlanningRuntimeReleasePort,
-) *app.PlanningRuntimeService {
-	t.Helper()
-	runtime, err := app.NewPlanningRuntimeService(app.PlanningRuntimeServiceOptions{
-		Store:       f.db,
-		Leases:      f.leases,
-		ReleasePort: port,
-	})
-	if err != nil {
-		t.Fatalf("构造规划运行时服务失败: %v", err)
-	}
-	return runtime
 }
 
 // newPort 构造一个与现场一致、已登记全部规划容器标签的容器能力替身。
 //
-// 规划调用会核验容器归属与规划会话标签，第二个实例必须看到同一批容器记录；
-// 只构造空替身验证的不是租约，而是"记录缺失时被拒绝"。
+// 只构造空替身验证的不是归属，而是"记录缺失时被拒绝"。
 func (f *planningFixture) newPort(hold time.Duration, ignoreCancel bool) *fakeContainerPort {
 	port := newFakeContainerPort(hold, ignoreCancel)
 	for _, target := range f.targets {

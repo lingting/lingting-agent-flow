@@ -45,7 +45,7 @@ func (s *TaskWorkspaceService) RecoverInterrupted(ctx context.Context) error {
 
 // recoverInterrupted 把一条中断的初始化记录收敛为需要核验现场。
 //
-// 写入带状态前置条件：状态已被其他进程推进时按"同一次收敛已完成"处理，不重复写入
+// 写入带状态前置条件：状态已被其他入口推进时按"同一次收敛已完成"处理，不重复写入
 // 事件，也不把本地对象覆盖到数据库。
 func (s *TaskWorkspaceService) recoverInterrupted(
 	ctx context.Context,

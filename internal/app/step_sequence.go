@@ -32,11 +32,11 @@ type ExecuteStepsRequest struct {
 	Timeout time.Duration
 	// Grant 是本次顺序执行持有的任务执行权凭据。
 	//
-	// 顺序执行会连续推进多个步骤，每一步都修改同一份工作区与容器，因此任务租约
-	// 必须覆盖整个调用周期：凭据非空时每一步的占用与任务终态写入都附带栅栏。
+	// 顺序执行会连续推进多个步骤，每一步都修改同一份工作区与容器，因此任务执行权
+	// 必须覆盖整个调用周期：凭据非空时每一步的写入前都核验执行权仍有效。
 	//
 	// 该字段只由应用层内部使用，不通过 HTTP 请求体暴露。
-	Grant *WorkflowExecutionGrant
+	Grant *TaskExecutionGrant
 }
 
 // StepSequenceResult 是一次顺序执行的结果。
@@ -108,6 +108,20 @@ func (e *StepExecutor) ExecuteSteps(
 			task.Status,
 		)
 	}
+	// 执行权覆盖整段顺序执行：同一任务不会被另一个入口在两步之间插入。
+	grant, ownsGrant, grantErr := acquireTaskGrant(
+		e.coordination,
+		task.ID,
+		request.Grant,
+		ErrStepExecutionConflict,
+	)
+	if grantErr != nil {
+		return StepSequenceResult{}, grantErr
+	}
+	if ownsGrant {
+		defer e.coordination.Release(grant)
+	}
+	request.Grant = &grant
 	// 顺序执行在进程内以任务为键串行化：同一任务的两个顺序执行请求不能交错推进，
 	// 否则后一个请求会在前一个请求刚完成一步时读到过期的步骤列表。
 	release, acquired := e.sequences.acquire(task.ID)

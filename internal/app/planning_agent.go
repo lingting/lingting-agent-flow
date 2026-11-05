@@ -23,20 +23,6 @@ var (
 	// ErrPlanningAgentPrerequisite 表示规划运行环境、角色配置或容器运行状态不满足调用条件。
 	ErrPlanningAgentPrerequisite  = errors.New("app: 规划 Agent 前置条件未满足")
 	ErrPlanningAgentStateConflict = errors.New("app: 规划 Agent 现场与调用要求冲突")
-	// ErrPlanningAgentBusy 表示同一规划会话正被另一个执行者占用（含其他 Server 实例）。
-	//
-	// 它与 ErrPlanningAgentStateConflict 分开表达：现场不一致要求重新读取并核验规划容器，
-	// 而"被占用"只说明当前不能进入，稍后重试即可。
-	ErrPlanningAgentBusy = errors.New("app: 规划会话正在被其他执行者占用")
-	// ErrPlanningAgentLeaseLost 表示本次调用已失去规划会话租约。
-	//
-	// 失去租约意味着另一个执行者可能已经开始操作同一份 Pi Session：本次调用必须如实失败，
-	// 不得报告为成功。
-	ErrPlanningAgentLeaseLost = errors.New("app: 规划会话租约已丢失")
-	// ErrPlanningAgentLeaseUnavailable 表示规划会话租约的数据库操作失败。
-	//
-	// 它与 ErrPlanningAgentBusy 分开表达：数据库不可用是可重试的运行时故障，不是竞争。
-	ErrPlanningAgentLeaseUnavailable = errors.New("app: 规划会话租约不可用")
 )
 
 // PlanningAgentService 是一次规划角色 Pi 调用的编排入口。
@@ -59,13 +45,12 @@ type PlanningAgentService struct {
 	runtime *PlanningRuntimeService
 	// sessionRoot 是本机 Session 持久化根目录的绝对路径。
 	sessionRoot string
-	// leases 是规划会话的跨进程执行租约：租约覆盖容器准备、角色会话绑定、Pi 执行与
-	// Session 归档，因此两个 Server 实例不会同时读写同一份稳定 Session。
-	leases *PlanningSessionLeaseService
-	// locks 按规划会话串行化规划调用：同一会话的两个角色共用一个稳定 Session 目录，
-	// 并发调用会让同一份 Pi JSONL 同时被两个进程读写。它只保证单进程内串行，跨进程互斥
-	// 由 leases 承担；两者同时生效，进程内排队优先，同进程并发调用不会无谓地竞争租约。
-	locks keyedMutex
+	// coordination 按规划会话串行化角色调用与运行环境操作：同一会话的两个角色共用一份
+	// 稳定 Session 目录，准备/释放运行环境又在操作同一个容器，三者必须互斥。
+	//
+	// 它与 PlanningRuntimeService 共用同一个实例，否则一个入口执行 Pi 时另一个入口
+	// 可以删除容器。
+	coordination *PlanningSessionCoordinator
 	// lifecycle 管理后台服务状态与在途调用：Server 停止时据此拒绝新调用、取消在途
 	// 调用并等待其完整收敛。
 	lifecycle lifecycleState
@@ -93,11 +78,11 @@ type PlanningAgentServiceOptions struct {
 	Containers PlanningAgentContainerPort
 	// Runtime 是可选的规划运行时服务：会话尚未准备运行环境时用它准备容器与快照。
 	Runtime *PlanningRuntimeService
-	// Leases 是规划会话的跨进程执行租约入口，必填。
+	// Coordination 是规划会话的进程内协调器，必填。
 	//
-	// 它与 PlanningRuntimeService 共用同一个实例：Prepare / Release 与 RunRole 必须竞争
-	// 同一把会话锁，否则一个实例准备容器时另一个实例可以释放它。
-	Leases *PlanningSessionLeaseService
+	// 它与 PlanningRuntimeService 共用同一个实例：Prepare / Release 与 RunRole 必须串行
+	// 同一会话，否则一个入口准备容器时另一个入口可以释放它。
+	Coordination *PlanningSessionCoordinator
 	// SessionRoot 是本机 Session 持久化根目录，必须落在配置的数据目录下。
 	SessionRoot string
 	// Now 是时间源，默认返回 UTC 当前时间。
@@ -117,8 +102,8 @@ func NewPlanningAgentService(
 	if options.Containers == nil {
 		return nil, fmt.Errorf("规划 Agent 服务初始化失败: 容器服务不能为空")
 	}
-	if options.Leases == nil {
-		return nil, fmt.Errorf("规划 Agent 服务初始化失败: 规划会话租约服务不能为空")
+	if options.Coordination == nil {
+		return nil, fmt.Errorf("规划 Agent 服务初始化失败: 规划会话协调器不能为空")
 	}
 	sessionRoot, err := resolveSessionRoot(options.SessionRoot)
 	if err != nil {
@@ -129,13 +114,13 @@ func NewPlanningAgentService(
 		now = func() time.Time { return time.Now().UTC() }
 	}
 	return &PlanningAgentService{
-		store:       options.Store,
-		roles:       options.Roles,
-		containers:  options.Containers,
-		runtime:     options.Runtime,
-		leases:      options.Leases,
-		sessionRoot: sessionRoot,
-		now:         now,
+		store:        options.Store,
+		roles:        options.Roles,
+		containers:   options.Containers,
+		runtime:      options.Runtime,
+		coordination: options.Coordination,
+		sessionRoot:  sessionRoot,
+		now:          now,
 	}, nil
 }
 
@@ -186,14 +171,13 @@ type PlanningAgentResult struct {
 // 服务生命周期取消约束，取消信号随上下文传递给 ContainerService.RunAgent，最终传到 Pi
 // 执行与 Session 归档路径。
 //
-// 登记之后的执行顺序固定为：取得规划会话的持久化租约 → 校验请求与会话状态 → 校验所属
-// 项目 → 读取并校验固定角色配置 → 核验规划容器归属与运行状态 → 确保两个角色的会话标识
-// 已绑定 → 生成稳定 Session 与本机归档路径 → 通过 ContainerService.RunAgent 执行 →
-// 等待 Session 归档返回 → 释放租约。远程执行只走现有容器服务，不直接访问 SSH、
-// Docker CLI 或 SFTP。
+// 登记之后的执行顺序固定为：按会话串行 → 校验请求与会话状态 → 校验所属项目 → 读取并
+// 校验固定角色配置 → 核验规划容器归属与运行状态 → 确保两个角色的会话标识已绑定 →
+// 生成稳定 Session 与本机归档路径 → 通过 ContainerService.RunAgent 执行 → 等待
+// Session 归档返回。远程执行只走现有容器服务，不直接访问 SSH、Docker CLI 或 SFTP。
 //
-// 租约是跨进程互斥的依据：同一会话的另一个 Server 实例在持有期间既不能发起规划调用，
-// 也不能准备或释放运行环境。它在 Pi 进程退出之后仍然有效，直到归档收尾完成。
+// 会话串行由进程内协调器承担：同一会话的角色调用与运行环境准备/释放互斥，Pi 进程退出
+// 之后归档收尾仍在持锁期间内。
 func (s *PlanningAgentService) RunRole(
 	ctx context.Context,
 	request RunPlanningRoleRequest,
@@ -208,9 +192,9 @@ func (s *PlanningAgentService) RunRole(
 
 // runRole 执行一次已准入的规划角色调用。
 //
-// 执行顺序固定为：校验请求 → 进程内按会话排队 → 取得规划会话的持久化租约 → 业务校验与
-// 运行环境核验 → Pi 执行 → Session 归档 → 释放租约。租约在读取会话之前取得，因此容器
-// 准备、角色会话绑定、Pi 调用与归档都发生在持有执行权的期间内。
+// 执行顺序固定为：校验请求 → 按会话串行 → 业务校验与运行环境核验 → Pi 执行 →
+// Session 归档 → 释放会话锁。会话锁在读取会话之前取得，因此容器准备、角色会话绑定、
+// Pi 调用与归档都发生在持锁期间内。
 func (s *PlanningAgentService) runRole(
 	ctx context.Context,
 	request RunPlanningRoleRequest,
@@ -219,28 +203,14 @@ func (s *PlanningAgentService) runRole(
 	if err != nil {
 		return result, err
 	}
-	// 进程内先排队，再参与跨进程竞争：同进程的第二个调用不会在第一个调用持租期间
-	// 无谓地拿到一个"正被占用"的错误。
-	unlock := s.locks.Lock(sessionID.String())
+	// 同一会话的第二个调用在这里排队，而不是立刻拿到"正被占用"：规划角色调用与运行
+	// 环境准备/释放是同一份现场上的顺序操作。
+	unlock := s.coordination.Lock(sessionID)
 	defer unlock()
-	// 排队期间调用方取消或服务停止：还没有取得执行权，如实按取消返回，不占用也不争抢租约。
+	// 排队期间调用方取消或服务停止：还没有取得执行权，如实按取消返回。
 	if err := ctx.Err(); err != nil {
 		return result, fmt.Errorf("规划角色调用在取得执行权之前被取消: %w", err)
 	}
-	lease, err := s.leases.Acquire(ctx, sessionID, domain.PlanningLeaseOperationRunRole)
-	if err != nil {
-		return result, planningAgentLeaseFailure(err, sessionID.String())
-	}
-	defer func() {
-		// 收尾顺序固定：先让 Runner 与归档路径完整返回，再停止续租并释放租约。
-		// 释放失败或租约已被接管都必须反映到返回错误上，不报告成功。
-		if settleErr := lease.Settle(); settleErr != nil {
-			err = errors.Join(err, planningAgentLeaseFailure(settleErr, sessionID.String()))
-		}
-	}()
-	// 之后的全部步骤都在租约上下文内执行：租约丢失会取消它，使容器内 Pi 调用与随后的
-	// Session 归档尽快收敛。
-	ctx = lease.Context()
 	session, err := s.loadPlanningAgentSession(ctx, sessionID)
 	if err != nil {
 		return result, err

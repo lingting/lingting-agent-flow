@@ -96,15 +96,16 @@ type Options struct {
 		store storage.Store,
 		cfg *config.Config,
 		steps *app.StepWorkflowService,
+		coordination *app.TaskExecutionCoordinator,
 	) (*app.TaskWorkflowService, error)
 	// TaskSchedulerFactory 在数据库打开后构造任务调度器。
 	//
-	// 调度器依赖数据库、任务租约与统一启动服务，因此必须在它们之后构造；返回 nil
-	// 表示本次运行不提供自动调度，此时 queued 任务只能由用户显式启动。
+	// 调度器依赖数据库、任务执行协调器与统一启动服务，因此必须在它们之后构造；
+	// 返回 nil 表示本次运行不提供自动调度，此时 queued 任务只能由用户显式启动。
 	TaskSchedulerFactory func(
 		store storage.Store,
 		cfg *config.Config,
-		leases *app.TaskLeaseService,
+		coordination *app.TaskExecutionCoordinator,
 		launch *app.TaskLaunchService,
 	) (*app.TaskScheduler, error)
 	// TaskLaunchFactory 在数据库打开后构造统一任务启动服务。
@@ -117,14 +118,19 @@ type Options struct {
 		cfg *config.Config,
 		workflow *app.TaskWorkflowService,
 		steps *app.StepWorkflowService,
-		leases *app.TaskLeaseService,
+		coordination *app.TaskExecutionCoordinator,
+		buildLocks *app.EnvironmentBuildLocks,
 	) (*app.TaskLaunchService, error)
 	// StepExecutorFactory 在数据库打开后构造单步骤执行协调器。
 	//
 	// 协调器需要容器能力与容器内 Agent 执行能力（SSH、Docker），因此不能在构造
 	// Server 时创建。工厂返回错误时启动失败；返回 nil 表示本次运行不提供执行接口，
 	// 此时接口返回 503 而不是伪造执行。
-	StepExecutorFactory func(store storage.Store, cfg *config.Config) (*app.StepExecutor, error)
+	StepExecutorFactory func(
+		store storage.Store,
+		cfg *config.Config,
+		coordination *app.TaskExecutionCoordinator,
+	) (*app.StepExecutor, error)
 	// RequireWebUI 为 true 时缺少前端构建产物将导致启动失败。
 	//
 	// 正式发布构建应当置为 true；开发时先启动后端再构建前端属于正常流程，
@@ -142,12 +148,17 @@ type Server struct {
 	openStore  StoreOpener
 	sshFactory func(store storage.Store, cfg *config.Config) (*app.SSHService, error)
 	// stepExecutorFactory 在数据库打开后构造单步骤执行协调器。
-	stepExecutorFactory func(store storage.Store, cfg *config.Config) (*app.StepExecutor, error)
+	stepExecutorFactory func(
+		store storage.Store,
+		cfg *config.Config,
+		coordination *app.TaskExecutionCoordinator,
+	) (*app.StepExecutor, error)
 	// taskWorkflowFactory 在数据库打开后构造任务级工作流编排器。
 	taskWorkflowFactory func(
 		store storage.Store,
 		cfg *config.Config,
 		steps *app.StepWorkflowService,
+		coordination *app.TaskExecutionCoordinator,
 	) (*app.TaskWorkflowService, error)
 	// taskLaunchFactory 在数据库打开后构造统一任务启动服务。
 	taskLaunchFactory func(
@@ -155,13 +166,14 @@ type Server struct {
 		cfg *config.Config,
 		workflow *app.TaskWorkflowService,
 		steps *app.StepWorkflowService,
-		leases *app.TaskLeaseService,
+		coordination *app.TaskExecutionCoordinator,
+		buildLocks *app.EnvironmentBuildLocks,
 	) (*app.TaskLaunchService, error)
 	// taskSchedulerFactory 在数据库打开后构造任务调度器。
 	taskSchedulerFactory func(
 		store storage.Store,
 		cfg *config.Config,
-		leases *app.TaskLeaseService,
+		coordination *app.TaskExecutionCoordinator,
 		launch *app.TaskLaunchService,
 	) (*app.TaskScheduler, error)
 	// validationFactory 在数据库打开后构造确定性验证引擎。
@@ -213,10 +225,13 @@ type Server struct {
 	taskWorkflow *app.TaskWorkflowService
 	// taskLaunch 是统一任务启动服务，为空时不提供启动接口。
 	taskLaunch *app.TaskLaunchService
-	// taskLeases 是任务租约服务，为启动、工作流与调度器提供统一执行权。
-	//
-	// 它在数据库打开后构造，是"任务租约是唯一所有权令牌"的唯一来源。
-	taskLeases *app.TaskLeaseService
+	// coordination 是任务执行的进程内协调器，为调度、启动、重试、步骤执行与工作流
+	// 编排提供同一份执行权登记。
+	coordination *app.TaskExecutionCoordinator
+	// buildLocks 是环境构建的进程内互斥集合，由环境写路径与任务启动共用。
+	buildLocks *app.EnvironmentBuildLocks
+	// lock 是服务端进程锁，覆盖整个 Server 运行期。
+	lock *ProcessLock
 	// scheduler 是有界并发任务调度器，为空时不自动领取 queued 任务。
 	scheduler *app.TaskScheduler
 	// containerRecovery 收敛状态不明的容器记录并报告孤儿容器。
@@ -263,15 +278,11 @@ type Server struct {
 	// historyQueries 提供事件时间线与修复周期历史的只读查询。
 	historyQueries *app.HistoryQueryService
 	// taskRetry 是任务显式重试服务，为空时不提供重试接口。
-	taskRetry *app.TaskRetryService
-	// taskLeaseRecovery 在启动时核验残留的任务租约现场。
-	//
-	// 它不释放租约、不改写任务状态：租约过期不等于远程操作已停止。
-	taskLeaseRecovery *app.TaskLeaseRecoveryService
-	requireWeb        bool
-	logger            *slog.Logger
-	report            func(message string)
-	manager           *lifecycle.Manager
+	taskRetry  *app.TaskRetryService
+	requireWeb bool
+	logger     *slog.Logger
+	report     func(message string)
+	manager    *lifecycle.Manager
 
 	boundAddr       string
 	cfg             *config.Config
@@ -339,8 +350,13 @@ func New(options Options) (*Server, error) {
 
 // Run 执行完整的启动、运行与关闭流程。
 //
-// 返回值语义：ctx 取消导致的正常关闭返回 nil；配置错误、启动失败或运行期组件故障
-// 返回错误。任何返回路径上已启动的组件都会按逆序停止，不留监听端口与后台 goroutine。
+// 启动顺序固定为：加载并校验配置 → 确定数据库路径与锁文件路径 → 取得独占文件锁 →
+// 启动组件 → 运行。同一份服务端数据目录只允许一个进程运行：第二个进程在这里立即失败，
+// 不会打开数据库，也不会启动任何后台服务。
+//
+// 返回值语义：ctx 取消导致的正常关闭返回 nil；配置错误、启动失败、锁被占用或运行期
+// 组件故障返回错误。任何返回路径上已启动的组件都会按逆序停止，最后释放文件锁，不留监听
+// 端口与后台 goroutine。
 func (s *Server) Run(ctx context.Context, load ConfigLoader) error {
 	if load == nil {
 		return fmt.Errorf("%w: 缺少配置加载器", ErrStartup)
@@ -355,6 +371,16 @@ func (s *Server) Run(ctx context.Context, load ConfigLoader) error {
 	s.address = resolveAddress(cfg, s.address)
 	s.addrMu.Unlock()
 
+	if err := s.acquireProcessLock(cfg); err != nil {
+		return errors.Join(ErrStartup, err)
+	}
+	// 锁覆盖整个运行期：只在 HTTP 关闭、后台服务收敛与数据库关闭之后才释放。
+	defer func() {
+		if releaseErr := s.releaseProcessLock(); releaseErr != nil {
+			s.logger.Warn("释放服务端进程锁失败", slog.String("error", releaseErr.Error()))
+		}
+	}()
+
 	runCtx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
 	defer cancel()
@@ -363,6 +389,37 @@ func (s *Server) Run(ctx context.Context, load ConfigLoader) error {
 		return errors.Join(ErrStartup, err, s.Stop(context.WithoutCancel(ctx)))
 	}
 	return s.wait(ctx, runCtx)
+}
+
+// acquireProcessLock 取得服务端进程锁。
+//
+// 锁文件由数据库路径确定，父目录在取得锁之前创建：锁被占用时立即返回错误，调用方不会
+// 打开数据库，也不会构造任何后台服务。
+func (s *Server) acquireProcessLock(cfg *config.Config) error {
+	lock, err := NewProcessLock(cfg.Storage.DatabasePath)
+	if err != nil {
+		return err
+	}
+	if err := lock.TryAcquire(); err != nil {
+		return err
+	}
+	s.lock = lock
+	s.report(fmt.Sprintf("已取得服务端进程锁: %s", lock.Path()))
+	return nil
+}
+
+// releaseProcessLock 释放服务端进程锁，返回释放失败的错误。
+//
+// 它不删除锁文件：只释放操作系统文件锁并关闭句柄。
+func (s *Server) releaseProcessLock() error {
+	if s.lock == nil {
+		return nil
+	}
+	if err := s.lock.Release(); err != nil {
+		return err
+	}
+	s.lock = nil
+	return nil
 }
 
 // startup 按依赖顺序启动组件，失败时由 Run 负责逆序清理。
@@ -383,6 +440,10 @@ func (s *Server) openDatabase(ctx context.Context) error {
 		return fmt.Errorf("初始化数据库失败: %w", err)
 	}
 	s.store = store
+	// 进程内协调器与构建互斥集合只有一份：所有可能推进任务的入口与所有可能构建同一
+	// 环境的服务都必须注入同一个实例，否则互斥会退化成各自为战。
+	s.coordination = app.NewTaskExecutionCoordinator()
+	s.buildLocks = app.NewEnvironmentBuildLocks()
 	// 角色初始化必须早于任何业务服务：全新数据库的 roles 为空时，创建任务会因
 	// 找不到角色直接失败。这里复用存储层的原子初始化，只在空表时导入。
 	if err := s.seedRoles(ctx, store); err != nil {
@@ -404,7 +465,7 @@ func (s *Server) openDatabase(ctx context.Context) error {
 		s.ssh = sshService
 	}
 	if s.stepExecutorFactory != nil && s.sessions != nil {
-		executor, err := s.stepExecutorFactory(store, s.cfg)
+		executor, err := s.stepExecutorFactory(store, s.cfg, s.coordination)
 		if err != nil {
 			return fmt.Errorf("初始化步骤执行协调器失败: %w", err)
 		}
@@ -419,14 +480,14 @@ func (s *Server) openDatabase(ctx context.Context) error {
 	}
 	if s.stepExecutor != nil && s.validationEngine != nil {
 		// 闭环协调器只是把两个已有服务串起来：开发使用 StepExecutor，验证使用
-		// ValidationService，两者共享同一任务容器工作区。
+		// ValidationService，两者共享同一任务容器工作区与同一份执行权登记。
 		workflow, workflowErr := app.NewStepWorkflowService(app.StepWorkflowOptions{
-			Steps:      s.stepExecutor,
-			Validation: s.validationEngine,
-			Store:      s.store,
-			// 执行周期与预算事实来自同一份数据库：修复上限因此可以跨进程保持一致。
-			Cycles: s.store,
-			Logger: s.logger,
+			Steps:        s.stepExecutor,
+			Validation:   s.validationEngine,
+			Store:        s.store,
+			Cycles:       s.store,
+			Coordination: s.coordination,
+			Logger:       s.logger,
 		})
 		if workflowErr != nil {
 			return fmt.Errorf("初始化步骤闭环协调器失败: %w", workflowErr)
@@ -436,7 +497,12 @@ func (s *Server) openDatabase(ctx context.Context) error {
 	if s.taskWorkflowFactory != nil && s.stepWorkflow != nil {
 		// 任务级编排器复用同一份单步骤闭环服务：它不重复实现 Developer 与 Validator，
 		// 也不自行创建 Attempt 与 Session。
-		orchestrator, workflowErr := s.taskWorkflowFactory(store, s.cfg, s.stepWorkflow)
+		orchestrator, workflowErr := s.taskWorkflowFactory(
+			store,
+			s.cfg,
+			s.stepWorkflow,
+			s.coordination,
+		)
 		if workflowErr != nil {
 			return fmt.Errorf("初始化任务级工作流编排器失败: %w", workflowErr)
 		}
@@ -446,8 +512,9 @@ func (s *Server) openDatabase(ctx context.Context) error {
 		// 残留收敛依赖已打开的数据库：它在步骤执行与验证引擎之后构造，
 		// 因此可以在两者启动之后、编排器启动之前收敛它们的残留。
 		residue, residueErr := app.NewExecutionResidueService(app.ExecutionResidueOptions{
-			Store:  store,
-			Logger: s.logger,
+			Store:        store,
+			Coordination: s.coordination,
+			Logger:       s.logger,
 		})
 		if residueErr != nil {
 			return fmt.Errorf("初始化残留收敛服务失败: %w", residueErr)
@@ -497,8 +564,9 @@ func (s *Server) openDatabase(ctx context.Context) error {
 	// 尝试级代码获取残留收敛只依赖已打开的数据库：启动时把没有执行者的
 	// pending / running 记录收敛为 uncertain，不重放任何容器内 Git 操作。
 	codeFetchRecovery, fetchErr := app.NewCodeFetchRecoveryService(app.CodeFetchRecoveryOptions{
-		Store:  store,
-		Logger: s.logger,
+		Store:        store,
+		Coordination: s.coordination,
+		Logger:       s.logger,
 	})
 	if fetchErr != nil {
 		return fmt.Errorf("初始化代码获取残留收敛服务失败: %w", fetchErr)
@@ -514,16 +582,6 @@ func (s *Server) openDatabase(ctx context.Context) error {
 		return fmt.Errorf("初始化代码保存恢复扫描服务失败: %w", recoveryErr)
 	}
 	s.codeSaveRecovery = codeSaveRecovery
-	// 任务租约服务是启动、工作流与调度器的共同依赖：它必须在这些服务之前构造，
-	// 因为"任务租约是唯一所有权令牌"要求所有执行入口使用同一份租约能力。
-	leases, leaseErr := app.NewTaskLeaseService(app.TaskLeaseOptions{
-		Store:  store,
-		Logger: s.logger,
-	})
-	if leaseErr != nil {
-		return fmt.Errorf("初始化任务租约服务失败: %w", leaseErr)
-	}
-	s.taskLeases = leases
 	if s.taskLaunchFactory != nil && s.taskWorkflow != nil {
 		// 统一启动服务只串联既有能力：环境准备、计划生成与工作流编排都在它们
 		// 各自的服务里实现，启动服务不重复实现任何一步。
@@ -532,7 +590,8 @@ func (s *Server) openDatabase(ctx context.Context) error {
 			s.cfg,
 			s.taskWorkflow,
 			s.stepWorkflow,
-			leases,
+			s.coordination,
+			s.buildLocks,
 		)
 		if launchErr != nil {
 			return fmt.Errorf("初始化任务启动服务失败: %w", launchErr)
@@ -541,7 +600,12 @@ func (s *Server) openDatabase(ctx context.Context) error {
 	}
 	if s.taskSchedulerFactory != nil && s.taskLaunch != nil {
 		// 调度器在启动服务之后构造：它只调用既有启动流程，不重复实现任何阶段。
-		scheduler, schedulerErr := s.taskSchedulerFactory(store, s.cfg, leases, s.taskLaunch)
+		scheduler, schedulerErr := s.taskSchedulerFactory(
+			store,
+			s.cfg,
+			s.coordination,
+			s.taskLaunch,
+		)
 		if schedulerErr != nil {
 			return fmt.Errorf("初始化任务调度器失败: %w", schedulerErr)
 		}
@@ -550,24 +614,16 @@ func (s *Server) openDatabase(ctx context.Context) error {
 	// 显式重试复用统一启动流程：它只负责重开任务与取得执行权，不实现第二套启动逻辑。
 	if s.taskLaunch != nil {
 		retry, retryErr := app.NewTaskRetryService(app.TaskRetryOptions{
-			Store:  store,
-			Leases: leases,
-			Launch: s.taskLaunch,
-			Logger: s.logger,
+			Store:        store,
+			Coordination: s.coordination,
+			Launch:       s.taskLaunch,
+			Logger:       s.logger,
 		})
 		if retryErr != nil {
 			return fmt.Errorf("初始化任务重试服务失败: %w", retryErr)
 		}
 		s.taskRetry = retry
 	}
-	// 租约残留核验只记录现场：它不释放租约、不改写任务状态、不重放外部操作。
-	leaseRecovery, leaseRecoveryErr := app.NewTaskLeaseRecoveryService(
-		app.TaskLeaseRecoveryOptions{Store: store, Logger: s.logger},
-	)
-	if leaseRecoveryErr != nil {
-		return fmt.Errorf("初始化租约残留核验服务失败: %w", leaseRecoveryErr)
-	}
-	s.taskLeaseRecovery = leaseRecovery
 	if s.codeInitializeFactory != nil {
 		initializer, initErr := s.codeInitializeFactory(store, s.cfg)
 		if initErr != nil {
@@ -703,14 +759,9 @@ func (s *Server) startServices(ctx context.Context) error {
 		// 先停止新的启动请求，再让下层服务收敛在途工作。
 		services = append(services, s.taskLaunch)
 	}
-	if s.taskLeaseRecovery != nil {
-		// 租约残留核验必须排在调度器之前：调度器的第一次扫描不得在"租约过期但现场
-		// 未核验"的任务上做任何判断。它只记录现场，不释放租约、不改写状态。
-		services = append(services, s.taskLeaseRecovery)
-	}
 	if s.scheduler != nil {
-		// 调度器注册在最后：它依赖数据库、任务租约与统一启动服务，因此启动顺序
-		// 自然排在恢复与前置收敛之后，停止顺序反转为"先停止新分派"。
+		// 调度器注册在最后：它依赖数据库、任务执行协调器与统一启动服务，因此启动
+		// 顺序自然排在恢复与前置收敛之后，停止顺序反转为"先停止新分派"。
 		services = append(services, s.scheduler)
 	}
 	if s.codeSaveRecovery != nil {
@@ -832,9 +883,10 @@ func (s *Server) environmentManagement() error {
 		return nil
 	}
 	service, err := app.NewEnvironmentService(app.DockerServiceOptions{
-		SSH:    s.ssh,
-		Store:  s.store,
-		Logger: s.loggerWrapper(),
+		SSH:        s.ssh,
+		Store:      s.store,
+		Logger:     s.loggerWrapper(),
+		BuildLocks: s.buildLocks,
 	})
 	if err != nil {
 		return fmt.Errorf("初始化环境服务失败: %w", err)
@@ -932,28 +984,25 @@ func (s *Server) planningServices() error {
 	if s.containerService == nil || s.roleQuery == nil {
 		return nil
 	}
-	// 规划会话租约由两个服务共用：RunRole、Prepare 与 Release 必须竞争同一把会话锁，
-	// 否则一个实例准备容器时另一个实例可以释放它。
-	leases, err := app.NewPlanningSessionLeaseService(app.PlanningLeaseOptions{Store: s.store})
-	if err != nil {
-		return fmt.Errorf("初始化规划会话租约服务失败: %w", err)
-	}
+	// 规划会话协调器由两个服务共用：RunRole、Prepare 与 Release 必须串行同一会话，
+	// 否则一个入口准备容器时另一个入口可以执行 Pi 或释放资源。
+	sessionCoordination := app.NewPlanningSessionCoordinator()
 	runtime, err := app.NewPlanningRuntimeService(app.PlanningRuntimeServiceOptions{
-		Store:      s.store,
-		Containers: s.containerService,
-		Leases:     leases,
+		Store:        s.store,
+		Containers:   s.containerService,
+		Coordination: sessionCoordination,
 	})
 	if err != nil {
 		return fmt.Errorf("初始化规划运行时服务失败: %w", err)
 	}
 	s.planningRuntime = runtime
 	agent, err := app.NewPlanningAgentService(app.PlanningAgentServiceOptions{
-		Store:       s.store,
-		Roles:       s.roleQuery,
-		Containers:  s.containerService,
-		Runtime:     runtime,
-		Leases:      leases,
-		SessionRoot: app.SessionRoot(s.cfg),
+		Store:        s.store,
+		Roles:        s.roleQuery,
+		Containers:   s.containerService,
+		Runtime:      runtime,
+		Coordination: sessionCoordination,
+		SessionRoot:  app.SessionRoot(s.cfg),
 	})
 	if err != nil {
 		return fmt.Errorf("初始化规划 Agent 服务失败: %w", err)
@@ -1045,7 +1094,6 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		StepWorkflow:      s.stepWorkflow,
 		Workflow:          s.taskWorkflow,
 		TaskLaunch:        s.taskLaunch,
-		TaskLeases:        s.taskLeases,
 		Containers:        s.containerService,
 		CodeSaveQueries:   s.codeSaveQueries,
 		ResumeEligibility: s.resumeEligibility,

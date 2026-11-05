@@ -33,8 +33,6 @@ const (
 	TaskRetryRejectionCancelRequested TaskRetryRejection = "cancel_requested"
 	// TaskRetryRejectionStatusNotRetryable 表示任务状态不属于允许显式重试的集合。
 	TaskRetryRejectionStatusNotRetryable TaskRetryRejection = "status_not_retryable"
-	// TaskRetryRejectionLeaseHeld 表示任务租约仍被另一个有效持有者持有。
-	TaskRetryRejectionLeaseHeld TaskRetryRejection = "lease_held"
 	// TaskRetryRejectionActiveWorkflowRun 表示任务仍存在未结束的工作流执行记录。
 	TaskRetryRejectionActiveWorkflowRun TaskRetryRejection = "active_workflow_run"
 	// TaskRetryRejectionStepOccupied 表示仍有步骤被一次执行占用。
@@ -62,13 +60,6 @@ type TaskRetryInput struct {
 	Steps []Step
 	// CodeSaveRecords 是该任务的代码保存记录，用于判定是否仍有未核验的外部副作用。
 	CodeSaveRecords []CodeSaveRecord
-	// Now 是判定租约与占用是否仍然有效的时刻。
-	Now time.Time
-	// Owner 是本次判定的执行者标识，可为空。
-	//
-	// 非空时"租约仍由本人持有"不算阻塞：调用方可能在取得执行权之后再次判定现场。
-	// 空值表示调用方还没有执行权，此时任何有效租约都属于他人。
-	Owner string
 }
 
 // TaskRetryDecision 是显式重试的准入结论。
@@ -134,13 +125,12 @@ func (s TaskStatus) AllowsExplicitRetry() bool {
 //  1. 已被逻辑删除 → 拒绝；
 //  2. 已请求取消 → 拒绝（取消意图优先于任何推进）；
 //  3. 状态不属于 AllowsExplicitRetry → 拒绝；
-//  4. 任务租约仍被有效持有 → 拒绝（执行权没失效就不能重试，否则会出现两个执行者）；
-//  5. 存在未结束的工作流执行记录 → 拒绝（无法证明旧执行者已经停止）；
-//  6. 存在仍被占用的步骤 → 拒绝（旧执行者可能仍在推进）；
-//  7. 存在结果不确定的步骤 → 拒绝（P2 门控：必须先核验现场）；
-//  8. 仍有未核验的外部副作用 → 拒绝（P2 门控，复用 DecideTaskCodeSaveResume）；
-//  9. 启动前置条件未满足 → 拒绝（复用既有启动前置校验，不重复实现）；
-//  10. 计划中已经没有需要重新执行的步骤 → 拒绝（重试不会产生任何新执行）。
+//  4. 存在未结束的工作流执行记录 → 拒绝（无法证明旧执行周期已经停止）；
+//  5. 存在仍被占用的步骤 → 拒绝（旧执行者可能仍在推进）；
+//  6. 存在结果不确定的步骤 → 拒绝（P2 门控：必须先核验现场）；
+//  7. 仍有未核验的外部副作用 → 拒绝（P2 门控，复用 DecideTaskCodeSaveResume）；
+//  8. 启动前置条件未满足 → 拒绝（复用既有启动前置校验，不重复实现）；
+//  9. 计划中已经没有需要重新执行的步骤 → 拒绝（重试不会产生任何新执行）。
 //
 // 该函数是纯函数：不读数据库、不写状态、不产生任何远程副作用。调用方不得在别处复制
 // 同一套判定，否则"failed 任务能否重试"会出现第二份实现。
@@ -158,10 +148,6 @@ func DecideTaskRetryEligibility(input TaskRetryInput) TaskRetryDecision {
 	}
 	if !task.Status.AllowsExplicitRetry() {
 		decision.Rejections = append(decision.Rejections, TaskRetryRejectionStatusNotRetryable)
-	}
-	if leaseHeldByOther(task, input.Owner, input.Now) {
-		// 有效租约说明仍有其他执行者：接管会在未知现场上重放外部操作。
-		decision.Rejections = append(decision.Rejections, TaskRetryRejectionLeaseHeld)
 	}
 	if input.ActiveWorkflowRun != nil {
 		decision.Rejections = append(
@@ -185,25 +171,9 @@ func DecideTaskRetryEligibility(input TaskRetryInput) TaskRetryDecision {
 	decision.Allowed = len(decision.Rejections) == 0
 	if decision.Allowed {
 		decision.Summary = "允许开启一次新的执行周期：任务将回到 preparing，" +
-			"执行权由新的任务租约代次持有，历史执行记录保持不变"
+			"由一次新的执行周期持有执行权，历史执行记录保持不变"
 	}
 	return decision
-}
-
-// leaseHeldByOther 判断任务租约是否仍被其他执行者有效持有。
-//
-// 判定分两种情况：调用方尚未持有执行权时，任何有效租约都属于他人；调用方已持有
-// 执行权时，只有 owner 不同才算"他人"。代次不参与判定——同一 owner 的不同代次仍
-// 代表同一次领取流程，而代次正确性由存储层的条件更新保证。
-func leaseHeldByOther(task Task, owner string, at time.Time) bool {
-	if !task.LeaseActive(at) {
-		return false
-	}
-	trimmed := strings.TrimSpace(owner)
-	if trimmed == "" {
-		return true
-	}
-	return task.LeaseOwner != trimmed
 }
 
 // retryStepRejection 返回步骤层面的重试拒绝原因。
@@ -262,8 +232,8 @@ func TaskRetrySummary(decision TaskRetryDecision) string {
 //     进入执行，任务 API 会把它展示成"已结束但仍在执行"；
 //   - 清空当前步骤与尝试占用：它们属于上一个周期，残留会让新周期无法占用步骤。
 //
-// 本方法不改变任务标识，也不删除任何历史记录：执行代次由新的任务租约（`lease_epoch`）
-// 与新的 WorkflowRun / Attempt / Session 表达，历史 Attempt 与 Session 全部保留。
+// 本方法不改变任务标识，也不删除任何历史记录：新的执行周期由新的 WorkflowRun /
+// Attempt / Session 表达，历史 Attempt 与 Session 全部保留。
 func (t *Task) ReopenForRetry(at time.Time) error {
 	if t == nil {
 		return invalidField("Task", "", "实体为空")

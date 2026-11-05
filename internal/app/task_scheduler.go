@@ -30,10 +30,10 @@ const (
 	defaultSchedulerStopTimeout = 30 * time.Second
 )
 
-// TaskSchedulerStore 是调度器依赖的只读事实来源与租约写入能力。
+// TaskSchedulerStore 是调度器依赖的只读事实来源。
 //
-// 它只包含"读取候选所需的事实"与"领取 / 续租 / 释放"：调度器不推进任务状态、
-// 不创建工作流执行记录，这些仍由 TaskLaunchService 与 TaskWorkflowService 承担。
+// 它只包含"读取候选所需的事实"：调度器不推进任务状态、不创建工作流执行记录，也不
+// 持有任何持久化执行权，这些由统一启动与工作流编排承担。
 type TaskSchedulerStore interface {
 	GetTask(ctx context.Context, id domain.ID) (*domain.Task, error)
 	// ListTasks 返回满足筛选条件的任务，用于扫描候选与统计名额占用。
@@ -43,7 +43,6 @@ type TaskSchedulerStore interface {
 	ListStepsByTask(ctx context.Context, taskID domain.ID) ([]domain.Step, error)
 	ListCodeSaveRecordsByTask(ctx context.Context, taskID string) ([]domain.CodeSaveRecord, error)
 	AppendEvent(ctx context.Context, event domain.Event) (domain.Event, error)
-	RenewTaskLease(ctx context.Context, request storage.TaskLeaseRenewRequest) error
 }
 
 // TaskSchedulerLaunchPort 是调度器对统一启动能力的需求。
@@ -54,20 +53,15 @@ type TaskSchedulerLaunchPort interface {
 	Launch(ctx context.Context, request TaskLaunchRequest) (TaskLaunchResult, error)
 }
 
-// TaskSchedulerLeasePort 是调度器对任务租约能力的需求。
-type TaskSchedulerLeasePort interface {
-	Claim(ctx context.Context, request TaskClaimRequest) (TaskClaim, error)
-	Renew(ctx context.Context, handle domain.TaskLeaseHandle) error
-	Release(ctx context.Context, handle domain.TaskLeaseHandle) error
-	RenewInterval() time.Duration
-}
-
 // TaskSchedulerOptions 是构造任务调度器的输入。
 type TaskSchedulerOptions struct {
 	// Store 是持久化入口，必填。
 	Store TaskSchedulerStore
-	// Leases 提供任务领取与租约维护，必填。
-	Leases TaskSchedulerLeasePort
+	// Coordination 提供任务执行权登记，必填。
+	//
+	// 它与启动、重试、单步骤执行与工作流编排共用同一个实例：同一任务不会被两个入口
+	// 同时推进。
+	Coordination *TaskExecutionCoordinator
 	// Launch 提供统一任务启动能力，必填。
 	Launch TaskSchedulerLaunchPort
 	// MaxConcurrentTasks 是并发上限，必须大于 0。
@@ -89,26 +83,26 @@ type TaskSchedulerOptions struct {
 // 职责边界：
 //   - 周期扫描 queued 任务，用 domain.DecideTaskQueueAdmission 判定候选资格；
 //   - 用 domain.NewTaskQueueOrderKey / CompareTaskQueueOrder 排序候选；
-//   - 用 domain.DecideTaskSlotState 统计真实持有执行权的任务，受配置上限约束；
-//   - 领取成功后调用既有 TaskLaunchService.Launch，不重复实现任何启动阶段；
-//   - 在途分派期间维持任务租约，并在结束时按真实结果释放。
+//   - 用 domain.DecideTaskSlotState 统计仍在推进的任务，受配置上限约束；
+//   - 取得任务执行权后调用既有 TaskLaunchService.Launch，不重复实现任何启动阶段；
+//   - 在途分派期间持有任务执行权，并在结束时按真实结果释放或移交给工作流。
 //
 // 它不创建、启动、删除或接管容器，不生成计划，不执行步骤，不保存代码，也不把
 // "Launch 返回 nil"当作任务完成：任务结论只能来自持久化状态。
 type TaskScheduler struct {
-	store   TaskSchedulerStore
-	leases  TaskSchedulerLeasePort
-	launch  TaskSchedulerLaunchPort
-	logger  *slog.Logger
-	now     func() time.Time
-	limit   int
-	scan    time.Duration
-	timeout time.Duration
+	store        TaskSchedulerStore
+	coordination *TaskExecutionCoordinator
+	launch       TaskSchedulerLaunchPort
+	logger       *slog.Logger
+	now          func() time.Time
+	limit        int
+	scan         time.Duration
+	timeout      time.Duration
 
 	mu sync.Mutex
 	// dispatched 记录本进程正在分派或启动中的任务。
 	//
-	// 它是第一道防线而不是一致性保证：跨进程仍由任务租约的条件更新拒绝重复领取。
+	// 它配合任务执行协调器保证同一任务不会在进程内被重复分派；不同任务之间完全并发。
 	dispatched map[domain.ID]*schedulerDispatch
 	started    bool
 	stopped    bool
@@ -120,14 +114,13 @@ type TaskScheduler struct {
 	//
 	// 名额统计是"读取数据库占用快照 → 计算空名额 → 逐个领取"的三步过程。两次并发
 	// 扫描会同时读到同一份空名额快照，各自再领取自己的份额，使本进程的领取数超过
-	// 上限（实测：上限 2 时并发扫描可领取 3 个）。互斥锁只保护本进程内的扫描，
-	// 跨进程仍由任务租约的条件更新拒绝重复领取。
+	// 上限（实测：上限 2 时并发扫描可领取 3 个）。互斥锁只保护本进程内的扫描。
 	scanMu sync.Mutex
 }
 
 // schedulerDispatch 是一次在途分派。
 type schedulerDispatch struct {
-	handle domain.TaskLeaseHandle
+	grant  TaskExecutionGrant
 	cancel context.CancelFunc
 }
 
@@ -136,8 +129,8 @@ func NewTaskScheduler(options TaskSchedulerOptions) (*TaskScheduler, error) {
 	if options.Store == nil {
 		return nil, fmt.Errorf("%w: 存储不能为空", ErrSchedulerInvalidConfig)
 	}
-	if options.Leases == nil {
-		return nil, fmt.Errorf("%w: 任务租约服务不能为空", ErrSchedulerInvalidConfig)
+	if options.Coordination == nil {
+		return nil, fmt.Errorf("%w: 任务执行协调器不能为空", ErrSchedulerInvalidConfig)
 	}
 	if options.Launch == nil {
 		return nil, fmt.Errorf("%w: 启动服务不能为空", ErrSchedulerInvalidConfig)
@@ -162,15 +155,15 @@ func NewTaskScheduler(options TaskSchedulerOptions) (*TaskScheduler, error) {
 		timeout = defaultSchedulerStopTimeout
 	}
 	return &TaskScheduler{
-		store:      options.Store,
-		leases:     options.Leases,
-		launch:     options.Launch,
-		logger:     logger,
-		now:        now,
-		limit:      options.MaxConcurrentTasks,
-		scan:       scan,
-		timeout:    timeout,
-		dispatched: make(map[domain.ID]*schedulerDispatch),
+		store:        options.Store,
+		coordination: options.Coordination,
+		launch:       options.Launch,
+		logger:       logger,
+		now:          now,
+		limit:        options.MaxConcurrentTasks,
+		scan:         scan,
+		timeout:      timeout,
+		dispatched:   make(map[domain.ID]*schedulerDispatch),
 	}, nil
 }
 
@@ -186,7 +179,7 @@ func (s *TaskScheduler) Limit() int {
 
 // Start 启动调度循环。
 //
-// 只有数据库、任务租约、启动服务与工作流编排器都已成功启动后，Server 才会调用它；
+// 只有数据库、任务执行协调器、启动服务与工作流编排器都已成功启动后，Server 才会调用它；
 // 因此恢复与前置收敛一定先于第一次扫描。
 func (s *TaskScheduler) Start(ctx context.Context) error {
 	s.mu.Lock()
@@ -211,8 +204,8 @@ func (s *TaskScheduler) Start(ctx context.Context) error {
 // Stop 取消调度扫描并等待在途分派收敛。
 //
 // 停止后不再领取新任务；在途分派的启动上下文被取消，由启动服务按真实结果收敛。
-// 因服务停止而中断的启动**不释放租约**：无法确认远程操作是否已经发生，盲目释放会
-// 让其他执行者立刻在未知现场上重放。租约按有效期自然过期，由 P2 的恢复语义处理。
+// 因服务停止而中断的启动按进程中断现场处理：无法确认远程操作是否已经发生，因此只记录
+// 需要人工核验的事件，不重放任何外部操作。
 func (s *TaskScheduler) Stop(ctx context.Context) error {
 	s.mu.Lock()
 	if s.stopped {
@@ -313,8 +306,7 @@ func (s *TaskScheduler) Scan(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return ErrSchedulerStopped
 	}
-	now := s.now()
-	occupied, err := s.countOccupiedSlots(ctx, now)
+	occupied, err := s.countOccupiedSlots(ctx)
 	if err != nil {
 		return err
 	}
@@ -322,7 +314,7 @@ func (s *TaskScheduler) Scan(ctx context.Context) error {
 	if available <= 0 {
 		return nil
 	}
-	candidates, err := s.loadCandidates(ctx, now)
+	candidates, err := s.loadCandidates(ctx)
 	if err != nil {
 		return err
 	}
@@ -333,19 +325,17 @@ func (s *TaskScheduler) Scan(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return ErrSchedulerStopped
 		}
-		claimed, claimErr := s.dispatch(ctx, candidate, now)
-		if claimErr != nil {
-			if !errors.Is(claimErr, ErrTaskLeaseConflict) {
-				s.logger.WarnContext(
-					ctx,
-					"调度器领取任务失败",
-					slog.String("task_id", candidate.Task.ID.String()),
-					slog.String("error", errorSummary(claimErr)),
-				)
-			}
+		dispatched, dispatchErr := s.dispatch(ctx, candidate)
+		if dispatchErr != nil {
+			s.logger.WarnContext(
+				ctx,
+				"调度器分派任务失败",
+				slog.String("task_id", candidate.Task.ID.String()),
+				slog.String("error", errorSummary(dispatchErr)),
+			)
 			continue
 		}
-		if claimed {
+		if dispatched {
 			available--
 		}
 	}
@@ -360,15 +350,14 @@ type schedulerCandidate struct {
 	key domain.TaskQueueOrderKey
 	// input 是判定该候选时加载的持久化事实。
 	//
-	// 领取后必须用它重新仲裁：只带 Task 的空输入会让准入以 priority_unknown 拒绝，
-	// 从而把一次真实领取误判为"现场已变化"。
+	// 取得执行权后必须用它重新仲裁：只带 Task 的空输入会让准入以 priority_unknown
+	// 拒绝，从而把一次真实分派误判为"现场已变化"。
 	input domain.TaskQueueInput
 }
 
 // loadCandidates 读取 queued 任务并筛选出通过准入的候选，按领域排序规则排序。
 func (s *TaskScheduler) loadCandidates(
 	ctx context.Context,
-	now time.Time,
 ) ([]schedulerCandidate, error) {
 	tasks, err := s.store.ListTasks(ctx, storage.TaskFilter{
 		Statuses: domain.AutomaticSchedulingStatuses(),
@@ -378,7 +367,7 @@ func (s *TaskScheduler) loadCandidates(
 	}
 	candidates := make([]schedulerCandidate, 0, len(tasks))
 	for _, task := range tasks {
-		input, inputErr := s.loadQueueInput(ctx, task, now)
+		input, inputErr := s.loadQueueInput(ctx, task)
 		if inputErr != nil {
 			// 无法判断候选资格时跳过：不得伪造"可调度"，也不让单个任务阻塞队列。
 			s.logger.WarnContext(
@@ -421,9 +410,8 @@ func (s *TaskScheduler) loadCandidates(
 func (s *TaskScheduler) loadQueueInput(
 	ctx context.Context,
 	task domain.Task,
-	now time.Time,
 ) (domain.TaskQueueInput, error) {
-	input := domain.TaskQueueInput{Task: task, Now: now}
+	input := domain.TaskQueueInput{Task: task}
 	requirement, err := s.store.GetRequirement(ctx, task.RequirementID)
 	if err != nil {
 		if !errors.Is(err, storage.ErrNotFound) {
@@ -453,17 +441,14 @@ func (s *TaskScheduler) loadQueueInput(
 	return input, nil
 }
 
-// countOccupiedSlots 统计真实占用调度名额的任务数量。
+// countOccupiedSlots 统计占用调度名额的任务数量。
 //
-// 事实来源是数据库而不是内存：领取后尚未建立 WorkflowRun 的窗口由任务租约表达
-// （TaskSlotClaimed），执行阶段由执行记录租约表达。本进程正在分派的任务也计入，
-// 避免同一进程的并发扫描超额领取。
+// 事实来源是数据库中的执行记录状态：只有仍在推进的执行记录才占用名额。本进程已经
+// 登记但尚未建立执行记录的分派同样计入，避免并发扫描基于同一份快照超额分派。
 //
-// 说明：这是**基于数据库事实的进程级上限**。多个服务进程共享同一数据库时，任务租约
-// 能防止同一任务被重复领取，但不提供跨进程的全局容量仲裁：两个进程可能各自看到
-// 同一份占用快照后各领一个任务，使总量短暂超过上限。全局配额需要数据库仲裁，属于
-// 后续里程碑。
-func (s *TaskScheduler) countOccupiedSlots(ctx context.Context, now time.Time) (int, error) {
+// 说明：这是进程级上限。服务端只允许一个进程运行，因此它就是全局上限，不需要数据库
+// 层面的容量仲裁。
+func (s *TaskScheduler) countOccupiedSlots(ctx context.Context) (int, error) {
 	tasks, err := s.store.ListTasks(ctx, storage.TaskFilter{
 		ExcludeStatuses: []domain.TaskStatus{
 			domain.TaskStatusCompleted,
@@ -474,36 +459,29 @@ func (s *TaskScheduler) countOccupiedSlots(ctx context.Context, now time.Time) (
 		return 0, fmt.Errorf("统计调度名额失败: %w", err)
 	}
 	occupied := 0
+	// executing 记录已经建立执行记录的任务：它们由数据库事实计入名额。
+	executing := make(map[domain.ID]struct{}, len(tasks))
 	for _, task := range tasks {
-		input := domain.TaskSlotInput{Task: task, Now: now}
-		// 租约有效时判定不需要执行记录：省掉一次查询，也避免把"读取失败"当成
-		// "没有执行记录"。
-		if !task.LeaseActive(now) {
-			run, runErr := s.store.GetActiveWorkflowRun(ctx, task.ID)
-			if runErr != nil && !errors.Is(runErr, storage.ErrNotFound) {
-				return 0, fmt.Errorf("读取任务 %s 的执行记录失败: %w", task.ID, runErr)
-			}
-			if runErr == nil {
-				input.ActiveWorkflowRun = run
-			}
+		input := domain.TaskSlotInput{Task: task}
+		run, runErr := s.store.GetActiveWorkflowRun(ctx, task.ID)
+		if runErr != nil && !errors.Is(runErr, storage.ErrNotFound) {
+			return 0, fmt.Errorf("读取任务 %s 的执行记录失败: %w", task.ID, runErr)
+		}
+		if runErr == nil {
+			input.ActiveWorkflowRun = run
 		}
 		if domain.DecideTaskSlotState(input).OccupiesSlot() {
 			occupied++
+			executing[task.ID] = struct{}{}
 		}
 	}
-	// 本进程已登记但尚未写回租约的分派同样占名额：它们即将成为 claimed。
+	// 本进程已登记但尚无执行记录的分派同样占名额；已有执行记录的分派不重复计入。
 	s.mu.Lock()
 	for taskID := range s.dispatched {
-		found := false
-		for _, task := range tasks {
-			if task.ID == taskID && task.LeaseActive(now) {
-				found = true
-				break
-			}
+		if _, counted := executing[taskID]; counted {
+			continue
 		}
-		if !found {
-			occupied++
-		}
+		occupied++
 	}
 	s.mu.Unlock()
 	return occupied, nil
@@ -516,7 +494,6 @@ func (s *TaskScheduler) countOccupiedSlots(ctx context.Context, now time.Time) (
 func (s *TaskScheduler) dispatch(
 	ctx context.Context,
 	candidate schedulerCandidate,
-	now time.Time,
 ) (bool, error) {
 	s.mu.Lock()
 	if s.stopped {
@@ -524,71 +501,44 @@ func (s *TaskScheduler) dispatch(
 		return false, ErrSchedulerStopped
 	}
 	if _, exists := s.dispatched[candidate.Task.ID]; exists {
-		// 本进程已经在分派同一任务：不重复领取。
+		// 本进程已经在分派同一任务：不重复取得执行权。
 		s.mu.Unlock()
 		return false, nil
 	}
 	s.mu.Unlock()
 
-	claim, err := s.leases.Claim(ctx, TaskClaimRequest{
-		TaskID: candidate.Task.ID,
-		Owner:  "scheduler-" + domain.NewID().String(),
-		// 自动调度只领取 queued：不得依赖存储层的默认集合。
-		Statuses: domain.AutomaticSchedulingStatuses(),
-	})
-	if err != nil {
-		return false, err
-	}
-	// 领取后再次核验领域仲裁：并发场景下"领域允许"与"存储成功"之间可能有状态变化。
-	// 输入沿用候选加载时的事实，只把任务替换为领取后回读的记录（其中已包含租约），
-	// 因此准入判定与排序依据与领取前完全一致。
-	input := candidate.input
-	input.Task = claim.Task
-	input.Now = now
-	decision, decisionErr := domain.DecideTaskClaim(input, claim.Handle.Owner)
-	if decisionErr != nil || !decision.Allowed {
-		// 领域判定拒绝说明现场已经变化：释放自己刚拿到的租约并如实返回。
-		if releaseErr := s.leases.Release(context.WithoutCancel(ctx), claim.Handle); releaseErr != nil {
-			return false, fmt.Errorf(
-				"%w: 领取后领域判定拒绝且释放租约失败: %v",
-				ErrTaskLeaseConflict,
-				releaseErr,
-			)
-		}
+	// 执行权由进程内协调器登记：同一任务的全部入口共用这一份登记。
+	grant, ok := s.coordination.TryAcquire(candidate.Task.ID)
+	if !ok {
 		return false, nil
 	}
-	if !s.register(candidate.Task.ID, claim.Handle) {
-		// 停止或已有分派：释放刚取得的租约，避免占住名额。
-		if releaseErr := s.leases.Release(context.WithoutCancel(ctx), claim.Handle); releaseErr != nil {
-			return false, fmt.Errorf(
-				"%w: 登记分派失败且释放租约失败: %v",
-				ErrTaskLeaseConflict,
-				releaseErr,
-			)
-		}
+	// 取得执行权后再次核验领域仲裁：并发场景下"领域允许"与"取得执行权"之间可能有
+	// 状态变化。输入沿用候选加载时的事实，因此准入判定与排序依据保持一致。
+	input := candidate.input
+	decision := domain.DecideTaskQueueAdmission(input)
+	if !decision.Admitted {
+		s.coordination.Release(grant)
+		return false, nil
+	}
+	if !s.register(candidate.Task.ID, grant) {
+		// 停止或已有分派：释放刚取得的执行权。
+		s.coordination.Release(grant)
 		return false, ErrSchedulerStopped
 	}
 	s.appendEvent(ctx, candidate.Task.ID, domain.EventTypeTaskClaimed, map[string]any{
-		"owner":      claim.Handle.Owner,
-		"epoch":      claim.Handle.Epoch,
-		"takeover":   claim.Takeover,
-		"claimed_at": claim.ClaimedAt.Format(time.RFC3339Nano),
-		"expires_at": claim.ExpiresAt.Format(time.RFC3339Nano),
+		"claimed_at": s.now().Format(time.RFC3339Nano),
 		"source":     "scheduler",
 	})
 	s.runs.Add(1)
-	go s.run(claim)
+	go s.run(grant)
 	return true, nil
 }
 
 // register 登记一次在途分派，返回是否登记成功。
 //
-// 登记只记录租约身份：取消函数由 run 在创建启动上下文后写回，Stop 与 run 之间
-// 通过同一个 map 条目共享该函数。
-func (s *TaskScheduler) register(
-	taskID domain.ID,
-	handle domain.TaskLeaseHandle,
-) bool {
+// 登记记录本次分派持有的执行权凭据：取消函数由 run 在创建启动上下文后写回，Stop 与
+// run 之间通过同一个 map 条目共享该函数。
+func (s *TaskScheduler) register(taskID domain.ID, grant TaskExecutionGrant) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.stopped {
@@ -597,7 +547,7 @@ func (s *TaskScheduler) register(
 	if _, exists := s.dispatched[taskID]; exists {
 		return false
 	}
-	s.dispatched[taskID] = &schedulerDispatch{handle: handle}
+	s.dispatched[taskID] = &schedulerDispatch{grant: grant}
 	return true
 }
 
@@ -626,52 +576,40 @@ func (s *TaskScheduler) unregister(taskID domain.ID) {
 	}
 }
 
-// run 执行一次分派：在租约有效期内调用既有启动流程，并按真实结果收尾。
-func (s *TaskScheduler) run(claim TaskClaim) {
+// run 执行一次分派：在持有执行权期间调用既有启动流程，并按真实结果收尾。
+func (s *TaskScheduler) run(grant TaskExecutionGrant) {
 	defer s.runs.Done()
-	defer s.unregister(claim.Handle.TaskID)
+	defer s.unregister(grant.TaskID())
 
 	base := s.stopSignal
 	if base == nil {
 		base = context.Background()
 	}
 	runCtx, cancel := context.WithCancel(base)
-	s.setDispatchCancel(claim.Handle.TaskID, cancel)
+	s.setDispatchCancel(grant.TaskID(), cancel)
 	defer cancel()
 
-	// 启动阶段可能持续数十分钟：租约必须在整个过程中保持有效，否则任务会在准备
-	// 过程中被其他执行者接管。
-	stopHeartbeat := s.startLeaseHeartbeat(runCtx, claim.Handle)
+	// 执行权在整个启动过程中保持有效：同一任务的其它入口在此期间会被拒绝，因此任务
+	// 不会在准备过程中被第二个入口推进。
 	result, launchErr := s.launch.Launch(runCtx, TaskLaunchRequest{
-		TaskID: claim.Handle.TaskID.String(),
-		Grant: WorkflowExecutionGrant{
-			Lease: claim.Handle,
-			TTL:   s.leases.RenewInterval() * 3,
-		},
+		TaskID: grant.TaskID().String(),
+		Grant:  grant,
 	})
-	stopHeartbeat()
 
 	if launchErr != nil {
-		s.settleFailedDispatch(context.WithoutCancel(runCtx), claim.Handle, result, launchErr)
+		s.settleFailedDispatch(context.WithoutCancel(runCtx), grant, result, launchErr)
 		return
 	}
-	// 启动成功不等于任务完成：工作流执行记录在后台推进，名额由它自己占用。
-	// 只有确实没有启动工作流时才由调度器释放租约。
+	// 启动成功不等于任务完成：工作流执行记录在后台推进并继续持有执行权。
+	// 只有确实没有启动工作流时才由调度器释放它。
 	if !result.WorkflowStarted {
-		if releaseErr := s.leases.Release(context.WithoutCancel(runCtx), claim.Handle); releaseErr != nil {
-			s.logger.WarnContext(
-				runCtx,
-				"启动未建立工作流时释放任务租约失败，名额将受租约有效期约束",
-				slog.String("task_id", claim.Handle.TaskID.String()),
-				slog.String("error", errorSummary(releaseErr)),
-			)
-		}
+		s.coordination.Release(grant)
 		return
 	}
 	s.logger.InfoContext(
 		context.WithoutCancel(runCtx),
 		"调度器已启动任务工作流",
-		slog.String("task_id", claim.Handle.TaskID.String()),
+		slog.String("task_id", grant.TaskID().String()),
 		slog.String("stage", result.Stage.String()),
 		slog.String("status", string(result.TaskStatus)),
 	)
@@ -680,53 +618,42 @@ func (s *TaskScheduler) run(claim TaskClaim) {
 // settleFailedDispatch 处理启动失败的分派。
 //
 // 语义固定为：
-//   - 服务停止导致的取消不释放租约：无法确认远程操作是否已经发生，盲目释放会让其他
-//     执行者在未知现场上重放，租约按有效期自然过期；
-//   - 其他失败释放本次领取的租约，并记录真实失败阶段；释放失败必须如实报告，
-//     不得伪造"名额已空出"。
+//   - 服务停止导致的取消不推进任务状态：无法确认远程操作是否已经发生，因此按进程中断
+//     处理并记录需要人工核验的事件，不重放任何外部操作；
+//   - 任何失败都释放本次分派的执行权：启动是同步的，函数返回时本地流程已经停止；释放
+//     进程内登记不会让其他入口重放未确认的远程操作，数据库现场由启动恢复收敛。
 func (s *TaskScheduler) settleFailedDispatch(
 	ctx context.Context,
-	handle domain.TaskLeaseHandle,
+	grant TaskExecutionGrant,
 	result TaskLaunchResult,
 	cause error,
 ) {
+	defer s.coordination.Release(grant)
 	if s.isServiceStop(cause) {
 		s.logger.InfoContext(
 			ctx,
-			"调度器停止导致启动中断，保留租约等待自然过期",
-			slog.String("task_id", handle.TaskID.String()),
+			"调度器停止导致启动中断，按进程中断现场处理",
+			slog.String("task_id", grant.TaskID().String()),
 			slog.String("stage", result.Stage.String()),
 			slog.String("error", errorSummary(cause)),
 		)
-		s.appendEvent(ctx, handle.TaskID, domain.EventTypeTaskRecoveryRequired, map[string]any{
-			"stage":       "scheduler_dispatch",
-			"error_class": "scheduler_interrupted",
-			"summary":     "服务停止中断了任务启动，租约保留至自然过期",
-			"owner":       handle.Owner,
-			"epoch":       handle.Epoch,
+		s.appendEvent(ctx, grant.TaskID(), domain.EventTypeTaskRecoveryRequired, map[string]any{
+			"stage":         "scheduler_dispatch",
+			"error_class":   "scheduler_interrupted",
+			"summary":       "服务停止中断了任务启动，现场需要人工核验后再重新开始",
+			"recovery_auto": false,
 		})
 		return
 	}
-	s.appendEvent(ctx, handle.TaskID, domain.EventTypeTaskFailed, map[string]any{
+	s.appendEvent(ctx, grant.TaskID(), domain.EventTypeTaskFailed, map[string]any{
 		"stage":         "scheduler_dispatch",
 		"failure_stage": result.FailureStage,
 		"summary":       errorSummary(cause),
-		"owner":         handle.Owner,
-		"epoch":         handle.Epoch,
 	})
-	if releaseErr := s.leases.Release(ctx, handle); releaseErr != nil {
-		s.logger.WarnContext(
-			ctx,
-			"启动失败后释放任务租约失败，名额将受租约有效期约束",
-			slog.String("task_id", handle.TaskID.String()),
-			slog.String("error", errorSummary(releaseErr)),
-		)
-		return
-	}
 	s.logger.InfoContext(
 		ctx,
-		"启动失败后已释放任务租约",
-		slog.String("task_id", handle.TaskID.String()),
+		"启动失败后已释放任务执行权",
+		slog.String("task_id", grant.TaskID().String()),
 		slog.String("failure_stage", result.FailureStage),
 		slog.String("error", errorSummary(cause)),
 	)
@@ -742,46 +669,6 @@ func (s *TaskScheduler) isServiceStop(err error) bool {
 		errors.Is(err, ErrStepExecutorStopped) ||
 		errors.Is(err, context.Canceled) ||
 		errors.Is(err, ErrSchedulerStopped)
-}
-
-// startLeaseHeartbeat 在启动期间周期性续租，返回停止函数。
-func (s *TaskScheduler) startLeaseHeartbeat(
-	ctx context.Context,
-	handle domain.TaskLeaseHandle,
-) func() {
-	interval := s.leases.RenewInterval()
-	if interval <= 0 {
-		return func() {}
-	}
-	stop := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if err := s.leases.Renew(ctx, handle); err != nil {
-					s.logger.WarnContext(
-						ctx,
-						"调度器任务租约续期失败，停止推进",
-						slog.String("task_id", handle.TaskID.String()),
-						slog.String("error", errorSummary(err)),
-					)
-					return
-				}
-			}
-		}
-	}()
-	return func() {
-		close(stop)
-		<-done
-	}
 }
 
 // appendEvent 追加调度事件，失败只记录日志。

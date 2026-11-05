@@ -123,7 +123,7 @@ func (rt *router) routes() []apiRoute {
 		"代码保存恢复服务未初始化",
 	)
 	launchService := rt.availabilityGuard(
-		rt.taskLaunch.launch != nil && rt.taskLaunch.leases != nil,
+		rt.taskLaunch.launch != nil,
 		"任务启动服务未初始化",
 	)
 	retryService := rt.availabilityGuard(
@@ -131,7 +131,7 @@ func (rt *router) routes() []apiRoute {
 		"任务重试服务未初始化",
 	)
 	workflowService := rt.availabilityGuard(
-		rt.workflow.workflow != nil && rt.workflow.leases != nil,
+		rt.workflow.workflow != nil,
 		"工作流编排服务未初始化",
 	)
 
@@ -521,7 +521,7 @@ func (rt *router) routes() []apiRoute {
 			methodNotAllowed: "该接口只支持 POST 请求",
 		},
 
-		// 任务级工作流与计划生成：编排器与任务租约都装配后才能执行。
+		// 任务级工作流与计划生成：编排器装配后才能执行。
 		{
 			pattern:          matchTask + "/" + planSegment,
 			methods:          post(rt.workflow.plan),

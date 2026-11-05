@@ -14,7 +14,7 @@ import (
 // 因此该端口不会成为第二条容器或 SSH 调用链。
 //
 // 它同时是释放路径的唯一测试缝隙：生产装配由 planningRuntimeContainerRelease 包装
-// ContainerService 提供，测试可以注入受控替身来观察"租约冲突时是否真的进入远程删除"。
+// ContainerService 提供，测试可以注入受控替身来观察"会话锁被占用时是否真的进入远程删除"。
 type PlanningRuntimeReleasePort interface {
 	// LoadExecutionHost 读取规划会话绑定的执行节点。
 	LoadExecutionHost(ctx context.Context, hostID string) (domain.ExecutionHost, error)

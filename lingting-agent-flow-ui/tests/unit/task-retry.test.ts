@@ -62,8 +62,6 @@ function eligibility(overrides: Partial<RetryEligibilityResponse> = {}): RetryEl
 /** 一份重试响应样本，字段与 Go 端 `httpapi.RetryTaskResponse` 一致 */
 function retryResponse(overrides: Partial<RetryTaskResponse> = {}): RetryTaskResponse {
   return {
-    lease_epoch: 3,
-    lease_owner: "retry-1",
     previous_status: "failed",
     result: undefined,
     task_id: "task-1",
@@ -396,7 +394,7 @@ describe("重试操作可用性", () => {
 });
 
 describe("重试结果展示", () => {
-  it("workflow_started=true 时展示真实任务状态、执行记录与执行代次", () => {
+  it("workflow_started=true 时展示真实任务状态与执行记录", () => {
     const outcome = describeRetryResult(
       retryResponse({
         run: sampleRun() as unknown as RetryTaskResponse["run"],
@@ -409,7 +407,6 @@ describe("重试结果展示", () => {
     expect(outcome.title).toContain("启动工作流");
     expect(outcome.details.join("｜")).toContain("失败 → 当前 开发中");
     expect(outcome.details.join("｜")).toContain("run-1");
-    expect(outcome.details.join("｜")).toContain("执行代次：3");
     // 执行记录里的工作流状态与页面标签同源，不出现原始取值 running
     expect(outcome.details.join("｜")).toContain("（执行中，已完成 0 / 2 步）");
     expect(outcome.details.join("｜")).not.toContain("（running，");

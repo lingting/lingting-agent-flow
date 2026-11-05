@@ -4,8 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"strings"
-	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage"
@@ -14,11 +12,11 @@ import (
 // workflowRunColumns 是工作流执行表的完整列顺序。
 const workflowRunColumns = `id, task_id, plan_digest, status, stage, current_step_id,
 	current_attempt_id, last_completed_step_id, last_completed_sequence, completed_steps,
-	total_steps, cancel_requested, cancel_requested_at, worker_id, lease_expires_at,
+	total_steps, cancel_requested, cancel_requested_at,
 	error_class, error_summary, revision, started_at, finished_at, created_at, updated_at`
 
 // workflowRunInsertCount 是写入执行记录时的参数个数。
-const workflowRunInsertCount = 22
+const workflowRunInsertCount = 20
 
 // workflowRunActivePredicate 是"未结束执行记录"的判定条件。
 //
@@ -66,8 +64,6 @@ func (s workflowRunStore) CreateWorkflowRun(
 		run.TotalSteps,
 		toBoolInt(run.CancelRequested),
 		toMillisPtr(run.CancelRequestedAt),
-		sqlNullString(run.WorkerID),
-		toMillisPtr(run.LeaseExpiresAt),
 		sqlNullString(run.ErrorClass),
 		sqlNullString(run.ErrorSummary),
 		run.Revision,
@@ -97,8 +93,8 @@ func (s workflowRunStore) UpdateWorkflowRun(
 UPDATE workflow_runs SET
 	plan_digest = ?, status = ?, stage = ?, current_step_id = ?, current_attempt_id = ?,
 	last_completed_step_id = ?, last_completed_sequence = ?, completed_steps = ?,
-	total_steps = ?, cancel_requested = ?, cancel_requested_at = ?, worker_id = ?,
-	lease_expires_at = ?, error_class = ?, error_summary = ?, revision = revision + 1,
+	total_steps = ?, cancel_requested = ?, cancel_requested_at = ?,
+	error_class = ?, error_summary = ?, revision = revision + 1,
 	started_at = ?, finished_at = ?, updated_at = ?
 WHERE id = ? AND revision = ?`
 	result, err := s.q.ExecContext(
@@ -115,8 +111,6 @@ WHERE id = ? AND revision = ?`
 		run.TotalSteps,
 		toBoolInt(run.CancelRequested),
 		toMillisPtr(run.CancelRequestedAt),
-		sqlNullString(run.WorkerID),
-		toMillisPtr(run.LeaseExpiresAt),
 		sqlNullString(run.ErrorClass),
 		sqlNullString(run.ErrorSummary),
 		toMillisPtr(run.StartedAt),
@@ -211,57 +205,6 @@ func (s workflowRunStore) ListUnfinishedWorkflowRuns(
 	return s.queryRuns(ctx, statement)
 }
 
-// RenewWorkflowRunLease 在"仍是同一个执行者且仍在 running"时延长租约。
-//
-// 条件更新的三个前置条件是续租的全部正确性依据：
-//   - status = 'running'：已停止、已取消或已完成的记录不得被后台心跳重新延长租约；
-//   - worker_id = ?：执行权已转移给其他进程时，原执行者必须认为自己的执行权已丢失；
-//   - lease_expires_at IS NOT NULL：没有租约的记录本来就不持有执行权。
-//
-// 只写 lease_expires_at 与 updated_at，不改状态、不推进 revision：续租不是一次
-// 状态迁移，推进版本号会让正常推进的写入因版本冲突而失败。
-func (s workflowRunStore) RenewWorkflowRunLease(
-	ctx context.Context,
-	request storage.WorkflowRunLeaseRenewRequest,
-) error {
-	if err := request.RunID.Validate(); err != nil {
-		return err
-	}
-	workerID := strings.TrimSpace(request.WorkerID)
-	if workerID == "" {
-		return wrapError(
-			"延长执行权",
-			errors.Join(storage.ErrInvalidData, errors.New("执行者标识不能为空")),
-		)
-	}
-	at := request.At
-	if at.IsZero() {
-		at = time.Now().UTC()
-	}
-	if request.LeaseExpiresAt.IsZero() || !request.LeaseExpiresAt.After(at) {
-		return wrapError(
-			"延长执行权",
-			errors.Join(storage.ErrInvalidData, errors.New("新的租约到期时间必须晚于当前时间")),
-		)
-	}
-	const statement = `UPDATE workflow_runs
-		SET lease_expires_at = ?, updated_at = ?
-		WHERE id = ? AND status = ? AND worker_id = ? AND lease_expires_at IS NOT NULL`
-	result, err := s.q.ExecContext(
-		ctx,
-		statement,
-		toMillis(request.LeaseExpiresAt),
-		toMillis(at),
-		toIDParam(request.RunID),
-		string(domain.WorkflowRunRunning),
-		workerID,
-	)
-	if err != nil {
-		return wrapError("延长执行权", err)
-	}
-	return ensureStatusAffected(result, "执行记录", request.RunID)
-}
-
 // queryRuns 执行查询并扫描全部执行记录。
 func (s workflowRunStore) queryRuns(
 	ctx context.Context,
@@ -304,8 +247,6 @@ func scanWorkflowRun(scanner interface {
 		lastStep        sql.NullString
 		cancelRequested int64
 		cancelRequestAt sql.NullInt64
-		workerID        sql.NullString
-		leaseExpiresAt  sql.NullInt64
 		errorClass      sql.NullString
 		errorSummary    sql.NullString
 		startedAt       sql.NullInt64
@@ -327,8 +268,6 @@ func scanWorkflowRun(scanner interface {
 		&run.TotalSteps,
 		&cancelRequested,
 		&cancelRequestAt,
-		&workerID,
-		&leaseExpiresAt,
 		&errorClass,
 		&errorSummary,
 		&run.Revision,
@@ -349,8 +288,6 @@ func scanWorkflowRun(scanner interface {
 	run.LastCompletedStepID = fromIDPtr(lastStep)
 	run.CancelRequested = cancelRequested != 0
 	run.CancelRequestedAt = fromMillisPtr(cancelRequestAt)
-	run.WorkerID = workerID.String
-	run.LeaseExpiresAt = fromMillisPtr(leaseExpiresAt)
 	run.ErrorClass = errorClass.String
 	run.ErrorSummary = errorSummary.String
 	run.StartedAt = fromMillisPtr(startedAt)

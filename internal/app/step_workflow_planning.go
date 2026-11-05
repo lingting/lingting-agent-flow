@@ -25,7 +25,7 @@ type ExecutePlanningRequest struct {
 	// Grant 是本次执行持有的任务执行权凭据。
 	//
 	// 它只由应用层内部使用，不通过 HTTP 请求体暴露。
-	Grant *WorkflowExecutionGrant
+	Grant *TaskExecutionGrant
 }
 
 // ExecutePlanningResult 是一次规划阶段执行的结果。
@@ -104,6 +104,20 @@ func (s *StepWorkflowService) ExecutePlanning(
 			domain.StepTypePlan,
 		)
 	}
+	// 规划执行同样在任务执行权下进行：同一任务不会被另一个入口同时推进。
+	grant, ownsGrant, grantErr := acquireTaskGrant(
+		s.coordination,
+		task.ID,
+		request.Grant,
+		ErrStepExecutionConflict,
+	)
+	if grantErr != nil {
+		return ExecutePlanningResult{}, grantErr
+	}
+	if ownsGrant {
+		defer s.coordination.Release(grant)
+	}
+	request.Grant = &grant
 	prompt, err := stepExecutionPrompt(task, step, request.Prompt)
 	if err != nil {
 		return ExecutePlanningResult{}, err

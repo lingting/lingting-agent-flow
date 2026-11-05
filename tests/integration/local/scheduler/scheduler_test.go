@@ -26,16 +26,16 @@ import (
 
 // schedulerFixture 是一套调度器测试现场。
 type schedulerFixture struct {
-	ctx       context.Context
-	db        *sqlite.DB
-	path      string
-	now       time.Time
-	logger    *logging.Logger
-	leases    *app.TaskLeaseService
-	workspace *testkit.Workspace
+	ctx         context.Context
+	db          *sqlite.DB
+	path        string
+	now         time.Time
+	logger      *logging.Logger
+	coordinator *app.TaskExecutionCoordinator
+	workspace   *testkit.Workspace
 }
 
-// newSchedulerFixture 在工作空间中创建数据库与租约服务。
+// newSchedulerFixture 在工作空间中创建数据库与执行协调器。
 func newSchedulerFixture(t *testing.T) *schedulerFixture {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -55,21 +55,15 @@ func newSchedulerFixture(t *testing.T) *schedulerFixture {
 			t.Errorf("关闭数据库失败: %v", closeErr)
 		}
 	})
-	leases, err := app.NewTaskLeaseService(app.TaskLeaseOptions{
-		Store:  db,
-		Logger: logger.Slog(),
-	})
-	if err != nil {
-		t.Fatalf("构造任务租约服务失败: %v", err)
-	}
+	coordinator := app.NewTaskExecutionCoordinator()
 	return &schedulerFixture{
-		ctx:       ctx,
-		db:        db,
-		path:      path,
-		now:       time.Now().UTC(),
-		logger:    logger,
-		leases:    leases,
-		workspace: workspace,
+		ctx:         ctx,
+		db:          db,
+		path:        path,
+		now:         time.Now().UTC(),
+		logger:      logger,
+		coordinator: coordinator,
+		workspace:   workspace,
 	}
 }
 
@@ -135,11 +129,11 @@ func (f *schedulerFixture) task(t *testing.T, id domain.ID) domain.Task {
 	return *task
 }
 
-// leaseRecorder 是统一启动端口的受控替身。
+// dispatchRecorder 是统一启动端口的受控替身。
 //
-// 它记录被启动的任务与顺序，并可按任务注入失败：调度器的候选筛选、领取、名额统计
-// 与释放全部是生产代码，替身只替换"容器准备 / 计划生成 / 工作流启动"这一段。
-type leaseRecorder struct {
+// 它记录被启动的任务与顺序，并可按任务注入失败：调度器的候选筛选、执行权登记、名额
+// 统计与释放全部是生产代码，替身只替换"容器准备 / 计划生成 / 工作流启动"这一段。
+type dispatchRecorder struct {
 	mu sync.Mutex
 	// launched 是按调用顺序记录的任务标识。
 	launched []domain.ID
@@ -154,7 +148,7 @@ type leaseRecorder struct {
 }
 
 // Launch 记录一次启动并返回受控结果。
-func (r *leaseRecorder) Launch(
+func (r *dispatchRecorder) Launch(
 	ctx context.Context,
 	request app.TaskLaunchRequest,
 ) (app.TaskLaunchResult, error) {
@@ -198,14 +192,14 @@ func (r *leaseRecorder) Launch(
 }
 
 // launchedOrder 返回启动顺序的快照。
-func (r *leaseRecorder) launchedOrder() []domain.ID {
+func (r *dispatchRecorder) launchedOrder() []domain.ID {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]domain.ID(nil), r.launched...)
 }
 
 // launchedCount 返回启动调用次数。
-func (r *leaseRecorder) launchedCount() int {
+func (r *dispatchRecorder) launchedCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.launched)
@@ -220,7 +214,7 @@ func (f *schedulerFixture) newScheduler(
 	t.Helper()
 	scheduler, err := app.NewTaskScheduler(app.TaskSchedulerOptions{
 		Store:              f.db,
-		Leases:             f.leases,
+		Coordination:       f.coordinator,
 		Launch:             launch,
 		MaxConcurrentTasks: limit,
 		// 扫描间隔拉长：Start 会立即扫描一次，之后不再自动扫描，用例可以显式
@@ -271,7 +265,7 @@ func TestSchedulerDispatchesInQueueOrder(t *testing.T) {
 	normalEarlier := fixture.queuedTask(t, domain.PriorityNormal, base.Add(time.Second))
 	high := fixture.queuedTask(t, domain.PriorityHigh, base.Add(3*time.Second))
 
-	recorder := &leaseRecorder{workflowStarted: true}
+	recorder := &dispatchRecorder{workflowStarted: true}
 	fixture.newScheduler(t, 4, recorder)
 	waitFor(t, 10*time.Second, func() bool {
 		return recorder.launchedCount() == 4
@@ -337,7 +331,7 @@ func TestSchedulerRespectsConcurrencyLimit(t *testing.T) {
 		))
 	}
 	block := make(chan struct{})
-	recorder := &leaseRecorder{
+	recorder := &dispatchRecorder{
 		workflowStarted: true,
 		block:           block,
 		started:         make(chan domain.ID, 8),
@@ -360,16 +354,15 @@ func TestSchedulerRespectsConcurrencyLimit(t *testing.T) {
 	if count := recorder.launchedCount(); count != 2 {
 		t.Fatalf("并发上限为 2 时不得领取更多任务，实际 %d", count)
 	}
-	// 领取窗口占名额：两个任务都有有效租约，即使工作流尚未建立。
+	// 在途分派占名额：两个任务都已由本进程登记为在途执行。
 	occupied := 0
 	for _, task := range tasks {
-		stored := fixture.task(t, task.ID)
-		if stored.LeaseActive(fixture.now) {
+		if fixture.coordinator.Held(task.ID) {
 			occupied++
 		}
 	}
 	if occupied != 2 {
-		t.Fatalf("领取窗口必须占用名额，实际持有租约的任务 %d 个", occupied)
+		t.Fatalf("在途分派必须占用名额，实际持有执行权的任务 %d 个", occupied)
 	}
 	close(block)
 	waitFor(t, 10*time.Second, func() bool {
@@ -377,15 +370,18 @@ func TestSchedulerRespectsConcurrencyLimit(t *testing.T) {
 	}, "在途分派应收敛")
 }
 
-// TestSchedulerResumesAfterSlotReleased 验证名额释放后继续处理队列。
-func TestSchedulerResumesAfterSlotReleased(t *testing.T) {
+// TestSchedulerResumesAfterDispatchCompletes 验证名额释放后继续处理队列。
+//
+// 名额由"仍在推进的执行"与调度器自己的在途分派共同占用：替身声明本次启动没有建立
+// 工作流时，调度器在启动结束后释放执行权，下一次扫描应继续分派下一个候选。
+func TestSchedulerResumesAfterDispatchCompletes(t *testing.T) {
 	t.Parallel()
 	fixture := newSchedulerFixture(t)
 	base := fixture.now.Add(-time.Hour)
 	first := fixture.queuedTask(t, domain.PriorityHigh, base)
 	second := fixture.queuedTask(t, domain.PriorityNormal, base.Add(time.Second))
 
-	recorder := &leaseRecorder{workflowStarted: true}
+	recorder := &dispatchRecorder{}
 	scheduler := fixture.newScheduler(t, 1, recorder)
 	waitFor(t, 10*time.Second, func() bool {
 		return recorder.launchedCount() == 1
@@ -393,61 +389,43 @@ func TestSchedulerResumesAfterSlotReleased(t *testing.T) {
 	if recorder.launchedOrder()[0] != first.ID {
 		t.Fatalf("应先分派高优先级任务，实际 %s", recorder.launchedOrder()[0])
 	}
-	// 第一个任务的工作流已经建立（替身声明已启动），但它的租约仍由工作流持有；
-	// 显式释放它模拟"工作流结束"，名额随即释放。
 	waitFor(t, 10*time.Second, func() bool {
 		return scheduler.ActiveDispatches() == 0
 	}, "首个分派应收敛")
-	stored := fixture.task(t, first.ID)
-	if !stored.LeaseActive(fixture.now) {
-		// 替身声明工作流已启动，调度器不得提前释放租约。
-		t.Fatal("工作流启动后调度器不得提前释放任务租约")
-	}
-	handle := domain.TaskLeaseHandle{
-		TaskID: stored.ID,
-		Owner:  stored.LeaseOwner,
-		Epoch:  stored.LeaseEpoch,
-	}
-	if err := fixture.leases.Release(fixture.ctx, handle); err != nil {
-		t.Fatalf("释放首个任务的租约失败: %v", err)
-	}
-	// 名额释放后下一次扫描应领取下一个候选。第一个任务的状态仍是 queued（替身没有
-	// 推进状态），因此它依然通过准入并排在最前——这正是"先到先服务"的体现。
+	// 名额释放后下一次扫描应继续处理队列。
 	if err := scheduler.Scan(fixture.ctx); err != nil {
 		t.Fatalf("第二次扫描失败: %v", err)
 	}
 	waitFor(t, 10*time.Second, func() bool {
 		return recorder.launchedCount() == 2
-	}, fmt.Sprintf("名额释放后应继续处理队列（实际启动 %d 次，首个任务 %+v，第二个任务 %+v）",
-		recorder.launchedCount(), fixture.task(t, first.ID), fixture.task(t, second.ID)))
+	}, fmt.Sprintf("名额释放后应继续处理队列（实际启动 %d 次）", recorder.launchedCount()))
 	if recorder.launchedOrder()[1] != first.ID {
 		t.Fatalf("释放名额后应再次分派队列首位任务，实际 %s", recorder.launchedOrder()[1])
 	}
 	_ = second
 }
 
-// TestSchedulerReleasesLeaseOnLaunchFailure 验证启动失败释放自己的租约。
-func TestSchedulerReleasesLeaseOnLaunchFailure(t *testing.T) {
+// TestSchedulerReleasesExecutionOnLaunchFailure 验证启动失败释放自己的执行权。
+func TestSchedulerReleasesExecutionOnLaunchFailure(t *testing.T) {
 	t.Parallel()
 	fixture := newSchedulerFixture(t)
 	base := fixture.now.Add(-time.Hour)
 	task := fixture.queuedTask(t, domain.PriorityNormal, base)
 	failure := errors.New("容器准备失败")
-	recorder := &leaseRecorder{
-		workflowStarted: true,
-		failures:        map[domain.ID]error{task.ID: failure},
+	recorder := &dispatchRecorder{
+		failures: map[domain.ID]error{task.ID: failure},
 	}
 	scheduler := fixture.newScheduler(t, 2, recorder)
 	waitFor(t, 10*time.Second, func() bool {
 		return scheduler.ActiveDispatches() == 0 && recorder.launchedCount() == 1
 	}, "失败分派应收敛")
-	stored := fixture.task(t, task.ID)
-	if stored.LeaseActive(fixture.now) {
-		t.Fatalf("启动失败后必须释放租约，实际仍持有: %+v", stored)
+	// 执行权必须已经释放：下一次扫描可以再次尝试同一个候选（它仍是 queued）。
+	if err := scheduler.Scan(fixture.ctx); err != nil {
+		t.Fatalf("第二次扫描失败: %v", err)
 	}
-	if stored.LeaseOwner != "" {
-		t.Fatalf("释放后不得留下 owner: %+v", stored)
-	}
+	waitFor(t, 10*time.Second, func() bool {
+		return recorder.launchedCount() == 2
+	}, "执行权释放后应可以再次尝试该候选")
 	// 失败必须留下可追溯事件，且不得把任务写成完成。
 	events, err := fixture.db.ListEventsByTask(fixture.ctx, task.ID, storage.EventFilter{})
 	if err != nil {
@@ -462,29 +440,26 @@ func TestSchedulerReleasesLeaseOnLaunchFailure(t *testing.T) {
 	if !failed {
 		t.Fatal("启动失败必须追加可追溯的失败事件")
 	}
+	stored := fixture.task(t, task.ID)
 	if stored.Status != domain.TaskStatusQueued {
 		t.Fatalf("启动失败不得推进任务状态，实际 %s", stored.Status)
 	}
 }
 
-// TestSchedulerKeepsLeaseOnStop 验证服务停止不释放无法确认的租约。
-//
-// 服务停止与用户取消不同：无法确认远程操作是否已经发生，盲目释放租约会让其他执行者
-// 立刻在未知现场上重放，因此租约必须保留到自然过期。
-func TestSchedulerKeepsLeaseOnStop(t *testing.T) {
+// TestSchedulerStopsWithoutDispatching 验证服务停止后不再分派新任务。
+func TestSchedulerStopsWithoutDispatching(t *testing.T) {
 	t.Parallel()
 	fixture := newSchedulerFixture(t)
 	base := fixture.now.Add(-time.Hour)
 	task := fixture.queuedTask(t, domain.PriorityNormal, base)
 	block := make(chan struct{})
-	recorder := &leaseRecorder{
-		workflowStarted: true,
-		block:           block,
-		started:         make(chan domain.ID, 4),
+	recorder := &dispatchRecorder{
+		block:   block,
+		started: make(chan domain.ID, 4),
 	}
 	scheduler, err := app.NewTaskScheduler(app.TaskSchedulerOptions{
 		Store:              fixture.db,
-		Leases:             fixture.leases,
+		Coordination:       fixture.coordinator,
 		Launch:             recorder,
 		MaxConcurrentTasks: 1,
 		ScanInterval:       time.Hour,
@@ -503,26 +478,22 @@ func TestSchedulerKeepsLeaseOnStop(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("等待分派启动超时")
 	}
-	// 服务停止：在途启动被取消，但租约必须保留到自然过期——无法确认远程操作是否
-	// 已经发生，盲目释放会让其他执行者在未知现场上重放。
+	// 服务停止：在途启动被取消，之后不再领取新任务。
 	stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := scheduler.Stop(stopCtx); err != nil {
 		t.Fatalf("停止调度器失败: %v", err)
 	}
 	close(block)
-	stored := fixture.task(t, task.ID)
-	if !stored.LeaseActive(fixture.now) {
-		t.Fatalf("服务停止后不得释放无法确认的租约: %+v", stored)
-	}
-	// 停止后不再领取新任务。
 	second := fixture.queuedTask(t, domain.PriorityNormal, base.Add(time.Second))
 	if scanErr := scheduler.Scan(fixture.ctx); !errors.Is(scanErr, app.ErrSchedulerStopped) {
 		t.Fatalf("停止后的扫描必须返回已停止，实际 %v", scanErr)
 	}
-	if after := fixture.task(t, second.ID); after.LeaseOwner != "" {
-		t.Fatal("停止后不得领取新任务")
+	if recorder.launchedCount() != 1 {
+		t.Fatalf("停止后不得分派新任务，实际启动 %d 次", recorder.launchedCount())
 	}
+	_ = task
+	_ = second
 }
 
 // TestSchedulerSkipsFailedAndPausedTasks 验证非 queued 任务不会被自动领取。
@@ -564,7 +535,7 @@ func TestSchedulerSkipsFailedAndPausedTasks(t *testing.T) {
 		}
 	}
 
-	recorder := &leaseRecorder{workflowStarted: true}
+	recorder := &dispatchRecorder{workflowStarted: true}
 	fixture.newScheduler(t, 4, recorder)
 	waitFor(t, 10*time.Second, func() bool {
 		return recorder.launchedCount() == 1
@@ -572,89 +543,11 @@ func TestSchedulerSkipsFailedAndPausedTasks(t *testing.T) {
 	if recorder.launchedOrder()[0] != queued.ID {
 		t.Fatalf("被分派的任务不符: %s", recorder.launchedOrder()[0])
 	}
-	// 非 queued 任务不得被写入任何租约。
+	// 非 queued 任务不得取得任何执行权。
 	for _, item := range []domain.Task{failedTask, pausedTask} {
-		if stored := fixture.task(t, item.ID); stored.LeaseOwner != "" {
-			t.Fatalf("状态 %s 的任务不得被自动领取: %+v", stored.Status, stored)
+		if fixture.coordinator.Held(item.ID) {
+			t.Fatalf("状态 %s 的任务不得被自动领取", item.Status)
 		}
-	}
-}
-
-// TestTwoSchedulersCannotClaimSameTask 验证两个调度器实例不会重复领取同一任务。
-func TestTwoSchedulersCannotClaimSameTask(t *testing.T) {
-	t.Parallel()
-	fixture := newSchedulerFixture(t)
-	base := fixture.now.Add(-time.Hour)
-	task := fixture.queuedTask(t, domain.PriorityNormal, base)
-
-	// 两个调度器共享同一数据库，但各自持有独立连接：领取互斥必须来自数据库。
-	other, err := sqlite.Open(fixture.ctx, sqlite.Options{Path: fixture.path})
-	if err != nil {
-		t.Fatalf("打开第二个数据库连接失败: %v", err)
-	}
-	t.Cleanup(func() {
-		if closeErr := other.Close(); closeErr != nil {
-			t.Errorf("关闭第二个连接失败: %v", closeErr)
-		}
-	})
-	otherLeases, err := app.NewTaskLeaseService(app.TaskLeaseOptions{
-		Store:  other,
-		Logger: fixture.logger.Slog(),
-	})
-	if err != nil {
-		t.Fatalf("构造第二个租约服务失败: %v", err)
-	}
-	block := make(chan struct{})
-	firstRecorder := &leaseRecorder{
-		workflowStarted: true,
-		block:           block,
-		started:         make(chan domain.ID, 4),
-	}
-	secondRecorder := &leaseRecorder{workflowStarted: true}
-	first := fixture.newScheduler(t, 1, firstRecorder)
-	second, err := app.NewTaskScheduler(app.TaskSchedulerOptions{
-		Store:              other,
-		Leases:             otherLeases,
-		Launch:             secondRecorder,
-		MaxConcurrentTasks: 1,
-		ScanInterval:       time.Hour,
-		StopTimeout:        10 * time.Second,
-		Logger:             fixture.logger.Slog(),
-		Now:                func() time.Time { return fixture.now },
-	})
-	if err != nil {
-		t.Fatalf("构造第二个调度器失败: %v", err)
-	}
-	// 第二个调度器不启动后台循环：Start 会立即扫描一次，可能抢在第一个之前领取，
-	// 使用例退化成"谁先启动谁赢"的时序竞争。这里只显式调用 Scan，验证的仍然是
-	// 数据库层的领取互斥。
-	t.Cleanup(func() {
-		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if stopErr := second.Stop(stopCtx); stopErr != nil {
-			t.Errorf("停止第二个调度器失败: %v", stopErr)
-		}
-	})
-
-	select {
-	case <-firstRecorder.started:
-	case <-time.After(10 * time.Second):
-		t.Fatal("等待第一个调度器分派超时")
-	}
-	// 第二个调度器此时扫描：租约已被第一个持有，不得重复领取。
-	if err := second.Scan(fixture.ctx); err != nil {
-		t.Fatalf("第二个调度器扫描失败: %v", err)
-	}
-	if count := secondRecorder.launchedCount(); count != 0 {
-		t.Fatalf("同一任务不得被第二个调度器重复领取，实际启动 %d 次", count)
-	}
-	close(block)
-	waitFor(t, 10*time.Second, func() bool {
-		return first.ActiveDispatches() == 0
-	}, "首个分派应收敛")
-	stored := fixture.task(t, task.ID)
-	if stored.LeaseEpoch != 1 {
-		t.Fatalf("同一任务只应领取一次，实际代次 %d", stored.LeaseEpoch)
 	}
 }
 
@@ -664,7 +557,7 @@ func TestSchedulerLeaseEventIsTraceable(t *testing.T) {
 	fixture := newSchedulerFixture(t)
 	base := fixture.now.Add(-time.Hour)
 	task := fixture.queuedTask(t, domain.PriorityNormal, base)
-	recorder := &leaseRecorder{workflowStarted: true}
+	recorder := &dispatchRecorder{workflowStarted: true}
 	fixture.newScheduler(t, 1, recorder)
 	waitFor(t, 10*time.Second, func() bool {
 		return recorder.launchedCount() == 1
@@ -682,42 +575,36 @@ func TestSchedulerLeaseEventIsTraceable(t *testing.T) {
 	if claimed < 1 {
 		t.Fatal("调度领取必须留下领取事件")
 	}
-	stored := fixture.task(t, task.ID)
-	if stored.LeaseEpoch < 1 {
-		t.Fatalf("领取后必须写入代次，实际 %d", stored.LeaseEpoch)
-	}
 }
 
-// TestSchedulerCountsExistingActiveTasks 验证已有活跃任务占用名额。
+// TestSchedulerCountsExistingActiveTasks 验证已有活跃执行占用名额。
 func TestSchedulerCountsExistingActiveTasks(t *testing.T) {
 	t.Parallel()
 	fixture := newSchedulerFixture(t)
 	base := fixture.now.Add(-time.Hour)
 	active := fixture.queuedTask(t, domain.PriorityHigh, base)
 	waiting := fixture.queuedTask(t, domain.PriorityNormal, base.Add(time.Second))
-	// 让已有任务持有有效租约：它占用一个名额，即使本进程没有在分派它。
-	handle, err := fixture.db.AcquireTaskLease(fixture.ctx, storage.TaskLeaseRequest{
-		TaskID:   active.ID,
-		Owner:    "external-worker",
-		TTL:      time.Hour,
-		Statuses: []domain.TaskStatus{domain.TaskStatusQueued},
-		At:       fixture.now,
-	})
+	// 让已有任务存在一条 running 的执行记录：它占用一个名额，即使本进程没有在分派它。
+	step := fixture.writeStep(t, active.ID, 1)
+	run, err := domain.NewWorkflowRun(active.ID, []domain.Step{step}, fixture.now)
 	if err != nil {
-		t.Fatalf("预置租约失败: %v", err)
+		t.Fatalf("构造执行记录失败: %v", err)
 	}
-	if handle.Epoch != 1 {
-		t.Fatalf("预置租约代次应为 1，实际 %d", handle.Epoch)
+	if err := run.Start(fixture.now); err != nil {
+		t.Fatalf("推进执行记录失败: %v", err)
 	}
-	recorder := &leaseRecorder{workflowStarted: true}
+	if err := fixture.db.CreateWorkflowRun(fixture.ctx, run); err != nil {
+		t.Fatalf("写入执行记录失败: %v", err)
+	}
+	recorder := &dispatchRecorder{workflowStarted: true}
 	fixture.newScheduler(t, 1, recorder)
-	// 给首次扫描留出完成时间：名额已被外部持有者占用，不得领取第二个任务。
+	// 给首次扫描留出完成时间：名额已被在途执行占用，不得分派第二个任务。
 	time.Sleep(200 * time.Millisecond)
 	if count := recorder.launchedCount(); count != 0 {
-		t.Fatalf("名额被占用时不得领取新任务，实际启动 %d 次", count)
+		t.Fatalf("名额被占用时不得分派新任务，实际启动 %d 次", count)
 	}
-	if stored := fixture.task(t, waiting.ID); stored.LeaseOwner != "" {
-		t.Fatalf("名额耗尽时不得写入租约: %+v", stored)
+	if fixture.coordinator.Held(waiting.ID) {
+		t.Fatal("名额耗尽时不得取得第二个任务的执行权")
 	}
 }
 
@@ -761,7 +648,7 @@ func TestSchedulerSkipsTaskWithActiveWorkflowRun(t *testing.T) {
 	if err := fixture.db.CreateWorkflowRun(fixture.ctx, run); err != nil {
 		t.Fatalf("写入执行记录失败: %v", err)
 	}
-	recorder := &leaseRecorder{workflowStarted: true}
+	recorder := &dispatchRecorder{workflowStarted: true}
 	fixture.newScheduler(t, 2, recorder)
 	// 给后台分派留出机会：如果错误地领取了，这里会观察到启动调用。
 	time.Sleep(200 * time.Millisecond)
@@ -776,8 +663,8 @@ func TestSchedulerRequiresPositiveLimit(t *testing.T) {
 	fixture := newSchedulerFixture(t)
 	_, err := app.NewTaskScheduler(app.TaskSchedulerOptions{
 		Store:              fixture.db,
-		Leases:             fixture.leases,
-		Launch:             &leaseRecorder{},
+		Coordination:       fixture.coordinator,
+		Launch:             &dispatchRecorder{},
 		MaxConcurrentTasks: 0,
 	})
 	if !errors.Is(err, app.ErrSchedulerInvalidConfig) {
@@ -789,7 +676,7 @@ func TestSchedulerRequiresPositiveLimit(t *testing.T) {
 func TestSchedulerStatusReportsLimit(t *testing.T) {
 	t.Parallel()
 	fixture := newSchedulerFixture(t)
-	scheduler := fixture.newScheduler(t, 3, &leaseRecorder{})
+	scheduler := fixture.newScheduler(t, 3, &dispatchRecorder{})
 	status := scheduler.Status()
 	if status.Limit != 3 {
 		t.Fatalf("状态上限不符: %d", status.Limit)
@@ -826,16 +713,12 @@ func (f *schedulerFixture) writeActiveRun(
 	t *testing.T,
 	task domain.Task,
 	steps []domain.Step,
-	workerID string,
-	expiresAt time.Time,
 ) domain.WorkflowRun {
 	t.Helper()
 	run, err := domain.NewWorkflowRun(task.ID, steps, f.now)
 	if err != nil {
 		t.Fatalf("构造执行记录失败: %v", err)
 	}
-	run.WorkerID = workerID
-	run.LeaseExpiresAt = &expiresAt
 	run.Status = domain.WorkflowRunRunning
 	if err := f.db.CreateWorkflowRun(f.ctx, run); err != nil {
 		t.Fatalf("写入执行记录失败: %v", err)

@@ -351,11 +351,12 @@ func newWorkflowFixture(t *testing.T, options workflowOptions) *workflowFixture 
 		after:  domain.GitWorktreeState{StatusRead: true, Branch: "agent/" + task.ID.String()},
 	}
 	executor, err := app.NewStepExecutor(app.StepExecutorOptions{
-		Store:      store,
-		Containers: containers,
-		Sessions:   sessions,
-		Git:        gitPort,
-		Logger:     logger.Slog(),
+		Store:        store,
+		Containers:   containers,
+		Sessions:     sessions,
+		Git:          gitPort,
+		Coordination: app.NewTaskExecutionCoordinator(),
+		Logger:       logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造步骤执行协调器失败: %v", err)
@@ -370,11 +371,12 @@ func newWorkflowFixture(t *testing.T, options workflowOptions) *workflowFixture 
 		t.Fatalf("构造验证引擎失败: %v", err)
 	}
 	service, err := app.NewStepWorkflowService(app.StepWorkflowOptions{
-		Steps:      executor,
-		Validation: validation,
-		Store:      workflowStore,
-		Cycles:     workflowCyclesOf(db),
-		Logger:     logger.Slog(),
+		Steps:        executor,
+		Validation:   validation,
+		Store:        workflowStore,
+		Cycles:       workflowCyclesOf(db),
+		Coordination: app.NewTaskExecutionCoordinator(),
+		Logger:       logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造闭环协调器失败: %v", err)
@@ -963,10 +965,11 @@ func TestWorkflowStopCancelsInFlightRun(t *testing.T) {
 	}
 	containers := &workflowContainerPort{running: true}
 	executor, err := app.NewStepExecutor(app.StepExecutorOptions{
-		Store:      db,
-		Containers: containers,
-		Sessions:   sessions,
-		Logger:     logger.Slog(),
+		Store:        db,
+		Containers:   containers,
+		Sessions:     sessions,
+		Coordination: app.NewTaskExecutionCoordinator(),
+		Logger:       logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造步骤执行协调器失败: %v", err)
@@ -981,11 +984,12 @@ func TestWorkflowStopCancelsInFlightRun(t *testing.T) {
 		t.Fatalf("构造验证引擎失败: %v", err)
 	}
 	service, err := app.NewStepWorkflowService(app.StepWorkflowOptions{
-		Steps:      executor,
-		Validation: validation,
-		Store:      db,
-		Cycles:     db,
-		Logger:     logger.Slog(),
+		Steps:        executor,
+		Validation:   validation,
+		Store:        db,
+		Cycles:       db,
+		Coordination: app.NewTaskExecutionCoordinator(),
+		Logger:       logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造闭环协调器失败: %v", err)

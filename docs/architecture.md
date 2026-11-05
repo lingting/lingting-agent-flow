@@ -58,10 +58,36 @@ HTTP 接口契约见 [http-api.md](http-api.md)；测试规范见 [testing.md](t
   `GET /api/v1/settings/config` 提供；接口不重新读取配置文件，也不暴露 SSH 路径、凭据或完整配置对象。
 - 配置变更只通过修改配置文件并重启服务生效，不提供编辑、保存、热更新或重启入口。
 
-## 数据与状态
+## 单进程运行模型与进程锁
 
+**同一份服务端数据目录只允许一个 Server 进程运行。**
+
+- `agentflow server` 在加载并校验配置之后、打开数据库之前，用数据库路径确定 sidecar 锁文件
+  `<database_path>.server.lock`，并以操作系统的独占文件锁（`github.com/gofrs/flock`）非阻塞获取。
+- 取得失败立即返回 `server.ErrServerAlreadyRunning`，错误信息给出锁文件路径并要求先停止已有服务端；
+  此时不会打开数据库，也不会启动任何后台服务。CLI 按原有错误处理路径返回非零退出码。
+- 锁文件路径由数据库路径的绝对规范路径派生：相对路径与引用同一数据库文件的不同配置得到同一个锁文件。
+  锁文件所在父目录会被创建，但不读取、不初始化数据库。
+- 锁覆盖整个 Server 运行期：数据库初始化、后台服务启动、HTTP 服务与后台执行都在持锁期间完成；
+  HTTP 关闭、后台服务收敛、数据库关闭之后才释放文件锁。释放只解除操作系统文件锁并关闭句柄，
+  **不删除锁文件**：删除后不同进程可能锁住不同 inode，互斥会失效。
+- 进程异常退出时锁由操作系统释放，不影响下一次启动；锁本身不证明远程命令已经停止，恢复规则见下文。
+
+由此带来的模型约束：
+
+- **不再支持多个 Server 进程共享同一份数据库**，也不存在跨进程的任务领取、执行权续租与接管。
+- 任务的执行权是**进程内事实**：`app.TaskExecutionCoordinator` 按任务标识登记在途执行，调度器、
+  显式启动、显式重试、单步骤执行、单步骤闭环与任务级工作流共用同一个实例，因此同一任务不会被两个
+  入口同时推进；不同任务之间完全并发。
+- 规划会话同理：`app.PlanningSessionCoordinator` 按规划会话串行化 `RunRole`、`Prepare` 与 `Release`，
+  不同会话之间保持隔离。
+- 环境构建的"节点 + 环境"互斥由共享的 `app.EnvironmentBuildLocks` 承担：HTTP 后台构建与任务启动中的
+  镜像准备使用同一个实例，同一环境版本不会被本进程并发构建。
+- CLI 的任务执行入口（`agentflow task run` 等）通过 HTTP 访问已有 Server，不需要也不允许再启动第二个
+  服务端。
+## 数据与状态
 - 数据库是唯一真相来源，关键状态迁移必须落库后再继续执行。
-- 任务领取使用事务与原子状态迁移，禁止“先查询、后更新”。
+- 任务执行权由服务端进程内的执行协调器按任务登记，数据库写入仍使用状态条件更新，禁止“先查询、后更新”。
 - 跨实体的关键状态更新必须在 `storage.Tx` 内完成，不能在应用层分多次调用独立方法后假定原子性。
 - 尝试序号由存储层在事务内分配（`storage.AttemptStore.StartAttempt`），禁止"先查最大值再无条件插入"；
   `NextAttemptNumber` 只用于展示与预估。
@@ -158,7 +184,7 @@ HTTP Handler（POST /api/v1/tasks/{taskID}/execute-steps）
 - 执行前必须校验前置步骤：全部序号更小的步骤处于 `completed` 或 `skipped` 才允许执行，
   否则返回 409。该规则只在 `domain` 中定义一次。
 - 失败、超时、取消与中断都会立即停止，不自动重试，也不自动执行验证与代码保存。
-- 同一任务的顺序执行在进程内以任务为键串行化，跨进程仍由步骤占用的事务条件更新拒绝。
+- 同一任务的顺序执行由进程内任务执行协调器按任务串行化；步骤占用的事务条件更新仍拒绝迟到的写入。
 - 入口固定为 `app.StepExecutor.ExecuteSteps`（`internal/app/step_sequence*.go`）：HTTP Handler 与 CLI
   不得自行串联步骤、自行判断"下一步该执行谁"，也不得跳过未完成的步骤。
 - 顺序执行按 `steps.sequence` 推进，不依赖数据库默认返回顺序；每次只执行一个 Step。
@@ -313,8 +339,8 @@ HTTP Handler（POST /api/v1/tasks/{taskID}/steps/{stepID}/execute-and-validate�
   终态；收口为可再次执行或终态时必须释放 `current_attempt_id`。
 - 闭环协调器作为 `agentflow server` 的后台服务注册进 `internal/lifecycle`，注册顺序在步骤执行与验证
   引擎之后，停止顺序因此反过来：先停止新请求入口，再让下层服务收敛。
-- 同一 Step 同一时刻只允许一条闭环：进程内以步骤为键拒绝重复请求，跨进程由步骤占用的事务条件更新
-  拒绝；重复与并发请求返回 409，不得启动第二个 Pi 进程。
+- 同一 Step 同一时刻只允许一条闭环：进程内以步骤为键拒绝重复请求，任务级入口由任务执行协调器
+  串行化；重复与并发请求返回 409，不得启动第二个 Pi 进程。
 - 未验证通过不得返回 200：响应必须如实区分开发结论、验证是否发起、验证结论与最终状态。接口契约见
   [http-api.md](http-api.md)。
 
@@ -344,8 +370,8 @@ HTTP Handler（POST /api/v1/tasks/{taskID}/steps/{stepID}/execute-and-validate�
 ### 当前能力边界
 
 - 闭环只覆盖单个 Step：不生成计划、不串联多个步骤、不自动重试、不自动修复代码。
-- 同一 Step 同一时刻只允许一条闭环：进程内以步骤为键拒绝重复请求，跨进程由步骤占用的事务
-  条件更新拒绝。
+- 同一 Step 同一时刻只允许一条闭环：进程内以步骤为键拒绝重复请求，任务级入口由任务执行协调器
+  串行化。
 - 任务级串联由"任务级工作流编排"负责，见下一节。
 
 ## 计划生成边界
@@ -358,7 +384,7 @@ HTTP Handler（POST /api/v1/tasks/{taskID}/plan → 200 + 真实结果）
         ├── domain.CheckPlanGenerationStart（状态 / 容器 / 无已落库步骤 / 已配置规划角色）
         ├── 未结束工作流检查 + 容器核验 + 执行节点预检
         ├── 规划角色与开发角色加载（类型必须匹配且启用）
-        ├── domain.TaskStatus.CanStartPlanning → planning（状态条件更新，跨进程闸门）
+        ├── domain.TaskStatus.CanStartPlanning → planning（状态条件更新）
         ├── app.SessionService.Start（任务级会话，无步骤与尝试归属）
         ├── app.ContainerService.RunAgent（容器内 Planner 调用）
         ├── app.SessionService.Finish（写入产出与归档）
@@ -374,7 +400,7 @@ HTTP Handler（POST /api/v1/tasks/{taskID}/plan → 200 + 真实结果）
   （绑定开发角色）。计划以规划阶段开头，因此任务级编排器可以"从 plan 启动"。
 - **Planner 调用成功不等于计划成功**：解析失败、校验失败或持久化失败都不会让任务进入
   `planned`，也不会留下半成品计划。
-- **并发**：`planning` 的状态条件更新是跨进程闸门；进程内另有任务级互斥锁作为第一道防线。
+- **并发**：计划生成入口由任务执行协调器按任务串行化，状态条件更新保证迟到的写入不会生效。
 - **失败收敛**：调用失败 / 超时 / 输出非法 / 校验失败 / 持久化失败 → `failed`；用户取消 →
   `cancelling` → `cancelled`；服务停止导致的中断 → `recovery_required`。
 - **启动恢复**：停留在 `planning` 的任务按持久化事实收敛——已有步骤 → `planned`，
@@ -414,7 +440,7 @@ HTTP Handler（POST /api/v1/tasks/{taskID}/execute-workflow → 202 + 真实初�
 | 工作流执行状态 | `workflow_runs.status` | 这一次编排执行是否在推进 |
 | 执行阶段 | `workflow_runs.stage` | 中断发生在哪一步（定位用，不参与成功判定） |
 | 执行游标 | `current_step_id` / `current_attempt_id` / `last_completed_step_id` / `last_completed_sequence` | 恢复的唯一依据 |
-| 执行权 | `worker_id` + `lease_expires_at` | 识别"进程已退出但记录仍在 running" |
+| 执行权 | 进程内任务执行协调器 | 记录本身只说明"上一次执行停在哪里"，不表达所有权 |
 | 并发版本 | `workflow_runs.revision` | 迟到结果不得覆盖已确认终态 |
 
 `workflow_runs.status` 与 `tasks.status` 是不同层次的概念，**不得合并为同一个字段**，也不得用
@@ -463,9 +489,10 @@ HTTP Handler（POST /api/v1/tasks/{taskID}/execute-workflow → 202 + 真实初�
 
 - **恢复**：`plan_digest` 必须与当前计划一致；已完成的步骤不会重新执行；`recovery_required` 与
   仍被占用的步骤必须先人工处理。恢复只从数据库已确认的进度继续。
-- **服务重启**：`running` 记录在租约过期后收敛为 `blocked`；租约仍有效时不得抢占；
-  `cancel_requested` 收敛为 `cancelled`；`pending` 记录在租约窗口后收敛为 `blocked`；
-  `blocked` 与 `recovery_required` 保持原状等待用户显式恢复。启动恢复**不重放 Pi 调用**。
+- **服务重启**：服务端只允许一个进程运行，因此启动阶段数据库中的 `running` 记录一定是上一个进程
+  退出时留下的现场：按进程中断收敛为 `blocked`；`cancel_requested` 收敛为 `cancelled`；`pending`
+  记录直接收敛为 `blocked`；`blocked` 与 `recovery_required` 保持原状等待用户显式恢复。启动恢复
+  **不重放 Pi 调用**。
 - **取消**：请求先写入 `cancel_requested`，再向在途执行传播取消信号，最终状态由真实收敛结果
   决定；重复取消幂等。不得因 HTTP 请求成功就把仍在执行的工作流标记为已取消。
 - **重启顺序**：服务重启后的处理严格依据数据库事实，顺序固定为：未结束的执行记录 → 计划生成现场 →
@@ -648,8 +675,8 @@ CodeSaver 缺失时编排器仍会按顺序执行并验证全部步骤，但收�
 
 - 不提供 `uncertain` 记录的只读核验入口：当前只能由人工在容器内确认后显式处理。
 - 不自动重试任一阶段，也不在失败后自动删除容器或重放外部操作。
-- 同一任务在进程内以任务为键串行；跨任务并发由调度器按 `scheduler.max_concurrent_tasks` 领取 `queued`
-  任务，跨进程仍由各阶段自身的条件更新与 `workflow_runs` 的部分唯一索引拒绝。
+- 同一任务由进程内任务执行协调器串行化；跨任务并发由调度器按 `scheduler.max_concurrent_tasks`
+  领取 `queued` 任务，`workflow_runs` 的部分唯一索引仍拒绝同一任务的第二条未结束执行记录。
 
 ## SSH 与执行节点边界
 

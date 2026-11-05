@@ -28,7 +28,7 @@ func writeCancelledRun(
 	if err != nil {
 		t.Fatalf("构造执行记录失败: %v", err)
 	}
-	if err := run.Start("dead-worker", time.Minute, fixture.now.Add(-time.Hour)); err != nil {
+	if err := run.Start(fixture.now.Add(-time.Hour)); err != nil {
 		t.Fatalf("登记执行权失败: %v", err)
 	}
 	if err := fixture.db.CreateWorkflowRun(fixture.ctx, run); err != nil {

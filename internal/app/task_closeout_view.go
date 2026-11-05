@@ -23,7 +23,6 @@ func (s *TaskService) TaskCloseoutViews(
 	if len(tasks) == 0 {
 		return views, nil
 	}
-	now := s.now()
 	for _, task := range tasks {
 		runs, err := s.store.ListWorkflowRunsByTask(ctx, task.ID)
 		if err != nil {
@@ -37,7 +36,6 @@ func (s *TaskService) TaskCloseoutViews(
 		views[task.ID] = domain.DecideTaskCloseoutView(domain.TaskCloseoutViewInput{
 			Task: task,
 			Run:  latest,
-			Now:  now,
 		})
 	}
 	return views, nil

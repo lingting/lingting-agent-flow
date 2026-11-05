@@ -31,6 +31,10 @@ type CodeFetchRecoveryStore interface {
 type CodeFetchRecoveryOptions struct {
 	// Store 是持久化入口，必填。
 	Store CodeFetchRecoveryStore
+	// Coordination 是任务执行的进程内协调器，必填。
+	//
+	// 残留收敛只在"本进程没有持有该任务执行权"时生效：服务端只允许一个进程运行。
+	Coordination *TaskExecutionCoordinator
 	// Logger 是日志器，为空时使用默认日志器。
 	Logger *slog.Logger
 	// Now 是可注入的时钟，零值使用当前时间。
@@ -48,9 +52,10 @@ type CodeFetchRecoveryOptions struct {
 // 收敛目标固定为 uncertain 而不是 failed：`pending` 与 `running` 都不能证明 Clone
 // 是否真的发生过，空 `commit_sha` 同样不是"未发生"的证据。
 type CodeFetchRecoveryService struct {
-	store  CodeFetchRecoveryStore
-	logger *slog.Logger
-	now    func() time.Time
+	store        CodeFetchRecoveryStore
+	coordination *TaskExecutionCoordinator
+	logger       *slog.Logger
+	now          func() time.Time
 }
 
 // NewCodeFetchRecoveryService 构造代码获取残留收敛服务。
@@ -60,6 +65,9 @@ func NewCodeFetchRecoveryService(
 	if options.Store == nil {
 		return nil, fmt.Errorf("代码获取残留收敛服务初始化失败: 存储不能为空")
 	}
+	if options.Coordination == nil {
+		return nil, fmt.Errorf("代码获取残留收敛服务初始化失败: 任务执行协调器不能为空")
+	}
 	logger := options.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -68,7 +76,12 @@ func NewCodeFetchRecoveryService(
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
 	}
-	return &CodeFetchRecoveryService{store: options.Store, logger: logger, now: now}, nil
+	return &CodeFetchRecoveryService{
+		store:        options.Store,
+		coordination: options.Coordination,
+		logger:       logger,
+		now:          now,
+	}, nil
 }
 
 // Name 返回后台服务名称。
@@ -81,7 +94,7 @@ func (s *CodeFetchRecoveryService) Name() string {
 // 任一条记录收敛失败都让启动失败：残留已落库时服务继续启动，会让一条无法解释的
 // 活动记录一直阻止该 Attempt 重新初始化，用户既看不到原因也无法自行处置。
 func (s *CodeFetchRecoveryService) Start(ctx context.Context) error {
-	live, err := liveExecutionTasks(ctx, s.store, s.now())
+	live, err := liveExecutionTasks(ctx, s.store, s.coordination)
 	if err != nil {
 		return err
 	}
@@ -134,7 +147,7 @@ func (s *CodeFetchRecoveryService) recoverRecord(
 		[]domain.CodeFetchStatus{previous},
 	); err != nil {
 		if errors.Is(err, storage.ErrConflict) {
-			// 另一个进程已经推进了该记录（例如迟到的 succeeded）：不是失败，
+			// 另一个入口或迟到的写入已经推进了该记录（例如 succeeded）：不是失败，
 			// 也不重复写入事件，绝不覆盖新结论。
 			return nil
 		}

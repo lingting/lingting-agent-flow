@@ -16,12 +16,12 @@ import (
 //
 // 职责边界：
 //   - 用领域规则（domain.DecideTaskRetryEligibility）判定重试资格，不在本层另写条件；
-//   - 用既有任务租约（TaskLeaseService.Claim）取得执行权，成功后把 failed 重开为
-//     preparing 并交接给既有统一启动流程（TaskLaunchService.Launch）；
+//   - 取得任务执行权后把 failed 重开为 preparing 并交接给既有统一启动流程
+//     （TaskLaunchService.Launch）；
 //   - 不新建第二套启动流程：容器准备、工作区初始化、计划生成与工作流启动全部由
 //     TaskLaunchService 承担；
 //   - 不覆盖历史：Attempt / Session / WorkflowRun / CodeSave 记录一律保留，新执行周期
-//     由新的任务租约代次与新的执行记录表达。
+//     由新的执行记录表达。
 //
 // 它不实现自动重试：重试必须由用户显式发起，调度器永远只领取 queued。
 
@@ -50,24 +50,13 @@ type TaskRetryStore interface {
 	ListStepsByTask(ctx context.Context, taskID domain.ID) ([]domain.Step, error)
 	GetActiveWorkflowRun(ctx context.Context, taskID domain.ID) (*domain.WorkflowRun, error)
 	ListCodeSaveRecordsByTask(ctx context.Context, taskID string) ([]domain.CodeSaveRecord, error)
-	// UpdateTaskLeaseGuard 在仍持有任务执行权时写入任务状态。
-	//
-	// 重开任务的写入必须附带 owner + epoch 条件：否则旧代次可以覆盖新领取者的记录。
-	UpdateTaskLeaseGuard(
+	// UpdateTaskIfStatus 在任务状态仍属于 expected 时写入重开后的任务。
+	UpdateTaskIfStatus(
 		ctx context.Context,
 		task domain.Task,
 		expected []domain.TaskStatus,
-		handle domain.TaskLeaseHandle,
 	) error
 	AppendEvent(ctx context.Context, event domain.Event) (domain.Event, error)
-}
-
-// TaskRetryLeasePort 是显式重试对任务租约能力的需求。
-type TaskRetryLeasePort interface {
-	Claim(ctx context.Context, request TaskClaimRequest) (TaskClaim, error)
-	Release(ctx context.Context, handle domain.TaskLeaseHandle) error
-	TTL() time.Duration
-	RenewInterval() time.Duration
 }
 
 // TaskRetryLaunchPort 是显式重试对统一启动能力的需求。
@@ -81,8 +70,11 @@ type TaskRetryLaunchPort interface {
 type TaskRetryOptions struct {
 	// Store 是持久化入口，必填。
 	Store TaskRetryStore
-	// Leases 提供任务领取与租约维护，必填。
-	Leases TaskRetryLeasePort
+	// Coordination 是任务执行的进程内协调器，必填。
+	//
+	// 它与调度器、启动、单步骤执行与工作流编排共用同一个实例：同一任务不会被两个入口
+	// 同时推进。
+	Coordination *TaskExecutionCoordinator
 	// Launch 提供统一启动能力，必填。
 	Launch TaskRetryLaunchPort
 	// Logger 是日志器，为空时使用默认日志器。
@@ -93,7 +85,7 @@ type TaskRetryOptions struct {
 
 // TaskRetryResult 是一次显式重试的结果。
 //
-// 结构显式区分四件事：重试前的状态、重开后的状态、新执行代次，以及启动流程的真实结果。
+// 结构显式区分三件事：重试前的状态、重开后的状态，以及启动流程的真实结果。
 // `WorkflowStarted` 为 false 时任务已进入新周期但没有启动编排，调用方不得把它当作已开始执行。
 type TaskRetryResult struct {
 	TaskID domain.ID
@@ -101,10 +93,6 @@ type TaskRetryResult struct {
 	PreviousStatus domain.TaskStatus
 	// TaskStatus 是重试结束后读取到的任务真实状态。
 	TaskStatus domain.TaskStatus
-	// Epoch 是本次重试取得的任务领取代次。
-	Epoch int64
-	// Owner 是本次重试的领取者标识。
-	Owner string
 	// Launch 是统一启动流程的真实结果。
 	Launch TaskLaunchResult
 	// WorkflowStarted 表示本次重试真的启动了工作流推进。
@@ -118,14 +106,14 @@ type TaskRetryResult struct {
 //
 // 职责边界：
 //   - 读取重试判定所需的持久化事实，并调用 domain.DecideTaskRetryEligibility；
-//   - 以任务租约取得执行权后把任务重开为 preparing，再交接给统一启动流程；
+//   - 取得任务执行权后把任务重开为 preparing，再交接给统一启动流程；
 //   - 失败如实返回，不自动重试、不删除容器、不重放外部操作。
 type TaskRetryService struct {
-	store  TaskRetryStore
-	leases TaskRetryLeasePort
-	launch TaskRetryLaunchPort
-	logger *slog.Logger
-	now    func() time.Time
+	store        TaskRetryStore
+	coordination *TaskExecutionCoordinator
+	launch       TaskRetryLaunchPort
+	logger       *slog.Logger
+	now          func() time.Time
 }
 
 // NewTaskRetryService 构造显式重试服务。
@@ -133,8 +121,8 @@ func NewTaskRetryService(options TaskRetryOptions) (*TaskRetryService, error) {
 	if options.Store == nil {
 		return nil, fmt.Errorf("任务重试服务初始化失败: 存储不能为空")
 	}
-	if options.Leases == nil {
-		return nil, fmt.Errorf("任务重试服务初始化失败: 任务租约服务不能为空")
+	if options.Coordination == nil {
+		return nil, fmt.Errorf("任务重试服务初始化失败: 任务执行协调器不能为空")
 	}
 	if options.Launch == nil {
 		return nil, fmt.Errorf("任务重试服务初始化失败: 启动服务不能为空")
@@ -148,11 +136,11 @@ func NewTaskRetryService(options TaskRetryOptions) (*TaskRetryService, error) {
 		now = func() time.Time { return time.Now().UTC() }
 	}
 	return &TaskRetryService{
-		store:  options.Store,
-		leases: options.Leases,
-		launch: options.Launch,
-		logger: logger,
-		now:    now,
+		store:        options.Store,
+		coordination: options.Coordination,
+		launch:       options.Launch,
+		logger:       logger,
+		now:          now,
 	}, nil
 }
 
@@ -160,13 +148,13 @@ func NewTaskRetryService(options TaskRetryOptions) (*TaskRetryService, error) {
 //
 // 顺序固定为：
 //  1. 读取任务、步骤、未结束执行记录与代码保存记录，由领域规则判定资格；
-//  2. 以 `failed` 状态集合原子领取任务租约（执行权必须失效才可能领取成功）；
-//  3. 重新读取任务并再次判定资格：领取成功不代表现场没有变化；
-//  4. 用租约栅栏写入把任务重开为 preparing，并追加可追溯事件；
+//  2. 取得该任务的执行权（同一任务的其它入口在此期间会被拒绝）；
+//  3. 重新读取任务并再次判定资格：取得执行权不代表现场没有变化；
+//  4. 把任务重开为 preparing，并追加可追溯事件；
 //  5. 把执行权交接给统一启动流程。
 //
-// 第 2 步先于第 4 步是关键：租约是唯一所有权令牌，先取得它才能保证"重开任务"与
-// "后续启动"由同一个执行代次完成。任一步失败都不会留下"看起来已重试"的状态。
+// 第 2 步先于第 4 步是关键：执行权是唯一所有权令牌，先取得它才能保证"重开任务"与
+// "后续启动"由同一个执行登记完成。任一步失败都不会留下"看起来已重试"的状态。
 func (s *TaskRetryService) Retry(
 	ctx context.Context,
 	taskID string,
@@ -181,59 +169,60 @@ func (s *TaskRetryService) Retry(
 		return TaskRetryResult{}, err
 	}
 	previous := task.Status
-	decision, err := s.decide(ctx, task, "")
+	decision, err := s.decide(ctx, task)
 	if err != nil {
 		return TaskRetryResult{}, err
 	}
 	if !decision.Allowed {
 		return TaskRetryResult{}, classifyRetryRejection(decision)
 	}
-	claim, err := s.leases.Claim(ctx, TaskClaimRequest{
-		TaskID:   task.ID,
-		Owner:    "retry-" + domain.NewID().String(),
-		Statuses: []domain.TaskStatus{domain.TaskStatusFailed},
-	})
-	if err != nil {
-		return TaskRetryResult{}, classifyRetryClaimError(err)
+	grant, ownsGrant, grantErr := acquireTaskGrant(
+		s.coordination,
+		task.ID,
+		nil,
+		ErrTaskRetryConflict,
+	)
+	if grantErr != nil {
+		return TaskRetryResult{}, grantErr
 	}
+	// 重试成功时执行权由启动流程继续持有，失败时释放，使任务可以再次被显式重试。
+	releaseGrant := ownsGrant
+	defer func() {
+		if releaseGrant {
+			s.coordination.Release(grant)
+		}
+	}()
 	result := TaskRetryResult{
 		TaskID:         task.ID,
 		PreviousStatus: previous,
-		Epoch:          claim.Handle.Epoch,
-		Owner:          claim.Handle.Owner,
 	}
-	// 领取成功后任务记录已带租约：后续判定必须基于这份快照，否则会误判"不持有执行权"。
-	task = claim.Task
-	decision, err = s.decide(ctx, task, claim.Handle.Owner)
+	decision, err = s.decide(ctx, task)
 	if err != nil {
-		s.releaseQuietly(ctx, claim.Handle)
 		return result, err
 	}
 	if !decision.Allowed {
-		s.releaseQuietly(ctx, claim.Handle)
 		return result, classifyRetryRejection(decision)
 	}
-	reopened, reopenErr := s.reopen(ctx, task, claim.Handle)
+	reopened, reopenErr := s.reopen(ctx, task, grant)
 	if reopenErr != nil {
-		s.releaseQuietly(ctx, claim.Handle)
 		return result, reopenErr
 	}
 	result.TaskStatus = reopened.Status
-	s.appendRetryEvent(ctx, reopened, claim.Handle, previous)
+	s.appendRetryEvent(ctx, reopened, previous)
 	launchResult, launchErr := s.launch.Launch(ctx, TaskLaunchRequest{
 		TaskID:            reopened.ID.String(),
 		Prompt:            request.Prompt,
 		Timeout:           request.Timeout,
 		ValidationTimeout: request.ValidationTimeout,
 		PlanTimeout:       request.PlanTimeout,
-		Grant: WorkflowExecutionGrant{
-			Lease: claim.Handle,
-			TTL:   s.leaseTTL(),
-		},
+		Grant:             grant,
 	})
 	result.Launch = launchResult
 	result.WorkflowStarted = launchErr == nil && launchResult.WorkflowStarted
 	if launchErr == nil {
+		// 建立了工作流执行时执行权由工作流在推进结束时释放；没有建立工作流时由本次
+		// 重试立即释放，避免任务被自己的执行权挡在候选池之外。
+		releaseGrant = !launchResult.WorkflowStarted
 		if current, loadErr := s.loadTask(ctx, reopened.ID); loadErr == nil {
 			result.TaskStatus = current.Status
 		}
@@ -246,11 +235,6 @@ func (s *TaskRetryService) Retry(
 	}
 	if result.Failure == "" {
 		result.Failure = errorSummary(launchErr)
-	}
-	// 服务停止导致的取消不释放租约：无法确认远程操作是否已经发生，盲目释放会让其他
-	// 执行者在未知现场上重放。其余失败释放本次领取，使任务可以再次被显式重试。
-	if !isRetryServiceStop(launchErr) {
-		s.releaseQuietly(ctx, claim.Handle)
 	}
 	if current, loadErr := s.loadTask(ctx, reopened.ID); loadErr == nil {
 		result.TaskStatus = current.Status
@@ -288,7 +272,7 @@ func (s *TaskRetryService) Eligibility(
 	if err != nil {
 		return domain.TaskRetryDecision{}, err
 	}
-	return s.decide(ctx, task, "")
+	return s.decide(ctx, task)
 }
 
 // decide 读取重试判定所需的持久化事实并调用领域规则。
@@ -297,7 +281,6 @@ func (s *TaskRetryService) Eligibility(
 func (s *TaskRetryService) decide(
 	ctx context.Context,
 	task domain.Task,
-	owner string,
 ) (domain.TaskRetryDecision, error) {
 	steps, err := s.store.ListStepsByTask(ctx, task.ID)
 	if err != nil {
@@ -320,31 +303,38 @@ func (s *TaskRetryService) decide(
 		ActiveWorkflowRun: active,
 		Steps:             steps,
 		CodeSaveRecords:   records,
-		Now:               s.now(),
-		Owner:             owner,
 	}), nil
 }
 
-// reopen 用租约栅栏把失败任务重开为一次新的执行周期。
+// reopen 把失败任务重开为一次新的执行周期。
+//
+// 写入以任务状态为前置条件：状态已被其他操作推进时拒绝本次重开，迟到的执行者不能
+// 覆盖更新的状态。
 func (s *TaskRetryService) reopen(
 	ctx context.Context,
 	task domain.Task,
-	handle domain.TaskLeaseHandle,
+	grant TaskExecutionGrant,
 ) (domain.Task, error) {
+	if !grant.Held() {
+		return task, fmt.Errorf(
+			"%w: 任务 %s 的执行权已释放",
+			ErrTaskRetryConflict,
+			task.ID,
+		)
+	}
 	previous := task.Status
 	reopened := task
 	if err := reopened.ReopenForRetry(s.now()); err != nil {
 		return task, fmt.Errorf("%w: %w", ErrTaskRetryConflict, err)
 	}
-	if err := s.store.UpdateTaskLeaseGuard(
+	if err := s.store.UpdateTaskIfStatus(
 		context.WithoutCancel(ctx),
 		reopened,
 		[]domain.TaskStatus{previous},
-		handle,
 	); err != nil {
 		if errors.Is(err, storage.ErrConflict) {
 			return task, fmt.Errorf(
-				"%w: 任务 %s 的状态或执行权已变更，重试未生效",
+				"%w: 任务 %s 的状态已变更，重试未生效",
 				ErrTaskRetryConflict,
 				task.ID,
 			)
@@ -360,7 +350,6 @@ func (s *TaskRetryService) reopen(
 func (s *TaskRetryService) appendRetryEvent(
 	ctx context.Context,
 	task domain.Task,
-	handle domain.TaskLeaseHandle,
 	previous domain.TaskStatus,
 ) {
 	event, err := domain.NewEvent(
@@ -372,8 +361,6 @@ func (s *TaskRetryService) appendRetryEvent(
 		marshalStepExecutionPayload(map[string]any{
 			"previous_status": string(previous),
 			"status":          string(task.Status),
-			"owner":           handle.Owner,
-			"epoch":           handle.Epoch,
 			"retried_at":      s.now().Format(time.RFC3339Nano),
 			"source":          "explicit_retry",
 		}),
@@ -396,29 +383,6 @@ func (s *TaskRetryService) appendRetryEvent(
 			slog.String("error", errorSummary(err)),
 		)
 	}
-}
-
-// releaseQuietly 释放本次领取的租约，失败只记录日志。
-//
-// 释放冲突说明租约已被接管：那不是错误，也不应覆盖新持有者的记录。
-func (s *TaskRetryService) releaseQuietly(ctx context.Context, handle domain.TaskLeaseHandle) {
-	releaseCtx := context.WithoutCancel(ctx)
-	if err := s.leases.Release(releaseCtx, handle); err != nil {
-		s.logger.WarnContext(
-			releaseCtx,
-			"重试结束后释放任务租约失败，名额将受租约有效期约束",
-			slog.String("task_id", handle.TaskID.String()),
-			slog.String("error", errorSummary(err)),
-		)
-	}
-}
-
-// leaseTTL 返回重试交接使用的租约有效期。
-func (s *TaskRetryService) leaseTTL() time.Duration {
-	if interval := s.leases.RenewInterval(); interval > 0 {
-		return interval * 3
-	}
-	return defaultTaskLeaseTTL
 }
 
 // loadTask 读取未被逻辑删除的任务。
@@ -463,30 +427,4 @@ func classifyRetryRejection(decision domain.TaskRetryDecision) error {
 	default:
 		return fmt.Errorf("%w: %s", ErrTaskRetryConflict, summary)
 	}
-}
-
-// classifyRetryClaimError 把领取错误映射为可区分的重试错误。
-func classifyRetryClaimError(err error) error {
-	switch {
-	case errors.Is(err, ErrTaskLeaseNotFound):
-		return fmt.Errorf("%w: %w", ErrTaskRetryNotFound, err)
-	case errors.Is(err, ErrTaskLeaseConflict):
-		return fmt.Errorf("%w: %w", ErrTaskRetryConflict, err)
-	case errors.Is(err, ErrTaskLeaseInvalid):
-		return fmt.Errorf("%w: %w", ErrTaskRetryPrerequisite, err)
-	default:
-		return fmt.Errorf("领取任务执行权失败: %w", err)
-	}
-}
-
-// isRetryServiceStop 判断错误是否来自服务停止。
-//
-// 服务停止与用户取消必须区分：前者不是用户的决定，因此不能推进任务到取消，也不能
-// 触发任何自动重试；两者都不能被当作"可以立刻释放现场"。
-func isRetryServiceStop(err error) bool {
-	return errors.Is(err, ErrTaskLaunchStopped) ||
-		errors.Is(err, ErrWorkflowStopped) ||
-		errors.Is(err, ErrStepExecutorStopped) ||
-		errors.Is(err, ErrSchedulerStopped) ||
-		errors.Is(err, context.Canceled)
 }

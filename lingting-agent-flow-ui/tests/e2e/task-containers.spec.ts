@@ -749,8 +749,6 @@ test.describe("容器列表的刷新时机", () => {
   /** 一份重试响应样本，字段与 Go 端 `httpapi.RetryTaskResponse` 一致 */
   function sampleRetry(overrides: Record<string, unknown> = {}) {
     return {
-      lease_epoch: 3,
-      lease_owner: "retry-1",
       previous_status: "failed",
       task_id: "task-1",
       task_status: "preparing",

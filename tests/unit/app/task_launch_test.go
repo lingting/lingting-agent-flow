@@ -76,38 +76,6 @@ func (s *launchTaskStore) UpdateTaskIfStatus(
 	return nil
 }
 
-// AcquireTaskLease 记录一次领取并返回代次 1。
-//
-// 受控存储不模拟并发竞争：它只保证启动流程拿到的租约身份与任务记录一致。
-func (s *launchTaskStore) AcquireTaskLease(
-	ctx context.Context,
-	request storage.TaskLeaseRequest,
-) (domain.TaskLeaseHandle, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.task.LeaseOwner = request.Owner
-	s.task.LeaseEpoch = 1
-	expires := request.At.Add(request.TTL)
-	s.task.LeaseExpiresAt = &expires
-	return domain.TaskLeaseHandle{TaskID: request.TaskID, Owner: request.Owner, Epoch: 1}, nil
-}
-
-// ReleaseTaskLease 清除受控记录上的租约。
-func (s *launchTaskStore) ReleaseTaskLease(
-	ctx context.Context,
-	handle domain.TaskLeaseHandle,
-	at time.Time,
-) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.task.LeaseOwner != handle.Owner || s.task.LeaseEpoch != handle.Epoch {
-		return false, storage.ErrConflict
-	}
-	s.task.LeaseOwner = ""
-	s.task.LeaseExpiresAt = nil
-	return true, nil
-}
-
 // UpdateStepIfStatus 记录步骤写入并更新当前记录。
 func (s *launchTaskStore) UpdateStepIfStatus(
 	ctx context.Context,
@@ -128,8 +96,7 @@ func (s *launchTaskStore) UpdateStepIfStatus(
 
 // GetActiveWorkflowRun 返回受控的未结束执行记录。
 //
-// activeRun 表示"仍有一个执行者持有有效执行权"：返回的记录必须是 running 且租约
-// 有效，否则它就不再是抢占判据——步骤占用收敛只保护真正在推进的执行。
+// activeRun 表示"上一次执行仍停留在 running"：它阻止同任务的执行权再次被取得。
 func (s *launchTaskStore) GetActiveWorkflowRun(
 	ctx context.Context,
 	taskID domain.ID,
@@ -139,13 +106,10 @@ func (s *launchTaskStore) GetActiveWorkflowRun(
 	if !s.activeRun {
 		return nil, storage.ErrNotFound
 	}
-	expires := time.Now().UTC().Add(10 * time.Minute)
 	return &domain.WorkflowRun{
-		ID:             domain.NewID(),
-		TaskID:         taskID,
-		Status:         domain.WorkflowRunRunning,
-		WorkerID:       "worker-test",
-		LeaseExpiresAt: &expires,
+		ID:     domain.NewID(),
+		TaskID: taskID,
+		Status: domain.WorkflowRunRunning,
 	}, nil
 }
 
@@ -401,6 +365,7 @@ func newLaunchFixture(t *testing.T) *launchFixture {
 		Planner:      fixture.planner,
 		Workspace:    fixture.workspace,
 		Workflow:     fixture.workflow,
+		Coordination: app.NewTaskExecutionCoordinator(),
 	})
 	if err != nil {
 		t.Fatalf("构造启动服务失败: %v", err)
@@ -690,6 +655,7 @@ func TestLaunchWithoutWorkspacePortReturnsPrerequisite(t *testing.T) {
 		Containers:   fixture.containers,
 		Planner:      fixture.planner,
 		Workflow:     fixture.workflow,
+		Coordination: app.NewTaskExecutionCoordinator(),
 	})
 	if err != nil {
 		t.Fatalf("构造启动服务失败: %v", err)

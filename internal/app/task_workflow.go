@@ -50,11 +50,6 @@ var errWorkflowLeaseLost = errors.New("app: 工作流执行权已丢失")
 
 // 工作流编排器的默认参数。
 const (
-	// defaultWorkflowRunLease 是执行权（租约）的默认有效期。
-	//
-	// 它只用于识别"进程已退出但记录仍停留在 running"的残留：租约过期后其他进程
-	// 才允许接管，因此不会出现两个 Worker 同时推进同一任务。
-	defaultWorkflowRunLease = 10 * time.Minute
 	// defaultWorkflowStopTimeout 是等待在途工作流收敛的默认时限。
 	defaultWorkflowStopTimeout = 30 * time.Second
 	// maxWorkflowPrompt 是补充提示词的长度上限。
@@ -65,8 +60,6 @@ const (
 	// 冲突更符合用户预期，超过时限仍如实返回状态冲突。恢复是显式用户操作，因此这里
 	// 允许比 HTTP 默认超时更长的等待。
 	resumeLockTimeout = 60 * time.Second
-	// minLeaseRenewInterval 是续租间隔的下限，避免可注入的极短租约产生过密的心跳。
-	minLeaseRenewInterval = 50 * time.Millisecond
 )
 
 // WorkflowTaskRepository 是编排器需要的任务读写能力。
@@ -112,11 +105,6 @@ type WorkflowRunRepository interface {
 	GetActiveWorkflowRun(ctx context.Context, taskID domain.ID) (*domain.WorkflowRun, error)
 	ListWorkflowRunsByTask(ctx context.Context, taskID domain.ID) ([]domain.WorkflowRun, error)
 	ListUnfinishedWorkflowRuns(ctx context.Context) ([]domain.WorkflowRun, error)
-	// RenewWorkflowRunLease 在"仍是同一个执行者且仍在 running"时延长租约。
-	//
-	// 它与 UpdateWorkflowRun 分开：续租不改状态、不推进版本号，因此不会与正常
-	// 推进的写入互相覆盖。
-	RenewWorkflowRunLease(ctx context.Context, request storage.WorkflowRunLeaseRenewRequest) error
 }
 
 // WorkflowHostRepository 是编排器需要的执行节点读取能力。
@@ -186,38 +174,6 @@ type TaskWorkflowStore interface {
 	WithTx(ctx context.Context, fn func(ctx context.Context, tx storage.Tx) error) error
 	// AppendEvent 追加任务事件。
 	AppendEvent(ctx context.Context, event domain.Event) (domain.Event, error)
-	// AcquireTaskLease 以原子条件更新领取任务租约。
-	//
-	// 服务在调用方未提供执行权凭据时用它自行领取：任务租约仍是唯一所有权令牌，
-	// 只是由服务本身成为领取者，而不是另立一套 owner。
-	AcquireTaskLease(
-		ctx context.Context,
-		request storage.TaskLeaseRequest,
-	) (domain.TaskLeaseHandle, error)
-	// RenewTaskLease 以 owner + epoch 为条件延长任务租约。
-	//
-	// 编排器的心跳必须同时维持任务租约与工作流租约：任何一方失去执行权都要停止
-	// 推进，不能继续依赖另一方仍然有效的租约运行。
-	RenewTaskLease(ctx context.Context, request storage.TaskLeaseRenewRequest) error
-	// ReleaseTaskLease 释放本次领取持有的任务租约。
-	//
-	// 终止场景必须显式释放并检查结果：没有释放任何记录时返回 storage.ErrConflict，
-	// 调用方不得据此认为名额已经空出。
-	ReleaseTaskLease(
-		ctx context.Context,
-		handle domain.TaskLeaseHandle,
-		at time.Time,
-	) (bool, error)
-	// UpdateTaskLeaseGuard 在仍持有任务执行权时写入任务状态。
-	//
-	// 执行期的状态写入必须经过它：条件包含 status、lease_owner 与 lease_epoch，
-	// 旧代次的迟到写入因此被拒绝。
-	UpdateTaskLeaseGuard(
-		ctx context.Context,
-		task domain.Task,
-		expected []domain.TaskStatus,
-		handle domain.TaskLeaseHandle,
-	) error
 	// ListCodeSaveRecordsByTask 按任务列出代码保存记录，最新的在前。
 	//
 	// 恢复推进前必须据此判断是否还存在结果不明的外部 Git 副作用：数据库中的
@@ -248,8 +204,11 @@ type TaskWorkflowOptions struct {
 	Logger *slog.Logger
 	// Now 是可注入的时钟，零值使用当前时间。
 	Now func() time.Time
-	// Lease 是执行权有效期，零值使用默认值。
-	Lease time.Duration
+	// Coordination 是任务执行的进程内协调器，必填。
+	//
+	// 它与调度器、启动、重试与单步骤执行共用同一个实例，保证同一任务不会被两个入口
+	// 同时推进。
+	Coordination *TaskExecutionCoordinator
 	// DefaultTimeout 是单个步骤开发阶段的默认超时，零值使用闭环服务默认值。
 	DefaultTimeout time.Duration
 	// DefaultValidationTimeout 是单个步骤验证阶段的默认超时。
@@ -278,17 +237,14 @@ type TaskWorkflowService struct {
 	sessions   *SessionService
 	logger     *slog.Logger
 	now        func() time.Time
-	owner      string
-
-	lease                    time.Duration
+	// coordination 按任务串行化执行入口：同一任务不会被两个入口同时推进。
+	//
+	// 它是唯一的所有权登记：跨进程并发不再存在（服务端进程锁保证单进程），因此不再
+	// 需要持久化执行权；不同任务之间完全并发。
+	coordination             *TaskExecutionCoordinator
 	defaultTimeout           time.Duration
 	defaultValidationTimeout time.Duration
 	defaultPlanTimeout       time.Duration
-	// taskLocks 保证同一任务在本进程内不会被两个 goroutine 同时推进。
-	//
-	// 它是第一道防线而不是一致性保证：跨进程并发仍由 workflow_runs 的部分唯一索引
-	// 与版本号条件更新拒绝。
-	taskLocks keyedTaskMutex
 	// cancels 记录在途工作流的取消函数，使取消请求能传播到实际执行。
 	cancels cancelRegistry
 	// lifecycle 管理后台服务状态与在途工作流，使 Server 停止时能取消并等待收敛。
@@ -306,6 +262,9 @@ func NewTaskWorkflowService(options TaskWorkflowOptions) (*TaskWorkflowService, 
 	if options.Containers == nil {
 		return nil, fmt.Errorf("工作流编排器初始化失败: 容器核验能力不能为空")
 	}
+	if options.Coordination == nil {
+		return nil, fmt.Errorf("工作流编排器初始化失败: 任务执行协调器不能为空")
+	}
 	logger := options.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -313,10 +272,6 @@ func NewTaskWorkflowService(options TaskWorkflowOptions) (*TaskWorkflowService, 
 	now := options.Now
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
-	}
-	lease := options.Lease
-	if lease <= 0 {
-		lease = defaultWorkflowRunLease
 	}
 	return &TaskWorkflowService{
 		store:                    options.Store,
@@ -326,8 +281,7 @@ func NewTaskWorkflowService(options TaskWorkflowOptions) (*TaskWorkflowService, 
 		sessions:                 options.Sessions,
 		logger:                   logger,
 		now:                      now,
-		owner:                    "workflow-" + domain.NewID().String(),
-		lease:                    lease,
+		coordination:             options.Coordination,
 		defaultTimeout:           options.DefaultTimeout,
 		defaultValidationTimeout: options.DefaultValidationTimeout,
 		defaultPlanTimeout:       options.DefaultPlanTimeout,
@@ -501,47 +455,6 @@ func (l *workflowLifecycle) activeCount() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.active
-}
-
-// keyedTaskMutex 按任务标识提供互斥锁。
-//
-// 不同任务之间完全并发，同一任务上的编排串行化；无引用时自动回收条目，避免长时间
-// 运行后无限增长。
-type keyedTaskMutex struct {
-	mu    sync.Mutex
-	locks map[string]*keyedTaskLock
-}
-
-// keyedTaskLock 是一个带引用计数的互斥锁。
-type keyedTaskLock struct {
-	mu   sync.Mutex
-	refs int
-}
-
-// Lock 取得指定任务的锁，返回解锁函数。
-func (m *keyedTaskMutex) Lock(key string) func() {
-	m.mu.Lock()
-	if m.locks == nil {
-		m.locks = make(map[string]*keyedTaskLock)
-	}
-	entry, ok := m.locks[key]
-	if !ok {
-		entry = &keyedTaskLock{}
-		m.locks[key] = entry
-	}
-	entry.refs++
-	m.mu.Unlock()
-
-	entry.mu.Lock()
-	return func() {
-		entry.mu.Unlock()
-		m.mu.Lock()
-		entry.refs--
-		if entry.refs <= 0 {
-			delete(m.locks, key)
-		}
-		m.mu.Unlock()
-	}
 }
 
 // loadTask 读取未被逻辑删除的任务。

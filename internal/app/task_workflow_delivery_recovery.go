@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage"
@@ -39,9 +38,8 @@ func (s *TaskWorkflowService) recoverStalledDelivery(ctx context.Context) error 
 	if err != nil {
 		return fmt.Errorf("读取收尾停滞任务失败: %w", err)
 	}
-	now := s.now()
 	for _, task := range tasks {
-		if err := s.recoverStalledTask(ctx, task, now); err != nil {
+		if err := s.recoverStalledTask(ctx, task); err != nil {
 			return fmt.Errorf("收敛任务 %s 的收尾停滞现场失败: %w", task.ID, err)
 		}
 	}
@@ -52,7 +50,6 @@ func (s *TaskWorkflowService) recoverStalledDelivery(ctx context.Context) error 
 func (s *TaskWorkflowService) recoverStalledTask(
 	ctx context.Context,
 	task domain.Task,
-	now time.Time,
 ) error {
 	latest, err := s.latestWorkflowRun(ctx, task.ID)
 	if err != nil {
@@ -61,7 +58,6 @@ func (s *TaskWorkflowService) recoverStalledTask(
 	input := domain.TaskCloseoutRecoveryInput{
 		Task: task,
 		Run:  latest,
-		Now:  now,
 	}
 	if latest != nil && latest.Status == domain.WorkflowRunCompleted {
 		// 执行记录已是终态、无法再被改写：任务能否收口只能按持久化证据重算。
@@ -149,7 +145,7 @@ func (s *TaskWorkflowService) stopStalledTask(
 	writeCtx := context.WithoutCancel(ctx)
 	if err := s.store.UpdateTaskIfStatus(writeCtx, recovered, []domain.TaskStatus{previous}); err != nil {
 		if errors.Is(err, storage.ErrConflict) {
-			// 另一个进程已经推进了该任务：不是失败，也不重复写事件。
+			// 另一个入口已经推进了该任务：不是失败，也不重复写事件。
 			return nil
 		}
 		return err
@@ -280,7 +276,6 @@ func (s *TaskWorkflowService) reportCloseoutInconsistencies(ctx context.Context)
 	if err != nil {
 		return fmt.Errorf("读取已完成任务失败: %w", err)
 	}
-	now := s.now()
 	for _, task := range tasks {
 		latest, readErr := s.latestWorkflowRun(ctx, task.ID)
 		if readErr != nil {
@@ -289,7 +284,6 @@ func (s *TaskWorkflowService) reportCloseoutInconsistencies(ctx context.Context)
 		state := domain.DecideTaskCloseoutView(domain.TaskCloseoutViewInput{
 			Task: task,
 			Run:  latest,
-			Now:  now,
 		})
 		if state != domain.TaskCloseoutInconsistent {
 			continue

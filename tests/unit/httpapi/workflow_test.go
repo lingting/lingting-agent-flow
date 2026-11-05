@@ -337,11 +337,12 @@ func newTaskWorkflowAPIFixture(t *testing.T, stepCount int) *taskWorkflowAPIFixt
 		MergeStatus:  domain.MergeStatusNotRequested,
 	}}
 	service, err := app.NewTaskWorkflowService(app.TaskWorkflowOptions{
-		Store:      db,
-		Steps:      runner,
-		Containers: taskWorkflowAPIContainer{},
-		CodeSaver:  codeSaver,
-		Logger:     logger.Slog(),
+		Store:        db,
+		Steps:        runner,
+		Containers:   taskWorkflowAPIContainer{},
+		CodeSaver:    codeSaver,
+		Coordination: app.NewTaskExecutionCoordinator(),
+		Logger:       logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造工作流编排器失败: %v", err)
@@ -362,15 +363,10 @@ func newTaskWorkflowAPIFixture(t *testing.T, stepCount int) *taskWorkflowAPIFixt
 	if err != nil {
 		t.Fatalf("构造任务服务失败: %v", err)
 	}
-	leases, err := app.NewTaskLeaseService(app.TaskLeaseOptions{Store: db})
-	if err != nil {
-		t.Fatalf("构造任务租约服务失败: %v", err)
-	}
 	handler := httpapi.NewHandler(httpapi.Deps{
-		Tasks:      tasks,
-		Workflow:   service,
-		TaskLeases: leases,
-		Logger:     logger.Slog(),
+		Tasks:    tasks,
+		Workflow: service,
+		Logger:   logger.Slog(),
 	})
 	return &taskWorkflowAPIFixture{
 		db:       db,

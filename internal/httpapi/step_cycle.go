@@ -114,7 +114,7 @@ type RepairCycleEligibilityResponse struct {
 // serveRepairCycleEligibility 处理
 // GET /api/v1/tasks/{taskID}/steps/{stepID}/repair-cycle-eligibility。
 //
-// 只读：不登记周期、不结束周期、不写事件、不改任务或步骤状态、不领取任务租约、
+// 只读：不登记周期、不结束周期、不写事件、不改任务或步骤状态、不取任务执行权、
 // 不启动 Agent，也不产生任何远程副作用。写操作仍然只有 open-repair-cycle。
 func (h *stepExecutionHandler) serveRepairCycleEligibility(w http.ResponseWriter, r *http.Request) {
 	taskID := pathID(r, paramTaskID)

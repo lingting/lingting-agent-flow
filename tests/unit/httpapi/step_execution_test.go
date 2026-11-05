@@ -234,10 +234,11 @@ func newStepAPIFixture(t *testing.T, stayQueued bool) *stepAPIFixture {
 	}
 	port := &stepAPIExecutor{sessions: db}
 	executor, err := app.NewStepExecutor(app.StepExecutorOptions{
-		Store:      db,
-		Containers: port,
-		Sessions:   sessions,
-		Logger:     logger.Slog(),
+		Store:        db,
+		Containers:   port,
+		Sessions:     sessions,
+		Coordination: app.NewTaskExecutionCoordinator(),
+		Logger:       logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造步骤执行协调器失败: %v", err)
@@ -260,21 +261,12 @@ func newStepAPIFixture(t *testing.T, stayQueued bool) *stepAPIFixture {
 	if err != nil {
 		t.Fatalf("构造执行记录服务失败: %v", err)
 	}
-	// 单步骤入口同样需要任务租约：它是与任务级工作流共用的唯一所有权令牌。
-	leases, err := app.NewTaskLeaseService(app.TaskLeaseOptions{
-		Store:  db,
-		Logger: logger.Slog(),
-	})
-	if err != nil {
-		t.Fatalf("构造任务租约服务失败: %v", err)
-	}
 	handler := httpapi.NewHandler(httpapi.Deps{
 		Health:           app.NewHealthService(db),
 		SystemInfo:       func() app.SystemInfo { return app.SystemInfo{Version: "test"} },
 		Tasks:            tasks,
 		ExecutionRecords: records,
 		StepExecutor:     executor,
-		TaskLeases:       leases,
 	})
 	return &stepAPIFixture{
 		handler: handler,

@@ -240,13 +240,11 @@ type workflowAPIRetryRequest struct {
 // workflowAPIRetry 是一次显式重试的结果。
 //
 // `workflow_started` 为 false 时任务已进入新周期但没有启动编排：命令不得把它描述成
-// "已开始执行"。`lease_epoch` 用于区分执行周期，历史执行记录保持不变。
+// "已开始执行"。历史执行记录保持不变。
 type workflowAPIRetry struct {
 	TaskID          string          `json:"task_id"`
 	PreviousStatus  string          `json:"previous_status"`
 	TaskStatus      string          `json:"task_status"`
-	LeaseEpoch      int64           `json:"lease_epoch"`
-	LeaseOwner      string          `json:"lease_owner"`
 	WorkflowStarted bool            `json:"workflow_started"`
 	Run             *workflowAPIRun `json:"run"`
 	FailureStage    string          `json:"failure_stage"`
@@ -560,7 +558,6 @@ func printRetryResult(a *app.App, result workflowAPIRetry) error {
 		fmt.Sprintf("任务: %s", result.TaskID),
 		fmt.Sprintf("重试前状态: %s", emptyAsUnknown(result.PreviousStatus)),
 		fmt.Sprintf("当前状态: %s", emptyAsUnknown(result.TaskStatus)),
-		fmt.Sprintf("执行代次: %d（领取者 %s）", result.LeaseEpoch, emptyAsUnknown(result.LeaseOwner)),
 		fmt.Sprintf("工作流已启动: %s", flagMark(result.WorkflowStarted)),
 	}
 	if stage := strings.TrimSpace(result.FailureStage); stage != "" {

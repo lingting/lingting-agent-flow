@@ -616,7 +616,7 @@ func (s *ValidationService) ensureHostUsable(ctx context.Context, task domain.Ta
 // validationRegistry 记录本进程内正在验证的尝试。
 //
 // 它只用于快速拒绝同一进程内的重复请求与观测在途数量；数据库条件更新才是
-// 唯一的一致性保证，跨进程并发同样会被拒绝。
+// 唯一的一致性保证，并发的迟到写入同样会被拒绝。
 type validationRegistry struct {
 	mu      sync.Mutex
 	entries map[domain.ID]struct{}

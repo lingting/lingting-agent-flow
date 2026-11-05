@@ -408,7 +408,6 @@ var eventLabelMap = map[domain.EventType]string{
 	domain.EventTypeTaskRetrying:             "任务重试中",
 	domain.EventTypeTaskRetried:              "任务已重试",
 	domain.EventTypeTaskClaimed:              "任务领取",
-	domain.EventTypeTaskReleased:             "任务租约释放",
 	domain.EventTypeRequirementSubmitted:     "需求提交",
 	domain.EventTypeContainerCreated:         "容器创建",
 	domain.EventTypeContainerCleaned:         "容器清理",

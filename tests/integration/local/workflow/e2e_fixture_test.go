@@ -55,11 +55,11 @@ type e2eFixture struct {
 	workflow  *app.TaskWorkflowService
 	// retry 是任务显式重试服务：它复用 launch，不实现第二套启动流程。
 	retry *app.TaskRetryService
-	// leases 是任务租约服务，为显式重试提供执行权。
-	leases    *app.TaskLeaseService
-	codeSaver *e2eCodeSaver
-	task      domain.Task
-	now       time.Time
+	// coordinator 是任务执行的进程内协调器，为全部执行入口提供同一份执行权登记。
+	coordinator *app.TaskExecutionCoordinator
+	codeSaver   *e2eCodeSaver
+	task        domain.Task
+	now         time.Time
 	// options 是本次现场的构造参数，重启后按同一份参数重新装配。
 	options e2eOptions
 	// dbPath 是数据库文件路径，重启时用同一路径重新打开。
@@ -191,13 +191,15 @@ func (f *e2eFixture) assemble(t *testing.T, options e2eOptions) {
 	if err != nil {
 		t.Fatalf("构造会话服务失败: %v", err)
 	}
+	f.coordinator = app.NewTaskExecutionCoordinator()
 	f.sessions = sessions
 	executor, err := app.NewStepExecutor(app.StepExecutorOptions{
-		Store:      f.db,
-		Containers: f.ports,
-		Sessions:   sessions,
-		Git:        f.ports,
-		Logger:     f.logger.Slog(),
+		Store:        f.db,
+		Containers:   f.ports,
+		Sessions:     sessions,
+		Git:          f.ports,
+		Coordination: f.coordinator,
+		Logger:       f.logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造步骤执行协调器失败: %v", err)
@@ -222,11 +224,12 @@ func (f *e2eFixture) assemble(t *testing.T, options e2eOptions) {
 		t.Fatalf("构造验证引擎失败: %v", err)
 	}
 	stepFlow, err := app.NewStepWorkflowService(app.StepWorkflowOptions{
-		Steps:      executor,
-		Validation: validation,
-		Store:      f.db,
-		Cycles:     f.db,
-		Logger:     f.logger.Slog(),
+		Steps:        executor,
+		Validation:   validation,
+		Store:        f.db,
+		Cycles:       f.db,
+		Coordination: f.coordinator,
+		Logger:       f.logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造单步骤闭环协调器失败: %v", err)
@@ -248,11 +251,12 @@ func (f *e2eFixture) assemble(t *testing.T, options e2eOptions) {
 		options.codeSaverWrapper(f.codeSaver)
 	}
 	workflowOptions := app.TaskWorkflowOptions{
-		Store:      store,
-		Steps:      stepFlow,
-		Containers: f.ports,
-		Sessions:   sessions,
-		Logger:     f.logger.Slog(),
+		Store:        store,
+		Steps:        stepFlow,
+		Containers:   f.ports,
+		Sessions:     sessions,
+		Coordination: f.coordinator,
+		Logger:       f.logger.Slog(),
 	}
 	if options.codeSaver {
 		workflowOptions.CodeSaver = f.codeSaver
@@ -269,25 +273,18 @@ func (f *e2eFixture) assemble(t *testing.T, options e2eOptions) {
 		Planner:      workflow,
 		Workspace:    workspace,
 		Workflow:     workflow,
+		Coordination: f.coordinator,
 		Logger:       f.logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造统一启动服务失败: %v", err)
 	}
 	f.launch = launch
-	leases, leaseErr := app.NewTaskLeaseService(app.TaskLeaseOptions{
-		Store:  f.db,
-		Logger: f.logger.Slog(),
-	})
-	if leaseErr != nil {
-		t.Fatalf("构造任务租约服务失败: %v", leaseErr)
-	}
-	f.leases = leases
 	retry, retryErr := app.NewTaskRetryService(app.TaskRetryOptions{
-		Store:  f.db,
-		Leases: f.leases,
-		Launch: launch,
-		Logger: f.logger.Slog(),
+		Store:        f.db,
+		Coordination: f.coordinator,
+		Launch:       launch,
+		Logger:       f.logger.Slog(),
 	})
 	if retryErr != nil {
 		t.Fatalf("构造任务重试服务失败: %v", retryErr)

@@ -74,10 +74,6 @@ type Options struct {
 	CodeInitialize *app.CodeInitializeService
 	// TaskLaunch 是统一任务启动服务，为空时启动接口报告服务不可用。
 	TaskLaunch *app.TaskLaunchService
-	// TaskLeases 是任务租约服务，为启动、计划与工作流接口提供统一执行权。
-	//
-	// 为空时这些接口报告服务不可用：没有任务租约就无法证明调用方持有该任务的执行权。
-	TaskLeases *app.TaskLeaseService
 	// Containers 是容器服务，提供代码保存的只读核验能力，为空时核验接口报告服务不可用。
 	Containers *app.ContainerService
 	// CodeSaveQueries 是代码保存记录只读查询服务，为空时列表接口报告服务不可用。
@@ -151,7 +147,6 @@ func New(options Options) (*Server, error) {
 		Workflow:          options.Workflow,
 		CodeInitialize:    options.CodeInitialize,
 		TaskLaunch:        options.TaskLaunch,
-		TaskLeases:        options.TaskLeases,
 		Containers:        options.Containers,
 		CodeSaveQueries:   options.CodeSaveQueries,
 		ResumeEligibility: options.ResumeEligibility,

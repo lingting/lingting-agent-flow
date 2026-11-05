@@ -50,12 +50,10 @@ func (s *TaskLaunchService) recoverTaskStepOccupancy(
 	if err != nil {
 		return fmt.Errorf("恢复任务 %s 的步骤占用失败: %w", taskID, err)
 	}
-	now := s.now()
 	for _, step := range steps {
 		needed, next := domain.DecideStepOccupancyRecovery(domain.TaskLaunchStepOccupancyInput{
 			Step:        step,
 			WorkflowRun: run,
-			Now:         now,
 		})
 		if !needed {
 			continue
@@ -94,7 +92,7 @@ func (s *TaskLaunchService) activeWorkflowRun(
 
 // recoverStepOccupancy 把一个被占用的步骤收敛为需要人工核验。
 //
-// 写入带状态前置条件：状态已被其他进程推进时按"同一次收敛已完成"处理，不重复写入
+// 写入带状态前置条件：状态已被其他入口推进时按"同一次收敛已完成"处理，不重复写入
 // 事件，也不把本地对象覆盖到数据库。
 func (s *TaskLaunchService) recoverStepOccupancy(
 	ctx context.Context,
@@ -111,7 +109,7 @@ func (s *TaskLaunchService) recoverStepOccupancy(
 	}
 	if err := s.store.UpdateStepIfStatus(ctx, step, []domain.StepStatus{previous}); err != nil {
 		if errors.Is(err, storage.ErrConflict) {
-			// 另一个进程已经推进了该步骤：不是失败，也不重复写入事件。
+			// 另一个入口已经推进了该步骤：不是失败，也不重复写入事件。
 			return nil
 		}
 		return err

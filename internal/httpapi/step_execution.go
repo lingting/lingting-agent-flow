@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -87,10 +86,7 @@ type stepExecutionHandler struct {
 	executor *app.StepExecutor
 	// workflow 是开发—验证闭环协调器，为空时闭环接口返回 503。
 	workflow *app.StepWorkflowService
-	// leases 提供任务执行权：单步骤入口与任务级工作流必须共用同一套所有权，
-	// 否则"单步骤执行"会绕过任务租约去修改同一份工作区与容器。
-	leases *app.TaskLeaseService
-	logger *slog.Logger
+	logger   *slog.Logger
 }
 
 // newStepExecutionHandler 构造步骤执行处理器。
@@ -99,7 +95,6 @@ type stepExecutionHandler struct {
 func newStepExecutionHandler(
 	executor *app.StepExecutor,
 	workflow *app.StepWorkflowService,
-	leases *app.TaskLeaseService,
 	logger *slog.Logger,
 ) *stepExecutionHandler {
 	if logger == nil {
@@ -108,43 +103,8 @@ func newStepExecutionHandler(
 	return &stepExecutionHandler{
 		executor: executor,
 		workflow: workflow,
-		leases:   leases,
 		logger:   logger,
 	}
-}
-
-// claimForStepExecution 为一次单步骤操作领取任务执行权。
-//
-// 任务租约保护整个 Task 的执行权，步骤占用保护单次 Step 的执行登记：两者职责
-// 不同、都不能替代对方。单步骤入口与任务级工作流因此共用同一套所有权，不存在
-// "绕过任务租约直接改工作区"的路径。
-//
-// 取消请求不经过这里：用户取消走任务管理接口，不需要先取得任务执行权。
-func (h *stepExecutionHandler) claimForStepExecution(
-	r *http.Request,
-	taskID string,
-	statuses []domain.TaskStatus,
-) (app.WorkflowExecutionGrant, func(), error) {
-	claim, err := h.leases.Claim(r.Context(), app.TaskClaimRequest{
-		TaskID:   domain.ID(taskID),
-		Owner:    "step-" + domain.NewID().String(),
-		Statuses: statuses,
-	})
-	if err != nil {
-		return app.WorkflowExecutionGrant{}, nil, err
-	}
-	release := func() {
-		releaseCtx := context.WithoutCancel(r.Context())
-		if releaseErr := h.leases.Release(releaseCtx, claim.Handle); releaseErr != nil {
-			h.logger.WarnContext(
-				releaseCtx,
-				"步骤操作结束后释放任务租约失败，名额将受租约有效期约束",
-				"task_id", taskID,
-				"error", releaseErr.Error(),
-			)
-		}
-	}
-	return app.WorkflowExecutionGrant{Lease: claim.Handle, TTL: h.leases.TTL()}, release, nil
 }
 
 // serve 处理 POST /api/v1/tasks/{taskID}/steps/{stepID}/execute。
@@ -174,27 +134,6 @@ func (h *stepExecutionHandler) serve(w http.ResponseWriter, r *http.Request) {
 		h.writeServiceError(w, r, err)
 		return
 	}
-	// 单步骤执行同样必须经过任务租约：任务租约保护整个 Task 的执行权，步骤占用
-	// 只保护单次 Step 的登记。缺少任务级所有权时，单步骤入口会与任务级工作流
-	// 同时修改同一份工作区、容器与 Session。
-	if h.leases == nil {
-		writeError(
-			w,
-			r,
-			h.logger,
-			http.StatusServiceUnavailable,
-			CodeInternal,
-			"任务租约服务未初始化",
-		)
-		return
-	}
-	grant, release, claimErr := h.claimForStepExecution(r, taskID, domain.ExplicitStepExecutionStatuses())
-	if claimErr != nil {
-		h.writeServiceError(w, r, claimErr)
-		return
-	}
-	defer release()
-	request.Grant = &grant
 	result, err := h.executor.Execute(r.Context(), request)
 	if err != nil {
 		h.writeServiceError(w, r, err)
@@ -338,15 +277,9 @@ func (h *stepExecutionHandler) writeServiceError(
 		status = http.StatusBadRequest
 		code = CodeInvalidRequest
 	case errors.Is(err, app.ErrStepExecutionNotFound),
-		errors.Is(err, app.ErrTaskLeaseNotFound),
 		errors.Is(err, storage.ErrNotFound):
 		status = http.StatusNotFound
 		code = CodeNotFound
-	case errors.Is(err, app.ErrTaskLeaseConflict),
-		errors.Is(err, app.ErrTaskLeaseInvalid):
-		// 任务执行权竞争属于状态冲突：目标存在，但当前不能被本次调用推进。
-		status = http.StatusConflict
-		code = CodeConflict
 	case errors.Is(err, app.ErrStepExecutionConflict),
 		errors.Is(err, domain.ErrStepExecutionBlocked),
 		errors.Is(err, domain.ErrInvalidState),

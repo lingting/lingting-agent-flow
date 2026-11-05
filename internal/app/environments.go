@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/lingting/agentflow/internal/docker"
@@ -23,9 +22,6 @@ import (
 // 版本一旦保存即不可覆盖，新配置只能生成新的版本号。
 type EnvironmentService struct {
 	*remoteDockerService
-	// locks 按"节点+环境"提供范围明确的互斥锁，避免同一版本的并发构建互相覆盖
-	// 日志与元数据，同时不影响不同环境的并发构建。
-	locks keyedMutex
 }
 
 // NewEnvironmentService 构造环境服务。
@@ -35,28 +31,6 @@ func NewEnvironmentService(options DockerServiceOptions) (*EnvironmentService, e
 		return nil, err
 	}
 	return &EnvironmentService{remoteDockerService: base}, nil
-}
-
-// keyedMutex 是按字符串键提供互斥锁的集合。
-type keyedMutex struct {
-	mu    sync.Mutex
-	locks map[string]*sync.Mutex
-}
-
-// Lock 取得指定键的互斥锁并返回解锁函数。
-func (m *keyedMutex) Lock(key string) func() {
-	m.mu.Lock()
-	if m.locks == nil {
-		m.locks = make(map[string]*sync.Mutex)
-	}
-	lock, ok := m.locks[key]
-	if !ok {
-		lock = &sync.Mutex{}
-		m.locks[key] = lock
-	}
-	m.mu.Unlock()
-	lock.Lock()
-	return lock.Unlock
 }
 
 // EnvironmentSummary 是一个环境定义的概览。
@@ -351,7 +325,7 @@ func (s *EnvironmentService) CreateVersion(
 		request.MachineID,
 		false,
 		func(ctx context.Context, session *remoteDocker) error {
-			unlock := s.locks.Lock(lockKey(session.host.ID, request.Ref))
+			unlock := s.buildLocks.Lock(session.host.ID, request.Ref)
 			defer unlock()
 			version, err := s.createVersionLocked(ctx, session, request)
 			if err != nil {

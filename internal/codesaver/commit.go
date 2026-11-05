@@ -83,7 +83,7 @@ func (x *Session) markCommitNotAttempted(ctx context.Context) error {
 
 // refreshStatus 重新读取工作区状态。
 //
-// 提交前的判定必须基于最新状态：前一步读取与提交之间可能有其他进程改动工作区。
+// 提交前的判定必须基于最新状态：前一步读取与提交之间可能有其他写入改动工作区。
 func (x *Session) refreshStatus(ctx context.Context) (WorktreeState, error) {
 	raw, err := x.runner.output(
 		ctx,

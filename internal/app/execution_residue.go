@@ -43,8 +43,8 @@ type ExecutionResidueStore interface {
 	) error
 	// ListUnfinishedWorkflowRuns 返回全部未结束的执行记录。
 	//
-	// 它是"原执行者是否仍持有执行权"的唯一判据来源：只有租约已过期的记录才允许
-	// 收敛其残留 Attempt / Session / ValidationRun。
+	// 它是"原执行者是否仍有执行权"的事实来源之一：执行权本身由进程内的任务协调器
+	// 登记，数据库中的 running 记录只描述"上一次执行停在这里"。
 	ListUnfinishedWorkflowRuns(ctx context.Context) ([]domain.WorkflowRun, error)
 }
 
@@ -58,15 +58,21 @@ type ExecutionResidueStore interface {
 // 它不实现重试资格判定：`interrupted` 的尝试是否可以被自动重跑属于 P2-M3，
 // 本服务只保证残留记录不再停留在无法解释的活动状态。
 type ExecutionResidueService struct {
-	store  ExecutionResidueStore
-	logger *slog.Logger
-	now    func() time.Time
+	store        ExecutionResidueStore
+	coordination *TaskExecutionCoordinator
+	logger       *slog.Logger
+	now          func() time.Time
 }
 
 // ExecutionResidueOptions 是构造残留收敛服务的输入。
 type ExecutionResidueOptions struct {
 	// Store 是持久化入口，必填。
 	Store ExecutionResidueStore
+	// Coordination 是任务执行的进程内协调器，必填。
+	//
+	// 残留收敛只在"本进程没有持有该任务执行权"时生效：服务端只允许一个进程运行，
+	// 因此它同时也回答了"上一个进程是否已经退出"。
+	Coordination *TaskExecutionCoordinator
 	// Logger 是日志器，为空时使用默认日志器。
 	Logger *slog.Logger
 	// Now 是可注入的时钟，零值使用当前时间。
@@ -78,6 +84,9 @@ func NewExecutionResidueService(options ExecutionResidueOptions) (*ExecutionResi
 	if options.Store == nil {
 		return nil, fmt.Errorf("残留收敛服务初始化失败: 存储不能为空")
 	}
+	if options.Coordination == nil {
+		return nil, fmt.Errorf("残留收敛服务初始化失败: 任务执行协调器不能为空")
+	}
 	logger := options.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -86,7 +95,12 @@ func NewExecutionResidueService(options ExecutionResidueOptions) (*ExecutionResi
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
 	}
-	return &ExecutionResidueService{store: options.Store, logger: logger, now: now}, nil
+	return &ExecutionResidueService{
+		store:        options.Store,
+		coordination: options.Coordination,
+		logger:       logger,
+		now:          now,
+	}, nil
 }
 
 // Name 返回后台服务名称。
@@ -97,8 +111,9 @@ func (s *ExecutionResidueService) Name() string {
 // Start 收敛三类残留记录。
 //
 // 顺序固定为：先确定"哪些任务的执行者已经失去执行权"，再收敛 ValidationRun、
-// Attempt 与 Session。判定依据只有持久化事实与租约：租约仍有效的执行记录说明
-// 可能有其他进程正在推进，其残留一律不动。
+// Attempt 与 Session。判定依据是进程内执行登记：仍由本进程持有执行权的任务，其残留
+// 一律不动；服务端只允许一个进程运行，因此本进程不持有的执行记录一定是上一个进程退出
+// 留下的现场。
 //
 // 任一条记录收敛失败都让启动失败：残留记录没有落库时服务继续启动，会让"无法解释
 // 的活动状态"被当作已恢复，之后该 Attempt 再也无法验证、该步骤也无法再执行。
@@ -121,20 +136,20 @@ func (s *ExecutionResidueService) Stop(ctx context.Context) error {
 	return nil
 }
 
-// liveTasks 返回"仍有执行者持有有效执行权"的任务标识集合。
+// liveTasks 返回"仍有执行者持有执行权"的任务标识集合。
 //
-// 只有 `running` 且租约仍然有效的执行记录说明"可能有执行者正在推进"：
-// `blocked` / `recovery_required` / `pending` / `cancel_requested` 都已经没有
-// 执行权（`Stop` / `Fail` / `Cancel` 清空 worker_id 与租约，`pending` 从未写入）。
+// 只有本进程真实持有执行登记、且数据库中的执行记录仍在 running 的任务才算有执行者。
+// 服务端只允许一个进程运行，因此启动阶段本集合必然为空：数据库中的 running 记录都是
+// 上一个进程退出时留下的现场。
 //
 // 返回集合而不是"残留任务集合"是刻意的：没有执行记录的任务同样可能留下 Attempt /
-// Session 残留（进程在创建 WorkflowRun 之前就退出），它们没有任何执行者，必须被
-// 收敛。用"不在集合里"表达"可以收敛"，覆盖了这两种情况。
+// Session 残留（进程在创建 WorkflowRun 之前就退出），它们没有任何执行者，必须被收敛。
+// 用"不在集合里"表达"可以收敛"，覆盖了这两种情况。
 func (s *ExecutionResidueService) liveTasks(ctx context.Context) (map[domain.ID]struct{}, error) {
-	return liveExecutionTasks(ctx, s.store, s.now())
+	return liveExecutionTasks(ctx, s.store, s.coordination)
 }
 
-// liveExecutionTasks 返回"仍有执行者持有有效执行权"的任务标识集合。
+// liveExecutionTasks 返回"仍有执行者持有执行权"的任务标识集合。
 //
 // 它是"能否安全收敛残留"的唯一判据来源，供所有残留收敛入口复用：
 // ExecutionResidueService 用它收敛 Attempt / Session / ValidationRun，
@@ -143,7 +158,7 @@ func (s *ExecutionResidueService) liveTasks(ctx context.Context) (map[domain.ID]
 func liveExecutionTasks(
 	ctx context.Context,
 	store unfinishedWorkflowRunLister,
-	now time.Time,
+	coordination *TaskExecutionCoordinator,
 ) (map[domain.ID]struct{}, error) {
 	runs, err := store.ListUnfinishedWorkflowRuns(ctx)
 	if err != nil {
@@ -154,8 +169,8 @@ func liveExecutionTasks(
 		if run.Status != domain.WorkflowRunRunning {
 			continue
 		}
-		if !run.LeaseActive(now) {
-			// 租约已过期：持有者没有续租，进程很可能已经退出。
+		// 只有本进程确实持有该任务的执行登记时才算"仍有执行者在推进"。
+		if !coordination.Held(run.TaskID) {
 			continue
 		}
 		live[run.TaskID] = struct{}{}
@@ -188,7 +203,7 @@ func (s *ExecutionResidueService) recoverValidationRuns(
 	now := s.now()
 	for _, run := range runs {
 		if _, ok := live[run.TaskID]; ok {
-			// 该任务仍有持有有效租约的执行者：验证可能仍在推进，不抢占。
+			// 该任务仍由本进程持有执行权：验证可能仍在推进，不抢占。
 			continue
 		}
 		reason := validationResidueSummary(run.Status)
@@ -200,7 +215,7 @@ func (s *ExecutionResidueService) recoverValidationRuns(
 			now,
 		); err != nil {
 			if errors.Is(err, storage.ErrConflict) {
-				// 另一个进程或迟到的执行结果已经收敛了这条记录：不是失败。
+				// 另一个入口或迟到的写入已经收敛了这条记录：不是失败。
 				continue
 			}
 			return fmt.Errorf("收敛验证记录 %s 失败: %w", run.ID, err)
@@ -246,7 +261,7 @@ func (s *ExecutionResidueService) recoverAttempts(
 	now := s.now()
 	for _, attempt := range attempts {
 		if _, ok := live[attempt.TaskID]; ok {
-			// 任务仍有持有有效租约的执行者：尝试可能仍在执行，不抢占。
+			// 该任务仍由本进程持有执行权：尝试可能仍在执行，不抢占。
 			continue
 		}
 		recovered := attempt
@@ -311,7 +326,7 @@ func (s *ExecutionResidueService) recoverSessions(
 	now := s.now()
 	for _, session := range sessions {
 		if _, ok := live[session.TaskID]; ok {
-			// 任务仍有持有有效租约的执行者：会话可能仍在运行，不抢占。
+			// 该任务仍由本进程持有执行权：会话可能仍在运行，不抢占。
 			continue
 		}
 		recovered := session
