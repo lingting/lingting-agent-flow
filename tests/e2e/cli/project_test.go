@@ -14,7 +14,8 @@ import (
 // projectTestConfig 生成一份可用于项目命令的配置文件。
 //
 // 数据库与工作区都落在同一个测试工作空间内；这里显式接收 Workspace，避免多次调用
-// testkit.Dir 得到不同目录（每个用例的数据库与配置必须指向同一处）。
+// testkit.Dir 得到不同目录（每个用例的数据库与配置必须指向同一处）。配置只包含当前
+// 正式 Schema 中的字段：角色不在配置里，由 seedProjectPrerequisites 显式写入测试数据库。
 func projectTestConfig(t *testing.T, ws *testkit.Workspace) string {
 	t.Helper()
 	content := `
@@ -28,15 +29,6 @@ workspace:
 scheduler:
   max_concurrent_tasks: 1
   max_retries_per_step: 0
-roles:
-  - id: planner
-    name: 架构规划师
-    type: planner
-    runner: pi
-    model: "provider/model-id"
-    system_prompt: 生成开发计划
-    tools_policy:
-      mode: read_only
 `
 	return writeConfig(t, content)
 }

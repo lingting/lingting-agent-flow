@@ -1,9 +1,9 @@
 // 调度器集成测试。
 //
-// 用例使用真实 SQLite、正式迁移、真实 app.TaskLeaseService 与真实 app.TaskScheduler，
-// 只把统一启动端口（容器准备 / 计划生成 / 工作流启动）替换为受控替身：候选筛选、
-// 领域准入与排序、原子领取、名额统计、租约维护与释放全部走生产代码，因此断言的是
-// 数据库里真实留下的任务记录、租约与事件，而不是方法的返回值。
+// 用例使用真实 SQLite、正式 Schema、真实 app.TaskExecutionCoordinator 与真实
+// app.TaskScheduler，只把统一启动端口（容器准备 / 计划生成 / 工作流启动）替换为受控替身：
+// 候选筛选、领域准入与排序、进程内执行权取得、名额统计与释放全部走生产代码，因此断言的是
+// 数据库里真实留下的任务记录、事件与协调器登记，而不是方法的返回值。
 package scheduler_test
 
 import (
@@ -551,8 +551,8 @@ func TestSchedulerSkipsFailedAndPausedTasks(t *testing.T) {
 	}
 }
 
-// TestSchedulerLeaseEventIsTraceable 验证调度领取留下可追溯事件。
-func TestSchedulerLeaseEventIsTraceable(t *testing.T) {
+// TestSchedulerClaimEventIsTraceable 验证调度领取留下可追溯事件。
+func TestSchedulerClaimEventIsTraceable(t *testing.T) {
 	t.Parallel()
 	fixture := newSchedulerFixture(t)
 	base := fixture.now.Add(-time.Hour)

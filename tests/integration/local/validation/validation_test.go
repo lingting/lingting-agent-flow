@@ -425,10 +425,13 @@ func httpStatusText(status int) string {
 }
 
 // dockerHelpText 返回覆盖全部实际使用参数的帮助文本。
+//
+// 内容必须与 internal/docker 的 RequiredCLICommands 保持一致：真实校验会逐项核对这些
+// 选项，缺少任一项都会被判定为 abnormal，因此这里不能裁剪生产代码要求核验的参数。
 func dockerHelpText() string {
 	return strings.Join([]string{
 		"Options:",
-		"--name --detach --workdir --label --mount",
+		"--name --detach --workdir --label --mount --read-only --tmpfs",
 		"--time --force --interactive --env --tail",
 		"--rm --entrypoint --all --filter --format",
 		"--tag --file --build-arg --no-cache --progress",

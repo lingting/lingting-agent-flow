@@ -86,6 +86,9 @@ func writeConfig(t *testing.T, content string) string {
 
 // minimalConfig 是一份可以通过校验的最小配置。
 //
+// 配置只包含当前正式 Schema 中的字段：角色不是配置项，需要角色的用例改为往测试数据库
+// 写入角色记录，不能靠配置回填。
+//
 // 其中的数据库与工作区路径是**占位符**，由 workspaceConfig 替换为测试工作空间内的
 // 绝对路径。任何会打开数据库的用例都必须使用 workspaceConfig 生成的配置，直接用
 // 本常量会让 SQLite 文件按进程工作目录解析，写到包目录下。
@@ -100,15 +103,6 @@ workspace:
 scheduler:
   max_concurrent_tasks: 1
   max_retries_per_step: 0
-roles:
-  - id: planner
-    name: 架构规划师
-    type: planner
-    runner: pi
-    model: "provider/model-id"
-    system_prompt: 生成开发计划
-    tools_policy:
-      mode: read_only
 `
 
 // TestVersionCommand 校验 version 子命令输出注入的版本信息。

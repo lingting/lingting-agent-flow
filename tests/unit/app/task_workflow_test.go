@@ -1362,33 +1362,6 @@ func TestWorkflowRecoveryOnServerRestart(t *testing.T) {
 	}
 }
 
-// TestWorkflowRecoveryKeepsLiveLease 验证有效租约不会被其他进程抢占。
-func TestWorkflowRecoveryKeepsLiveLease(t *testing.T) {
-	t.Parallel()
-	var existing domain.WorkflowRun
-	fixture := newTaskWorkflowFixture(t, taskWorkflowOptions{
-		stepCount: 2,
-		existingRun: func(t *testing.T, task domain.Task, steps []domain.Step) domain.WorkflowRun {
-			run, err := domain.NewWorkflowRun(task.ID, steps, time.Now().UTC())
-			if err != nil {
-				t.Fatalf("构造执行记录失败: %v", err)
-			}
-			if err := run.Start(time.Now().UTC()); err != nil {
-				t.Fatalf("模拟在途执行失败: %v", err)
-			}
-			existing = run
-			return run
-		},
-	})
-	recovered, err := fixture.db.GetWorkflowRun(fixture.ctx, existing.ID)
-	if err != nil {
-		t.Fatalf("读取执行记录失败: %v", err)
-	}
-	if recovered.Status != domain.WorkflowRunRunning {
-		t.Fatalf("有效租约不应被抢占，实际 %s", recovered.Status)
-	}
-}
-
 // TestWorkflowRecoveryCancelsRequested 验证服务启动时确认已记录的取消请求。
 func TestWorkflowRecoveryCancelsRequested(t *testing.T) {
 	t.Parallel()

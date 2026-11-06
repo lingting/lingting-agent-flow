@@ -261,7 +261,7 @@ func TestStepTimestampsSurviveUnknownStatus(t *testing.T) {
 
 // TestBeginStepExecutionWritesStartedAt 校验并发受保护的占用路径同时写入开始时间。
 //
-// 占用是"步骤真正开始执行"的唯一跨进程落点：开始时间必须与状态、尝试、任务推进
+// 占用是"步骤真正开始执行"的唯一持久化落点：开始时间必须与状态、尝试、任务推进
 // 在同一个事务内写入，不能依赖调用方事后补写。
 func TestBeginStepExecutionWritesStartedAt(t *testing.T) {
 	t.Parallel()

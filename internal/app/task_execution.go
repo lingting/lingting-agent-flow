@@ -248,6 +248,18 @@ func newTaskExecutionGrant(taskID domain.ID, unlock func()) TaskExecutionGrant {
 	}
 }
 
+// providedTaskGrant 把调用方给出的执行凭据收敛为"提供"与"未提供"两种情形。
+//
+// 零值凭据表示调用方没有提供执行权：接口层与直接调用方都无法构造凭据，因此空值必须被
+// 当作"未提供"，由服务自己通过协调器取得，而不是当成一个已经给出但无效的所有权令牌。
+// 非空凭据原样返回，其任务归属与持有状态仍由 acquireTaskGrant 与各入口继续校验。
+func providedTaskGrant(grant TaskExecutionGrant) *TaskExecutionGrant {
+	if !grant.Valid() {
+		return nil
+	}
+	return &grant
+}
+
 // acquireTaskGrant 返回本次操作使用的执行凭据，并在需要时由服务自行取得执行权。
 //
 // provided 非空时必须属于同一任务：调用方已经持有了执行权（例如调度器、启动流程或

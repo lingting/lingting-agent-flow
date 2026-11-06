@@ -258,9 +258,7 @@ export function describeRetryResult(
 ): RetryOutcome {
   const status = retryTaskStatusLabel(String(result.task_status ?? ""), options.statusLabels);
   const previous = retryTaskStatusLabel(String(result.previous_status ?? ""), options.statusLabels);
-  const details = [
-    `任务状态：重试前 ${previous} → 当前 ${status}`,
-  ];
+  const details = [`任务状态：重试前 ${previous} → 当前 ${status}`];
   if (isRealTime(result.started_at)) {
     details.push(`开始时间：${new Date(result.started_at as string).toLocaleString()}`);
   }

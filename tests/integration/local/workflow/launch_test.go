@@ -611,7 +611,7 @@ func TestRecoverStepOccupancyPersistsRecoveryRequired(t *testing.T) {
 
 // TestRecoverStepOccupancyKeepsActiveRunOccupancy 校验仍有有效执行权时不抢占。
 //
-// 判据是"执行者仍持有有效租约"，不是"存在未结束记录"：pending / blocked /
+// 判据是"执行记录仍在推进"，不是"存在未结束记录"：pending / blocked /
 // recovery_required 记录都已经没有执行权，不能阻止其残留步骤被收敛（B1）。
 func TestRecoverStepOccupancyKeepsActiveRunOccupancy(t *testing.T) {
 	t.Parallel()

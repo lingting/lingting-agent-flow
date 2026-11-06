@@ -44,10 +44,13 @@ func (s *TaskLaunchService) Launch(
 		return TaskLaunchResult{}, err
 	}
 	// 执行权按任务串行：同一任务不会被另一个执行入口同时推进，启动阶段全程持有它。
+	//
+	// 接口层与直接调用方都无法构造执行凭据：空凭据表示"本次调用没有提供执行权"，
+	// 必须由协调器为本次启动取得，而不是当作调用方已经给出的所有权令牌拒绝启动。
 	grant, ownsGrant, grantErr := acquireTaskGrant(
 		s.coordination,
 		task.ID,
-		&request.Grant,
+		providedTaskGrant(request.Grant),
 		ErrTaskLaunchConflict,
 	)
 	if grantErr != nil {

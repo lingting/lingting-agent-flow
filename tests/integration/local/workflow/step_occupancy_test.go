@@ -74,7 +74,7 @@ func TestStepOccupancyConvergesAfterRunBlocked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造执行记录失败: %v", err)
 	}
-	// 租约已经过期：说明持有者没有续租，进程已经退出。
+	// 上一次进程已经退出：running 记录只是遗留现场，不再有执行者在推进。
 	if err := run.Start(fixture.now.Add(-time.Hour)); err != nil {
 		t.Fatalf("登记执行权失败: %v", err)
 	}
@@ -127,11 +127,11 @@ func TestStepOccupancyConvergesAfterRunBlocked(t *testing.T) {
 	_ = workflow
 }
 
-// TestStepOccupancyKeepsLiveLeaseOwner 验证仍持有有效租约的执行不被抢占。
+// TestStepOccupancyKeepsRunningWorkflowOwner 验证仍在推进的执行不被启动恢复抢占。
 //
-// 判据必须是"执行权"而不是"存在未结束记录"：否则一个仍在长调用中的正常执行会被
-// 启动恢复误判为残留（B6 的另一面）。
-func TestStepOccupancyKeepsLiveLeaseOwner(t *testing.T) {
+// 判据必须是"执行记录仍在推进"而不是"存在未结束记录"：否则一个仍在长调用中的正常
+// 执行会被启动恢复误判为残留（B6 的另一面）。
+func TestStepOccupancyKeepsRunningWorkflowOwner(t *testing.T) {
 	t.Parallel()
 	fixture := newLaunchFixture(t)
 	steps := fixture.writeSteps(t, 1)
@@ -141,7 +141,7 @@ func TestStepOccupancyKeepsLiveLeaseOwner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造执行记录失败: %v", err)
 	}
-	// 租约仍然有效：另一个进程可能正在推进同一任务。
+	// 执行记录仍在推进：执行者可能仍在推进同一任务，不能把步骤占用当作残留抢占。
 	if err := run.Start(fixture.now); err != nil {
 		t.Fatalf("登记执行权失败: %v", err)
 	}

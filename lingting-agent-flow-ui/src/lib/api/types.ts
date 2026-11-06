@@ -204,7 +204,6 @@ export type ValidationStatus = "checking" | "normal" | "abnormal";
  */
 export type ValidationCheckStatus = "passed" | "failed" | "timed_out" | "skipped" | "not_run";
 
-
 /** 一项校验的结果 */
 export type ValidationCheck = {
   name: string;

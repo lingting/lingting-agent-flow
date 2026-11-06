@@ -10,7 +10,7 @@ import (
 
 // 本文件覆盖"用户显式重试失败任务"的准入规则。
 //
-// 这些用例只验证纯领域判定：真正的领取原子性、租约栅栏与状态落库由
+// 这些用例只验证纯领域判定：真正的进程内执行权取得与状态落库由
 // tests/integration/local/scheduler 与 tests/integration/local/workflow 的集成用例用
 // 真实 SQLite 证明，不能用这里的纯函数替代。
 

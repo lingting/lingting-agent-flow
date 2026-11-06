@@ -634,7 +634,7 @@ func TestGeneratePlanRollsBackOnPersistFailure(t *testing.T) {
 func TestGeneratePlanRejectsConcurrentRequest(t *testing.T) {
 	t.Parallel()
 	fixture := newPlanFixture(t, planOptions{})
-	// 先由另一个"进程"把任务推进到 planning：模拟跨进程并发已经占用。
+	// 先把任务推进到 planning：模拟另一个入口已经占用了该任务的执行状态。
 	task := fixture.task
 	if err := task.Transition(domain.TaskStatusPlanning, fixture.now); err != nil {
 		t.Fatalf("任务迁移失败: %v", err)

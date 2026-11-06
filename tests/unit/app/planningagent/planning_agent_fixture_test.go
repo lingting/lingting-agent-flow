@@ -43,11 +43,11 @@ type planningFixture struct {
 	service *app.PlanningAgentService
 	port    *fakeContainerPort
 	targets []planningTarget
-	// db 是本次现场使用的测试数据库，供"第二个实例"与直接读取租约事实的用例复用。
+	// db 是本次现场使用的测试数据库，供直接核对持久化事实的用例复用。
 	db *sqlite.DB
-	// roles 是固定角色配置读取入口，供第二个实例复用。
+	// roles 是固定角色配置读取入口。
 	roles *app.RoleService
-	// sessionRoot 是本机 Session 根目录，两个实例必须指向同一份归档目录。
+	// sessionRoot 是本机 Session 根目录，现场内所有实例必须指向同一份归档目录。
 	sessionRoot string
 	// coordination 是本现场使用的规划会话协调器。
 	coordination *app.PlanningSessionCoordinator
@@ -358,7 +358,7 @@ func (f *fakeContainerPort) RunAgent(
 		time.Sleep(hold)
 	}
 	if archiving != nil {
-		// 模拟"Pi 已取消、归档仍在收尾"：RunAgent 尚未返回，因此租约不能提前释放。
+		// 模拟"Pi 已取消、归档仍在收尾"：RunAgent 尚未返回，因此会话登记不能提前释放。
 		select {
 		case archiving <- struct{}{}:
 		default:
@@ -420,7 +420,7 @@ func (f *fakeContainerPort) releaseAll() {
 // holdArchive 让 RunAgent 在收到取消后停在"归档收尾"阶段。
 //
 // 返回的 archiving 在进入归档阶段时收到信号，调用 closeArchive 之后 RunAgent 才真正返回。
-// 用例据此断言：Pi 已被取消、但归档尚未完成时，租约仍然被持有，RunRole 也没有返回。
+// 用例据此断言：Pi 已被取消、但归档尚未完成时，会话登记仍然被持有，RunRole 也没有返回。
 func (f *fakeContainerPort) holdArchive(t *testing.T) (<-chan struct{}, func()) {
 	t.Helper()
 	archiving := make(chan struct{}, 1)

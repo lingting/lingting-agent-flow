@@ -572,7 +572,7 @@ func TestRecoverUnfinishedRunOnRestart(t *testing.T) {
 		t.Fatalf("读取执行记录失败: %v", err)
 	}
 	if stored.Status != domain.WorkflowRunBlocked {
-		t.Fatalf("租约过期的残留应收敛为 blocked，实际 %s", stored.Status)
+		t.Fatalf("进程退出遗留的 running 应收敛为 blocked，实际 %s", stored.Status)
 	}
 	if stored.ErrorClass != "worker_interrupted" {
 		t.Fatalf("错误分类不符: %s", stored.ErrorClass)
@@ -860,7 +860,7 @@ func TestPlanGenerationPersistsAcrossRestart(t *testing.T) {
 	}
 }
 
-// TestConcurrentGeneratePlanRejectsSecond 验证跨进程并发只有一个能生成计划。
+// TestConcurrentGeneratePlanRejectsSecond 验证同一服务内并发只有一个能生成计划。
 func TestConcurrentGeneratePlanRejectsSecond(t *testing.T) {
 	t.Parallel()
 	fixture := newRestartFixture(t)

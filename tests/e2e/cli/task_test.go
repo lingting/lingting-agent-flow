@@ -14,7 +14,8 @@ import (
 
 // taskConfig 生成一份可用于任务命令的配置文件。
 //
-// 数据库与 Session 目录都位于测试工作空间内，避免写入真实数据目录。
+// 数据库与工作区都位于测试工作空间内，避免写入真实数据目录。配置只包含当前正式
+// Schema 中的字段：角色不在配置里，由 seedTaskPrerequisites 显式写入测试数据库。
 func taskConfig(t *testing.T, ws *testkit.Workspace) string {
 	t.Helper()
 	content := `
@@ -28,31 +29,6 @@ workspace:
 scheduler:
   max_concurrent_tasks: 2
   max_retries_per_step: 2
-roles:
-  - id: planner
-    name: 架构规划师
-    type: planner
-    runner: pi
-    model: "provider/model-id"
-    system_prompt: 生成开发计划
-    tools_policy:
-      mode: read_only
-  - id: developer
-    name: 开发工程师
-    type: developer
-    runner: pi
-    model: "provider/model-id"
-    system_prompt: 实现代码
-    tools_policy:
-      mode: development
-  - id: validator
-    name: 验证工程师
-    type: validator
-    runner: pi
-    model: "provider/model-id"
-    system_prompt: 验证代码
-    tools_policy:
-      mode: verification
 `
 	return writeConfig(t, content)
 }
