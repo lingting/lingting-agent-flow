@@ -7,7 +7,7 @@
 # - go-local     ：`./tests/integration/local/...`（本机 SQLite / 进程 / 本机 bare 仓库 / 进程内
 #                  模拟 SSH 服务端；这些是普通测试，不属于真实外部依赖）
 # - go-e2e       ：`./tests/e2e/...`（CLI 端到端用户操作路径，不需要 pnpm 与前端依赖）
-# - go-race      ：竞态检测（`make test-race` 覆盖范围 + 数据库迁移 + 任务级工作流编排）
+# - go-race      ：竞态检测（`make test-race` 覆盖范围 + 任务级工作流编排）
 # - ui-test      ：前端单元测试、Playwright 浏览器 E2E、格式、lint、类型检查与生产构建
 #
 # 普通 Go 测试按职责拆成三个互不依赖的 Job，由 GitHub Actions 在不同 Runner 上并行执行；
