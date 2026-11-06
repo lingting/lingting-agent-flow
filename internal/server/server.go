@@ -350,7 +350,7 @@ func New(options Options) (*Server, error) {
 
 // Run 执行完整的启动、运行与关闭流程。
 //
-// 启动顺序固定为：加载并校验配置 → 确定数据库路径与锁文件路径 → 取得独占文件锁 →
+// 启动顺序固定为：加载并校验配置 → 规范化数据库路径并确定锁文件路径 → 取得独占文件锁 →
 // 启动组件 → 运行。同一份服务端数据目录只允许一个进程运行：第二个进程在这里立即失败，
 // 不会打开数据库，也不会启动任何后台服务。
 //
@@ -393,8 +393,11 @@ func (s *Server) Run(ctx context.Context, load ConfigLoader) error {
 
 // acquireProcessLock 取得服务端进程锁。
 //
-// 锁文件由数据库路径确定，父目录在取得锁之前创建：锁被占用时立即返回错误，调用方不会
-// 打开数据库，也不会构造任何后台服务。
+// 锁文件由规范化后的数据库路径确定，父目录在取得锁之前创建：锁被占用时立即返回错误，
+// 调用方不会打开数据库，也不会构造任何后台服务。
+//
+// 取得锁之后把配置中的数据库路径替换为规范化路径：锁身份与真正打开的 SQLite 文件必须
+// 是同一份文件，否则符号链接别名会让两个服务端锁住不同锁文件、却写同一个数据库。
 func (s *Server) acquireProcessLock(cfg *config.Config) error {
 	lock, err := NewProcessLock(cfg.Storage.DatabasePath)
 	if err != nil {
@@ -403,6 +406,7 @@ func (s *Server) acquireProcessLock(cfg *config.Config) error {
 	if err := lock.TryAcquire(); err != nil {
 		return err
 	}
+	cfg.Storage.DatabasePath = lock.DatabasePath()
 	s.lock = lock
 	s.report(fmt.Sprintf("已取得服务端进程锁: %s", lock.Path()))
 	return nil

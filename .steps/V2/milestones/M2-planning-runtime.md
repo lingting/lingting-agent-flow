@@ -36,8 +36,9 @@
   [`../DATA-MODEL.md`](../DATA-MODEL.md) §2。
 - `projects.default_host_id`（项目默认执行节点）：已实现（M2 第八阶段），字段、部分索引与 NULL 语义见
   [`../DATA-MODEL.md`](../DATA-MODEL.md) §2。
-- `planning_session_leases`（规划会话跨进程执行租约）：已实现（M2 第九阶段），组合约束、部分索引、
-  epoch 与释放语义见 [`../DATA-MODEL.md`](../DATA-MODEL.md) §2。
+- 规划会话的互斥不是数据库事实：`planning_session_leases`（M2 第九阶段引入）已随单 Server 架构删除，
+  `RunRole` / `Prepare` / `Release` 由进程内 `app.PlanningSessionCoordinator` 串行化，见
+  [`../DATA-MODEL.md`](../DATA-MODEL.md) §2 与 [architecture.md](../../docs/architecture.md)。
 
 ### 2.4 生命周期
 
@@ -242,7 +243,8 @@ SQLite 持久化连接成统一入口。它仍**没有 Pi 调用方、HTTP 入�
 
 本阶段解决的只是"运行时字段与业务字段相互覆盖"。`PlanningRuntimeService` 的 `keyedMutex` 仍只保证当前
 进程内的同会话串行；不同进程对同一规划会话发起 `Prepare` / `Release` 时，运行时绑定由数据库条件更新拒绝
-过期写入，但远程资源操作本身仍没有跨进程租约，`Release` 也不检查在途规划调用。
+过期写入，但远程资源操作本身仍没有跨进程租约，`Release` 也不检查在途规划调用。（单 Server 架构确认后，
+进程内串行就是唯一的协调机制，上述"仍没有跨进程租约"不再是缺口，见 §7.13。）
 
 ### 7.6 已交付：规划角色 Pi Session 持久化与多轮上下文复用（M2 第六阶段）
 
@@ -390,9 +392,16 @@ Store 的 NULL 与非 NULL 往返、更新默认节点不影响其它项目字�
 `host_id` 与 `config_json` 快照；HTTP 的创建、列表、详情、更新读写与 null 语义、无效节点返回 `400` 且不留
 部分写入；前端表单取值转换、清除语义与"节点不在列表中"的展示规则。
 
-### 7.9 已交付：规划会话跨进程执行租约与运行时释放保护（M2 第九阶段）
+### 7.9 已被单 Server 架构替代：规划会话跨进程执行租约与运行时释放保护（M2 第九阶段）
 
-规划调用现在有数据库级的跨进程互斥：`Prepare`、`RunRole` 与 `Release` 竞争同一把会话锁，租约覆盖容器准备、
+> **本阶段已被单 Server 架构替代，以下内容只作为历史记录保留，不描述当前实现。**
+>
+> 服务端进程锁确认"同一份数据目录只有一个 Server 进程"之后，跨进程仲裁不再成立：`planning_session_leases`
+> 表、owner、operation、epoch、`lease_expires_at`、续租与租约丢失上报全部删除，`Prepare`、`RunRole` 与
+> `Release` 的互斥改由进程内 `app.PlanningSessionCoordinator` 承担（见 §7.13）。规划会话的业务状态机、
+> Revision、角色会话标识与固定快照没有变化。
+
+规划调用当时由数据库级跨进程互斥保护：`Prepare`、`RunRole` 与 `Release` 竞争同一把会话锁，租约覆盖容器准备、
 角色会话绑定、Pi 执行与 Session 归档的完整过程；租约丢失会取消在途调用并等待其收敛。M2 已有业务状态机、
 Revision、角色会话标识、固定快照与普通任务执行行为均未改变。
 
@@ -450,25 +459,24 @@ fencing 边界（必须保留的风险）：
   调用顺序、提示词组装、结构化输出解析与 `CompleteAnalysis` / `FailAnalysis` 的自动收口仍属 M3。
 - 后续项目级调度需要的结构变化（`requirements` 项目关联的业务实现、任务顺序、项目执行租约）：项目
   默认执行节点已在第八阶段落地，但调度侧仍未使用它。
-- 跨进程租约解决了"同一会话不能被两个执行者同时进入"，但没有解决"远端 Pi 进程是否真的已终止"：取消上下文
+- 进程内协调器解决了"同一会话不会被两个入口同时推进"，但没有解决"远端 Pi 进程是否真的已终止"：取消上下文
   与等待收敛只保证本端调用结束，容器内进程的存续仍未核验（见 §7.9 的 fencing 边界）。
 - 规划服务的 HTTP API 与前端需求规划工作台（M3）：三个服务只完成装配与生命周期，没有对外入口。
 - 撤销与重跑之外的失败恢复入口：结果不确定的运行时现场只能通过再次 `Prepare` 做只读核验；残留的
-  一次性准备容器没有专门清理路径；释放本身已纳入跨进程租约（见 §7.9），但残留资源仍只能人工处理。
+  一次性准备容器没有专门清理路径；释放与其他会话操作由进程内协调器串行化（见 §7.13），但残留资源仍只能人工处理。
 - `Release` 仍不做"上一次释放结果不确定"的自动收敛：远程删除结果无法确认时保留定位信息并返回带阶段的错误，
   由调用方再次核验，不自动重试。
 - 真实环境下的只读验证（文件工具与 `sh -c` 写入是否真的被文件系统拒绝）尚未执行：本阶段只确认参数
   构造正确，**不代表只读规划环境已经可用**。
-- 自动化测试守点仍不完整：第七阶段的生命周期用例、第九阶段的租约用例与第十阶段的规划会话 / 稳定 Session /
-  只读参数用例已覆盖准入、取消传播、停止等待、跨实例互斥、续期与租约丢失后的收敛、会话状态机与事务边界、状态
-  与两个绑定的条件更新、稳定 Session 首轮归档 / 多轮恢复 / 归档失败上报，以及规划只读工作区与 Docker 参数
-  （见 §7.12）。仍未自动化覆盖的是这些行为在真实环境中的结果：真实数据库上的 Schema 初始化与不兼容旧库的
-  失败行为、真实 Docker / SSH 的资源创建与释放，以及真实 Pi 的多轮上下文恢复。
+- 自动化测试守点仍不完整：第七阶段的生命周期用例、第十阶段的规划会话 / 稳定 Session / 只读参数用例，以及
+  §7.13 的单 Server 基础设施用例（数据库路径规范化、进程锁身份统一、进程内协调器锁表回收与同键串行 / 异键并行）
+  已覆盖准入、取消传播、停止等待、会话状态机与事务边界、状态与两个绑定的条件更新、稳定 Session 首轮归档 /
+  多轮恢复 / 归档失败上报、规划只读工作区与 Docker 参数。仍未自动化覆盖的是这些行为在真实环境中的结果：真实
+  数据库上的 Schema 初始化与不兼容旧库的失败行为、真实 Docker / SSH 的资源创建与释放，以及真实 Pi 的多轮上下文恢复。
 - 未验证的真实外部能力：真实只读环境（文件工具与 `sh -c` 写入是否真的被文件系统拒绝）、真实多轮 Pi Session
   跨容器重建恢复、真实远程容器释放、远端 Pi 进程在取消后是否真的终止，都没有执行，不得报告为通过。
-  `planning_session_leases` 的表结构与条件写入已由第九阶段定向测试在测试数据库中执行（见 §7.11），其余
-  Schema 结构（项目默认节点、规划会话表）只在测试数据库中由首次初始化建表验证，没有自动化审计守点，也没有
-  在真实开发数据库上执行。
+  已删除的 `planning_session_leases` 不再有表结构与测试守点；其余 Schema 结构（项目默认节点、规划会话表）
+  只在测试数据库中由首次初始化建表验证，没有自动化审计守点，也没有在真实开发数据库上执行。
 
 ### 7.11 验证方式
 
@@ -678,3 +686,37 @@ Session 文件的续写语义，都需要在真实只读规划环境中验证后
   重建后真实 Session 的恢复能力、`docker cp` / `mkdir -p` / SSH 上传与归档原子替换的实际行为、真实 SSH / Docker
   取消后远端 Pi 进程是否确实终止、一次性准备容器的残留与远程释放不确定结果的恢复入口，以及旧数据库被
   明确拒绝打开的行为（未在真实旧库上验证）。M2 状态继续为 `pending`。
+
+### 7.13 已交付：单 Server 文件锁身份统一与进程内协调器锁对象回收（M2 基础设施修复）
+
+本阶段修复单 Server 架构的两处基础设施缺陷，并校正历史阶段与路线图的描述。它不新增业务能力，M2 状态仍为
+`pending`。
+
+- **数据库路径规范化**（`internal/server/process_lock.go`）：`normalizeDatabasePath` 先用 `filepath.Abs` 与
+  `filepath.Clean` 收敛相对路径与冗余段，再用 `filepath.EvalSymlinks` 解析最近一个已存在的祖先（覆盖数据库
+  文件本身是符号链接、父目录是符号链接两种情形），把尚未创建的路径段按原顺序拼回。悬空符号链接与解析过程中
+  的其他文件系统错误一律返回错误并保留原始错误链，启动失败关闭，不把悬空链接当成"尚未创建的新数据库"。
+- **锁身份与 SQLite 路径统一**：`ProcessLock` 保存规范化数据库路径、`<database_path>.server.lock` 与 OS 文件锁
+  对象；`Server.Run` 取得锁之后把配置中的数据库路径替换为规范化路径，因此 `StoreOpener` 打开的就是与锁同一条
+  路径。锁被占用时不打开数据库、不执行 Schema 初始化、不构造后台服务、不启动 HTTP；锁的生命周期
+  （HTTP 关闭 → 后台收敛 → 数据库关闭 → 释放文件锁）与"不删除锁文件"的语义不变。
+- **keyed mutex 引用计数回收**（`internal/app/coordination.go`）：`PlanningSessionCoordinator` 与
+  `EnvironmentBuildLocks` 共用同一个带引用计数的 `keyedMutex`：引用计数在等待实际互斥锁之前增加，覆盖持锁者与
+  等待者，只有最后一个引用退出时才删除锁表条目，因此锁表不会随节点 / 环境 / 会话数量增长。`EnvironmentBuildLocks`
+  仍以 `lockKey(hostID, ref)` 生成锁键，HTTP 后台构建与任务启动的环境准备继续共用 Server 装配的同一份实例。
+  `TaskExecutionCoordinator`（`keyedTaskMutex`）及其执行权语义未改动。
+- **已知边界**：本阶段只处理符号链接别名。Go 1.23 起 `os.Lstat` 不再把目录联接（junction）标记为符号链接，
+  `filepath.EvalSymlinks` 不解析它，因此 Windows 目录联接形式的路径别名不在本次范围内。
+
+本次测试范围与实际结果（本任务明确授权测试）：
+
+- 基线（改动生产代码之前）：`go test -count=1 ./tests/unit/server ./tests/unit/app` → 339 passed。
+- `go test -race -count=20 ./tests/unit/app -run '^(TestPlanningSessionCoordinator|TestEnvironmentBuildLocks)'`
+  → 120 passed，`-race` 无数据竞争报告。
+- `go test -race -count=1 ./tests/unit/server ./tests/unit/app` → 346 passed。
+- `go vet ./...` 与 `git diff --check` 无输出。
+- 本机 Windows 未开启开发模式，`os.Symlink` 返回 `ERROR_PRIVILEGE_NOT_HELD`，因此 7 个依赖符号链接的用例
+  （数据库文件别名、父目录别名、悬空链接、Server 使用规范化路径打开数据库、别名锁冲突）在本机 `SKIP` 并记录
+  原因，只有 5 个不依赖符号链接的用例实际执行；这些用例在支持符号链接的环境（CI 的 `ubuntu-latest`）会真实执行。
+- 未运行的验收：未连接真实 Docker / SSH / Pi / 远程主机，未设置或修改 `AGENTFLOW_REAL_TESTS` 等真实测试开关，
+  未启动真实 AgentFlow Server。基础设施修复与单元测试通过不代表真实环境验收完成。

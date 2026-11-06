@@ -41,8 +41,7 @@ func (c *PlanningSessionCoordinator) Lock(sessionID domain.ID) func() {
 // 中的镜像准备），它们必须共享同一份互斥集合，否则同一环境版本会在本进程内被并发构建，
 // 互相覆盖远程构建日志与元数据。
 type EnvironmentBuildLocks struct {
-	mu    sync.Mutex
-	locks map[string]*sync.Mutex
+	locks keyedMutex
 }
 
 // NewEnvironmentBuildLocks 构造环境构建互斥集合。
@@ -55,41 +54,52 @@ func (l *EnvironmentBuildLocks) Lock(hostID domain.ID, ref domain.EnvironmentRef
 	if l == nil {
 		return func() {}
 	}
-	key := lockKey(hostID, ref)
-	l.mu.Lock()
-	if l.locks == nil {
-		l.locks = make(map[string]*sync.Mutex)
-	}
-	lock, ok := l.locks[key]
-	if !ok {
-		lock = &sync.Mutex{}
-		l.locks[key] = lock
-	}
-	l.mu.Unlock()
-	lock.Lock()
-	return lock.Unlock
+	return l.locks.Lock(lockKey(hostID, ref))
 }
 
 // keyedMutex 是按字符串键提供互斥锁的集合。
 //
-// 它只被进程内协调机制使用：键相同的操作串行，键不同的操作完全并发。
+// 它只被进程内协调机制使用：键相同的操作串行，键不同的操作完全并发；一个键没有任何
+// 持有者与等待者之后对应条目自动回收，因此长期运行不会让锁表无界增长。
 type keyedMutex struct {
 	mu    sync.Mutex
-	locks map[string]*sync.Mutex
+	locks map[string]*keyedLock
+}
+
+// keyedLock 是一个带引用计数的互斥锁。
+//
+// refs 统计当前持有者与已经登记、正在等待同一把锁的调用者：两者都退出之后条目才可以
+// 回收，否则新的调用者可能拿到与等待者不同的锁对象，同一把键就不再互斥。
+type keyedLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
 // Lock 取得指定键的互斥锁并返回解锁函数。
+//
+// 引用计数必须在等待实际互斥锁之前增加：等待者同样占着条目，条目在它退出之前不能被
+// 回收，否则后来的调用者会拿到另一把锁，与等待者并发进入同一段临界区。
 func (m *keyedMutex) Lock(key string) func() {
 	m.mu.Lock()
 	if m.locks == nil {
-		m.locks = make(map[string]*sync.Mutex)
+		m.locks = make(map[string]*keyedLock)
 	}
-	lock, ok := m.locks[key]
+	entry, ok := m.locks[key]
 	if !ok {
-		lock = &sync.Mutex{}
-		m.locks[key] = lock
+		entry = &keyedLock{}
+		m.locks[key] = entry
 	}
+	entry.refs++
 	m.mu.Unlock()
-	lock.Lock()
-	return lock.Unlock
+
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		m.mu.Lock()
+		entry.refs--
+		if entry.refs <= 0 {
+			delete(m.locks, key)
+		}
+		m.mu.Unlock()
+	}
 }

@@ -78,7 +78,9 @@
 | `planning_sessions` | 所属项目、`status`（无白名单）、运行期绑定（`host_id` / `container_id` / `source_commit`）、两个角色的 Pi 会话标识、`adopted_revision_id`、`error_summary`、时间戳；索引按项目+状态+创建时间与按状态 |
 | `planning_messages` | 会话内多轮消息：`(planning_session_id, sequence)` 唯一，`sender_type`（无白名单）、`role_id`、`content`、`created_at`；只追加不覆盖 |
 | `planning_revisions` | 每轮完整快照：`(planning_session_id, revision_number)` 唯一，需求分析 / 实施方案 / 校验结果均为 JSON 文档（只做 `json_valid`） |
-| `planning_session_leases` | 规划会话跨进程执行租约：`planning_session_id` 为主键（每会话最多一个持有者）、`owner` / `operation` / `epoch` / `lease_expires_at` / `updated_at`；组合 CHECK 保证持有中三项同时存在、释放后三项同时为空，释放不删行且保留 `epoch`；部分索引按到期时间 |
+
+规划会话的互斥不是数据库事实：同一份数据目录只允许一个 Server 进程，`RunRole` / `Prepare` / `Release`
+由进程内的 `app.PlanningSessionCoordinator` 串行化，Schema 中没有租约表、owner、epoch 或 TTL。
 
 ### 2.7 冻结的遗留表
 
@@ -94,8 +96,9 @@
 - **项目默认执行节点**（M2 第八阶段）：`projects.default_host_id`（可空）与部分索引
   `idx_projects_default_host`。可空表示"未设置"，写入时把空值落成 SQL NULL，不为 NULL 行建立索引项；
   历史任务继续使用自己的 `tasks.host_id` 与 `config_json` 快照。
-- **规划会话执行租约**（M2 第九阶段）：`planning_session_leases` 与部分索引
-  `idx_planning_session_leases_expiry`。跨进程互斥由主键与 `epoch` 保证，规划会话的业务状态机不变。
+- **规划会话租约表已删除**：M2 第九阶段曾引入 `planning_session_leases`（含部分索引
+  `idx_planning_session_leases_expiry`）做跨进程互斥；单 Server 架构确认后该表与对应的 owner、epoch、
+  TTL、续租机制一起删除，`schema.sql` 中不再存在，也不需要为旧开发数据库保留迁移路径。
 
 固定四角色不需要结构变化：`roles.type` 没有取值白名单，新增角色类型可直接写入；"固定身份"由 `domain`
 常量与 `app.RoleService` 保证，不是数据库约束；缺失角色由应用层按固定 ID 补齐，已有角色不被覆盖。
