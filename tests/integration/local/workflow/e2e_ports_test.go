@@ -61,8 +61,8 @@ type e2eCheckReply struct {
 
 // e2eAgentReply 是一次受控 Agent 调用的结果。
 //
-// 端到端用例的 Agent 调用既包含 Developer，也包含 Validator：两者的区别只体现在
-// 提示词上，因此替身按调用顺序返回文本，由用例保证顺序。
+// 端到端用例的 Agent 调用包含任务级 Planner、规划阶段步骤的规划调用，以及每个开发步骤的
+// Developer 与 Validator：区别只体现在提示词上，因此替身按调用顺序返回文本，由用例保证顺序。
 type e2eAgentReply struct {
 	status       agent.RunStatus
 	finalText    string

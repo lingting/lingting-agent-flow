@@ -243,22 +243,56 @@ async function selectRole(page: Page, ariaLabel: string, label: RegExp | string)
   await page.locator(".ant-select-dropdown:visible").getByTitle(label).click();
 }
 
-/** 打开环境下拉并选择指定环境 */
+/**
+ * 打开环境下拉并选择指定环境，并确认选择真的写进了表单。
+ *
+ * 选项定位不使用 `title` 属性：`title` 只承载"不可用原因"，可用环境上它是空的，最终写进 DOM
+ * 的值取决于组件内部实现细节。虚拟列表下 `role="option"` 只渲染在零尺寸的无障碍镜像容器里，
+ * 点它不会写入选择；真正可交互的节点是 `.ant-select-item-option`。
+ *
+ * 点击之后必须显式等待结果：选中值出现在下拉里、版本下拉随之解除禁用。否则失败会推迟到
+ * "选版本"时才以超时暴露，看不出真正的出错步骤。
+ */
 async function selectEnvironment(page: Page, name: string) {
+  const environmentSelect = page
+    .locator(".ant-select")
+    .filter({ has: page.getByLabel("语言环境") });
+  const option = page
+    .locator(".ant-select-dropdown:visible .ant-select-item-option")
+    .filter({ hasText: new RegExp(`^${name} · `) });
+
+  // 环境来自真实接口：查询就绪前选择器整体禁用，此时点击不会打开下拉。先等它可用，
+  // 避免"点了一下但没有打开下拉，随后又去点一个并不存在的选项"。
+  await expect(environmentSelect).not.toHaveClass(/ant-select-disabled/);
   await page.getByLabel("语言环境").click();
-  await page
-    .locator(".ant-select-dropdown:visible")
-    .getByTitle(new RegExp(`^${name}`))
-    .click();
+  // 用真实可交互的选项节点定位，点完立刻验证选择是否落地。
+  await expect(option).toBeVisible();
+  await option.click();
+
+  // 选中值必须真的写进表单：环境显示为该项，版本选择器随之解除禁用。
+  await expect(environmentSelect).toContainText(new RegExp(`^${name} · `));
+  await expect(
+    page.locator(".ant-select").filter({ has: page.getByLabel("环境版本") }),
+  ).not.toHaveClass(/ant-select-disabled/);
 }
 
-/** 打开版本下拉并选择指定版本 */
+/**
+ * 打开版本下拉并选择指定版本。
+ *
+ * 与环境选择保持同一套定位方式：点真实可交互的选项节点，并确认选中值已写入表单。
+ */
 async function selectVersion(page: Page, version: string) {
+  const versionSelect = page.locator(".ant-select").filter({ has: page.getByLabel("环境版本") });
+  const option = page
+    .locator(".ant-select-dropdown:visible .ant-select-item-option")
+    .filter({ hasText: new RegExp(`^${version} · `) });
+
+  await expect(versionSelect).not.toHaveClass(/ant-select-disabled/);
   await page.getByLabel("环境版本").click();
-  await page
-    .locator(".ant-select-dropdown:visible")
-    .getByTitle(new RegExp(`^${version}`))
-    .click();
+  await expect(option).toBeVisible();
+  await option.click();
+
+  await expect(versionSelect).toContainText(new RegExp(`^${version} · `));
 }
 
 /**

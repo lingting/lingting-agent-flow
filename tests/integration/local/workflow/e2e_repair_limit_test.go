@@ -17,22 +17,25 @@ import (
 
 // e2eAlwaysFailReplies 返回"持续失败"的 Agent 调用序列。
 //
-// 上限为 2 时只会发生 2 轮闭环，因此序列只覆盖规划阶段与第 1 步的两轮开发。
+// 上限为 2 时只会发生 2 轮开发闭环，因此序列只覆盖任务级 Planner、规划阶段步骤与第 1
+// 步的两轮开发。确定性检查始终失败，语义审查因此从不被调用。
 func e2eAlwaysFailReplies() []e2eAgentReply {
 	return []e2eAgentReply{
-		// Planner 生成计划。
+		// 任务级 Planner 生成计划。
 		{status: agent.RunCompleted, finalText: e2ePlanJSON},
-		// 规划阶段步骤。
+		// 规划阶段步骤：只执行一次规划调用，没有 Validator 审查。
 		{status: agent.RunCompleted, finalText: "计划已生成"},
-		{status: agent.RunCompleted, finalText: e2eValidatorPassJSON},
-		// 第 1 个开发步骤：首轮实现（验证失败）。
+		// 第 1 个开发步骤：首轮实现（确定性检查失败，因此不调用 Validator）。
 		{status: agent.RunCompleted, finalText: "第一次实现"},
 		// 修复轮：第二次实现（仍然失败）。
 		{status: agent.RunCompleted, finalText: "第二次实现"},
 	}
 }
 
-// e2eAlwaysFailChecks 返回"规划阶段通过、此后持续失败"的检查结果。
+// e2eAlwaysFailChecks 返回"持续失败"的检查结果。
+//
+// 规划阶段不执行确定性检查，因此只保留两条失败结果，分别对应第 1 个开发步骤的两轮
+// 开发尝试。
 func e2eAlwaysFailChecks() []e2eCheckReply {
 	failed := e2eCheckReply{
 		exitCode: 1,
@@ -41,7 +44,6 @@ func e2eAlwaysFailChecks() []e2eCheckReply {
 		certain:  true,
 	}
 	return []e2eCheckReply{
-		{exitCode: 0, stdout: "ok", started: true, certain: true},
 		failed,
 		failed,
 	}
@@ -177,9 +179,11 @@ func TestE2ERepairDisabledFailsWithoutRetry(t *testing.T) {
 			RetryClasses: []domain.RetryErrorClass{domain.RetryClassTimeout},
 		},
 		agentReplies: []e2eAgentReply{
+			// 任务级 Planner 生成计划。
 			{status: agent.RunCompleted, finalText: e2ePlanJSON},
+			// 规划阶段步骤：只执行一次规划调用，没有 Validator 审查。
 			{status: agent.RunCompleted, finalText: "计划已生成"},
-			{status: agent.RunCompleted, finalText: e2eValidatorPassJSON},
+			// 第 1 个开发步骤：唯一一轮开发（确定性检查失败，因此不调用 Validator）。
 			{status: agent.RunCompleted, finalText: "实现完成"},
 		},
 		checkSequence: e2eAlwaysFailChecks(),
@@ -194,12 +198,12 @@ func TestE2ERepairDisabledFailsWithoutRetry(t *testing.T) {
 		t.Fatalf("错误分类应为 verification_failed，实际 %s", result.Run.ErrorClass)
 	}
 	_, _, agentCalls, checkCalls := fixture.ports.counts()
-	// 只有 Planner 计划生成、规划阶段步骤、以及第 1 步的一次开发，共 4 次调用。
-	if agentCalls != 4 {
+	// 只有任务级 Planner 计划生成、规划阶段步骤、以及第 1 步的一次开发，共 3 次调用。
+	if agentCalls != 3 {
 		t.Fatalf("未开启修复时不得产生额外 Agent 调用，实际 %d 次", agentCalls)
 	}
-	// 规划阶段 1 次 + 第 1 步 1 次，共 2 次检查。
-	if checkCalls != 2 {
+	// 规划阶段不执行确定性检查，只有第 1 步的一次检查。
+	if checkCalls != 1 {
 		t.Fatalf("未开启修复时不得重复执行检查，实际 %d 次", checkCalls)
 	}
 	if task := fixture.reloadTask(t); task.Status == domain.TaskStatusCompleted {

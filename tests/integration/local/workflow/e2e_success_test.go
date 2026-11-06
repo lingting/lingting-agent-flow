@@ -3,8 +3,12 @@
 // 本文件覆盖场景 A：完整成功。
 //
 // 链路固定为：任务创建 → 统一启动入口 → 执行环境与工作区准备 → Planner 生成并
-// 持久化计划 → 工作流启动 → Developer 执行 → 必需确定性检查 → Validator Agent
-// 语义审查 → 代码保存 → 会话归档核验 → 领域收尾决策 → 任务与工作流终态持久化。
+// 持久化计划 → 工作流启动 → 规划阶段步骤执行 → Developer 执行 → 必需确定性检查 →
+// Validator Agent 语义审查 → 代码保存 → 会话归档核验 → 领域收尾决策 → 任务与工作流
+// 终态持久化。
+//
+// 其中规划阶段步骤只做一次真实的 Planner 执行，不跑确定性检查，也不启动 Validator
+// 语义审查；"开发 → 检查 → 审查"的闭环只属于开发步骤。
 //
 // 断言对象是数据库里的真实记录：Task、WorkflowRun、Step、Attempt、Session、
 // ValidationRun、CodeSaveRecord 与事件，而不是方法的返回值。
@@ -20,19 +24,19 @@ import (
 
 // e2eHappyReplies 返回成功路径的 Agent 调用序列。
 //
-// 调用顺序由生产编排决定：Planner 生成计划后，计划中的规划阶段步骤与每个开发
-// 步骤都会各自执行一次 Developer 调用与一次 Validator 语义审查调用。
+// 调用顺序由生产编排决定：任务级 Planner 生成计划后，计划中的规划阶段步骤只执行一次
+// Planner 调用；随后每个开发步骤各自执行一次 Developer 调用，并在确定性检查通过后执行
+// 一次 Validator 语义审查调用。
 func e2eHappyReplies() []e2eAgentReply {
 	return []e2eAgentReply{
-		// Planner 生成计划。
+		// 任务级 Planner 生成计划。
 		{status: agent.RunCompleted, finalText: e2ePlanJSON},
-		// 计划中的规划阶段步骤（plan）。
+		// 计划中的规划阶段步骤（plan）：只执行一次规划调用，没有 Validator 审查。
 		{status: agent.RunCompleted, finalText: "计划已生成"},
-		{status: agent.RunCompleted, finalText: e2eValidatorPassJSON},
-		// 第 1 个开发步骤。
+		// 第 1 个开发步骤：Developer 执行 + 语义审查通过。
 		{status: agent.RunCompleted, finalText: "实现完成"},
 		{status: agent.RunCompleted, finalText: e2eValidatorPassJSON},
-		// 第 2 个开发步骤。
+		// 第 2 个开发步骤：Developer 执行 + 语义审查通过。
 		{status: agent.RunCompleted, finalText: "测试补齐"},
 		{status: agent.RunCompleted, finalText: e2eValidatorPassJSON},
 	}
@@ -136,7 +140,8 @@ func TestE2EHappyPathPersistsPlanAndWorkspace(t *testing.T) {
 	}
 }
 
-// TestE2EHappyPathPersistsExecutionRecords 验证执行记录四层关系与语义审查落库。
+// TestE2EHappyPathPersistsExecutionRecords 验证执行记录四层关系，以及规划阶段与
+// 开发步骤在验证记录上的差异：规划阶段没有 Validation Run，开发步骤恰好一条且审查落库。
 func TestE2EHappyPathPersistsExecutionRecords(t *testing.T) {
 	t.Parallel()
 	fixture := newE2EFixture(t, e2eOptions{
@@ -169,8 +174,17 @@ func TestE2EHappyPathPersistsExecutionRecords(t *testing.T) {
 			t.Fatalf("尝试 %s 应关联 1 条会话，实际 %d", attempt.ID, len(attempt.SessionIDs))
 		}
 		sessionIDs[attempt.SessionIDs[0]] = struct{}{}
-		// 每次尝试都必须留下独立的 Validation Run，并绑定该轮 Attempt。
+		// 验证记录按步骤类型区分：规划阶段不产生 Validation Run，开发步骤恰好一条。
 		runs := fixture.validationRuns(t, attempt.ID)
+		if step.Type == domain.StepTypePlan {
+			// 规划阶段只做一次真实规划执行：不跑确定性检查，也不启动语义审查，
+			// 因此不得凭空产生验证记录，也不要求 Validator 会话。
+			if len(runs) != 0 {
+				t.Fatalf("规划阶段不得产生验证记录，实际 %d 条", len(runs))
+			}
+			continue
+		}
+		// 每次开发尝试都必须留下独立的 Validation Run，并绑定该轮 Attempt。
 		if len(runs) != 1 {
 			t.Fatalf("尝试 %s 应有 1 条验证记录，实际 %d", attempt.ID, len(runs))
 		}
@@ -195,8 +209,8 @@ func TestE2EHappyPathPersistsExecutionRecords(t *testing.T) {
 	}
 	// 会话必须真实落库、已归档，并与执行记录一一对应。
 	//
-	// 计划生成是一次任务级调用，它同样留下独立会话：因此预期会话 = 1 条 Planner
-	// 会话 + 每个可执行步骤的 Developer 与 Validator 会话。
+	// 计划生成是一次任务级调用，它同样留下独立会话：因此预期会话 = 1 条任务级 Planner
+	// 会话 + 规划阶段步骤的规划会话 + 每个开发步骤的 Developer 与 Validator 会话。
 	sessions := fixture.sessionsOf(t)
 	if len(sessions) != len(sessionIDs)+1 {
 		t.Fatalf("会话数量与执行记录不一致: %d != %d+1", len(sessions), len(sessionIDs))
@@ -314,6 +328,14 @@ func TestE2EHappyPathLeavesAuditEvents(t *testing.T) {
 		domain.EventTypeWorkflowCompleted,
 	)
 	steps := fixture.reloadSteps(t)
+	// 修复循环只属于开发步骤：规划阶段没有确定性检查与语义审查，因此不会记录修复轮次。
+	developerSteps := 0
+	for _, step := range steps {
+		if step.Type == domain.StepTypePlan {
+			continue
+		}
+		developerSteps++
+	}
 	// 修复流程不应被无故触发：每轮闭环都会记录一条 repair.round 事件，但成功路径
 	// 只有 1 轮，且该轮必须是"验证通过、结束循环"的判定。
 	repairRounds := 0
@@ -327,15 +349,17 @@ func TestE2EHappyPathLeavesAuditEvents(t *testing.T) {
 			t.Fatalf("成功路径只应有第 1 轮修复判定，实际事件负载: %s", payload)
 		}
 	}
-	if repairRounds != len(steps) {
-		t.Fatalf("每个可执行步骤应记录 1 轮修复判定，实际 %d != %d", repairRounds, len(steps))
+	if repairRounds != developerSteps {
+		t.Fatalf("每个开发步骤应记录 1 轮修复判定，实际 %d != %d", repairRounds, developerSteps)
 	}
-	// Agent 调用次数必须与"每个步骤一次开发 + 一次审查"完全吻合。
+	// Agent 调用次数必须与真实调用顺序吻合：1 次任务级 Planner + 规划阶段步骤 1 次
+	// + 每个开发步骤的 1 次开发与 1 次审查。
 	_, _, agentCalls, checkCalls := fixture.ports.counts()
 	if agentCalls != len(e2eHappyReplies()) {
 		t.Fatalf("Agent 调用次数不符: %d != %d", agentCalls, len(e2eHappyReplies()))
 	}
-	if checkCalls != 3 {
-		t.Fatalf("确定性检查应执行 3 次（每个可执行步骤一次），实际 %d", checkCalls)
+	// 确定性检查只在开发步骤执行：规划阶段不跑检查。
+	if checkCalls != developerSteps {
+		t.Fatalf("确定性检查应执行 %d 次（每个开发步骤一次），实际 %d", developerSteps, checkCalls)
 	}
 }

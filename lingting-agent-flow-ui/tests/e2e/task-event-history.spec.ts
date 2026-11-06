@@ -3,6 +3,11 @@ import type { AddressInfo } from "node:net";
 
 import { expect, test, type Page, type Route } from "@playwright/test";
 
+import {
+  EVENT_STREAM_MAX_FAILURES,
+  eventStreamReconnectDelay,
+} from "@/pages/tasks/useTaskEventStream";
+
 /**
  * 事件时间线与修复周期历史的浏览器表现（P4-M3-8）。
  *
@@ -479,12 +484,24 @@ function liveStatus(page: Page) {
 }
 
 /**
+ * 虚拟时钟下用于确认"还没到重连时间"的安全间隔。
+ *
+ * Playwright 安装虚拟时钟后真实时间仍在推进虚拟时间，用例自身的往返开销会悄悄吃掉断言余量，
+ * 因此不能把"尚未重连"压在毫秒级边界上。
+ */
+const RECONNECT_GUARD_MS = 500;
+
+/** 越过重连时刻后再多推进的量，确保目标时间点一定已经跨过 */
+const RECONNECT_OVERSHOOT_MS = 600;
+
+/**
  * 按生产退避节奏连续驱动失败，直到自动重连停止，返回停止时的连接数量。
  *
- * 退避间隔直接来自生产行为（1s / 2s / 4s / 8s）：每一步都先把页面时钟推进到"还差一点"，
- * 断言此时没有新连接，再推进到该到的时间点断言连接已经建立——因此既验证了间隔，也验证了不会
- * 提前重连。阈值不在这里复制：`EVENT_STREAM_MAX_FAILURES` 的语义由"第 5 次失败后连接数不再
- * 增长"来体现，纯函数边界另由 `tests/unit/task-event-history.test.ts` 断言。
+ * 退避间隔与停止阈值都直接取自生产导出（`eventStreamReconnectDelay` /
+ * `EVENT_STREAM_MAX_FAILURES`），用例不另外维护一份可能漂移的时序常量。
+ *
+ * 每一步先把页面时钟推进到"距目标间隔还有一段安全余量"，断言此时没有新连接，再推进越过剩余
+ * 时间断言连接已经建立——因此既验证了退避顺序，也验证了不会提前重连。
  *
  * `start` 是第一条待失败的连接索引（当前处于 live 的那一条）。
  */
@@ -493,18 +510,19 @@ async function driveReconnectExhaustion(
   stream: ReturnType<typeof liveStream>,
   start: number,
 ): Promise<number> {
-  const delays = [1_000, 2_000, 4_000, 8_000];
   let index = start;
-  for (const delay of delays) {
+  // 达到上限前的每一次连续失败都会安排下一次重连；最后一次失败不再安排新连接。
+  for (let failures = 1; failures < EVENT_STREAM_MAX_FAILURES; failures += 1) {
+    const delay = eventStreamReconnectDelay(failures);
     await stream.fail(index);
     await expect(liveStatus(page)).toHaveText("正在重连");
-    await page.clock.runFor(delay - 100);
+    await page.clock.runFor(delay - RECONNECT_GUARD_MS);
     expect(await stream.count()).toBe(index + 1);
-    await page.clock.runFor(200);
+    await page.clock.runFor(RECONNECT_GUARD_MS + RECONNECT_OVERSHOOT_MS);
     await expect.poll(() => stream.count()).toBe(index + 2);
     index += 1;
   }
-  // 第 5 次连续失败：达到上限即停止，不再安排新的连接。
+  // 第 EVENT_STREAM_MAX_FAILURES 次连续失败：达到上限即停止，不再安排新的连接。
   await stream.fail(index);
   await expect(liveStatus(page)).toHaveText("已停止");
   await page.clock.runFor(60_000);

@@ -25,17 +25,17 @@ import (
 const e2eValidatorFailJSON = `{"passed":false,"summary":"实现缺少错误处理",` +
 	`"evidence":["internal/feature.go"],"suggest_fix":true,"needs_human_review":false}`
 
-// e2eReviewFailReplies 返回"规划阶段审查通过、第一个开发步骤审查不通过"的调用序列。
+// e2eReviewFailReplies 返回"第一个开发步骤审查不通过"的调用序列。
 //
-// 调用顺序由生产编排决定：Planner 生成计划后，规划阶段步骤与每个开发步骤各执行
-// 一次开发调用与一次语义审查调用。第 2 个开发步骤不会被调用。
+// 调用顺序由生产编排决定：任务级 Planner 生成计划后，规划阶段步骤只执行一次规划调用；
+// 第 1 个开发步骤执行一次开发调用，并在确定性检查通过后执行一次语义审查调用（判定
+// 不通过）。第 2 个开发步骤不会被调用。
 func e2eReviewFailReplies() []e2eAgentReply {
 	return []e2eAgentReply{
-		// Planner 生成计划。
+		// 任务级 Planner 生成计划。
 		{status: agent.RunCompleted, finalText: e2ePlanJSON},
-		// 规划阶段步骤：开发调用 + 语义审查通过。
+		// 规划阶段步骤：只执行一次规划调用，没有 Validator 审查。
 		{status: agent.RunCompleted, finalText: "计划已生成"},
-		{status: agent.RunCompleted, finalText: e2eValidatorPassJSON},
 		// 第 1 个开发步骤：开发调用 + 语义审查不通过。
 		{status: agent.RunCompleted, finalText: "实现完成"},
 		{status: agent.RunCompleted, finalText: e2eValidatorFailJSON},

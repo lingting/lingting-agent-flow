@@ -16,21 +16,22 @@ import (
 
 // e2eRepairThenPassReplies 返回"首轮失败、修复后通过"的 Agent 调用序列。
 //
-// 第 1 个开发步骤会有两轮闭环：首轮开发 → 验证失败 → 依据反馈修复 → 重验通过。
+// 调用顺序由生产编排决定：任务级 Planner 生成计划后，规划阶段步骤只执行一次规划调用；
+// 第 1 个开发步骤会有两轮闭环：首轮开发 → 确定性检查失败（不进入语义审查）→ 依据反馈
+// 修复 → 重验通过 → 语义审查通过；第 2 个开发步骤随后执行开发与审查。
 func e2eRepairThenPassReplies() []e2eAgentReply {
 	pass := e2eValidatorPassJSON
 	return []e2eAgentReply{
-		// Planner 生成计划。
+		// 任务级 Planner 生成计划。
 		{status: agent.RunCompleted, finalText: e2ePlanJSON},
-		// 规划阶段步骤。
+		// 规划阶段步骤：只执行一次规划调用，没有 Validator 审查。
 		{status: agent.RunCompleted, finalText: "计划已生成"},
-		{status: agent.RunCompleted, finalText: pass},
-		// 第 1 个开发步骤：首轮实现（验证失败）。
+		// 第 1 个开发步骤：首轮实现（确定性检查失败，因此不调用 Validator）。
 		{status: agent.RunCompleted, finalText: "第一次实现"},
-		// 修复轮：第二次实现（验证通过）。
+		// 修复轮：第二次实现（重验通过后进入语义审查）。
 		{status: agent.RunCompleted, finalText: "根据反馈修复"},
 		{status: agent.RunCompleted, finalText: pass},
-		// 第 2 个开发步骤。
+		// 第 2 个开发步骤：开发调用 + 语义审查通过。
 		{status: agent.RunCompleted, finalText: "测试补齐"},
 		{status: agent.RunCompleted, finalText: pass},
 	}
@@ -38,10 +39,10 @@ func e2eRepairThenPassReplies() []e2eAgentReply {
 
 // e2eFailThenPassChecks 返回"首轮构建失败、之后全部通过"的检查结果序列。
 //
-// 检查按调用顺序返回：规划阶段步骤、第 1 步首轮（失败）、第 1 步重验、第 2 步。
+// 检查按调用顺序返回：规划阶段不执行确定性检查，因此序列只覆盖开发步骤：
+// 第 1 步首轮（失败）、第 1 步修复后重验（通过）、第 2 步（通过）。
 func e2eFailThenPassChecks() []e2eCheckReply {
 	return []e2eCheckReply{
-		{exitCode: 0, stdout: "ok", started: true, certain: true},
 		{exitCode: 1, stderr: "编译错误: undefined: foo", started: true, certain: true},
 		{exitCode: 0, stdout: "ok", started: true, certain: true},
 		{exitCode: 0, stdout: "ok", started: true, certain: true},
@@ -240,9 +241,9 @@ func TestE2ERepairPromptCarriesFeedback(t *testing.T) {
 
 // e2eRepairNoteIndex 是第 1 个开发步骤首轮 Developer 调用在提示词序列中的下标。
 //
-// 序列前 3 项分别是 Planner 计划生成、规划阶段步骤的 Developer 与其 Validator
-// 审查，因此第 1 个开发步骤的首轮 Developer 是第 4 项（下标 3）。
-const e2eRepairNoteIndex = 3
+// 序列前 2 项分别是任务级 Planner 的计划生成与规划阶段步骤的规划调用（规划阶段没有
+// Validator 审查），因此第 1 个开发步骤的首轮 Developer 是第 3 项（下标 2）。
+const e2eRepairNoteIndex = 2
 
 // indexOfE2EText 返回子串首次出现的字节下标，未出现时返回 -1。
 func indexOfE2EText(text, sub string) int {
