@@ -39,7 +39,7 @@ V2 不引入第二套工作流引擎，也不新增分层。新能力一律按�
 | 服务 | 负责 | 明确不做 |
 |---|---|---|
 | `PlanningSessionService` | 会话创建、消息追加、Revision 追加、确认/放弃、状态收敛 | 不拼 Pi 命令、不创建容器 |
-| `PlanningRuntimeService` | 规划容器准备与复用、只读代码快照、两个角色 Session 路径、释放 | 不生成方案、不写业务状态结论 |
+| `PlanningRuntimeService` | 规划容器准备与复用、只读代码快照、远端现场核验、残留准备容器清理、完整快照恢复、不完整快照废弃、释放 | 不生成方案、不写业务状态结论、不自动重放远程副作用、不自动修复现场 |
 | `RequirementAnalysisService` | 调用需求分析师、解析结构化分析、落 Revision | 不创建正式 Requirement |
 | `RequirementPlanningService` | 调用方案规划师、解析实施方案、结构化校验 | 不写数据库正式实体 |
 | `RequirementService` | 正式需求的创建（含事务）、查询、逻辑删除、进度聚合 | 不调度、不执行 |
@@ -121,6 +121,29 @@ roles.tools_policy_json（SQLite）
 
 同一 PlanningSession 多轮复用同一容器与同一代码快照；不同 PlanningSession 互相隔离
 （独立容器、独立卷、独立 Session 文件）。
+
+### 4.1 现场核验与失败恢复（V2-M2 第十四阶段已落地）
+
+运行时的残留与不确定现场由四个显式入口处置，全部与 `RunRole` / `Prepare` / `Release` 共用同一个
+`app.PlanningSessionCoordinator`，因此同一规划会话严格串行、不同会话并行、排队期间取消不产生远程副作用：
+
+```text
+InspectPlanningRuntime             只读核验：数据库绑定 + 规划容器 + 快照卷 + 一次性准备容器 + 实际 commit
+CleanupPlanningSnapshotPreparation 只清准备容器：不存在幂等、运行中拒绝、退出且所有权核验通过才删
+RecoverPlanningSnapshot            已完整快照：只核验 + 条件更新写入 SourceCommit，不重新 Clone / checkout
+DiscardIncompletePlanningSnapshot  不完整快照：未固定 commit、未被容器引用、准备容器不存在、所有权匹配才删
+Release                            显式重试：先核验再删除，两项资源都确认不存在才清空绑定
+```
+
+规则：
+
+- 所有权判定集中在 `PlanningRuntimeService`，远程能力只通过 `app.PlanningRuntimeRemotePort` 读取事实与执行一次删除；
+  生产由 `planningRuntimeRemote` 包装 `ContainerService`，仍然只有一条 SSH / Docker 调用链。
+- 每份资源的核验结论分为 `present` / `absent` / `unknown` / `mismatch`：SSH、Docker、超时与解析失败只能落到 `unknown`，
+  不得映射为 `absent`；标签或归属不成立是 `mismatch`，返回冲突错误并保留数据库定位信息。
+- 结果不确定时立即返回并保留现场，服务端**不自动重试**远程删除、不自动重放 Clone / checkout、不自动终止运行中的准备
+  容器，也不提供批量清理或全局扫描删除能力。
+- 恢复有效快照与废弃不完整快照是两个独立操作，不合并为一次隐式自动修复。
 
 ## 5. HTTP API 方向
 

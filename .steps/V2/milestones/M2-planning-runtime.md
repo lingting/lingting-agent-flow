@@ -440,6 +440,8 @@ Revision、角色会话标识、固定快照与普通任务执行行为均未改
   删除本会话快照卷）与 `PlanningRuntimeServiceOptions.ReleasePort`。生产装配始终留空，由
   `planningRuntimeContainerRelease` 包装 `ContainerService`：快照卷删除代码只是从 `PlanningRuntimeService`
   移到该适配器，调用顺序、标签核验与错误映射未变，因此没有第二条容器或 SSH 调用链。
+  该端口已在第十四阶段（§7.14）被 `app.PlanningRuntimeRemotePort` 取代：所有权与状态判定重新回到应用层，
+  适配器只读取远端事实与执行单次删除。
 
 fencing 边界（必须保留的风险）：
 
@@ -462,17 +464,23 @@ fencing 边界（必须保留的风险）：
 - 进程内协调器解决了"同一会话不会被两个入口同时推进"，但没有解决"远端 Pi 进程是否真的已终止"：取消上下文
   与等待收敛只保证本端调用结束，容器内进程的存续仍未核验（见 §7.9 的 fencing 边界）。
 - 规划服务的 HTTP API 与前端需求规划工作台（M3）：三个服务只完成装配与生命周期，没有对外入口。
-- 撤销与重跑之外的失败恢复入口：结果不确定的运行时现场只能通过再次 `Prepare` 做只读核验；残留的
-  一次性准备容器没有专门清理路径；释放与其他会话操作由进程内协调器串行化（见 §7.13），但残留资源仍只能人工处理。
-- `Release` 仍不做"上一次释放结果不确定"的自动收敛：远程删除结果无法确认时保留定位信息并返回带阶段的错误，
-  由调用方再次核验，不自动重试。
+- ~~撤销与重跑之外的失败恢复入口~~ **已关闭**（第十四阶段）：运行时长具备 `InspectPlanningRuntime`
+  （只读现场核验）、`CleanupPlanningSnapshotPreparation`（一次性准备容器显式清理）、
+  `RecoverPlanningSnapshot`（完整快照显式恢复）、`DiscardIncompletePlanningSnapshot`（不完整快照显式废弃），
+  并以 `Release` 的显式重试收敛不确定结果；所有权与不确定判定集中在应用层，资源标签不一致时拒绝删除。
+  仍属于未完成的是真实环境验收（见下一条与 §7.14）。
+- ~~`Release` 不做"上一次释放结果不确定"的自动收敛~~ **语义已按此定稿**（第十四阶段）：远程删除结果无法确认时
+  保留定位信息并立即返回带阶段的错误，调用方先用 `InspectPlanningRuntime` 取得远端真实现场，再显式发起下一次
+  `Release`；服务端仍然**不自动重试**远程删除，也不在一次 `Release` 内部循环重试。
 - 真实环境下的只读验证（文件工具与 `sh -c` 写入是否真的被文件系统拒绝）尚未执行：本阶段只确认参数
   构造正确，**不代表只读规划环境已经可用**。
-- 自动化测试守点仍不完整：第七阶段的生命周期用例、第十阶段的规划会话 / 稳定 Session / 只读参数用例，以及
-  §7.13 的单 Server 基础设施用例（数据库路径规范化、进程锁身份统一、进程内协调器锁表回收与同键串行 / 异键并行）
-  已覆盖准入、取消传播、停止等待、会话状态机与事务边界、状态与两个绑定的条件更新、稳定 Session 首轮归档 /
-  多轮恢复 / 归档失败上报、规划只读工作区与 Docker 参数。仍未自动化覆盖的是这些行为在真实环境中的结果：真实
-  数据库上的 Schema 初始化与不兼容旧库的失败行为、真实 Docker / SSH 的资源创建与释放，以及真实 Pi 的多轮上下文恢复。
+- 自动化测试守点仍不完整：第七阶段的生命周期用例、第十阶段的规划会话 / 稳定 Session / 只读参数用例、§7.13 的
+  单 Server 基础设施用例（数据库路径规范化、进程锁身份统一、进程内协调器锁表回收与同键串行 / 异键并行），以及第十四
+  阶段的运行时现场核验 / 准备容器清理 / 快照恢复 / 快照废弃 / 释放恢复用例（受控远程替身注入存在、不存在、标签不一致、
+  归属不成立与结果不确定五类现场）已覆盖准入、取消传播、停止等待、会话状态机与事务边界、状态与两个绑定的条件更新、
+  稳定 Session 首轮归档 / 多轮恢复 / 归档失败上报、规划只读工作区与 Docker 参数，以及运行时现场处置的所有权与幂等语义。
+  仍未自动化覆盖的是这些行为在真实环境中的结果：真实数据库上的 Schema 初始化与不兼容旧库的失败行为、真实 Docker / SSH
+  的资源创建与释放，以及真实 Pi 的多轮上下文恢复。
 - 未验证的真实外部能力：真实只读环境（文件工具与 `sh -c` 写入是否真的被文件系统拒绝）、真实多轮 Pi Session
   跨容器重建恢复、真实远程容器释放、远端 Pi 进程在取消后是否真的终止，都没有执行，不得报告为通过。
   已删除的 `planning_session_leases` 不再有表结构与测试守点；其余 Schema 结构（项目默认节点、规划会话表）
@@ -720,3 +728,105 @@ Session 文件的续写语义，都需要在真实只读规划环境中验证后
   原因，只有 5 个不依赖符号链接的用例实际执行；这些用例在支持符号链接的环境（CI 的 `ubuntu-latest`）会真实执行。
 - 未运行的验收：未连接真实 Docker / SSH / Pi / 远程主机，未设置或修改 `AGENTFLOW_REAL_TESTS` 等真实测试开关，
   未启动真实 AgentFlow Server。基础设施修复与单元测试通过不代表真实环境验收完成。
+
+### 7.14 已交付：规划运行时现场核验、失败恢复与残留资源处置（M2 第十四阶段）
+
+本阶段为规划运行时补齐"先核验远端事实、再显式选择动作"的恢复能力，解决三类残留现场：快照准备容器因 SSH、
+Docker 或远程命令结果不确定而残留；快照卷已创建但 Clone / checkout / 进程中断导致快照未完成；释放时远程删除结果
+不确定。生产代码只在 `internal/app` 与既有 `ContainerService` / `remoteDocker` / Docker Runner 能力上扩展，
+没有新增第二套 SSH 或 Docker 调用链，也没有引入数据库租约、owner、epoch、TTL 或跨进程仲裁。
+
+**新增只读现场核验 `PlanningRuntimeService.InspectPlanningRuntime`**
+
+- 覆盖数据库运行时绑定、已登记规划容器的远端实际状态、快照卷存在性、快照卷的管理 / 节点 / 会话标签、一次性准备
+  容器的存在与运行状态，以及远端快照实际 commit 与 `SourceCommit` 的一致性。
+- 每份资源给出四态结论 `PlanningRuntimePresencePresent` / `Absent` / `Unknown` / `Mismatch`：SSH 失败、Docker
+  inspect 失败、超时与解析失败一律落到 `Unknown`，**不会**被映射为资源不存在；标签或归属不成立落到 `Mismatch`。
+- 标签不一致、归属不成立或固定 commit 不一致返回 `ErrPlanningRuntimeConflict`；无法确认的探测返回
+  `ErrPlanningRuntimeUncertain`。错误与结果同时返回：已确认的事实不因另一个资源的失败而丢失。
+- 核验不创建、启动、停止或删除规划资源，不写数据库。快照实际 commit 由既有的一次性只读核验容器（前台 `--rm`、
+  快照卷只读挂载、只读取 HEAD 与当前引用）取得，结束后容器自动删除，不留下需要清理的远程资源。
+- 会话未绑定执行节点时不建立连接：准备流程在产生任何远程副作用之前先落盘执行节点，因此此时三份资源按数据库事实
+  报告为 `Absent`，而不是把探测失败当成不存在。
+
+**新增一次性准备容器清理 `CleanupPlanningSnapshotPreparation`**
+
+- 容器名称继续由 `planningPrepContainerName(sessionID, hostID)` 生成，调用方只能提交规划会话标识，无法指定任意
+  Docker 容器名称或 ID。
+- 清理前重新 inspect，并同时核验：实际容器名称、AgentFlow 管理标签、`ContainerLabelKey` **不存在**、节点标签、
+  规划会话标签与 Docker 容器 ID 非空。任一不满足返回冲突且不调用删除，因此不会删除正式规划容器、任务容器或
+  其他会话 / 其他节点的资源。
+- 规则：容器不存在按已清理处理；仍在运行拒绝自动停止与删除（返回冲突）；状态无法确认（读取失败或 Docker 状态不是
+  `exited` / `dead`）拒绝操作；只有已退出且所有权全部核验通过才按 Docker 容器 ID 删除；删除结果不确定立即返回并
+  保留现场、不自动重试；删除成功后再次按名称核验，确认容器确实不存在才报告已清理。清理不删除快照卷。
+
+**新增完整快照恢复 `RecoverPlanningSnapshot`**
+
+- 顺序固定：取得会话锁 → 读取会话与绑定 → 核验一次性准备容器（**只要仍存在就拒绝**，即使已退出，必须先显式清理）
+  → 通过既有只读核验逻辑检查快照卷所有权、worktree、HEAD 与实际 commit → 通过既有条件更新写入 `SourceCommit`。
+- `SourceCommit` 为空时写入实际 commit；已记录时远端实际 commit 必须完全一致，否则返回冲突；远程状态不确定时保留
+  原有绑定。恢复只接受已经完整存在的快照，**不重新执行 Clone 或 checkout**，也不把不完整快照标记为成功。
+- 写入走 `persistRuntime` 的条件更新：绑定被并发改写时返回冲突并保留数据库最新值，不会用旧对象覆盖新事实。
+
+**新增不完整快照废弃 `DiscardIncompletePlanningSnapshot`**
+
+- 破坏性操作，只有同时满足 `SourceCommit` 为空、`ContainerID` 为空、一次性准备容器已确认不存在、快照卷存在且
+  卷名 / 管理标签 / 节点标签 / 会话标签全部匹配时才允许删除。
+- 顺序固定：取得会话锁 → 读取绑定 → 确认准备容器不存在 → inspect 快照卷 → 核验完整所有权 → 删除 → 再次 inspect
+  确认卷不存在 → 返回废弃结果。删除结果不确定时保留数据库绑定，不通过第二次删除命令猜测结果。
+- 不清空 `SourceCommit`、不修改会话业务状态、不重新准备快照；恢复有效快照与废弃不完整快照是两个独立操作，不合并为
+  一次隐式自动修复。
+
+**`Release` 的不确定结果核验与显式重试**
+
+- 顺序固定：按会话串行 → 核验规划容器远端状态 → 删除容器 → 确认已删除或已不存在 → 核验快照卷远端状态 → 删除卷 →
+  再次核验不存在 → 清空运行时绑定。任一步不确定都保留数据库定位信息并在本次调用内立即返回。
+- 再次显式 `Release` 时重新核验远端状态：已确认不存在的资源按幂等完成处理（不重复执行有副作用的删除），仍存在且
+  所有权正确的资源才继续后续步骤；标签不匹配或状态无法确认时立即停止。只有两项资源都确认不存在才通过
+  `persistRuntime` 的条件更新清空绑定。`Release` 内部不循环重试，也不新增批量清理或全局扫描删除能力。
+
+**端口与调用链**
+
+- `PlanningRuntimeServiceOptions.ReleasePort` / `app.PlanningRuntimeReleasePort` 被 `RemotePort` /
+  `app.PlanningRuntimeRemotePort` 取代：端口只提供"读取远端事实"与"执行一次删除"（`InspectManagedContainer`、
+  `DeleteManagedContainer`、`InspectPrepContainer`、`RemovePrepContainer`、`InspectSnapshotVolume`、
+  `RemoveSnapshotVolume`、`VerifySnapshotCommit`），所有权与状态判定集中在 `PlanningRuntimeService`，测试因此能观察
+  "标签不一致不得删除"这类边界。生产装配仍由 `planningRuntimeRemote` 包装 `ContainerService`，调用继续经过
+  `ContainerService.withRemoteSession` 与同一个 `docker.Runner`。
+- 新增失败阶段 `inspect` / `cleanup_preparation` / `recover_snapshot` / `discard_snapshot`，调用方据此定位失败位置，
+  不解析错误文本。
+- Inspect / Recover / Cleanup / Discard / Release 与 `RunRole`、`Prepare` 共用同一个
+  `app.PlanningSessionCoordinator`：同一会话严格串行，不同会话继续并行，排队期间上下文取消不执行任何远程副作用。
+
+**测试范围与实际结果（本任务明确授权测试）**
+
+- 基线（改动生产代码之前）：`go test -count=1 ./tests/unit/app ./tests/unit/app/planningagent ./tests/unit/server`
+  → 355 passed。
+- 新增 `tests/unit/app/planning_runtime_test.go` 与 `tests/unit/app/planning_runtime_fixture_test.go`：36 个顶层用例
+  （含子用例共 62 个），使用真实 SQLite、真实 `ContainerService` 外壳与 `app.PlanningRuntimeRemotePort` 受控替身，
+  替身未登记即视为不存在、失败必须显式注入。覆盖：现场核验的三态结论（存在 / 不存在 / 未知）与三类归属不匹配、
+  固定 commit 不一致、未绑定节点时不访问远程；准备容器清理的幂等、运行中拒绝、状态不确定拒绝、其他会话 / 节点 /
+  正式容器拒绝、删除不确定保留现场、删除后复核；快照恢复的写入、相同 commit 幂等、不同 commit 拒绝、准备容器存在
+  拒绝、不完整 / 不确定不更新绑定、条件更新冲突保留最新值；不完整快照废弃的全部前置条件、删除不确定保留绑定、
+  删除后复核与卷已不存在的幂等；`Release` 的容器删除不确定即停止、卷删除不确定保留绑定、已确认不存在按幂等完成、
+  归属不成立 / 状态不确定不清空绑定、清空走条件更新；以及同会话串行（含与 `RunRole` 互斥）、异会话并行、排队期间
+  取消不产生远程动作。
+- `go test -race -count=20 ./tests/unit/app -run '^TestPlanningRuntime'` → 1240 passed，`-race` 无数据竞争报告。
+- `go test -race -count=1 ./tests/unit/app ./tests/unit/app/planningagent ./tests/unit/server` → 417 passed。
+- `go vet ./...`、`git diff --check` 无输出；本次新增与修改文件行尾均为 LF。
+- `.github/scripts/go-test-groups.sh --check --declared-groups unit,local,e2e` 通过（31 个测试包全部分类，无遗漏、
+  无重复归属；本阶段未新增测试包）。
+
+**仍未完成的真实环境验收（不得报告为通过）**
+
+- 真实文件工具与 Shell 写入是否确实被文件系统拒绝。
+- 真实 Pi 多轮上下文恢复（跨容器重建）。
+- 容器停止、重建后的真实 Session 恢复。
+- 真实远程容器与快照卷的创建、删除与释放结果。
+- 远端 Pi 进程在取消后是否真正终止。
+- 真实开发数据库的 Schema 初始化与不兼容旧库的失败关闭行为。
+
+以上验收需要真实 Docker / SSH / Pi / 远程主机才能成立，本阶段的受控替身测试**不构成**真实环境验收。M2 状态继续为
+`pending`：仍阻塞 M2 的退出条件是"所有代码写入尝试被运行环境拒绝"与"Session 与容器生命周期可持久化恢复"两项在真实
+环境中的证据，以及规划轮次业务编排（M3）接入后在真实环境中复用同一容器与快照的多轮验证；本次阶段只补齐运行时的
+现场核验、失败恢复与残留资源处置能力，不改变 M2 的完成判定。

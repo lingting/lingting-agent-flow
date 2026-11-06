@@ -138,7 +138,7 @@ func (s *PlanningRuntimeService) ensureSnapshot(
 				err,
 			)
 		}
-		commit, verifyErr := s.verifySnapshot(ctx, remote, request, volumeName)
+		commit, verifyErr := verifySnapshotOnRemote(ctx, remote, planningSnapshotTargetOf(request))
 		if verifyErr != nil {
 			return result, verifyErr
 		}
@@ -318,7 +318,57 @@ func (s *PlanningRuntimeService) startSnapshotPrepContainer(
 	return dockerID, nil
 }
 
-// verifyTemporaryPlanningContainer 核验一次性容器确实由本会话创建。
+// inspectRemotePrepContainer 按固定名称读取一次性准备容器；容器不存在时 found=false。
+//
+// 名称由服务端依据规划会话与执行节点生成，因此"按名称查不到"就是"本会话没有准备容器"，
+// 与"读取失败"必须区分。
+func inspectRemotePrepContainer(
+	ctx context.Context,
+	remote *remoteDocker,
+	name string,
+) (docker.ContainerInspect, bool, error) {
+	inspect, err := remote.runner.InspectContainer(ctx, name)
+	if err != nil {
+		if docker.ErrorCodeOf(err) == docker.CodeContainerNotFound {
+			return docker.ContainerInspect{}, false, nil
+		}
+		return docker.ContainerInspect{}, false, err
+	}
+	return inspect, true, nil
+}
+
+// verifyPlanningPrepContainer 核验一次性准备容器的身份与归属。
+//
+// 只有名称、AgentFlow 管理标签、节点标签与规划会话标签全部匹配，且不带正式容器的登记
+// 标签时才算本会话的一次性准备容器：只凭名称相同就删除会误删其他会话、其他节点甚至正式
+// 规划容器。
+func verifyPlanningPrepContainer(
+	inspect docker.ContainerInspect,
+	name string,
+	sessionID, hostID domain.ID,
+) error {
+	if strings.TrimSpace(inspect.ID) == "" {
+		return fmt.Errorf("一次性准备容器的 Docker 容器 ID 为空: %s", name)
+	}
+	if strings.TrimSpace(inspect.Name) != name {
+		return fmt.Errorf("一次性准备容器名称不一致: 期望 %s，实际 %s", name, inspect.Name)
+	}
+	if inspect.Labels[docker.OwnershipLabelKey] != "true" {
+		return fmt.Errorf("一次性准备容器缺少 AgentFlow 管理标签: %s", name)
+	}
+	if actual := inspect.Labels[docker.ContainerLabelKey]; actual != "" {
+		return fmt.Errorf("一次性准备容器带容器登记标签（%s），属于受管理容器: %s", actual, name)
+	}
+	if actual := inspect.Labels[docker.HostLabelKey]; actual != hostID.String() {
+		return fmt.Errorf("一次性准备容器所属节点标签不一致: 期望 %s，实际 %s", hostID, actual)
+	}
+	if actual := inspect.Labels[docker.PlanningSessionLabelKey]; actual != sessionID.String() {
+		return fmt.Errorf("一次性准备容器所属规划会话标签不一致: 期望 %s，实际 %s", sessionID, actual)
+	}
+	return nil
+}
+
+// verifyTemporaryPlanningContainer 核验一次性容器确实由本会话创建且已经运行。
 func verifyTemporaryPlanningContainer(
 	ctx context.Context,
 	remote *remoteDocker,
@@ -334,44 +384,12 @@ func verifyTemporaryPlanningContainer(
 			err,
 		)
 	}
-	if inspect.Labels[docker.OwnershipLabelKey] != "true" {
+	if err := verifyPlanningPrepContainer(inspect, name, request.session.ID, request.host.ID); err != nil {
 		return planningRuntimeFailure(
 			ErrPlanningRuntimeConflict,
 			PlanningRuntimeStageSnapshot,
-			"临时准备容器缺少 AgentFlow 管理标签",
-			nil,
-		)
-	}
-	if inspect.Labels[docker.ContainerLabelKey] != "" {
-		return planningRuntimeFailure(
-			ErrPlanningRuntimeConflict,
-			PlanningRuntimeStageSnapshot,
-			"临时准备容器不应带容器登记标签",
-			nil,
-		)
-	}
-	if actual := inspect.Labels[docker.HostLabelKey]; actual != request.host.ID.String() {
-		return planningRuntimeFailure(
-			ErrPlanningRuntimeConflict,
-			PlanningRuntimeStageSnapshot,
-			"临时准备容器所属节点标签不一致",
-			fmt.Errorf("期望 %s，实际 %s", request.host.ID, actual),
-		)
-	}
-	if actual := inspect.Labels[docker.PlanningSessionLabelKey]; actual != request.session.ID.String() {
-		return planningRuntimeFailure(
-			ErrPlanningRuntimeConflict,
-			PlanningRuntimeStageSnapshot,
-			"临时准备容器所属规划会话标签不一致",
-			fmt.Errorf("期望 %s，实际 %s", request.session.ID, actual),
-		)
-	}
-	if inspect.Name != name {
-		return planningRuntimeFailure(
-			ErrPlanningRuntimeConflict,
-			PlanningRuntimeStageSnapshot,
-			"临时准备容器名称不一致",
-			fmt.Errorf("期望 %s，实际 %s", name, inspect.Name),
+			"临时准备容器的归属与本次准备不一致",
+			err,
 		)
 	}
 	if !inspect.Running {
@@ -580,26 +598,30 @@ func (s *PlanningRuntimeService) resolveBaseBranchCommit(
 	)
 }
 
-// verifySnapshot 用一次性只读容器核验已有快照卷的实际 commit 与工作区状态。
+// verifySnapshotOnRemote 用一次性只读容器核验已有快照卷的实际 commit 与工作区状态。
 //
-// 该路径不 Clone、不 checkout、不 reset：只读取 HEAD、当前引用与工作区状态。
-func (s *PlanningRuntimeService) verifySnapshot(
+// 该路径不 Clone、不 checkout、不 reset：只读取 HEAD、当前引用与工作区状态。核验容器以前
+// 台 `--rm` 方式运行且只读挂载快照卷，结束后自动删除，因此不产生需要后续清理的远程资源。
+func verifySnapshotOnRemote(
 	ctx context.Context,
 	remote *remoteDocker,
-	request planningSnapshotRequest,
-	volumeName string,
+	target PlanningRuntimeSnapshotTarget,
 ) (string, error) {
-	workDir := request.project.EffectiveWorkDir()
+	volumeName := strings.TrimSpace(target.VolumeName)
+	workDir := strings.TrimSpace(target.WorkDir)
+	if workDir == "" {
+		workDir = domain.DefaultContainerWorkDir
+	}
 	git := func(ctx context.Context, args ...string) (string, error) {
 		result, err := remote.runner.RunOneShotContainer(
 			ctx,
 			docker.OneShotContainerSpec{
-				ImageRef: request.version.ImageRef,
+				ImageRef: target.ImageRef,
 				WorkDir:  workDir,
 				Mounts: []docker.VolumeMountSpec{
 					{VolumeName: volumeName, ContainerPath: workDir, ReadOnly: true},
 				},
-				Labels:  planningRuntimeLabels(request.session.ID, request.host.ID),
+				Labels:  planningRuntimeLabels(target.SessionID, target.HostID),
 				Command: append([]string{"git"}, args...),
 			},
 			planningSnapshotRunTimeout,
@@ -637,6 +659,17 @@ func (s *PlanningRuntimeService) verifySnapshot(
 		)
 	}
 	return commit, nil
+}
+
+// planningSnapshotTargetOf 从准备请求构造只读核验的定位信息。
+func planningSnapshotTargetOf(request planningSnapshotRequest) PlanningRuntimeSnapshotTarget {
+	return PlanningRuntimeSnapshotTarget{
+		SessionID:  request.session.ID,
+		HostID:     request.host.ID,
+		VolumeName: planningSnapshotVolumeName(request.session.ID, request.host.ID),
+		ImageRef:   request.version.ImageRef,
+		WorkDir:    request.project.EffectiveWorkDir(),
+	}
 }
 
 // verifyPlanningSnapshotWorktree 校验提交 SHA 与 detached HEAD，并按需校验工作区干净。

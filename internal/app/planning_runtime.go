@@ -65,6 +65,14 @@ const (
 	PlanningRuntimeStageReleaseSnapshot PlanningRuntimeStage = "release_snapshot"
 	// PlanningRuntimeStageClearBinding 表示清空会话的运行时绑定。
 	PlanningRuntimeStageClearBinding PlanningRuntimeStage = "clear_binding"
+	// PlanningRuntimeStageInspect 表示只读核验远端运行时现场。
+	PlanningRuntimeStageInspect PlanningRuntimeStage = "inspect"
+	// PlanningRuntimeStageCleanupPreparation 表示清理一次性快照准备容器。
+	PlanningRuntimeStageCleanupPreparation PlanningRuntimeStage = "cleanup_preparation"
+	// PlanningRuntimeStageRecoverSnapshot 表示恢复已经完整存在但未落库的快照。
+	PlanningRuntimeStageRecoverSnapshot PlanningRuntimeStage = "recover_snapshot"
+	// PlanningRuntimeStageDiscardSnapshot 表示废弃不完整的快照卷。
+	PlanningRuntimeStageDiscardSnapshot PlanningRuntimeStage = "discard_snapshot"
 )
 
 // PlanningRuntimeError 是带阶段的规划运行时错误。
@@ -123,8 +131,9 @@ type PlanningRuntimeService struct {
 	store storage.Store
 	// containers 提供规划容器的创建、复用与核验能力。
 	containers *ContainerService
-	// release 是释放路径使用的容器能力：生产中包装 containers，测试可注入受控替身。
-	release PlanningRuntimeReleasePort
+	// remote 是核验、清理、恢复、废弃与释放共用的远程能力：生产中包装 containers，
+	// 测试可注入受控替身。
+	remote PlanningRuntimeRemotePort
 	// coordination 按规划会话串行化 Prepare / Release：同一会话不得并发创建第二个容器。
 	//
 	// 它与 PlanningAgentService 共用同一个实例，因此角色调用与运行环境操作互斥：一个
@@ -138,18 +147,19 @@ type PlanningRuntimeServiceOptions struct {
 	Store storage.Store
 	// Containers 是受管理容器服务，提供规划容器的创建、复用与核验能力。
 	//
-	// 释放路径只有一种情况可以缺省它：调用方显式提供了 ReleasePort。
+	// 只有一种情况可以缺省它：调用方显式提供了 RemotePort；此时 Prepare 不可用，
+	// 但仍可核验、清理、恢复、废弃与释放。
 	Containers *ContainerService
 	// Coordination 是规划会话的进程内协调器，必填。
 	//
 	// 它与 PlanningAgentService 共用同一个实例：RunRole、Prepare 与 Release 必须串行
 	// 同一会话，否则一个入口准备容器时另一个入口可以执行 Pi 或释放资源。
 	Coordination *PlanningSessionCoordinator
-	// ReleasePort 覆盖释放路径使用的容器能力，零值时包装 Containers。
+	// RemotePort 覆盖核验、清理、恢复、废弃与释放使用的远程能力，零值时包装 Containers。
 	//
-	// 它只是依赖测试缝隙：生产装配总是留空，释放路径因此在生产中始终由 ContainerService
+	// 它只是依赖测试缝隙：生产装配总是留空，这些路径因此在生产中始终由 ContainerService
 	// 执行，不存在第二条容器或 SSH 调用链。
-	ReleasePort PlanningRuntimeReleasePort
+	RemotePort PlanningRuntimeRemotePort
 }
 
 // NewPlanningRuntimeService 构造规划运行时服务。
@@ -168,12 +178,12 @@ func NewPlanningRuntimeService(
 		coordination: options.Coordination,
 	}
 	switch {
-	case options.ReleasePort != nil:
-		service.release = options.ReleasePort
+	case options.RemotePort != nil:
+		service.remote = options.RemotePort
 	case options.Containers != nil:
-		service.release = planningRuntimeContainerRelease{containers: options.Containers}
+		service.remote = planningRuntimeRemote{containers: options.Containers}
 	default:
-		return nil, fmt.Errorf("规划运行时初始化失败: 必须提供容器服务或释放能力")
+		return nil, fmt.Errorf("规划运行时初始化失败: 必须提供容器服务或远程能力")
 	}
 	return service, nil
 }
@@ -472,12 +482,22 @@ func (s *PlanningRuntimeService) prepareRuntime(
 
 // Release 释放本规划会话自己拥有的规划容器与快照卷。
 //
-// 顺序固定为：按会话串行 → 删除规划容器 → 确认已删除或已不存在 → 删除本会话快照卷 →
-// 确认删除 → 清空会话的运行时绑定 → 释放会话锁。任一步失败都保留数据库中的定位信息
-// （HostID / ContainerID / SourceCommit），不做自动重试，也不删除任何不属于本会话的资源。
+// 顺序固定为：按会话串行 → 核验规划容器远端状态 → 删除规划容器 → 确认已删除或已不存在 →
+// 核验快照卷远端状态 → 删除快照卷 → 确认删除 → 清空会话的运行时绑定 → 释放会话锁。任一步
+// 失败都保留数据库中的定位信息（HostID / ContainerID / SourceCommit），不做自动重试，也
+// 不删除任何不属于本会话的资源。
+//
+// 每次调用都重新核验远端事实：上一次释放的删除结果不确定时，本入口不猜测、不在内部循环
+// 重试，而是立即返回带阶段的错误；调用方先通过 InspectPlanningRuntime 取得真实现场，再决定
+// 是否显式发起下一次 Release。已确认不存在的资源按幂等完成处理，仍存在且归属正确的资源才
+// 继续后续步骤。
 //
 // 会话锁必须先取得再动手：另一个入口正在执行 Pi 或归档时不得删除容器与快照卷，而"先删除
 // 再检查"会让在途调用在半途丢失运行环境。
+//
+// 残留的一次性准备容器不属于本入口的处置范围：Release 既不停止也不删除它，它由
+// CleanupPlanningSnapshotPreparation 单独处置。准备容器仍挂载快照卷时，Docker 会拒绝删除卷，
+// 本入口据此如实上报失败并保留绑定，而不是猜测删除结果。
 func (s *PlanningRuntimeService) Release(
 	ctx context.Context,
 	request ReleasePlanningRuntimeRequest,
@@ -531,14 +551,9 @@ func (s *PlanningRuntimeService) releaseRuntime(
 		}
 		return result, nil
 	}
-	host, err := s.release.LoadExecutionHost(ctx, session.HostID.String())
+	host, err := s.loadRuntimeHost(ctx, *session.HostID)
 	if err != nil {
-		return result, planningRuntimeFailure(
-			ErrPlanningRuntimeFailed,
-			PlanningRuntimeStageReleaseContainer,
-			"读取规划会话的执行节点失败",
-			err,
-		)
+		return result, err
 	}
 	var registryWarning error
 	if session.ContainerID != "" {
@@ -549,7 +564,7 @@ func (s *PlanningRuntimeService) releaseRuntime(
 		result.ContainerReleased = released
 		registryWarning = warning
 	}
-	releasedVolume, releaseErr := s.release.RemoveSnapshotVolume(ctx, session, host)
+	releasedVolume, releaseErr := s.releasePlanningSnapshotVolume(ctx, session, host)
 	if releaseErr != nil {
 		return result, errors.Join(registryWarning, releaseErr)
 	}
@@ -578,6 +593,18 @@ func parsePlanningRuntimeTarget(sessionIDValue, hostIDValue string) (domain.ID, 
 		return "", "", err
 	}
 	return sessionID, hostID, nil
+}
+
+// parsePlanningRuntimeSessionID 校验规划会话标识的书写形式。
+//
+// 现场核验、准备容器清理、快照恢复与快照废弃都只接受会话标识：卷名、准备容器名与容器
+// 名称全部由服务端依据会话与执行节点推导，调用方无法指定任意资源。
+func parsePlanningRuntimeSessionID(value string) (domain.ID, error) {
+	sessionID := domain.ID(strings.TrimSpace(value))
+	if err := sessionID.Validate(); err != nil {
+		return "", err
+	}
+	return sessionID, nil
 }
 
 // loadPlanningSession 读取并返回规划会话。
@@ -682,6 +709,38 @@ func (s *PlanningRuntimeService) planningHost(
 	return host, nil
 }
 
+// loadRuntimeHost 读取并校验规划会话已经绑定的执行节点。
+//
+// 它只读取数据库记录，不建立连接：连接由后续远程调用统一建立。显式的可用性判断使
+// "节点已禁用或未通过预检"与"远程状态无法确认"不会被压缩成同一个结论——前者是调用方
+// 必须先处理的前置条件，后者必须保留真实现场并等待核验。
+func (s *PlanningRuntimeService) loadRuntimeHost(
+	ctx context.Context,
+	hostID domain.ID,
+) (domain.ExecutionHost, error) {
+	host, err := s.store.GetExecutionHost(ctx, hostID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return domain.ExecutionHost{}, planningRuntimeFailure(
+				ErrPlanningRuntimeNotFound,
+				PlanningRuntimeStageHost,
+				"执行节点不存在 "+hostID.String(),
+				err,
+			)
+		}
+		return domain.ExecutionHost{}, fmt.Errorf("读取执行节点失败: %w", err)
+	}
+	if err := EnsureHostUsableForRemoteTask(*host); err != nil {
+		return domain.ExecutionHost{}, planningRuntimeFailure(
+			ErrPlanningRuntimePrerequisite,
+			PlanningRuntimeStageHost,
+			"执行节点不可用于真实远程操作",
+			err,
+		)
+	}
+	return *host, nil
+}
+
 // planningEnvironmentVersion 解析项目语言环境在本节点上的可用版本。
 //
 // 没有构建成功的版本时直接失败：不构建、不修改版本，也不回退到宿主机执行。
@@ -690,6 +749,14 @@ func (s *PlanningRuntimeService) planningEnvironmentVersion(
 	project domain.Project,
 	host domain.ExecutionHost,
 ) (domain.EnvironmentVersion, error) {
+	if s.containers == nil {
+		return domain.EnvironmentVersion{}, planningRuntimeFailure(
+			ErrPlanningRuntimePrerequisite,
+			PlanningRuntimeStageEnvironment,
+			"规划运行时没有配置容器服务，无法解析环境版本",
+			nil,
+		)
+	}
 	number, err := planningProjectVersionNumber(project)
 	if err != nil {
 		return domain.EnvironmentVersion{}, planningRuntimeFailure(
