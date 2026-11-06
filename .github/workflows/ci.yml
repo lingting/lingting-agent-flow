@@ -497,6 +497,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # 本 Job 运行在独立 Runner 上，必须先检出仓库才能读取汇总脚本。
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # 结论只来自 Job 与步骤的结构化结果（needs.*.result 与 steps.*.outcome），
       # 不对测试日志做字符串搜索冒充判定。
       - name: 汇总必需 Job 结论
