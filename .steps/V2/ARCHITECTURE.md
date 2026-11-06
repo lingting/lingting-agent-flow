@@ -122,6 +122,7 @@ roles.tools_policy_json（SQLite）
 同一 PlanningSession 多轮复用同一容器与同一代码快照；不同 PlanningSession 互相隔离
 （独立容器、独立卷、独立 Session 文件）。
 
+
 ### 4.1 现场核验与失败恢复（V2-M2 第十四阶段已落地）
 
 运行时的残留与不确定现场由四个显式入口处置，全部与 `RunRole` / `Prepare` / `Release` 共用同一个
@@ -144,6 +145,38 @@ Release                            显式重试：先核验再删除，两项资
 - 结果不确定时立即返回并保留现场，服务端**不自动重试**远程删除、不自动重放 Clone / checkout、不自动终止运行中的准备
   容器，也不提供批量清理或全局扫描删除能力。
 - 恢复有效快照与废弃不完整快照是两个独立操作，不合并为一次隐式自动修复。
+
+### 4.2 规划容器终止策略（V2-M2 第十六阶段已落地）
+
+取消上下文只保证本端 SSH 会话结束，不保证 Docker 容器内的 Pi 与子进程退出。规划容器的终止因此
+采用显式策略，而不是从容器、Session 或角色类型推断：
+
+```text
+PlanningAgentService.RunRole
+  └─ ContainerAgentRequest{PlanningSessionID, StopContainerOnUncertain: true}
+       └─ agent.RunRequest{PlanningSessionID, StopContainerOnUncertain}
+            └─ ContainerRunner（Started && !Certain 时）
+                 └─ agent.ContainerTerminator（containerSessionExecutor）
+                      └─ ContainerService.stopContainerLocked（已持容器锁与远程会话）
+                           ├─ 复核本地记录 / 受管理 / Docker 容器 ID / 规划会话标签
+                           ├─ docker stop（1 秒宽限期）→ docker inspect
+                           └─ 记录 stopped + DockerState + 远程登记清单
+```
+
+规则：
+
+- 触发条件是显式事实的组合：调用方启用 `StopContainerOnUncertain`、给出合法 `PlanningSessionID`、
+  `ContainerExecResult.Started` 为真且 `Certain` 为假。普通任务调用不设置这些字段，任何路径都
+  不会因为一次调用取消就停止可能承载其他执行的容器。
+- 终止使用 `context.WithoutCancel` 派生的有界清理上下文；停止成功只由停止后的 `docker inspect`
+  判定，`docker stop` 返回错误但容器确实已停止时按已核实的远端事实收敛。
+- `ContainerService.RunAgent` 在执行期间已持有容器进程内锁，终止只能走持锁内部流程
+  `stopContainerLocked`；公开的 `StopContainer` 会再次取同一把锁并自锁，因此禁止在临界区内调用。
+- 结果通过 `agent.RunResult.RemoteTerminationConfirmed` / `RemoteTerminationError` 与
+  `agent.ErrRemoteTermination` 表达：已确认停止、已停止但收尾失败、仍然不确定是三种不同事实。
+- 停止不删除容器、不删除快照卷、不清空运行时绑定；容器记录为 `stopped` 时下一次 `RunRole` 由
+  `PlanningAgentService` 复用 `PlanningRuntimeService.prepareHeld` 按原容器 ID 重新启动，再从本机
+  最后一份完整稳定 Session 归档恢复上下文。容器已确认停止时不再从该容器导出或复制 Session。
 
 ## 5. HTTP API 方向
 
@@ -213,6 +246,7 @@ PUT    /api/v1/roles/{roleID}
 | G6 | ~~无 PlanningSession / Message / Revision 持久化~~ **已交付**（M2 第二阶段） | `domain/planning_*.go`、初始迁移的三张规划表 | M2/M3 |
 | G7 | 无项目级执行租约，`TaskScheduler` 只有全局并发 | `internal/app/task_scheduler.go`、`task_leases` 表按任务 | M5 |
 | G8 | 无项目/需求聚合查询 | `internal/app/projects.go` 只有项目 CRUD | M5 |
+| G9 | ~~取消上下文不能证明远端 Pi 进程已终止~~ **代码已关闭**（V2-M2 第十六阶段） | 现状：`PlanningAgentService.RunRole` 显式设置 `PlanningSessionID` 与 `StopContainerOnUncertain`，`ContainerRunner` 在 `Started && !Certain` 时经 `agent.ContainerTerminator` 调用 `ContainerService.stopContainerLocked`（复用已持有的容器锁与远程会话），以停止后的 `docker inspect` 判定终止并写入 `RemoteTerminationConfirmed` / `RemoteTerminationError`；真实 SSH / Docker 环境下的终止仍未验收，见里程碑 §7.10 / §7.16 | M2 |
 
 缺口状态说明：标记"已关闭"的条目在对应子任务完成后按当时的代码复核更新，未标记的条目仍按归属
 里程碑待实现；关闭单条缺口不代表里程碑退出条件已满足。

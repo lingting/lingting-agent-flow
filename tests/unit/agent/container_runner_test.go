@@ -64,6 +64,24 @@ type fakeExecutor struct {
 	uploads []fileTransfer
 	// containerCopies 记录远程宿主机临时文件到容器内路径的传输。
 	containerCopies []fileTransfer
+	// terminations 记录收到的容器终止请求。
+	terminations []agent.ContainerTerminationRequest
+	// terminationStates 记录每次终止时清理上下文的状态。
+	terminationStates []terminationContextState
+	// terminateResponder 返回终止结果；为空时报告已确认停止。
+	terminateResponder func(
+		request agent.ContainerTerminationRequest,
+	) (agent.ContainerTerminationResult, error)
+}
+
+// terminationContextState 是终止调用发生时清理上下文的状态。
+type terminationContextState struct {
+	// err 是调用发生时上下文自身的错误状态。
+	err error
+	// deadline 是调用发生时上下文的时间上限。
+	deadline time.Time
+	// hasDeadline 表示上下文是否带时间上限。
+	hasDeadline bool
 }
 
 // fileTransfer 是一次文件传输的起止路径。
@@ -168,6 +186,63 @@ func (e *fakeExecutor) UploadFromLocal(ctx context.Context, localPath, hostPath 
 	e.uploads = append(e.uploads, fileTransfer{source: localPath, target: hostPath})
 	e.hostFiles[hostPath] = string(content)
 	return nil
+}
+
+// TerminateContainer 记录终止请求并返回预设结果。
+//
+// 它实现 agent.ContainerTerminator：Runner 只在调用方明确启用规划容器终止策略、
+// 且 Pi 主命令已经启动但结果无法确认时才会调用它。
+func (e *fakeExecutor) TerminateContainer(
+	ctx context.Context,
+	request agent.ContainerTerminationRequest,
+) (agent.ContainerTerminationResult, error) {
+	e.mu.Lock()
+	e.terminations = append(e.terminations, request)
+	deadline, hasDeadline := ctx.Deadline()
+	e.terminationStates = append(e.terminationStates, terminationContextState{
+		err:         ctx.Err(),
+		deadline:    deadline,
+		hasDeadline: hasDeadline,
+	})
+	e.operations = append(e.operations, "terminate:"+request.ContainerID)
+	responder := e.terminateResponder
+	e.mu.Unlock()
+	if responder != nil {
+		return responder(request)
+	}
+	return agent.ContainerTerminationResult{Stopped: true}, nil
+}
+
+// terminationCount 返回收到的终止请求数量。
+func (e *fakeExecutor) terminationCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.terminations)
+}
+
+// terminationAt 返回第 index 次终止请求。
+func (e *fakeExecutor) terminationAt(t *testing.T, index int) agent.ContainerTerminationRequest {
+	t.Helper()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if index >= len(e.terminations) {
+		t.Fatalf("第 %d 次终止请求不存在，实际记录 %d 次", index+1, len(e.terminations))
+	}
+	return e.terminations[index]
+}
+
+// terminationStateAt 返回第 index 次终止发生时清理上下文的状态。
+//
+// 状态在调用发生时记录：终止返回后 Runner 会立即释放清理上下文，事后再检查
+// 上下文本身得不到调用时的真实状态。
+func (e *fakeExecutor) terminationStateAt(t *testing.T, index int) terminationContextState {
+	t.Helper()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if index >= len(e.terminationStates) {
+		t.Fatalf("第 %d 次终止上下文不存在，实际记录 %d 次", index+1, len(e.terminationStates))
+	}
+	return e.terminationStates[index]
 }
 
 // CopyToContainer 把"远程宿主机"文件复制到"容器内"路径。

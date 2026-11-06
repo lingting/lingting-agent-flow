@@ -14,7 +14,8 @@ import (
 // ensurePlanningAgentContainer 确认规划容器的归属与运行状态，必要时准备运行环境。
 //
 // 规划容器必须属于当前规划会话的执行节点、仍带本会话的规划标签并且正在运行；不在本
-// 阶段创建第二个容器，也不接管已 detached 的容器。
+// 阶段创建第二个容器，也不接管已 detached 的容器。容器在上一轮调用中断后已停止时，
+// 通过既有准备流程按原容器 ID 重新启动同一个容器。
 func (s *PlanningAgentService) ensurePlanningAgentContainer(
 	ctx context.Context,
 	session domain.PlanningSession,
@@ -53,7 +54,51 @@ func (s *PlanningAgentService) ensurePlanningAgentContainer(
 	if err != nil {
 		return session, domain.Container{}, err
 	}
+	if container.State == domain.ContainerStateStopped {
+		// 上一轮规划调用中断后容器已停止：这是正常现场，复用运行时既有的准备流程按原
+		// 容器 ID 重新启动它，而不是新建第二个容器或清空运行时绑定。
+		return s.restartPlanningAgentContainer(ctx, session, hostID, container)
+	}
 	return s.verifyPlanningAgentContainer(ctx, session, container)
+}
+
+// restartPlanningAgentContainer 重新启动本会话登记且已停止的规划容器。
+//
+// 只有本地记录明确表示容器已停止时才自动重启：停止是规划调用被中断后的正常现场，
+// 容器记录、快照卷与运行时绑定都保留。状态不确定的容器不在此自动处理，调用方需要先
+// 核验远端实际状态。
+func (s *PlanningAgentService) restartPlanningAgentContainer(
+	ctx context.Context,
+	session domain.PlanningSession,
+	hostID string,
+	container domain.Container,
+) (domain.PlanningSession, domain.Container, error) {
+	if container.State != domain.ContainerStateStopped {
+		return session, container, fmt.Errorf(
+			"%w: 规划容器当前状态为 %s，不能自动重新启动",
+			ErrPlanningAgentStateConflict,
+			container.State,
+		)
+	}
+	if err := ensureManaged(container); err != nil {
+		return session, container, fmt.Errorf("%w: %w", ErrPlanningAgentStateConflict, err)
+	}
+	if hostID == "" && session.HostID != nil {
+		hostID = session.HostID.String()
+	}
+	prepared, err := s.preparePlanningAgentRuntime(ctx, session, hostID)
+	if err != nil {
+		return session, container, err
+	}
+	if prepared.Container.ID != container.ID {
+		return session, container, fmt.Errorf(
+			"%w: 重新启动的规划容器与已登记容器不一致: 已登记 %s，本次 %s",
+			ErrPlanningAgentStateConflict,
+			container.ID,
+			prepared.Container.ID,
+		)
+	}
+	return s.verifyPlanningAgentContainer(ctx, prepared.Session, prepared.Container)
 }
 
 // preparePlanningAgentRuntime 复用规划运行时服务准备运行环境。
@@ -70,7 +115,7 @@ func (s *PlanningAgentService) preparePlanningAgentRuntime(
 	}
 	if hostID == "" {
 		return PlanningRuntimeDetail{}, fmt.Errorf(
-			"%w: 规划会话尚未准备运行环境，必须同时给出执行节点",
+			"%w: 规划会话缺少执行节点，无法准备运行环境",
 			ErrPlanningAgentInvalidInput,
 		)
 	}

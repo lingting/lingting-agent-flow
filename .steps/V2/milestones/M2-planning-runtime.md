@@ -462,8 +462,10 @@ fencing 边界（必须保留的风险）：
   调用顺序、提示词组装、结构化输出解析与 `CompleteAnalysis` / `FailAnalysis` 的自动收口仍属 M3。
 - 后续项目级调度需要的结构变化（`requirements` 项目关联的业务实现、任务顺序、项目执行租约）：项目
   默认执行节点已在第八阶段落地，但调度侧仍未使用它。
-- 进程内协调器解决了"同一会话不会被两个入口同时推进"，但没有解决"远端 Pi 进程是否真的已终止"：取消上下文
-  与等待收敛只保证本端调用结束，容器内进程的存续仍未核验（见 §7.9 的 fencing 边界）。
+- ~~进程内协调器没有解决"远端 Pi 进程是否真的已终止"~~ **代码缺口已关闭**（第十六阶段）：规划调用显式启用
+  `StopContainerOnUncertain` 并在 Pi 主命令已启动但结果不确定时停止本会话独占的规划容器，以停止后的实际
+  `docker inspect` 判定终止，本地记录与远程登记清单同步为 `stopped`，未确认时如实返回 `ErrRemoteTermination`
+  并保留绑定。**真实 SSH / Docker 环境下的终止仍未验收**（见本条与 §7.16、§7.9 的 fencing 边界）。
 - 规划服务的 HTTP API 与前端需求规划工作台（M3）：三个服务只完成装配与生命周期，没有对外入口。
 - ~~撤销与重跑之外的失败恢复入口~~ **已关闭**（第十四阶段）：运行时长具备 `InspectPlanningRuntime`
   （只读现场核验）、`CleanupPlanningSnapshotPreparation`（一次性准备容器显式清理）、
@@ -478,12 +480,16 @@ fencing 边界（必须保留的风险）：
 - 自动化测试守点仍不完整：第七阶段的生命周期用例、第十阶段的规划会话 / 稳定 Session / 只读参数用例、§7.13 的
   单 Server 基础设施用例（数据库路径规范化、进程锁身份统一、进程内协调器锁表回收与同键串行 / 异键并行），以及第十四
   阶段的运行时现场核验 / 准备容器清理 / 快照恢复 / 快照废弃 / 释放恢复用例（受控远程替身注入存在、不存在、标签不一致、
-  归属不成立与结果不确定五类现场）已覆盖准入、取消传播、停止等待、会话状态机与事务边界、状态与两个绑定的条件更新、
-  稳定 Session 首轮归档 / 多轮恢复 / 归档失败上报、规划只读工作区与 Docker 参数，以及运行时现场处置的所有权与幂等语义。
+  归属不成立与结果不确定五类现场），以及第十六阶段的规划容器终止与恢复用例（结果不确定时终止、独立有界清理上下文、
+  受管理 / 标签 / Docker ID 核验、停止后 inspect 判定、不确定不虚构 stopped、同容器重启与历史 Session 恢复）已覆盖
+  准入、取消传播、停止等待、会话状态机与事务边界、状态与两个绑定的条件更新、
+  稳定 Session 首轮归档 / 多轮恢复 / 归档失败上报、规划只读工作区与 Docker 参数、运行时现场处置的所有权与幂等语义，
+  以及容器停止与远端终止结论的表达。
   仍未自动化覆盖的是这些行为在真实环境中的结果：真实数据库上的 Schema 初始化与不兼容旧库的失败行为、真实 Docker / SSH
   的资源创建与释放，以及真实 Pi 的多轮上下文恢复。
 - 未验证的真实外部能力：真实只读环境（文件工具与 `sh -c` 写入是否真的被文件系统拒绝）、真实多轮 Pi Session
-  跨容器重建恢复、真实远程容器释放、远端 Pi 进程在取消后是否真的终止，都没有执行，不得报告为通过。
+  跨容器重建恢复、真实远程容器释放、**真实 SSH 中断与 Docker 环境下取消后的容器停止确认与历史 Session 恢复**
+  （第十六阶段只交付了代码路径与受控替身测试），都没有执行，不得报告为通过。
   已删除的 `planning_session_leases` 不再有表结构与测试守点；其余 Schema 结构（项目默认节点、规划会话表）
   只在测试数据库中由首次初始化建表验证，没有自动化审计守点，也没有在真实开发数据库上执行。
 
@@ -859,3 +865,122 @@ PRAGMA 之后由 Goose 执行所有待执行的迁移，已执行的版本记录
 
 M2 状态继续为 `pending`：本阶段只替换 Schema 初始化基础设施，不涉及规划轮次编排，也不改变 M2 的退出条件
 与完成判定。
+
+### 7.16 已交付：规划 Pi 执行结果不确定时的受控容器终止（M2 第十六阶段）
+
+本阶段关闭"取消上下文不能证明远端 Pi 进程已经终止"这一代码缺口。规划调用执行的是远程宿主机上的
+`docker exec`，本端 SSH 会话结束不等于 Docker 容器内的 Pi 与子进程退出；因此规划容器在结果不确定时
+被显式停止并以实际检查结果核验，而普通 Task 的容器执行、超时与取消行为保持不变。
+
+**规划专用容器停止策略（显式事实，不做推断）**
+
+- `ContainerAgentRequest` / `agent.RunRequest` 新增 `PlanningSessionID` 与 `StopContainerOnUncertain`；
+  只有 `PlanningAgentService.RunRole` 设置它们，其余调用方（Step / Workflow / Validation）保持零值。
+- `RunRequest.Validate` 要求启用策略时必须给出容器目标与合法规划会话标识，缺失即拒绝调用。
+- 触发条件全部来自显式事实：`ContainerExecResult.Started` 为真、`Certain` 为假、策略已启用、规划会话
+  标识非空。命令未启动、执行前已取消、已明确正常退出或明确非零退出都不触发终止。
+- `agent.ContainerExecResult` 增加 `Started`，由 `docker.CommandResult.Started` 透传，使"命令根本没跑
+  起来"与"命令跑过但结果不确定"可区分。
+
+**停止流程与确认顺序**
+
+```text
+ContainerRunner.Run（Started && !Certain）
+  └─ 独立有界清理上下文 context.WithoutCancel + 90s
+       └─ containerSessionExecutor.TerminateContainer
+            └─ ContainerService.stopContainerLocked（已持容器锁与远程会话）
+                 1. 重新读取本地容器记录
+                 2. 核验受管理（detached / removed 拒绝）
+                 3. 核验远程容器 ID 与本地 DockerID 一致
+                 4. 核验 Docker 标签所有权（含规划会话标签）
+                 5. 已停止 → 直接按核验结果收敛，不重复提交停止命令
+                 6. docker stop（1 秒宽限期，结束后由 Docker 强制终止容器内全部进程）
+                 7. docker inspect（唯一判定依据）
+                 8. 记录 stopped + 真实 DockerState + 远程登记清单
+```
+
+- 停止成功只由第 7 步的实际检查结果判定；`docker stop` 返回错误但容器确实已停止时按已核实的远端事实收敛，
+  同时照常更新本地记录与远程清单。
+- 停止后仍确认在运行：返回失败，容器保持原管理状态，不虚构 `stopped`。
+- 停止后仍无法核验：容器记录标记 `unknown`，错误带失败阶段说明；不清空 `HostID` / `ContainerID` /
+  `SourceCommit`，不自动重复发送停止命令。
+- 停止不删除容器与快照卷，也不释放规划会话；它只中断本轮执行。
+
+**避免在临界区内重复取同一把锁**
+
+`ContainerService.RunAgent` 执行期间已持有 `ContainerService.locks` 的 per-container keyed lock。公开的
+`StopContainer` 会再次获取同一把锁并自锁，因此本阶段把停止流程抽成持锁内部方法 `stopContainerLocked`：
+公开入口与 `RunAgent` 终止路径共用它，终止路径不取锁、不新建远程会话。`RunAgent` 路径的停止因此不会
+产生自锁、锁泄漏或死锁。
+
+**终止结论的表达**
+
+- `agent.RunResult` 增加 `RemoteTerminationConfirmed` 与 `RemoteTerminationError`，并新增
+  `agent.ErrRemoteTermination`：执行状态（`cancelled` / `timed_out` / `failed`）与远端终止结论是两件事实，
+  三种情况可区分：未触发终止 / 已确认停止 / 仍然不确定。
+- 已确认停止时不再从已停止的容器导出 HTML 或复制 Session：本轮单轮 Session 记为缺失，本机最后一份
+  完整稳定 Session 归档保持不变（`promoteStableSession` 在缺少本轮 Session 时不覆盖快照），既不删除也不
+  被本轮中断覆盖。
+- 无法确认停止时如实返回终止错误，不停止第二次、不启动第二次 Pi 调用。
+
+**同一容器重新启动与历史 Session 恢复**
+
+- 容器记录为 `stopped` 时，`PlanningAgentService.ensurePlanningAgentContainer` 复用
+  `PlanningRuntimeService.prepareHeld`：`reusePlanningContainer` 发现容器已停止后按原容器 ID 调用既有
+  `ContainerService.StartContainer` 并核验运行状态，随后仍从本机最后一份完整 Archive 恢复到容器内固定
+  Session 路径，再启动 Pi。
+- 不创建第二个规划容器，不新建 PlanningSession，不改写角色会话标识；`HostID` / `ContainerID` /
+  `SourceCommit` 保持不变。状态为 `unknown` 的容器不在此自动重启，调用方需先用 `InspectPlanningRuntime`
+  核验远端事实。
+
+**测试缝隙**
+
+- `app.SSHOptions.Connector` 是唯一新增的测试缝隙：生产装配始终留空，`SSHService.Connect` 仍走
+  `sshclient.Dialer`（主机密钥校验、私钥认证、known_hosts）；只有单元测试注入受控连接替身，其余远程操作
+  仍经过同一个 `sshclient.Client` 与 `docker.Runner`，不存在第二条 SSH / Docker 调用链。
+- 未新增 PID 文件、PID 表、进程租约、owner / epoch / TTL、远端进程注册表或后台监控进程；终止边界是
+  "停止本会话独占的容器"，不通过进程名匹配或 PID 猜测结束远端进程。
+
+**测试范围与实际结果（本任务明确授权测试）**
+
+- 新增 `tests/unit/agent/container_termination_test.go`（9 个顶层用例，取消 / 超时两个子用例）：正常完成不终止、普通 Task 取消与超时不终止、
+  结果不确定只终止一次、终止使用独立且有上限的清理上下文、命令未启动不终止、明确退出不终止、无法确认
+  停止时如实上报、停止后不覆盖最后一份完整归档。
+- 新增 `tests/unit/app/container_remote_fixture_test.go`（受控远程现场：真实 `ContainerService` +
+  真实 `docker.Runner` + 替身 `sshclient.Client` / `FileTransfer`，远程文件映射到测试工作空间）与
+  `tests/unit/app/container_stop_test.go`（11 个用例）：停止后按核验结果更新本地记录与远程清单、已停止幂等
+  收敛、`docker stop` 报错但实际已停止时收敛、停止后仍在运行不标记 stopped、无法确认时标记 unknown 且保留
+  规划会话绑定、detached / 记录缺失拒绝停止、`RunAgent` 内终止不死锁、标签不一致与 Docker ID 不一致拒绝
+  停止、普通任务调用不停止容器。
+- 新增 `tests/unit/app/planning_recovery_test.go`（3 个用例）：`Prepare` 按原容器 ID 重新启动已停止容器、中断后重启并恢复历史 Session
+  （逐轮断言 Pi 主调用前容器内已有 Session）、容器记录与快照卷只保留一份、绑定与归档在重启前后一致、
+  终止不确定时只调用一次 Pi 且另一个规划会话的容器不受影响。
+- 已运行：
+
+  ```bash
+  go test -count=1 ./tests/unit/agent ./tests/unit/app ./tests/unit/app/planningagent
+  go test -race -count=20 ./tests/unit/agent -run 'ContainerRunner'
+  go test -race -count=1 ./tests/unit/agent ./tests/unit/app ./tests/unit/app/planningagent ./tests/unit/server
+  go test -count=1 ./tests/unit/...
+  go test -count=1 ./tests/integration/local/...
+  go vet ./...
+  git diff --check
+  .github/scripts/go-test-groups.sh --check --declared-groups unit,local,e2e
+  ```
+
+  结果：前三组分别为 465 / 220 / 470 passed（`-race` 无数据竞争报告）；`./tests/unit/...` 1598 passed；
+  `./tests/integration/local/...` 242 passed；`go vet`、`git diff --check` 无输出；测试分组核验通过
+  （31 个测试包全部分类，本阶段未新增测试包）。用例使用 `TestMain` + `testkit` 随机工作空间，产物保留在
+  `TEST_ARTIFACT_DIR`，不写入仓库与用户数据目录。
+
+**仍未完成的真实环境验收（不得报告为通过）**
+
+- 真实 Docker 环境下取消后的容器停止确认（`docker stop` → `docker inspect` → 记录同步的真实结果）。
+- 真实 Pi 多轮上下文恢复，以及容器停止、重新启动后恢复历史 Session 的真实行为。
+- 真实 SSH 断开与远端停止的结果收敛（包括停止命令报错但容器实际已停止的场景）。
+- 上述验收需要真实 Docker / SSH / Pi / 远程主机才能成立，本阶段的受控替身测试**不构成**真实环境验收；
+  本阶段也没有连接真实远程环境、没有设置真实测试授权开关、没有关闭 SSH 主机密钥校验。
+
+M2 状态继续为 `pending`：退出条件仍缺"真实环境中的只读写入拒绝、Session 与容器生命周期可持久化恢复"
+的证据，以及 M3 编排接入后在真实环境复用同一容器与快照的多轮验证。本阶段只补齐代码侧终止能力、
+受控测试与文档，不改变 M2 的完成判定。

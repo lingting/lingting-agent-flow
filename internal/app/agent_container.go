@@ -70,6 +70,14 @@ type ContainerAgentRequest struct {
 	// 规划角色用它把多轮调用落在同一个容器内 Session 文件与本机归档目录上；路径由
 	// 规划 Agent 服务生成，调用方不提交任意路径。
 	StableSession *agent.StableSessionTarget
+	// PlanningSessionID 是本次调用所属的规划会话标识，普通任务调用留空。
+	PlanningSessionID string
+	// StopContainerOnUncertain 表示本次调用启用规划容器终止策略。
+	//
+	// 只有独占一个规划容器、且该容器不承载其他业务执行的规划角色调用才设置它：Pi 已经
+	// 启动但执行结果无法确认时，容器服务会停止该容器并核验实际状态。普通任务容器可能
+	// 承载其他执行，因此普通任务调用必须保持零值。
+	StopContainerOnUncertain bool
 	// PiOptions 覆盖 Pi Runner 的默认配置。
 	PiOptions pi.Options
 }
@@ -86,8 +94,12 @@ type ContainerAgentResult struct {
 
 // RunAgent 在受管理的任务容器内部执行一次 Pi 调用并把 Session 保存到本机。
 //
-// 容器只被核验与使用，不会被启动、停止、删除或重新接管：生命周期仍由容器管理层
-// 决定。本方法返回后调用方已经拿到真实的 Session 持久化结果，可以据此决定容器处置。
+// 容器只被核验与使用，不会被启动、删除或重新接管：生命周期仍由容器管理层决定。
+// 唯一的例外由调用方显式声明：启用 StopContainerOnUncertain 的规划调用在 Pi 主命令已经
+// 启动但执行结果无法确认时，会停止该独占容器并以实际检查结果核验终止；容器记录、快照卷
+// 与运行时绑定全部保留，下一次调用可以按原容器 ID 重新启动它。普通任务调用不启用该策略，
+// 因此不会因为一次调用取消而停止可能承载其他执行的容器。本方法返回后调用方已经拿到真实的
+// Session 持久化结果与远端终止结论，可以据此决定后续处置。
 func (s *ContainerService) RunAgent(
 	ctx context.Context,
 	request ContainerAgentRequest,
@@ -146,7 +158,11 @@ func (s *ContainerService) RunAgent(
 			if _, err := s.observe(ctx, session, current); err != nil {
 				return fmt.Errorf("执行前核验容器失败: %w", err)
 			}
-			executor := &containerSessionExecutor{session: session}
+			executor := &containerSessionExecutor{
+				session:   session,
+				service:   s,
+				container: current,
+			}
 			guard := &sessionContainerGuard{service: s, session: session}
 			runner, runnerErr := pi.NewContainerRunner(request.PiOptions, executor, guard)
 			if runnerErr != nil {
@@ -181,10 +197,20 @@ func (s *ContainerService) RunAgent(
 					WorkDir:     workDir,
 					SessionDir:  strings.TrimSpace(request.SessionDir),
 				},
+				// 终止策略只随调用方声明传播：普通任务调用既不给出规划会话标识，
+				// 也不启用停止容器。
+				PlanningSessionID:        strings.TrimSpace(request.PlanningSessionID),
+				StopContainerOnUncertain: request.StopContainerOnUncertain,
 			}
 			result, runErr := runner.Run(ctx, runRequest, func(event agent.Event) {
 				s.logAgentEvent(ctx, event)
 			})
+			if result.RemoteTerminationConfirmed {
+				// 容器已确认停止：返回停止后的真实记录，避免把中断前的运行状态当成现状。
+				if reloaded, loadErr := s.loadContainer(ctx, request.ContainerID); loadErr == nil {
+					current = reloaded
+				}
+			}
 			outcome = ContainerAgentResult{
 				Container:   current,
 				Result:      result,
@@ -219,8 +245,17 @@ func (s *ContainerService) logAgentEvent(ctx context.Context, event agent.Event)
 // containerSessionExecutor 把一次远程 Docker 会话适配为 agent.ContainerExecutor。
 //
 // 它只在单次应用服务调用内有效：连接与 SFTP 通道由 withRemoteDocker 统一关闭。
+// 它只在单次应用服务调用内有效：连接与 SFTP 通道由 withRemoteDocker 统一关闭。
+//
+// 它也承载"执行结果不确定时终止独占容器"的能力：终止发生在 ContainerService.RunAgent
+// 的临界区内，因此本类型必须持有容器服务与本次调用使用的容器记录，才能复用已持有的
+// 远程会话与容器锁。
 type containerSessionExecutor struct {
 	session *remoteDocker
+	// service 是重放停止流程的容器服务，为空时不能终止容器。
+	service *ContainerService
+	// container 是本次调用核验过的容器记录。
+	container domain.Container
 }
 
 // Exec 在容器内执行一条命令。
@@ -274,6 +309,7 @@ func convertExecResult(run docker.CommandResult) agent.ContainerExecResult {
 		Duration:        run.Duration,
 		TimedOut:        run.TimedOut(),
 		Cancelled:       run.Cancelled(),
+		Started:         run.Started,
 		Certain:         run.Certain,
 	}
 }
@@ -408,6 +444,59 @@ func (e *containerSessionExecutor) RemoveHostFile(ctx context.Context, hostPath 
 	return e.session.transfer.RemoveAll(ctx, hostPath)
 }
 
+// TerminateContainer 停止本次调用独占的容器并核验其实际状态。
+//
+// 调用发生在 ContainerService.RunAgent 的临界区内：容器锁与远程会话都已由该路径持有。
+// 因此这里只能走持锁内部的停止流程，不能调用公开的 ContainerService.StopContainer —
+// 后者会再次获取同一把容器锁，造成自锁死锁。
+//
+// 停止成功与否只由停止后的实际检查结果决定：本次调用使用的容器登记记录与 Docker 容器
+// ID 都必须与再次复核的结果一致，规划会话标签也必须与请求一致，任一不满足都拒绝停止。
+func (e *containerSessionExecutor) TerminateContainer(
+	ctx context.Context,
+	request agent.ContainerTerminationRequest,
+) (agent.ContainerTerminationResult, error) {
+	if e == nil || e.session == nil || e.service == nil {
+		return agent.ContainerTerminationResult{}, fmt.Errorf("终止容器失败: 远程会话不可用")
+	}
+	if strings.TrimSpace(request.ContainerID) != e.container.ID.String() {
+		return agent.ContainerTerminationResult{}, fmt.Errorf(
+			"终止容器失败: 请求的容器 %q 与本次调用使用的容器 %s 不一致",
+			request.ContainerID,
+			e.container.ID,
+		)
+	}
+	if strings.TrimSpace(request.DockerID) != e.container.DockerID {
+		return agent.ContainerTerminationResult{}, fmt.Errorf(
+			"终止容器失败: 请求的 Docker 容器 ID %q 与本次调用使用的 %s 不一致",
+			request.DockerID,
+			e.container.DockerID,
+		)
+	}
+	detail, err := e.service.stopContainerLocked(ctx, e.session, e.container, stopContainerOptions{
+		TimeoutSeconds:    request.GraceSeconds,
+		PlanningSessionID: request.PlanningSessionID,
+	})
+	if detail.Inspect != nil && !detail.Inspect.Running {
+		// 已核实的远端事实优先：登记同步等收尾失败不改变"容器已停止"这一结论，错误照实返回。
+		return agent.ContainerTerminationResult{Stopped: true}, err
+	}
+	if err != nil {
+		return agent.ContainerTerminationResult{}, err
+	}
+	if detail.Inspect == nil {
+		return agent.ContainerTerminationResult{}, fmt.Errorf(
+			"终止容器失败: 容器 %s 停止后没有取得实际状态",
+			e.container.ID,
+		)
+	}
+	return agent.ContainerTerminationResult{}, fmt.Errorf(
+		"终止容器失败: 容器 %s 停止后仍在运行（Docker 状态 %s）",
+		e.container.ID,
+		detail.Inspect.State,
+	)
+}
+
 // sessionContainerGuard 在一次远程会话内核验容器归属与运行状态。
 type sessionContainerGuard struct {
 	service *ContainerService
@@ -445,4 +534,5 @@ func (g *sessionContainerGuard) EnsureExecutable(
 // 编译期确认适配器满足 Agent 侧接口。
 var _ agent.ContainerExecutor = (*containerSessionExecutor)(nil)
 var _ agent.ContainerFileWriter = (*containerSessionExecutor)(nil)
+var _ agent.ContainerTerminator = (*containerSessionExecutor)(nil)
 var _ agent.ContainerGuard = (*sessionContainerGuard)(nil)

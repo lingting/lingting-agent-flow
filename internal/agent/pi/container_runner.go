@@ -28,6 +28,15 @@ const (
 	containerSessionFileName = "session.jsonl"
 	// containerHTMLFileName 是容器内导出的 HTML 文件名。
 	containerHTMLFileName = "session.html"
+	// containerStopGraceSeconds 是停止规划容器时交给 Docker 的优雅停止宽限期。
+	//
+	// 宽限期结束后 Docker 强制终止容器内的全部进程，因此容器内 Pi 及其子进程不会
+	// 因为本端 SSH 会话关闭而继续运行。
+	containerStopGraceSeconds = 1
+	// containerTerminationTimeout 是终止与复核规划容器的有界清理超时。
+	//
+	// 清理使用独立上下文：调用方取消不影响清理，清理也不会因此失去时间上限。
+	containerTerminationTimeout = 90 * time.Second
 )
 
 // ContainerRunner 在任务容器内部启动 Pi 并把 Session 持久化到本机。
@@ -36,8 +45,10 @@ const (
 // 只是把"启动子进程"替换为"在容器内执行命令"，并把 Session 文件通过
 // 受控的远程临时导出路径复制到本机。
 //
-// 本类型不承担容器生命周期：容器的创建、停止与删除仍由容器管理层负责，
-// 它也不会因为执行失败而删除容器。
+// 本类型不承担容器生命周期：容器的创建、启动与删除仍由容器管理层负责，它也不会
+// 因为执行失败而删除容器。唯一的例外由调用方显式声明：规划调用启用容器终止策略后，
+// 如果 Pi 主命令已经启动而执行结果无法确认，Runner 会通过执行器的 ContainerTerminator
+// 能力停止该独占容器并核验实际状态；普通任务调用不启用该策略。
 type ContainerRunner struct {
 	options  Options
 	executor agent.ContainerExecutor
@@ -90,12 +101,15 @@ func resolveRunnerOptions(options Options) Options {
 // Run 在任务容器内执行一次完整的 Agent 调用。
 //
 // 执行顺序固定为：核验容器 → 校验 Session 路径 → 检查容器内 Pi → 恢复历史 Session
-// （仅在给出稳定 Session 时）→ 启动 Pi 并写入提示词 → 收集退出状态 → 导出 HTML →
-// 复制 Session 到本机 → 清理远程临时文件 → 更新可恢复快照。
+// （仅在给出稳定 Session 时）→ 启动 Pi 并写入提示词 → 收集退出状态 →（规划调用在结果
+// 不确定时终止独占容器并核验实际状态）→ 导出 HTML → 复制 Session 到本机 → 清理远程
+// 临时文件 → 更新可恢复快照。
 //
 // 无论进程如何结束，都会尽力把已写入的 Session 复制到本机：容器内的 Session
 // 会随容器删除而消失，本机副本是唯一可追溯的记录。恢复失败会阻止本次调用，恢复前
 // 不会删除任何历史归档；归档失败与执行成功分别上报，不会合并成一个模糊的成功状态。
+// 容器已确认停止时不再从该容器提取 Session：已停止的容器内 Session 文件已不可用，
+// 本轮也不得把它提升为本机最新完整归档。
 func (r *ContainerRunner) Run(
 	ctx context.Context,
 	request agent.RunRequest,
@@ -212,8 +226,19 @@ func (r *ContainerRunner) Run(
 	result.StdoutTruncated = executed.StdoutTruncated || logs.stdoutTruncated()
 	result.StderrTruncated = executed.StderrTruncated || logs.stderrTruncated()
 	result.Status, result.Failure = classifyContainerOutcome(executed, execErr, request)
-	// Session 处理在进程结束之后：Pi 在退出前写完 Session 文件。
-	result.Session = r.persistSession(ctx, request, remote, paths, executed, result.Status, emit)
+	// 终止必须先于 Session 提取：已确认停止的容器不再执行 HTML 导出或复制 Session，
+	// 本机最后一份完整归档因此保持不变。
+	terminated, terminationErr := r.terminateUncertain(ctx, request, executed)
+	result.RemoteTerminationConfirmed = terminated
+	if terminationErr != nil {
+		result.RemoteTerminationError = terminationErr.Error()
+	}
+	if terminated {
+		result.Session.Error = "容器已确认停止，本轮不再从容器提取 Session"
+	} else {
+		// Session 处理在进程结束之后：Pi 在退出前写完 Session 文件。
+		result.Session = r.persistSession(ctx, request, remote, paths, executed, result.Status, emit)
+	}
 	var archiveErr error
 	if stable.enabled() {
 		archived, promoteErr := r.promoteStableSession(
@@ -235,9 +260,9 @@ func (r *ContainerRunner) Run(
 	}
 	emitContainerOutcome(result, emit)
 	result.FinishedAt = time.Now()
-	// Pi 的执行结果与 Session 归档结果分别返回：状态保持真实的执行结论，归档失败
-	// 额外作为错误上报，调用方不得把归档失败当成 Session 保存成功。
-	return result, errors.Join(containerRunError(result), archiveErr)
+	// Pi 的执行结果、Session 归档结果与远端终止结果分别返回：状态保持真实的执行结论，
+	// 归档失败与远端终止不确定额外作为错误上报，调用方不得把它们当成同一件事实。
+	return result, errors.Join(containerRunError(result), archiveErr, terminationErr)
 }
 
 // fail 构造失败结果并发出事件。
@@ -414,6 +439,63 @@ func classifyContainerOutcome(
 		return agent.RunFailed, fmt.Sprintf("Pi 异常退出（退出码 %d）", executed.ExitCode)
 	}
 	return agent.RunCompleted, ""
+}
+
+// terminateUncertain 在规划 Pi 主命令已经启动、但执行结果无法确认时终止独占容器。
+//
+// 触发条件全部来自显式事实：调用方启用规划容器终止策略、给出规划会话标识、命令确实
+// 提交执行过，并且无法确认远端命令已经结束。已明确正常结束或明确非零退出的命令不会
+// 触发终止；普通任务调用不启用该策略，因此永远不会走到这里。
+//
+// 终止使用独立的有界清理上下文：调用方取消不能阻止清理，清理也不会失去时间上限。
+// 只有停止后的容器检查结果证明容器不再运行时才返回 confirmed。
+func (r *ContainerRunner) terminateUncertain(
+	ctx context.Context,
+	request agent.RunRequest,
+	executed agent.ContainerExecResult,
+) (bool, error) {
+	if !requiresContainerTermination(request, executed) {
+		return false, nil
+	}
+	terminator, ok := r.executor.(agent.ContainerTerminator)
+	if !ok {
+		return false, fmt.Errorf("%w: 当前容器执行器不支持终止容器", agent.ErrRemoteTermination)
+	}
+	cleanupCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		containerTerminationTimeout,
+	)
+	defer cancel()
+	terminated, err := terminator.TerminateContainer(cleanupCtx, agent.ContainerTerminationRequest{
+		ContainerID:       request.Container.ContainerID,
+		DockerID:          request.Container.DockerID,
+		PlanningSessionID: strings.TrimSpace(request.PlanningSessionID),
+		GraceSeconds:      containerStopGraceSeconds,
+	})
+	if !terminated.Stopped {
+		message := "停止容器后未确认容器已经停止"
+		if err != nil {
+			message = err.Error()
+		}
+		return false, fmt.Errorf("%w: %s", agent.ErrRemoteTermination, message)
+	}
+	// 已确认容器停止：终止结论以核验到的远端事实为准，错误只描述收尾步骤（例如远程
+	// 登记清单同步）失败，不改变"容器内 Pi 已经终止"这一结论。
+	return true, err
+}
+
+// requiresContainerTermination 判断本次调用是否必须终止独占容器。
+func requiresContainerTermination(
+	request agent.RunRequest,
+	executed agent.ContainerExecResult,
+) bool {
+	if !request.StopContainerOnUncertain || request.Container == nil {
+		return false
+	}
+	if strings.TrimSpace(request.PlanningSessionID) == "" {
+		return false
+	}
+	return executed.Started && !executed.Certain
 }
 
 // persistSession 把容器内的 Session 复制到本机并尝试导出 HTML。

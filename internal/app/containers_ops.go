@@ -238,7 +238,21 @@ type StopContainerRequest struct {
 	TimeoutSeconds int
 }
 
+// stopContainerOptions 是持锁停止流程的附加约束。
+type stopContainerOptions struct {
+	// TimeoutSeconds 是交给 Docker 的优雅停止宽限期秒数，零值使用 10 秒。
+	TimeoutSeconds int
+	// PlanningSessionID 非空时要求 Docker 规划会话标签与之一致。
+	//
+	// 只有规划调用会给出它：规划容器由单个 PlanningSession 独占，停止该容器才是可靠的
+	// 终止边界；普通任务容器可能承载其他执行，不得因为一次调用取消而停止。
+	PlanningSessionID string
+}
+
 // StopContainer 停止受管理容器，保留容器现场。
+//
+// 停止成功与否以停止后的实际检查结果为准：停止命令返回错误但容器确实已经停止时，按
+// 已核实的远端事实收敛结果并同步本地记录与远程登记清单。
 func (s *ContainerService) StopContainer(
 	ctx context.Context,
 	request StopContainerRequest,
@@ -248,28 +262,105 @@ func (s *ContainerService) StopContainer(
 		session *remoteDocker,
 		container domain.Container,
 	) (ContainerDetail, error) {
-		if err := ensureManaged(container); err != nil {
-			return ContainerDetail{Container: container}, err
-		}
-		if err := session.runner.StopContainer(ctx, container.DockerID, request.TimeoutSeconds); err != nil {
-			return ContainerDetail{Container: container}, err
-		}
-		inspect, err := s.observe(ctx, session, container)
-		if err != nil {
-			return ContainerDetail{Container: container}, err
-		}
-		updated := container
-		if err := updated.MarkStopped(time.Now()); err != nil {
-			return ContainerDetail{Container: container, Inspect: inspect}, err
-		}
-		if err := s.store.UpdateContainer(ctx, updated); err != nil {
-			return ContainerDetail{Container: updated, Inspect: inspect}, err
-		}
-		if err := s.syncRegistry(ctx, session, updated); err != nil {
-			return ContainerDetail{Container: updated, Inspect: inspect}, err
-		}
-		return ContainerDetail{Container: updated, Inspect: inspect}, nil
+		return s.stopContainerLocked(ctx, session, container, stopContainerOptions{
+			TimeoutSeconds: request.TimeoutSeconds,
+		})
 	})
+}
+
+// stopContainerLocked 在已持有容器锁的调用路径内停止容器并核验实际状态。
+//
+// 它既不获取容器锁，也不建立远程会话：调用方必须已经持有同一容器的进程内锁与远程
+// 会话（例如 ContainerService.RunAgent 的执行临界区）。在临界区内部调用公开的
+// StopContainer 会再次获取同一把锁并自锁，因此所有停止能力都必须收敛到本方法。
+//
+// 停止前的复核顺序固定：重新读取本地记录 → 核验受管理 → 核验 Docker 容器 ID →
+// 核验所有权与规划会话标签。停止后的判定只依据实际观测：容器仍在运行或状态无法确认
+// 时都不会被标记为已停止。
+func (s *ContainerService) stopContainerLocked(
+	ctx context.Context,
+	session *remoteDocker,
+	container domain.Container,
+	options stopContainerOptions,
+) (ContainerDetail, error) {
+	current, err := s.loadContainer(ctx, container.ID.String())
+	if err != nil {
+		return ContainerDetail{Container: container}, err
+	}
+	if err := ensureManaged(current); err != nil {
+		return ContainerDetail{Container: current}, err
+	}
+	observed, err := s.observe(ctx, session, current)
+	if err != nil {
+		return ContainerDetail{Container: current}, err
+	}
+	if strings.TrimSpace(current.DockerID) != "" && observed.ID != current.DockerID {
+		return ContainerDetail{Container: current, Inspect: observed}, fmt.Errorf(
+			"停止容器失败: 远程容器 ID 与本地记录不一致: 远程 %s，记录 %s",
+			observed.ID,
+			current.DockerID,
+		)
+	}
+	if expected := strings.TrimSpace(options.PlanningSessionID); expected != "" {
+		if actual := observed.Labels[docker.PlanningSessionLabelKey]; actual != expected {
+			return ContainerDetail{Container: current, Inspect: observed}, fmt.Errorf(
+				"停止容器失败: 容器 %s 的规划会话标签与目标会话不一致: 期望 %s，实际 %s",
+				current.ID,
+				expected,
+				actual,
+			)
+		}
+	}
+	if !observed.Running {
+		// 已经停止：按核验结果收敛，不重复提交停止命令。
+		return s.applyStoppedContainer(ctx, session, current, *observed)
+	}
+	stopErr := session.runner.StopContainer(ctx, current.DockerID, options.TimeoutSeconds)
+	after, inspectErr := s.observe(ctx, session, current)
+	if inspectErr != nil {
+		// 停止后仍无法核验：保留容器现场与定位信息，如实标记状态不确定。
+		cause := errors.Join(stopErr, inspectErr)
+		s.markUnknown(ctx, current, cause)
+		return ContainerDetail{Container: current}, fmt.Errorf("停止容器结果无法确认: %w", cause)
+	}
+	if after.Running {
+		if stopErr != nil {
+			return ContainerDetail{Container: current, Inspect: after}, fmt.Errorf("停止容器失败: %w", stopErr)
+		}
+		return ContainerDetail{Container: current, Inspect: after}, fmt.Errorf(
+			"停止容器失败: 容器 %s 停止后仍在运行（Docker 状态 %s）",
+			current.ID,
+			after.State,
+		)
+	}
+	// 停止命令报错但容器确实已经停止：以核实的远端事实收敛结果。
+	return s.applyStoppedContainer(ctx, session, current, *after)
+}
+
+// applyStoppedContainer 记录已核验的停止结果并同步远程登记清单。
+func (s *ContainerService) applyStoppedContainer(
+	ctx context.Context,
+	session *remoteDocker,
+	container domain.Container,
+	inspect docker.ContainerInspect,
+) (ContainerDetail, error) {
+	updated := container
+	if updated.State != domain.ContainerStateStopped {
+		// 已经记录为停止时不再重复迁移状态：重复停止必须按核验结果幂等收敛。
+		if err := updated.MarkStopped(time.Now()); err != nil {
+			return ContainerDetail{Container: container, Inspect: &inspect}, err
+		}
+	}
+	if err := updated.SyncDockerState(inspect.State, time.Now()); err != nil {
+		return ContainerDetail{Container: container, Inspect: &inspect}, err
+	}
+	if err := s.store.UpdateContainer(ctx, updated); err != nil {
+		return ContainerDetail{Container: updated, Inspect: &inspect}, err
+	}
+	if err := s.syncRegistry(ctx, session, updated); err != nil {
+		return ContainerDetail{Container: updated, Inspect: &inspect}, err
+	}
+	return ContainerDetail{Container: updated, Inspect: &inspect}, nil
 }
 
 // DeleteContainerRequest 是删除容器的输入。

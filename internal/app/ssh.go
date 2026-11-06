@@ -16,12 +16,23 @@ import (
 	"github.com/lingting/agentflow/internal/storage"
 )
 
+// Connector 建立一次已认证的 SSH 连接。
+//
+// 生产实现由 SSHService 自己完成：主机密钥校验、私钥认证与 known_hosts 读取都在
+// sshclient.Dialer 内。只有单元测试注入受控替身，使"停止容器、复核实际状态、同步远程
+// 登记清单"这类本地可核验的行为可以在不连接真实主机的情况下被验证。替身只替换连接
+// 建立过程，其余远程操作仍然经过同一个 sshclient.Client 与 docker.Runner，不存在
+// 第二条 SSH 或 Docker 调用链。
+type Connector func(ctx context.Context, host domain.ExecutionHost) (*SSHConnection, error)
+
 // SSHOptions 是构造 SSH 服务的参数。
 type SSHOptions struct {
 	// KnownHostsPath 是只读 known_hosts 文件路径，为空时使用用户默认 known_hosts。
 	KnownHostsPath string
 	// ConnectTimeout 是 TCP 连接与认证的超时时间，零值使用默认值。
 	ConnectTimeout time.Duration
+	// Connector 是连接替身，仅供单元测试注入；生产装配始终留空。
+	Connector Connector
 }
 
 // SSHService 提供已认证的 SSH 连接、远程命令执行与文件传输能力。
@@ -29,10 +40,11 @@ type SSHOptions struct {
 // 认证只使用节点配置中的无口令私钥：本服务不接收、不保存、不记录任何凭据内容，
 // 私钥文件只被读取。主机密钥校验只读取 known_hosts，本服务不会创建或修改它。
 type SSHService struct {
-	store    storage.Store
-	dialer   *sshclient.Dialer
-	hostKeys *sshclient.KnownHostsStore
-	logger   *logging.Logger
+	store     storage.Store
+	dialer    *sshclient.Dialer
+	hostKeys  *sshclient.KnownHostsStore
+	logger    *logging.Logger
+	connector Connector
 }
 
 // NewSSHService 构造 SSH 服务。
@@ -57,7 +69,13 @@ func NewSSHService(
 	if err != nil {
 		return nil, fmt.Errorf("SSH 服务初始化失败: %w", err)
 	}
-	return &SSHService{store: store, dialer: dialer, hostKeys: hostKeys, logger: logger}, nil
+	return &SSHService{
+		store:     store,
+		dialer:    dialer,
+		hostKeys:  hostKeys,
+		logger:    logger,
+		connector: options.Connector,
+	}, nil
 }
 
 // KnownHostsPaths 返回参与主机密钥校验的只读 known_hosts 文件路径。
@@ -391,6 +409,22 @@ func (s *SSHService) Connect(
 	}
 	if !host.Enabled {
 		return nil, fmt.Errorf("连接执行节点失败: 节点 %s 已禁用", host.ID)
+	}
+	if s.connector != nil {
+		// 连接替身只用于单元测试：它必须返回已建立的连接与远程 Home 目录，节点归属
+		// 仍以数据库记录为准，替身不能把连接指向另一个节点。
+		connection, connectErr := s.connector(ctx, host)
+		if connectErr != nil {
+			return nil, fmt.Errorf("连接执行节点失败: %w", connectErr)
+		}
+		if connection == nil || connection.Client == nil {
+			return nil, fmt.Errorf("连接执行节点失败: 连接替身没有返回已建立的连接")
+		}
+		if strings.TrimSpace(connection.Home) == "" {
+			return nil, fmt.Errorf("连接执行节点失败: 连接替身没有返回远程 Home 目录")
+		}
+		connection.Host = host
+		return connection, nil
 	}
 	endpoint, authConfig, err := endpointFor(host)
 	if err != nil {

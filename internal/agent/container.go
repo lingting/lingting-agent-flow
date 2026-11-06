@@ -72,6 +72,11 @@ type ContainerExecResult struct {
 	TimedOut bool
 	// Cancelled 表示命令因调用方取消被中断。
 	Cancelled bool
+	// Started 表示容器内命令确实被提交执行过。
+	//
+	// 为 false 时容器内进程根本没有跑起来：此时退出码与输出都没有意义，调用方
+	// 不得据此判断"命令执行失败"，也不得把取消当成"远端进程需要终止"。
+	Started bool
 	// Certain 表示可以确认容器内命令已经结束。
 	//
 	// 为 false 时容器内进程可能仍在运行，调用方必须先核验实际状态，
@@ -117,4 +122,45 @@ type ContainerFileWriter interface {
 	UploadFromLocal(ctx context.Context, localPath, hostPath string) error
 	// CopyToContainer 把远程宿主机文件复制到容器内路径。
 	CopyToContainer(ctx context.Context, dockerID, hostPath, containerPath string) error
+}
+
+// ContainerTerminationRequest 是"执行结果不确定时终止独占容器"的请求。
+//
+// 只有调用方显式启用规划容器终止策略时才会构造它：是否允许停止容器由
+// RunRequest.StopContainerOnUncertain 决定，执行器不根据容器名称、稳定 Session、
+// 角色类型或其他隐含字段推断。
+type ContainerTerminationRequest struct {
+	// ContainerID 是容器登记记录 ID，终止过程必须用它复核本地记录。
+	ContainerID string
+	// DockerID 是本次调用实际使用的 Docker 容器 ID，必须与本地记录一致。
+	DockerID string
+	// PlanningSessionID 是独占该容器的规划会话标识，必须与 Docker 标签一致。
+	PlanningSessionID string
+	// GraceSeconds 是交给 Docker 的优雅停止宽限期，宽限期结束后由 Docker 强制终止
+	// 容器内的全部进程。
+	GraceSeconds int
+}
+
+// ContainerTerminationResult 是容器终止结果。
+type ContainerTerminationResult struct {
+	// Stopped 表示已通过容器实际状态核验确认容器不再运行。
+	//
+	// 只有该字段为 true 才能报告远端执行已经终止：停止命令的返回码不作为依据。
+	Stopped bool
+}
+
+// ContainerTerminator 是"停止独占容器并核验实际状态"的可选能力。
+//
+// 实现只能在调用方明确启用规划容器终止策略时被调用，并且必须在停止后重新核验容器
+// 实际状态。缺少该实现时执行器不会改用其他方式（进程名匹配、PID 猜测或信号试探）
+// 结束远端进程，而是如实报告远端终止无法确认。
+type ContainerTerminator interface {
+	// TerminateContainer 停止容器并核验其实际状态。
+	//
+	// 返回的 ctx 由调用方的独立清理上下文派生：它不受原始调用取消影响，并有明确的
+	// 时间上限。实现必须把"停止结果不确定"表达为错误，不得猜测成功。
+	TerminateContainer(
+		ctx context.Context,
+		request ContainerTerminationRequest,
+	) (ContainerTerminationResult, error)
 }

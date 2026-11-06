@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/lingting/agentflow/internal/domain"
 )
 
 // RunRequest 描述一次 Agent 执行所需的输入。
@@ -47,6 +49,14 @@ type RunRequest struct {
 	StableSession *StableSessionTarget
 	// Container 是容器内执行的附加配置，为空表示在本机执行。
 	Container *ContainerTarget
+	// PlanningSessionID 是本次调用所属的规划会话标识，普通任务调用为空。
+	PlanningSessionID string
+	// StopContainerOnUncertain 表示本次调用启用规划容器终止策略。
+	//
+	// 只有独占一个容器、且该容器不承载其他业务执行的规划调用才能启用：Pi 主命令已经
+	// 启动但执行结果无法确认时，执行器停止该容器并核验其实际状态。普通任务容器可能承载
+	// 其他执行，因此普通任务调用必须保持 false，避免因为一次调用取消就停止容器。
+	StopContainerOnUncertain bool
 	// Timeout 是本次调用的超时时间，零值表示使用执行器的默认超时。
 	Timeout time.Duration
 }
@@ -148,6 +158,16 @@ func (r RunRequest) Validate() error {
 	if r.StableSession != nil {
 		if err := r.StableSession.Validate(); err != nil {
 			return err
+		}
+	}
+	if r.StopContainerOnUncertain {
+		// 停止容器是不可逆的执行中断：只有明确声明了容器目标与规划会话身份的调用
+		// 才能启用，避免普通任务或其他容器被误停。
+		if r.Container == nil {
+			return fmt.Errorf("agent: 启用容器终止策略时必须给出容器目标")
+		}
+		if err := domain.ID(strings.TrimSpace(r.PlanningSessionID)).Validate(); err != nil {
+			return fmt.Errorf("agent: 启用容器终止策略时必须给出合法的规划会话标识: %w", err)
 		}
 	}
 	return nil

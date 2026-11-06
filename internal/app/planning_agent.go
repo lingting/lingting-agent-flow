@@ -195,6 +195,11 @@ func (s *PlanningAgentService) RunRole(
 // 执行顺序固定为：校验请求 → 按会话串行 → 业务校验与运行环境核验 → Pi 执行 →
 // Session 归档 → 释放会话锁。会话锁在读取会话之前取得，因此容器准备、角色会话绑定、
 // Pi 调用与归档都发生在持锁期间内。
+//
+// 规划容器由本会话独占，因此本次调用显式启用容器终止策略：Pi 主命令已经启动但执行结果
+// 无法确认（取消、超时、SSH 中断）时，容器服务停止该容器并以实际检查结果核验终止，结果
+// 通过 agent.RunResult.RemoteTerminationConfirmed / RemoteTerminationError 返回。停止后
+// 容器记录、快照卷与运行时绑定全部保留，下一次调用继续复用同一个容器与同一份本机归档。
 func (s *PlanningAgentService) runRole(
 	ctx context.Context,
 	request RunPlanningRoleRequest,
@@ -275,6 +280,11 @@ func (s *PlanningAgentService) runRole(
 			ContainerPath: layout.containerSession,
 			ArchiveDir:    layout.archiveDir,
 		},
+		// 规划容器由本规划会话独占：Pi 主命令已经启动但执行结果无法确认时，容器服务
+		// 必须停止该容器并核验实际状态，否则本端 SSH 会话结束并不等于容器内 Pi 已经退出。
+		// 普通任务调用不设置这两个字段，其容器不会因为一次调用取消而被停止。
+		PlanningSessionID:        session.ID.String(),
+		StopContainerOnUncertain: true,
 	})
 	result = PlanningAgentResult{
 		Session:              session,

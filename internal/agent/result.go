@@ -116,6 +116,13 @@ type SessionFiles struct {
 // RunResult.StableSession 表达，调用方不能把二者合成一个模糊的成功状态。
 var ErrSessionArchive = errors.New("agent: 稳定 Session 归档失败")
 
+// ErrRemoteTermination 表示远端执行终止未能确认。
+//
+// 它与执行状态是两件事实：RunResult.Status 仍然描述 Pi 的真实执行结果，远端终止
+// 结果单独由 RunResult.RemoteTerminationConfirmed 与 RunResult.RemoteTerminationError
+// 表达，调用方不得把二者合成一个模糊的成功状态。
+var ErrRemoteTermination = errors.New("agent: 远端执行终止未能确认")
+
 // StableSessionResult 描述规划角色稳定 Session 的恢复与归档结果。
 //
 // 恢复与归档互相独立：本轮可以从历史归档恢复，也可能因为执行失败而没有更新归档。
@@ -156,6 +163,17 @@ type RunResult struct {
 	Session SessionFiles
 	// StableSession 是稳定 Session 的恢复与归档结果，未启用时为零值。
 	StableSession StableSessionResult
+	// RemoteTerminationConfirmed 表示已通过容器实际状态核验确认远端执行已经终止。
+	//
+	// 只有停止后的容器检查结果证明容器不再运行时才为 true：停止命令返回成功不足以
+	// 确认远端 Pi 及其子进程已经退出。普通任务调用不启用该策略，始终为 false。
+	RemoteTerminationConfirmed bool
+	// RemoteTerminationError 是远端终止失败或结果无法确认的可诊断说明。
+	//
+	// 与 RemoteTerminationConfirmed 组合表达三种事实：都为空表示本次调用没有触发
+	// 终止；已确认为 true 且本字段非空表示容器已停止但收尾步骤（例如远程登记清单
+	// 同步）失败；已确认为 false 且本字段非空表示远端状态仍然不确定。
+	RemoteTerminationError string
 	// InvocationID 是本次调用的唯一标识。
 	InvocationID string
 	// ContainerID 是执行本次调用的容器登记记录 ID，本机执行时为空。
