@@ -31,7 +31,8 @@
 
 ### 2.3 持久化
 
-- `internal/storage/sqlite/schema.sql` 中的 `planning_sessions` / `planning_messages` /
+- 初始迁移（`internal/storage/sqlite/migrations/00001_initial_schema.sql`）中的 `planning_sessions` /
+  `planning_messages` /
   `planning_revisions`：已实现（M2 第二阶段），表结构、索引与序号/版本号唯一约束见
   [`../DATA-MODEL.md`](../DATA-MODEL.md) §2。
 - `projects.default_host_id`（项目默认执行节点）：已实现（M2 第八阶段），字段、部分索引与 NULL 语义见
@@ -120,7 +121,7 @@
   校验，不解析内部字段，也不定义任务拆分规则。
 - `internal/storage`：`PlanningSessionStore`（创建、更新、按 ID 查询、按项目列表、追加与查询消息、
   追加与查询方案版本），已并入 `Tx` 与 `Store`。
-- `internal/storage/sqlite`：`schema.sql` 中的三张规划表与四个索引，以及仓储实现；消息
+- `internal/storage/sqlite`：初始迁移中的三张规划表与四个索引，以及仓储实现；消息
   序号与方案版本号在写入事务内分配。
 
 约束与语义：
@@ -353,7 +354,7 @@ SQLite 持久化连接成统一入口。它仍**没有 Pi 调用方、HTTP 入�
 项目现在把"默认执行节点"作为持久化配置保存，并从既有项目管理入口完成创建、读取、修改与清除。本阶段
 不涉及任何规划轮次编排，也没有新增规划工作台：
 
-- **持久化**：`internal/storage/sqlite/schema.sql` 的 `projects` 表增加
+- **持久化**：`internal/storage/sqlite/migrations/00001_initial_schema.sql` 的 `projects` 表增加
   `default_host_id TEXT`（可空）与部分索引 `idx_projects_default_host (default_host_id)
   WHERE default_host_id IS NOT NULL`。可空表示"未设置"，写入时由存储层把空值落成 SQL NULL；
   不为 NULL 行建立索引项，也不声明外键或枚举白名单。历史任务继续使用自己的 `tasks.host_id` 与
@@ -405,7 +406,7 @@ Store 的 NULL 与非 NULL 往返、更新默认节点不影响其它项目字�
 角色会话绑定、Pi 执行与 Session 归档的完整过程；租约丢失会取消在途调用并等待其收敛。M2 已有业务状态机、
 Revision、角色会话标识、固定快照与普通任务执行行为均未改变。
 
-- **持久化**：`internal/storage/sqlite/schema.sql` 新增表 `planning_session_leases`（主键
+- **持久化**：迁移脚本新增表 `planning_session_leases`（主键
   `planning_session_id`、`owner`、`operation`、`epoch`、`lease_expires_at`、`updated_at`）与部分索引
   `idx_planning_session_leases_expiry`。字段、组合约束、epoch 与释放语义见
   [`../DATA-MODEL.md`](../DATA-MODEL.md) §2：不声明外键、不为 `operation` 设枚举白名单、释放不删行且
@@ -489,7 +490,7 @@ fencing 边界（必须保留的风险）：
 ### 7.11 验证方式
 
 六个阶段都只做非测试验证：阅读代码核对调用链、`gofmt`、`go vet ./...`、`git diff --check`。第二阶段另加
-人工核对 `schema.sql` 中对应的表、索引、字段与非枚举约束；第三阶段人工核对快照卷命名与标签、准备 / 只读复核
+人工核对迁移脚本中对应的表、索引、字段与非枚举约束；第三阶段人工核对快照卷命名与标签、准备 / 只读复核
 容器、`--read-only` 与只读代码卷、tmpfs 可写目录、容器所有权校验、释放顺序与 `RequiredCLICommands`
 新增参数，并确认普通任务容器的创建参数未改变；第四阶段人工核对七个业务操作的事务边界、领域状态机调用点、
 条件更新的前置状态、角色消息发送方限制与失败摘要脱敏；第五阶段人工核对运行时绑定更新的实际 `SET` 列、
@@ -534,7 +535,7 @@ Session 文件的续写语义，都需要在真实只读规划环境中验证后
 
 第八阶段同样获得定向测试授权，验证范围收敛在"项目默认执行节点"这一配置链路上，不执行完整测试套件。
 
-- **非测试验证**：人工核对 `schema.sql` 中 `projects.default_host_id` 与部分索引的定义、`projectColumns`
+- **非测试验证**：人工核对初始迁移中 `projects.default_host_id` 与部分索引的定义、`projectColumns`
   与占位列数一致、`scanProject` 的 NULL 还原、`UpdateProject`
   的 `SET` 列不含 `created_at` / `deleted_at`、应用层的引用校验只在引入新标识时发生、HTTP 响应以 JSON
   `null` 表达未设置，并确认普通任务执行路径（`tasks.host_id`、`config_json` 快照与执行节点选择）未被改动。
@@ -555,7 +556,7 @@ Session 文件的续写语义，都需要在真实只读规划环境中验证后
   ```
 
   八条命令全部通过（`-race` 无数据竞争报告），覆盖本阶段新增的默认节点用例与既有项目主流程用例；其中旧库
-  增量升级用例 `TestProjectsMigrationDefaultHostKeepsExistingProjects` 已在取消增量迁移时删除。
+  增量升级用例 `TestProjectsMigrationDefaultHostKeepsExistingProjects` 已在取消手写增量升级时删除。
   用例使用 `TestMain` + `testkit` 随机工作空间，产物保留在 `TEST_ARTIFACT_DIR`
   （`%TEMP%\lingting-agent-flow-tests\{domain,app,store,httpapi}-*`），不写入仓库与用户数据目录。
 - **前端**（`lingting-agent-flow-ui`）：
@@ -578,7 +579,7 @@ Session 文件的续写语义，都需要在真实只读规划环境中验证后
 
 第九阶段同样获得定向测试授权，验证范围收敛在"规划会话跨进程租约与运行时释放保护"，不执行完整测试套件。
 
-- **非测试验证**：人工核对 `schema.sql` 中 `planning_session_leases` 的表、列、组合 CHECK 与部分索引，
+- **非测试验证**：人工核对迁移脚本中 `planning_session_leases` 的表、列、组合 CHECK 与部分索引，
   核对领取 UPSERT 的原子性、回读代次的条件、续期与释放的 owner + epoch + 未过期三个
   条件、释放保留 epoch、受影响行数 0 一律按冲突返回；核对 `RunRole` 的租约取得点（读取会话之前）、
   `Settle` 的调用点（Runner 与归档返回之后）、`prepareHeld` 不重复领取、`Release` 的租约先于任何远程删除、
@@ -830,3 +831,31 @@ Docker 或远程命令结果不确定而残留；快照卷已创建但 Clone / c
 `pending`：仍阻塞 M2 的退出条件是"所有代码写入尝试被运行环境拒绝"与"Session 与容器生命周期可持久化恢复"两项在真实
 环境中的证据，以及规划轮次业务编排（M3）接入后在真实环境中复用同一容器与快照的多轮验证；本次阶段只补齐运行时的
 现场核验、失败恢复与残留资源处置能力，不改变 M2 的完成判定。
+
+### 7.15 已交付：Schema 初始化改为版本化 SQL 迁移（Goose，M2 基础设施变更）
+
+本阶段把 SQLite 的 Schema 初始化从手写的"完整最终态脚本 + `PRAGMA user_version` 判断"改为版本化 SQL 迁移：
+`internal/storage/sqlite/migrations/00001_initial_schema.sql` 整体承接原最终态结构，`sqlite.Open` 在确认
+PRAGMA 之后由 Goose 执行所有待执行的迁移，已执行的版本记录在 `goose_db_version` 表中。
+
+- **迁移组件**：使用 `github.com/pressly/goose/v3` 的 `goose.NewProvider`（关闭全局注册表、禁止乱序迁移），
+  脚本通过 `//go:embed` 编译进程序，不依赖工作目录，也不引入 CLI 外部可执行文件。
+- **执行顺序**：创建父目录 → 打开连接 → 确认 PRAGMA → 构造 Provider → `Up` 执行待执行迁移；任一步失败都
+  关闭刚建立的连接，不返回半初始化的 DB。已有数据库的迁移版本由 Goose 自己识别，重复打开不会重复执行。
+- **删除的手写实现**：`currentSchemaVersion`、`readSchemaState`、`initializeSchema`、`createSchema`、
+  `unsupportedSchemaError`、`schemaScript` 与 `schema.sql` 一并删除，`storage.ErrUnsupportedSchema` 不再
+  有使用方也随之删除；不再用 `user_version` 管理版本，也不再保留第二份完整 Schema 定义与旧初始化 fallback。
+- **约束与边界**：保留 `modernc.org/sqlite` 纯 Go 驱动与单 Server 文件锁；迁移仍在取得
+  `<database_path>.server.lock` 之后执行，未新增跨进程租约或额外仲裁。不兼容旧的手写 Schema 数据库，
+  不做旧库识别、数据回填或 `user_version` 转换。
+- **工具链**：Go 最低版本提升到 `1.25.7`（Goose v3.27.2 的要求），`modernc.org/sqlite` 随之升级到
+  `v1.53.0`，仍是纯 Go 驱动。
+- **验证（本任务明确授权测试）**：`go test -count=1 ./tests/unit/store` → 226 passed；
+  `go test -count=1 ./tests/unit/app ./tests/unit/server` → 408 passed；
+  `go test -race -count=1 ./tests/unit/store ./tests/unit/app ./tests/unit/server` → 634 passed；
+  `go vet ./...`、`git diff --check` 无输出；`go-test-groups.sh --check --declared-groups unit,local,e2e`
+  通过（31 个测试包，本阶段未新增测试包）。新增的 `tests/unit/store/migrations_test.go` 只确认全新数据库
+  能完成初始迁移、核心表可读、迁移记录已写入，且重复打开不会重复执行。
+
+M2 状态继续为 `pending`：本阶段只替换 Schema 初始化基础设施，不涉及规划轮次编排，也不改变 M2 的退出条件
+与完成判定。

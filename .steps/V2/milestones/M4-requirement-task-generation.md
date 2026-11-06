@@ -30,9 +30,9 @@
 
 ### 2.3 持久化
 
-- `schema.sql` 的 `requirements` 增加项目关联与规划快照相关列（结构见 `DATA-MODEL.md` §4）。不提供旧库升级，
+- 新增的迁移脚本给 `requirements` 增加项目关联与规划快照相关列（结构见 `DATA-MODEL.md` §4）。不提供旧库升级，
   因此没有历史数据回填。
-- `schema.sql` 的 `tasks` 增加 `requirement_sequence` 与部分唯一索引。
+- 新增的迁移脚本给 `tasks` 增加 `requirement_sequence` 与部分唯一索引。
 
 ### 2.4 HTTP
 
@@ -60,7 +60,7 @@ GET  /api/v1/projects/{projectID}/requirements
 ## 4. 验收方式（默认不自动执行）
 
 - 阅读代码：确认流程的前置校验点、事务边界、顺序写入、会话状态收敛。
-- `git diff` 核对 `schema.sql` 只包含本次需要的结构变化；`gofmt`、`go vet ./...`。
+- `git diff` 核对新增的迁移脚本只包含本次需要的结构变化；`gofmt`、`go vet ./...`。
 - 若用户明确要求测试，覆盖：结构化校验各失败分支、事务回滚、顺序唯一性。
 
 ## 5. 风险与待决

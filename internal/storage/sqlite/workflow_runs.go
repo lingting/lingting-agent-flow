@@ -20,8 +20,8 @@ const workflowRunInsertCount = 20
 
 // workflowRunActivePredicate 是"未结束执行记录"的判定条件。
 //
-// 与 `schema.sql` 中的部分唯一索引保持一致：两处必须描述同一集合，否则"唯一性由数据库
-// 保证"就会失效。
+// 与 `migrations/00001_initial_schema.sql` 中的部分唯一索引保持一致：两处必须描述同一
+// 集合，否则"唯一性由数据库保证"就会失效。
 const workflowRunActivePredicate = `status NOT IN ('completed', 'cancelled', 'failed')`
 
 // workflowRunStore 实现 storage.WorkflowRunStore。

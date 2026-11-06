@@ -1,6 +1,6 @@
 // Package sqlite 基于 database/sql 与 modernc.org/sqlite 实现 storage 接口。
 //
-// 本包负责数据库连接、Schema 初始化与各实体的持久化，业务层只能通过 storage 接口访问数据。
+// 本包负责数据库连接、版本化 Schema 迁移与各实体的持久化，业务层只能通过 storage 接口访问数据。
 package sqlite
 
 import (
@@ -56,14 +56,13 @@ type DB struct {
 	path string
 }
 
-// Open 打开数据库、确认 Schema 并返回可用的存储实例。
+// Open 打开数据库、执行待执行的 Schema 迁移并返回可用的存储实例。
 //
-// 打开过程依次完成：创建父目录、建立连接、设置连接参数、确认或初始化 Schema。
-// 任一步骤失败都会关闭已建立的连接，避免泄漏。
+// 打开过程依次完成：创建父目录、建立连接、设置并确认连接参数、执行版本化迁移脚本。
+// 任一步骤失败都会关闭已建立的连接，避免返回半初始化的 DB。
 //
-// 并发打开同一数据库时，初始化阶段的 PRAGMA 读取与建表可能短暂遇到写锁竞争；
-// 这里在可重试的错误上按 busy_timeout 的时间窗口重试，避免把正常的并发启动
-// 报成失败。
+// 并发打开同一数据库时，连接参数确认与迁移可能短暂遇到写锁竞争；这里在可重试的
+// 错误上按 busy_timeout 的时间窗口重试，避免把正常的并发启动报成失败。
 func Open(ctx context.Context, options Options) (*DB, error) {
 	path := strings.TrimSpace(options.Path)
 	if path == "" {
@@ -80,7 +79,7 @@ func Open(ctx context.Context, options Options) (*DB, error) {
 	if err := db.retryBusy(ctx, options, db.applyPragmas); err != nil {
 		return nil, errors.Join(err, db.Close())
 	}
-	if err := db.retryBusy(ctx, options, db.initializeSchema); err != nil {
+	if err := db.retryBusy(ctx, options, db.migrate); err != nil {
 		return nil, errors.Join(err, db.Close())
 	}
 	return db, nil
@@ -88,9 +87,9 @@ func Open(ctx context.Context, options Options) (*DB, error) {
 
 // retryBusy 在数据库忙时重试 fn，直到超过 busy_timeout 的时间窗口。
 //
-// 并发打开同一数据库时，SQLite 的写锁竞争可能让初始化阶段的 PRAGMA 读取或建表
-// 短暂返回 SQLITE_BUSY。这里只在明确属于"忙"的错误上重试，其他错误立即返回，
-// 避免把真正的初始化失败误判成可重试问题。
+// 并发打开同一数据库时，SQLite 的写锁竞争可能让连接参数确认或迁移脚本执行短暂返回
+// SQLITE_BUSY。这里只在明确属于"忙"的错误上重试，其他错误立即返回，避免把真正的
+// 初始化失败误判成可重试问题。
 func (db *DB) retryBusy(
 	ctx context.Context,
 	options Options,

@@ -29,7 +29,7 @@
 
 ### 2.3 持久化
 
-- `schema.sql` 新增 `project_execution_leases` 表（结构见 `DATA-MODEL.md` §4）。
+- 新增的迁移脚本创建 `project_execution_leases` 表（结构见 `DATA-MODEL.md` §4）。
 - 不改动 `task_leases`（任务租约与项目租约并存，互不替代）。
 
 ### 2.4 HTTP

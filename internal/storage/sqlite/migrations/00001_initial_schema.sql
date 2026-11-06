@@ -1,8 +1,8 @@
--- AgentFlow SQLite 最终态 Schema。
+-- 00001_initial_schema：AgentFlow SQLite 初始 Schema。
 --
--- 本文件是数据库结构的唯一事实来源：新数据库首次打开时由 sqlite.Open 在一个事务内
--- 完整执行一次，已初始化的当前 Schema 数据库不会再执行本文件。本程序不提供增量迁移，
--- 也不提供旧数据库升级：结构变化直接修改本文件。
+-- migrations/ 下的版本化 SQL 脚本是数据库结构的唯一事实来源：由 Goose 在 sqlite.Open
+-- 中按版本顺序执行，已执行的版本记录在 goose_db_version 表中。后续结构变化只新增更高
+-- 版本的脚本，不再修改本文件。
 --
 -- 约定：
 --   * 主键统一为 TEXT，由应用层生成；events 使用自增整数主键保留写入顺序；
@@ -16,10 +16,8 @@
 --     JSON 结构与跨字段组合一致性；
 --   * 逻辑删除优先：roles、execution_hosts、tasks 与 projects 使用 deleted_at 标记删除，
 --     删除操作不级联删除历史记录。
-
--- user_version 是当前 Schema 的兼容标记，不是迁移版本号：只在完整初始化时写入，
--- 用于区分"当前 Schema"与"不支持的数据库"。不匹配时程序拒绝打开，不执行任何升级。
-PRAGMA user_version = 1;
+--
+-- +goose Up
 
 -- ---------------------------------------------------------------------------
 -- 角色配置
@@ -116,6 +114,7 @@ CREATE INDEX idx_execution_hosts_validation ON execution_hosts (validation_statu
     WHERE deleted_at IS NULL;
 
 -- 私钥认证必须给出私钥文件路径（跨字段要求，不是枚举白名单）。
+-- +goose StatementBegin
 CREATE TRIGGER trg_execution_hosts_private_key_required
 BEFORE INSERT ON execution_hosts
 WHEN NEW.auth_method = 'private_key'
@@ -123,7 +122,9 @@ WHEN NEW.auth_method = 'private_key'
 BEGIN
     SELECT RAISE(ABORT, 'private_key_path is required for private_key auth');
 END;
+-- +goose StatementEnd
 
+-- +goose StatementBegin
 CREATE TRIGGER trg_execution_hosts_private_key_required_update
 BEFORE UPDATE ON execution_hosts
 WHEN NEW.auth_method = 'private_key'
@@ -131,6 +132,7 @@ WHEN NEW.auth_method = 'private_key'
 BEGIN
     SELECT RAISE(ABORT, 'private_key_path is required for private_key auth');
 END;
+-- +goose StatementEnd
 
 -- ---------------------------------------------------------------------------
 -- 任务

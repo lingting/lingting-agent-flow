@@ -32,7 +32,7 @@
 
 ## 数据库约束规范
 
-以下规则是长期约束，任何新增或修改表结构、`schema.sql`、数据访问层的工作都必须遵守。
+以下规则是长期约束，任何新增或修改表结构、`migrations/` 下的迁移脚本、数据访问层的工作都必须遵守。
 
 - 业务数据库中的枚举式字段不得通过 `CHECK` 等数据库约束限定固定取值集合；新增取值必须能在不修改
   Schema 的情况下写入。
@@ -47,25 +47,25 @@
   层必须保留未知枚举值，不得自动映射为默认状态。
 - 逻辑删除优先：`roles`、`execution_hosts` 与 `tasks` 使用 `deleted_at` 标记删除，删除操作不得级联
   删除历史记录。
-- SQLite 不使用增量迁移：`internal/storage/sqlite/schema.sql` 是数据库结构的唯一事实来源，通过
-  `embed` 嵌入程序，新数据库首次打开时在一个事务内完整执行一次。Schema 结构变化直接修改这份完整的
-  最终态文件，不再新增迁移脚本，也不保留迁移目录、版本表与逐版本执行机制。
-- 不承诺旧数据库自动升级：既不是全新数据库、也不是当前 Schema 的数据库必须失败关闭（返回
-  `storage.ErrUnsupportedSchema`），不得自动删除、覆盖、清空或重建用户数据库，也不得把旧库静默当作
-  空库初始化；错误信息必须提示用户自行备份后手动重建。
+- SQLite Schema 以 `internal/storage/sqlite/migrations/` 下的版本化 SQL 脚本为唯一事实来源：脚本通过
+  `embed` 编译进程序，由 Goose 在打开数据库时按版本顺序执行，已执行版本记录在 `goose_db_version` 表中。
+- 新增或修改 Schema 只追加更高版本的迁移脚本，不修改已经执行过的脚本，不再维护第二份完整的最终态
+  Schema 文件；不手写迁移引擎、版本判断与自定义版本表。
+- 不支持旧的手写 Schema 数据库兼容：本程序处于开发阶段，不提供旧库升级、Schema 转换或历史数据回填，
+  也不得自动删除、覆盖、清空用户数据库，或把旧库静默当作空库初始化。
 - 数据库连接显式关闭外键检查（`foreign_keys(0)`），业务 Schema 本身不得依赖该开关。
-- Schema 初始化必须在单个事务内完成，失败时整体回滚，不留下半套结构；并发首次打开同一数据库时由
-  数据库级事务锁串行化，只有一个进程完成初始化，其余进程取得锁后重新判断状态。
+- 每个迁移脚本由 Goose 在单个事务内执行，失败时整体回滚，不留下半套结构；同一数据库只允许一个 Server
+  进程，迁移只由取得 `<database_path>.server.lock` 文件锁的服务实例执行。
 - 执行记录表沿用同一套约束：`steps`、`attempts`、`sessions` 不声明外键，`step_type`、`status`、
   `run_status`、`completeness`、`export_status`、`archive_status` 等枚举式字段不得设置取值白名单，
   未知取值必须能写入并原样读回。
 - 执行尝试的 Git 工作区状态以 JSON 快照保存（`attempts.git_before_json` / `git_after_json`），只受
   `json_valid` 这类结构约束，不为快照内部字段建列或设白名单；快照为空表示本次没有采集，与"采集成功
   且工作区干净"必须能区分。
-- 表 `verification_results` 是**已冻结的遗留数据**：结构只由 `internal/storage/sqlite/schema.sql` 定义，
+- 表 `verification_results` 是**已冻结的遗留数据**：结构只由 `migrations/00001_initial_schema.sql` 定义，
   不再有运行时读写方。禁止在业务代码中重新写入或读取它，也禁止在没有可靠数据保全方案时删除该表定义。
 - 数据库相关测试集中在 `tests/unit/store/`：仓储读写、未知枚举值原样保留、逻辑删除、条件更新拒绝
-  迟到结果与并发写入。Schema 没有自动化审计守点，修改 `schema.sql` 必须人工核对（测试规范见
+  迟到结果与并发写入。Schema 没有自动化审计守点，新增迁移脚本必须人工核对（测试规范见
   [docs/testing.md](docs/testing.md)）。
 
 ## 硬性红线

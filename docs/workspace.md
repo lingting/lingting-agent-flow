@@ -31,7 +31,7 @@ tests/                    全部测试代码（见 testing.md）
 | `internal/config/` | 配置结构与 YAML 加载、校验 |
 | `internal/logging/` | 结构化日志封装（`log/slog`） |
 | `internal/storage/` | 存储接口与统一存储错误 |
-| `internal/storage/sqlite/` | 连接、Schema 初始化与仓储实现（`schema.sql` 是唯一 Schema 文件） |
+| `internal/storage/sqlite/` | 连接、迁移执行与仓储实现（`migrations/` 下的版本化脚本是唯一 Schema 来源） |
 | `internal/execenv/` | 统一执行环境契约（纯类型与纯函数） |
 | `internal/agent/` | Agent 接口与 Pi CLI 适配器、容器 Runner |
 | `internal/process/` | 外部进程生命周期管理（启动、输出、超时、取消、回收） |

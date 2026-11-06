@@ -736,8 +736,8 @@ go test -race -count=1 ./tests/unit/store/ ./tests/integration/local/scheduler/
 
 `tests/integration/local/database/`（迁移后全量 Schema 审计、旧库升级与数据保留、自增主键续号、
 迁移失败不留半成品、并发打开只迁移一次）已在测试精简中删除。Schema 审计与旧库不兼容行为因此**目前
-没有自动化守点**：修改 `schema.sql` 中的表结构或约束都不会被测试发现，只能靠 `schema.sql` 自身、
-`make vet` 与人工核对。程序已不再提供增量迁移，Schema 只是新数据库首次打开时执行的完整最终态定义。
+没有自动化守点**：迁移脚本中的表结构或约束不会被测试发现，只能靠脚本自身、`make vet` 与人工核对。
+Schema 由 `internal/storage/sqlite/migrations/` 下的版本化脚本维护，Goose 在打开数据库时执行待执行的迁移。
 
 ### 查看测试结果
 
