@@ -25,6 +25,7 @@ import (
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/logging"
 	"github.com/lingting/agentflow/internal/sshclient"
+	"github.com/lingting/agentflow/internal/storage"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
 	"github.com/lingting/agentflow/tests/internal/testkit"
 )
@@ -115,6 +116,10 @@ type fakeRemoteHost struct {
 	//
 	// 它用于验证"下一次调用先恢复历史 Session，再执行模型调用"这一顺序。
 	printSessionPresent []bool
+	// registryWriteFailure 让容器登记清单写入失败。
+	registryWriteFailure bool
+	// piPrintHook 在容器内 Pi 主命令执行期间被调用一次，用于构造调用方在 Pi 运行期间取消的现场。
+	piPrintHook func()
 }
 
 // newFakeRemoteHost 构造受控远程宿主机。
@@ -184,6 +189,13 @@ func (h *fakeRemoteHost) isRunning(dockerID string) bool {
 	return ok && container.Running
 }
 
+// volumeCount 返回受控远程现场的命名卷数量。
+func (h *fakeRemoteHost) volumeCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.volumes)
+}
+
 // setRunning 直接设置容器的远程运行状态，用于构造"容器已经停止"的现场。
 func (h *fakeRemoteHost) setRunning(dockerID string, running bool) {
 	h.mu.Lock()
@@ -198,6 +210,49 @@ func (h *fakeRemoteHost) setRunning(dockerID string, running bool) {
 		return
 	}
 	container.State = domain.DockerStateExited
+}
+
+// setDockerState 覆盖容器的远端状态，用于构造 paused / restarting 等现场。
+//
+// Running 只由状态本身推导：paused / restarting / dead 都不视为在运行，与真实 docker inspect
+// 的语义保持一致。
+func (h *fakeRemoteHost) setDockerState(dockerID string, state domain.DockerContainerState) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	container, ok := h.containers[dockerID]
+	if !ok {
+		return
+	}
+	container.State = state
+	container.Running = state == domain.DockerStateRunning
+}
+
+// setInspectUncertain 设置 docker inspect 是否返回不确定结果。
+func (h *fakeRemoteHost) setInspectUncertain(uncertain bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.inspectFailure = uncertain
+}
+
+// setRegistryWriteFailure 设置容器登记清单写入是否失败。
+func (h *fakeRemoteHost) setRegistryWriteFailure(failing bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.registryWriteFailure = failing
+}
+
+// registryWriteFails 返回是否让容器登记清单写入失败。
+func (h *fakeRemoteHost) registryWriteFails() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.registryWriteFailure
+}
+
+// setPiPrintHook 设置容器内 Pi 主命令执行期间的回调。
+func (h *fakeRemoteHost) setPiPrintHook(hook func()) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.piPrintHook = hook
 }
 
 // commandsCopy 返回收到的远程命令副本。
@@ -377,7 +432,12 @@ func (h *fakeRemoteHost) exec(command string) (sshclient.CommandResult, error) {
 		started, cancelled := h.piStarted, h.piCancelled
 		_, restored := h.files[dockerID+"|"+sessionPath]
 		h.printSessionPresent = append(h.printSessionPresent, restored)
+		hook := h.piPrintHook
 		h.mu.Unlock()
+		if hook != nil {
+			// 主命令已经提交执行：此时取消调用方上下文即可构造真实的取消现场。
+			hook()
+		}
 		if !started {
 			return sshclient.CommandResult{
 				Command:  command,
@@ -836,6 +896,9 @@ func (t *fakeRemoteTransfer) WriteFile(
 	if err != nil {
 		return err
 	}
+	if t.host.registryWriteFails() && strings.HasSuffix(target, filepath.FromSlash("/containers/registry.json")) {
+		return errors.New("受控故障注入: 远程容器登记清单写入失败")
+	}
 	if _, statErr := os.Stat(target); statErr == nil && !options.Overwrite {
 		return fmt.Errorf("%w: %s", sshclient.ErrRemotePathExists, remotePath)
 	}
@@ -865,11 +928,53 @@ func (t *fakeRemoteTransfer) Close() error {
 	return nil
 }
 
+// faultStore 是受控的存储替身：只在显式启用时让容器记录写入失败。
+//
+// 它包装真实 SQLite 存储，其余调用原样转发，因此故障注入只影响被点名的写入，不会把"数据库
+// 更新失败"伪造成其他原因；控制器在同一个测试内可以随时恢复写入条件，用来构造"写入失败之后
+// 下一次调用重新收敛"的现场。
+type faultStore struct {
+	storage.Store
+	mu sync.Mutex
+	// containerUpdatesFailing 为 true 时 UpdateContainer 直接返回错误。
+	containerUpdatesFailing bool
+}
+
+// 编译期确认故障替身仍然是完整的存储入口。
+var _ storage.Store = (*faultStore)(nil)
+
+// UpdateContainer 在注入故障时失败，其余情况转发给真实存储。
+func (s *faultStore) UpdateContainer(ctx context.Context, container domain.Container) error {
+	s.mu.Lock()
+	failing := s.containerUpdatesFailing
+	s.mu.Unlock()
+	if failing {
+		return errors.New("受控故障注入: 容器登记记录写入失败")
+	}
+	return s.Store.UpdateContainer(ctx, container)
+}
+
+// failContainerUpdates 设置是否让容器记录写入失败。
+func (s *faultStore) failContainerUpdates(failing bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.containerUpdatesFailing = failing
+}
+
+// newFaultStore 构造默认不注入故障的存储替身。
+func newFaultStore(inner storage.Store) *faultStore {
+	return &faultStore{Store: inner}
+}
+
 // remoteContainerFixture 是一套容器服务受控测试现场。
 type remoteContainerFixture struct {
 	t *testing.T
 	// db 是本次现场使用的测试数据库。
 	db *sqlite.DB
+	// store 是交给服务层的存储入口，注入存储故障时它是故障替身。
+	store storage.Store
+	// faults 是本次现场的存储故障注入入口，未注入时为 nil。
+	faults *faultStore
 	// containers 是接入受控远程现场的容器服务。
 	containers *app.ContainerService
 	// host 是记录远程命令与容器状态的替身。
@@ -887,7 +992,20 @@ type remoteContainerFixture struct {
 }
 
 // newRemoteContainerFixture 构造容器服务受控测试现场。
+//
+// 不带存储故障注入：需要构造"本地写入失败"现场的用例使用 newRemoteContainerFixtureWithStore。
 func newRemoteContainerFixture(t *testing.T) *remoteContainerFixture {
+	return newRemoteContainerFixtureWithStore(t, nil)
+}
+
+// newRemoteContainerFixtureWithStore 构造可注入存储故障的容器服务受控测试现场。
+//
+// wrap 非空时会被用来包装真实 SQLite 存储，服务层拿到的就是这个包装结果；测试自身仍直接读取
+// f.db，因此"服务写入失败但数据库真实内容没有变化"可以被观察。
+func newRemoteContainerFixtureWithStore(
+	t *testing.T,
+	wrap func(storage.Store) storage.Store,
+) *remoteContainerFixture {
 	t.Helper()
 	workspace := testkit.New(t)
 	workspace.Report()
@@ -909,7 +1027,13 @@ func newRemoteContainerFixture(t *testing.T) *remoteContainerFixture {
 	remoteRoot := workspace.Dir("remote")
 	host := newFakeRemoteHost(t, remoteRoot)
 	client := &fakeRemoteClient{host: host, transfer: &fakeRemoteTransfer{host: host}}
-	sshService, err := app.NewSSHService(db, logger, app.SSHOptions{
+	store := storage.Store(db)
+	var faults *faultStore
+	if wrap != nil {
+		store = wrap(store)
+		faults, _ = store.(*faultStore)
+	}
+	sshService, err := app.NewSSHService(store, logger, app.SSHOptions{
 		KnownHostsPath: filepath.Join(workspace.Dir("ssh"), "known_hosts"),
 		Connector: func(
 			ctx context.Context,
@@ -927,7 +1051,7 @@ func newRemoteContainerFixture(t *testing.T) *remoteContainerFixture {
 	}
 	containers, err := app.NewContainerService(app.DockerServiceOptions{
 		SSH:    sshService,
-		Store:  db,
+		Store:  store,
 		Logger: logger,
 	})
 	if err != nil {
@@ -987,6 +1111,8 @@ func newRemoteContainerFixture(t *testing.T) *remoteContainerFixture {
 	return &remoteContainerFixture{
 		t:          t,
 		db:         db,
+		store:      store,
+		faults:     faults,
 		containers: containers,
 		host:       host,
 		ctx:        ctx,

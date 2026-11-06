@@ -15,7 +15,9 @@ import (
 
 	"github.com/lingting/agentflow/internal/agent"
 	"github.com/lingting/agentflow/internal/app"
+	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
+	"github.com/lingting/agentflow/internal/storage"
 )
 
 // planningRecoveryFixture 是规划调用中断与恢复的测试现场。
@@ -23,6 +25,8 @@ type planningRecoveryFixture struct {
 	*remoteContainerFixture
 	// roles 是固定角色配置读取入口。
 	roles *app.RoleService
+	// coordination 是本次装配使用的会话协调器。
+	coordination *app.PlanningSessionCoordinator
 	// runtime 是规划运行时服务。
 	runtime *app.PlanningRuntimeService
 	// planningAgent 是被测的规划 Agent 服务。
@@ -31,51 +35,86 @@ type planningRecoveryFixture struct {
 
 // newPlanningRecoveryFixture 构造规划调用中断与恢复的测试现场。
 func newPlanningRecoveryFixture(t *testing.T) *planningRecoveryFixture {
+	return newPlanningRecoveryFixtureWithStore(t, nil)
+}
+
+// newPlanningRecoveryFixtureWithStore 构造可注入存储故障的规划恢复测试现场。
+//
+// wrap 非空时服务层拿到的存储入口会被包装：用例可以让容器记录写入失败，再恢复写入条件，
+// 从而构造"远端已停止但本地状态没写进去"的真实恢复现场。
+func newPlanningRecoveryFixtureWithStore(
+	t *testing.T,
+	wrap func(storage.Store) storage.Store,
+) *planningRecoveryFixture {
 	t.Helper()
-	base := newRemoteContainerFixture(t)
+	base := newRemoteContainerFixtureWithStore(t, wrap)
 	if _, err := base.db.SeedRoles(base.ctx, app.RoleSeeds()); err != nil {
 		t.Fatalf("初始化固定角色失败: %v", err)
 	}
-	roles, err := app.NewRoleService(base.db)
+	roles, err := app.NewRoleService(base.store)
 	if err != nil {
 		t.Fatalf("构造角色服务失败: %v", err)
 	}
-	coordination := app.NewPlanningSessionCoordinator()
+	fixture := &planningRecoveryFixture{
+		remoteContainerFixture: base,
+		roles:                  roles,
+	}
+	fixture.buildPlanningServices(t)
+	t.Cleanup(func() {
+		if fixture.planningAgent == nil {
+			return
+		}
+		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if stopErr := fixture.planningAgent.Stop(stopCtx); stopErr != nil {
+			t.Errorf("停止规划 Agent 服务失败: %v", stopErr)
+		}
+	})
+	return fixture
+}
+
+// buildPlanningServices 按当前存储、容器服务与会话协调器构造规划服务实例。
+func (f *planningRecoveryFixture) buildPlanningServices(t *testing.T) {
+	t.Helper()
+	f.coordination = app.NewPlanningSessionCoordinator()
 	runtime, err := app.NewPlanningRuntimeService(app.PlanningRuntimeServiceOptions{
-		Store:        base.db,
-		Containers:   base.containers,
-		Coordination: coordination,
+		Store:        f.store,
+		Containers:   f.containers,
+		Coordination: f.coordination,
 	})
 	if err != nil {
 		t.Fatalf("构造规划运行时服务失败: %v", err)
 	}
 	planningAgent, err := app.NewPlanningAgentService(app.PlanningAgentServiceOptions{
-		Store:        base.db,
-		Roles:        roles,
-		Containers:   base.containers,
+		Store:        f.store,
+		Roles:        f.roles,
+		Containers:   f.containers,
 		Runtime:      runtime,
-		Coordination: coordination,
-		SessionRoot:  base.workspace.SessionRoot(),
+		Coordination: f.coordination,
+		SessionRoot:  f.workspace.SessionRoot(),
 	})
 	if err != nil {
 		t.Fatalf("构造规划 Agent 服务失败: %v", err)
 	}
-	if err := planningAgent.Start(base.ctx); err != nil {
+	if err := planningAgent.Start(f.ctx); err != nil {
 		t.Fatalf("启动规划 Agent 服务失败: %v", err)
 	}
-	t.Cleanup(func() {
+	f.runtime = runtime
+	f.planningAgent = planningAgent
+}
+
+// restartPlanningServices 丢弃进程内的规划服务实例并按同一数据库重建，用于模拟 Server 重启。
+func (f *planningRecoveryFixture) restartPlanningServices(t *testing.T) {
+	t.Helper()
+	if f.planningAgent != nil {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if stopErr := planningAgent.Stop(stopCtx); stopErr != nil {
-			t.Errorf("停止规划 Agent 服务失败: %v", stopErr)
+		if err := f.planningAgent.Stop(stopCtx); err != nil {
+			t.Fatalf("停止规划 Agent 服务失败: %v", err)
 		}
-	})
-	return &planningRecoveryFixture{
-		remoteContainerFixture: base,
-		roles:                  roles,
-		runtime:                runtime,
-		planningAgent:          planningAgent,
+		f.planningAgent = nil
 	}
+	f.buildPlanningServices(t)
 }
 
 // seedPlanningTarget 写入规划会话、运行中的规划容器与已固定的快照卷。
@@ -315,4 +354,306 @@ func TestPlanningRuntimePrepareRestartsStoppedContainer(t *testing.T) {
 	}
 	// 重启不改变运行时绑定，也不重新克隆快照。
 	f.requireContainerBindings(t, session, container)
+}
+
+// requireRecoveredContainer 断言一次恢复沿用原容器、原绑定与最后一份完整归档。
+func (f *planningRecoveryFixture) requireRecoveredContainer(
+	t *testing.T,
+	session domain.PlanningSession,
+	container domain.Container,
+	result app.PlanningAgentResult,
+	archivePath string,
+) {
+	t.Helper()
+	if result.Container.ID != container.ID {
+		t.Fatalf("必须复用原容器 %s，实际 %s", container.ID, result.Container.ID)
+	}
+	if result.Container.DockerID != container.DockerID {
+		t.Fatalf("必须使用原 Docker 容器 ID %s，实际 %s", container.DockerID, result.Container.DockerID)
+	}
+	if !result.Result.StableSession.Restored {
+		t.Fatalf("恢复调用必须从本机归档恢复历史 Session: %+v", result.Result.StableSession)
+	}
+	if count := f.containerCount(); count != 1 {
+		t.Fatalf("不得创建第二个规划容器，实际容器记录 %d 条", count)
+	}
+	if volumes := f.host.volumeCount(); volumes != 1 {
+		t.Fatalf("快照卷只应保留一份，实际 %d 份", volumes)
+	}
+	if content := readLocalFile(t, archivePath); content != containerTestSessionJSONL {
+		t.Fatalf("最后一份完整归档不得被中断调用覆盖: %q", content)
+	}
+	if !f.host.isRunning(container.DockerID) {
+		t.Fatal("恢复后原容器应重新处于运行状态")
+	}
+	if stored := f.loadContainer(container.ID); stored.State != domain.ContainerStateRunning {
+		t.Fatalf("恢复后容器记录状态应为 running，实际 %s", stored.State)
+	}
+	f.requireContainerBindings(t, session, container)
+}
+
+// TestPlanningRoleConvergesStaleRunningStateAfterInterruptedCall 验证本地 running、远端 exited 时恢复原容器。
+//
+// 现场来自真实的"停止已生效但本地记录没写进去"：远端容器已退出，数据库记录仍是 running，
+// 本机保留最后一份完整稳定 Session 归档。
+func TestPlanningRoleConvergesStaleRunningStateAfterInterruptedCall(t *testing.T) {
+	t.Parallel()
+	f := newPlanningRecoveryFixture(t)
+	session, container := f.seedPlanningTarget(t)
+
+	first, err := f.planningAgent.RunRole(f.ctx, f.roleRequest(session))
+	requireNoError(t, err, "首轮规划调用应当成功")
+	archivePath := first.ArchivePath
+	if content := readLocalFile(t, archivePath); content != containerTestSessionJSONL {
+		t.Fatalf("首轮归档内容不符: %q", content)
+	}
+
+	// 中断现场：远端容器已经退出，本地记录仍是 running。
+	f.host.setRunning(container.DockerID, false)
+	if stored := f.loadContainer(container.ID); stored.State != domain.ContainerStateRunning {
+		t.Fatalf("中断现场要求本地记录仍为 running，实际 %s", stored.State)
+	}
+
+	restored, err := f.planningAgent.RunRole(f.ctx, f.roleRequest(session))
+	requireNoError(t, err, "本地 running、远端 exited 时应当收敛状态并恢复原容器")
+	f.requireRecoveredContainer(t, session, container, restored, archivePath)
+	if calls := f.host.countCommands(" docker start "); calls != 1 {
+		t.Fatalf("应当只提交一次启动命令，实际 %d 次", calls)
+	}
+	if calls := f.host.countCommands(" docker stop "); calls != 0 {
+		t.Fatalf("恢复过程不得提交停止命令，实际 %d 次", calls)
+	}
+	// 恢复顺序：第二轮 Pi 主调用之前容器内必须已经恢复历史 Session。
+	present := f.host.printSessionStates()
+	if len(present) != 2 {
+		t.Fatalf("应当只发生两次 Pi 主调用，实际 %d 次", len(present))
+	}
+	if present[0] {
+		t.Fatal("首轮调用前不应存在历史 Session")
+	}
+	if !present[1] {
+		t.Fatal("恢复调用必须先恢复历史 Session 再调用模型")
+	}
+}
+
+// TestPlanningRoleRecoversAfterStopStatePersistFailed 验证停止已确认但本地写入失败后的下一轮恢复。
+func TestPlanningRoleRecoversAfterStopStatePersistFailed(t *testing.T) {
+	t.Parallel()
+	f := newPlanningRecoveryFixtureWithStore(t, func(inner storage.Store) storage.Store {
+		return newFaultStore(inner)
+	})
+	if f.faults == nil {
+		t.Fatal("存储故障注入未生效")
+	}
+	session, container := f.seedPlanningTarget(t)
+
+	first, err := f.planningAgent.RunRole(f.ctx, f.roleRequest(session))
+	requireNoError(t, err, "首轮规划调用应当成功")
+	archivePath := first.ArchivePath
+
+	// 第二轮：Pi 结果不确定 → 远端容器已停止并核验，但本地容器记录写入失败。
+	f.faults.failContainerUpdates(true)
+	f.host.piCancelled = true
+	interrupted, err := f.planningAgent.RunRole(f.ctx, f.roleRequest(session))
+	if err == nil {
+		t.Fatal("结果不确定的规划调用必须返回错误")
+	}
+	if !interrupted.Result.RemoteTerminationConfirmed {
+		t.Fatalf("必须确认远端终止: %s", interrupted.Result.RemoteTerminationError)
+	}
+	if strings.TrimSpace(interrupted.Result.RemoteTerminationError) == "" {
+		t.Fatal("本地状态未能持久化时必须如实报告")
+	}
+	if f.host.isRunning(container.DockerID) {
+		t.Fatal("远端容器应当已经停止")
+	}
+	if stored := f.loadContainer(container.ID); stored.State != domain.ContainerStateRunning {
+		t.Fatalf("写入失败时容器记录应保持 running，实际 %s", stored.State)
+	}
+	f.requireContainerBindings(t, session, container)
+
+	// 恢复写入条件后再次调用：重新核验远端、收敛状态、恢复原容器与历史 Session。
+	f.faults.failContainerUpdates(false)
+	f.host.piCancelled = false
+	restored, err := f.planningAgent.RunRole(f.ctx, f.roleRequest(session))
+	requireNoError(t, err, "恢复写入条件后规划调用应当成功")
+	f.requireRecoveredContainer(t, session, container, restored, archivePath)
+	if calls := f.host.countCommands(" docker stop "); calls != 1 {
+		t.Fatalf("不得重复停止已经退出的容器，实际停止命令 %d 次", calls)
+	}
+	if calls := f.host.countCommands(" docker start "); calls != 1 {
+		t.Fatalf("应当只提交一次启动命令，实际 %d 次", calls)
+	}
+}
+
+// TestPlanningRoleConvergesAfterServerRestart 验证 Server 中断后的状态收敛。
+//
+// 进程内的规划服务实例全部重建、协调器重建、调用方上下文是新的：恢复仍然只能靠同一套远端
+// 核验与状态收敛路径完成。
+func TestPlanningRoleConvergesAfterServerRestart(t *testing.T) {
+	t.Parallel()
+	f := newPlanningRecoveryFixture(t)
+	session, container := f.seedPlanningTarget(t)
+
+	first, err := f.planningAgent.RunRole(f.ctx, f.roleRequest(session))
+	requireNoError(t, err, "首轮规划调用应当成功")
+	archivePath := first.ArchivePath
+
+	// 远端容器已经退出，数据库记录仍是 running，进程内服务实例全部消失。
+	f.host.setRunning(container.DockerID, false)
+	f.restartPlanningServices(t)
+
+	restored, err := f.planningAgent.RunRole(f.ctx, f.roleRequest(session))
+	requireNoError(t, err, "Server 重启后应当通过同一套远端核验与收敛路径恢复")
+	f.requireRecoveredContainer(t, session, container, restored, archivePath)
+	if calls := f.host.countCommands(" docker start "); calls != 1 {
+		t.Fatalf("应当只提交一次启动命令，实际 %d 次", calls)
+	}
+}
+
+// TestPlanningRoleRefusesRecoveryOnOwnershipMismatch 验证所有权或规划标签不成立时不会恢复容器。
+func TestPlanningRoleRefusesRecoveryOnOwnershipMismatch(t *testing.T) {
+	t.Parallel()
+	t.Run("标签不一致", func(t *testing.T) {
+		t.Parallel()
+		f := newPlanningRecoveryFixture(t)
+		session, container := f.seedPlanningTarget(t)
+		f.host.setRunning(container.DockerID, false)
+		f.host.setContainerLabels(container.DockerID, map[string]string{
+			docker.OwnershipLabelKey:       "true",
+			docker.HostLabelKey:            f.node.ID.String(),
+			docker.ContainerLabelKey:       container.ID.String(),
+			docker.PlanningSessionLabelKey: domain.NewID().String(),
+		})
+
+		_, err := f.planningAgent.RunRole(f.ctx, f.roleRequest(session))
+		if err == nil {
+			t.Fatal("规划标签不一致时不得恢复容器")
+		}
+		if calls := f.host.countCommands(" docker start "); calls != 0 {
+			t.Fatalf("拒绝恢复时不得提交启动命令，实际 %d 次", calls)
+		}
+		if f.host.isRunning(container.DockerID) {
+			t.Fatal("拒绝恢复时容器不应被启动")
+		}
+	})
+	t.Run("Docker 容器 ID 不一致", func(t *testing.T) {
+		t.Parallel()
+		f := newPlanningRecoveryFixture(t)
+		session, container := f.seedPlanningTarget(t)
+		f.host.setRunning(container.DockerID, false)
+		f.host.inspectIDOverride = "docker-unexpected-" + container.ID.String()
+
+		_, err := f.planningAgent.RunRole(f.ctx, f.roleRequest(session))
+		if err == nil {
+			t.Fatal("Docker 容器 ID 不一致时不得恢复容器")
+		}
+		if calls := f.host.countCommands(" docker start "); calls != 0 {
+			t.Fatalf("拒绝恢复时不得提交启动命令，实际 %d 次", calls)
+		}
+	})
+	t.Run("已脱离管理", func(t *testing.T) {
+		t.Parallel()
+		f := newPlanningRecoveryFixture(t)
+		session, container := f.seedPlanningTarget(t)
+		f.host.setRunning(container.DockerID, false)
+		detached := container
+		if err := detached.Detach(time.Now().UTC()); err != nil {
+			t.Fatalf("把容器置为脱离管理失败: %v", err)
+		}
+		if err := f.db.UpdateContainer(f.ctx, detached); err != nil {
+			t.Fatalf("更新容器记录失败: %v", err)
+		}
+
+		_, err := f.planningAgent.RunRole(f.ctx, f.roleRequest(session))
+		if err == nil {
+			t.Fatal("已脱离管理的容器不得被自动恢复")
+		}
+		if calls := f.host.countCommands(" docker start "); calls != 0 {
+			t.Fatalf("拒绝恢复时不得提交启动命令，实际 %d 次", calls)
+		}
+		if stored := f.loadContainer(container.ID); stored.State != domain.ContainerStateDetached {
+			t.Fatalf("拒绝恢复时不得改写容器状态，实际 %s", stored.State)
+		}
+	})
+}
+
+// TestPlanningRoleRefusesRecoveryOnUnconfirmedRemoteState 验证远端状态不确定时不会自动启动。
+func TestPlanningRoleRefusesRecoveryOnUnconfirmedRemoteState(t *testing.T) {
+	t.Parallel()
+	t.Run("远端暂停", func(t *testing.T) {
+		t.Parallel()
+		f := newPlanningRecoveryFixture(t)
+		session, container := f.seedPlanningTarget(t)
+		f.host.setDockerState(container.DockerID, domain.DockerStatePaused)
+
+		_, err := f.planningAgent.RunRole(f.ctx, f.roleRequest(session))
+		if err == nil {
+			t.Fatal("远端容器处于 paused 时不得自动恢复")
+		}
+		if !strings.Contains(err.Error(), "不在可自动恢复的退出状态") {
+			t.Fatalf("错误应说明远端状态不允许自动恢复，实际 %v", err)
+		}
+		if calls := f.host.countCommands(" docker start "); calls != 0 {
+			t.Fatalf("拒绝恢复时不得提交启动命令，实际 %d 次", calls)
+		}
+		if stored := f.loadContainer(container.ID); stored.State != domain.ContainerStateRunning {
+			t.Fatalf("拒绝恢复时不得改写容器状态，实际 %s", stored.State)
+		}
+	})
+	t.Run("远端状态无法确认", func(t *testing.T) {
+		t.Parallel()
+		f := newPlanningRecoveryFixture(t)
+		session, container := f.seedPlanningTarget(t)
+		f.host.setRunning(container.DockerID, false)
+		f.host.setInspectUncertain(true)
+
+		_, err := f.planningAgent.RunRole(f.ctx, f.roleRequest(session))
+		if err == nil {
+			t.Fatal("无法确认远端状态时不得恢复容器")
+		}
+		if calls := f.host.countCommands(" docker start "); calls != 0 {
+			t.Fatalf("拒绝恢复时不得提交启动命令，实际 %d 次", calls)
+		}
+		if stored := f.loadContainer(container.ID); stored.State != domain.ContainerStateRunning {
+			t.Fatalf("拒绝恢复时不得改写容器状态，实际 %s", stored.State)
+		}
+	})
+}
+
+// TestPlanningRoleRecoveryHoldsSessionCoordinator 验证恢复与 Pi 调用都在会话协调器内完成。
+//
+// Pi 主命令执行期间另一处同会话操作必须排队：这说明状态收敛、容器启动、历史 Session 恢复与
+// Pi 调用仍然覆盖在同一个 `PlanningSessionCoordinator` 临界区内。
+func TestPlanningRoleRecoveryHoldsSessionCoordinator(t *testing.T) {
+	t.Parallel()
+	f := newPlanningRecoveryFixture(t)
+	session, container := f.seedPlanningTarget(t)
+	// 构造本地 running、远端 exited 的恢复现场。
+	f.host.setRunning(container.DockerID, false)
+
+	acquired := make(chan struct{})
+	f.host.setPiPrintHook(func() {
+		go func() {
+			unlock := f.coordination.Lock(session.ID)
+			unlock()
+			close(acquired)
+		}()
+		select {
+		case <-acquired:
+			t.Error("恢复与 Pi 调用期间会话锁不得被其他同会话操作取得")
+		case <-time.After(100 * time.Millisecond):
+		}
+	})
+
+	restored, err := f.planningAgent.RunRole(f.ctx, f.roleRequest(session))
+	requireNoError(t, err, "恢复现场下的规划调用应当成功")
+	if restored.Container.ID != container.ID {
+		t.Fatalf("必须复用原容器 %s，实际 %s", container.ID, restored.Container.ID)
+	}
+	select {
+	case <-acquired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("调用结束后同会话操作应当可以取得会话锁")
+	}
 }

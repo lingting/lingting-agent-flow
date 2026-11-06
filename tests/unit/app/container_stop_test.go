@@ -7,6 +7,7 @@ package app_test
 // 的实际检查结果证明，而不是由替身默认给出。
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -311,5 +312,77 @@ func TestContainerServiceRunAgentDoesNotStopTaskContainer(t *testing.T) {
 	}
 	if stored := f.loadContainer(container.ID); stored.State != domain.ContainerStateRunning {
 		t.Fatalf("普通任务容器状态不得被改写，实际 %s", stored.State)
+	}
+}
+
+// TestContainerServiceRunAgentReloadsStoppedStateWithCancelledContext 验证调用上下文被取消后仍能读回停止状态。
+//
+// 触发终止的调用通常已经取消：读回记录必须使用独立的有界上下文，否则用户取消会让返回的容器
+// 记录错误地停留在停止前的 running 状态。
+func TestContainerServiceRunAgentReloadsStoppedStateWithCancelledContext(t *testing.T) {
+	t.Parallel()
+	f := newRemoteContainerFixture(t)
+	sessionID := domain.NewID()
+	container := f.seedContainer(sessionID, domain.ContainerStateRunning)
+	ctx, cancel := context.WithCancel(f.ctx)
+	defer cancel()
+	f.host.piCancelled = true
+	// Pi 主命令已经提交执行之后取消调用方上下文：这是真实的"用户取消"现场。
+	f.host.setPiPrintHook(cancel)
+
+	outcome, err := f.containers.RunAgent(ctx, f.agentRequest(container, sessionID.String(), true))
+	if err == nil {
+		t.Fatal("容器内 Pi 结果不确定时调用必须失败")
+	}
+	if ctx.Err() == nil {
+		t.Fatal("本次调用的上下文应当保持取消状态")
+	}
+	if !outcome.Result.RemoteTerminationConfirmed {
+		t.Fatalf("规划调用结果不确定时必须确认远端终止: %s", outcome.Result.RemoteTerminationError)
+	}
+	if outcome.ContainerStateReloadError != "" {
+		t.Fatalf("读回停止后的记录不应失败: %s", outcome.ContainerStateReloadError)
+	}
+	if outcome.Container.State != domain.ContainerStateStopped {
+		t.Fatalf("返回的容器记录应为停止后的真实状态，实际 %s", outcome.Container.State)
+	}
+	if outcome.Container.DockerState != domain.DockerStateExited {
+		t.Fatalf("返回的 Docker 状态应为 exited，实际 %s", outcome.Container.DockerState)
+	}
+	stored := f.loadContainer(container.ID)
+	if stored.State != domain.ContainerStateStopped {
+		t.Fatalf("持久化的容器状态应为 stopped，实际 %s", stored.State)
+	}
+}
+
+// TestContainerServiceRunAgentReturnsPersistedUnknownState 验证无法确认停止时返回落库的 unknown 状态。
+func TestContainerServiceRunAgentReturnsPersistedUnknownState(t *testing.T) {
+	t.Parallel()
+	f := newRemoteContainerFixture(t)
+	sessionID := domain.NewID()
+	container := f.seedContainer(sessionID, domain.ContainerStateRunning)
+	f.host.piCancelled = true
+	f.host.stopFailure = true
+	f.host.inspectAfterStopFailure = true
+
+	outcome, err := f.containers.RunAgent(f.ctx, f.agentRequest(container, sessionID.String(), true))
+	if err == nil {
+		t.Fatal("终止结果无法确认时调用必须失败")
+	}
+	if outcome.Result.RemoteTerminationConfirmed {
+		t.Fatal("无法确认停止时不得报告远端终止已确认")
+	}
+	if strings.TrimSpace(outcome.Result.RemoteTerminationError) == "" {
+		t.Fatal("无法确认停止时必须给出可诊断的终止错误")
+	}
+	stored := f.loadContainer(container.ID)
+	if stored.State != domain.ContainerStateUnknown {
+		t.Fatalf("无法确认时持久化的容器状态应为 unknown，实际 %s", stored.State)
+	}
+	if outcome.Container.State != domain.ContainerStateUnknown {
+		t.Fatalf("返回的容器记录应反映已落库的 unknown 状态，实际 %s", outcome.Container.State)
+	}
+	if outcome.ContainerStateReloadError != "" {
+		t.Fatalf("读回记录不应失败: %s", outcome.ContainerStateReloadError)
 	}
 }

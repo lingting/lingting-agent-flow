@@ -984,3 +984,138 @@ ContainerRunner.Run（Started && !Certain）
 M2 状态继续为 `pending`：退出条件仍缺"真实环境中的只读写入拒绝、Session 与容器生命周期可持久化恢复"
 的证据，以及 M3 编排接入后在真实环境复用同一容器与快照的多轮验证。本阶段只补齐代码侧终止能力、
 受控测试与文档，不改变 M2 的完成判定。
+
+### 7.17 已交付：规划容器停止状态对账与中断恢复（M2 第十七阶段）
+
+第十六阶段让规划容器在 Pi 结果不确定时被受控停止，但仍有一个恢复边界没有闭环：远端容器已经停止，
+本地数据库里的 `Container.State` 可能仍是 `running`。典型现场是"`docker stop` 成功、`docker inspect`
+确认容器已退出，但本地 `UpdateContainer` 失败或 Server 在写库之前崩溃"，此时下一次 `RunRole` 会按
+本地记录以为容器还在运行，直到前置核验失败而停在错误上；即使进入 `StartContainer`，`running → running`
+也是非法迁移。
+
+本阶段把这条恢复链补齐，规则只有一条：**Docker 实际状态是"容器是否仍在运行"的最终依据，本地管理
+状态必须先与之一致才能执行启动**。生产代码只修改 `ContainerService` 与 `PlanningAgentService` 的既有
+生命周期方法，新增一个只承载状态对账的文件 `internal/app/container_state_reconcile.go`，没有新增容器
+状态字段、缓存表、迁移脚本、租约、后台恢复进程或第二套容器生命周期服务。
+
+**允许收敛的远端事实（正例与反例都显式列出）**
+
+- 只有 `exited` 与 `created` 属于"容器确实没有在运行且可以安全再次启动"，才允许进入启动前的状态收敛。
+- `paused` / `restarting` / `dead` / `removing` / `unknown` 一律拒绝自动启动：它们既不表示容器已经正常
+  退出，也不保证再次启动能拿到可用的运行环境。拒绝时不改写管理状态、不提交 `docker start`，错误文本
+  说明远端状态不在可安全启动的退出状态。
+- `docker inspect` 失败、SSH 断开或状态无法确认时同样不写 `stopped`、不启动、不调用 Pi，保留现有记录
+  并返回明确错误。
+
+**启动前的状态对账（`ContainerService.StartContainer`）**
+
+```text
+StartContainer（持有容器锁与远程会话）
+  1. 重新读取本地记录 → 核验受管理（detached / removed 拒绝）
+  2. docker inspect 取得真实状态 → 核验 Docker 容器 ID 与本地记录一致
+  3. 远端已在运行 + 本地 running → 幂等成功，不重复提交启动命令
+  4. 远端未运行 + 远端状态 ∈ {exited, created}：
+       · stopped / created → 无需收敛
+       · running / unknown → MarkStopped + SyncDockerState → 落库 → 同步远程登记清单
+       · 其他管理状态     → 拒绝启动（不猜测、不覆盖）
+  5. 收敛成功后才执行 docker start → 再次 inspect 确认运行 → MarkRunning → 落库 → 同步清单
+```
+
+- 管理状态迁移全部经 `Container.MarkStopped` / `Container.MarkRunning` / `Container.SyncDockerState`，
+  没有任何直接赋值 `container.State = stopped`。
+- 收敛失败（本地写入失败或清单同步失败）立即返回：**不会**执行 `docker start`，也不会报告为已恢复。
+  写入失败时数据库保持原样，清单同步失败时保留已落库的 `stopped`（不回退成 `running`）并返回清单
+  错误，下一次调用按真实状态继续收敛。
+- 同一容器并发启动由既有 per-container 键控锁串行化：第一个调用完成收敛与启动，第二个观察到
+  "远端 running + 本地 running"直接幂等返回，因此只提交一次启动命令。
+- `reconcileBeforeStart` / `recordStartedContainer` 都是持锁内部方法，不在容器锁内再次调用公开入口，
+  也不会重复打开远程连接。
+
+**规划调用的恢复路径（`PlanningAgentService`）**
+
+```text
+PlanningAgentService.RunRole
+  → PlanningSessionCoordinator（整段持锁）
+  → 读取 PlanningSession 与原容器记录
+  → observePlanningAgentContainer：节点 / 受管理 / Docker 所有权 / 规划会话标签 + docker inspect
+  → 远端 running            → 直接使用（一次 inspect）
+  → 远端 exited / created   → restartPlanningAgentContainer
+       → PlanningRuntimeService.prepareHeld → reusePlanningContainer
+       → ContainerService.StartContainer（先对账为 stopped，再 start，再核验 running）
+       → 复用原容器 ID，从本机最后一份完整 StableSession Archive 恢复，再调用 Pi
+  → 其他远端状态            → 前置条件错误，不自动启动
+```
+
+- 分支不再由本地 `Container.State` 决定：`stopped`、`running`、`unknown` 与远端不一致时都走同一条
+  对账路径，因此"停止已生效但记录没落库"和"Server 中断"共用同一套恢复逻辑。
+- 不创建第二个容器、不新建 PlanningSession、不改写 `HostID` / `ContainerID` / `SourceCommit`、不重置
+  两个角色的 Session 标识、不删除或重新 Clone 快照卷、不把中断的调用提升为新的完整归档。
+- 归属核验先于状态判断：执行节点、受管理状态、Docker 所有权标签与规划会话标签任一不成立都拒绝继续，
+  "远端恰好已退出"不构成绕过所有权检查的理由。
+
+**终止后的容器记录读取（`ContainerService.RunAgent`）**
+
+- 只要本轮触发过远端终止流程（`RemoteTerminationConfirmed` 为真或 `RemoteTerminationError` 非空），
+  就重新读取本地记录：停止成功时返回 `stopped`，无法确认时返回已落库的 `unknown`，不再返回调用前的
+  内存副本。
+- 读取使用 `context.WithoutCancel` 派生的独立上下文并带 5 秒上限（`containerStateReloadTimeout`），
+  因此用户取消、Server 停止或调用超时都不会让读取立即失败；读取只访问本地 Store，不重新建立 SSH 连接。
+- 读取失败时保留最后一份可用记录，并通过新的结构化字段 `ContainerAgentResult.ContainerStateReloadError`
+  给出可诊断说明；它不覆盖原始 Pi 取消 / 超时结论，也不把本地读取失败写成 `RemoteTerminationError`
+  （那会误报成远端进程终止失败）。
+- 三种事实保持独立表达：远端容器已停止（`RemoteTerminationConfirmed`）、本地管理状态已持久化
+  （记录的 `State` 与 `ContainerStateReloadError`）、远程登记清单已同步（终止流程返回的错误）。
+
+**测试范围与实际结果（本任务明确授权测试）**
+
+- 扩展 `tests/unit/app/container_remote_fixture_test.go`：新增受控存储故障替身 `faultStore`（包装真实
+  SQLite，只在显式启用时让 `UpdateContainer` 失败）、远端状态覆盖 `setDockerState`、
+  `setInspectUncertain`、`setRegistryWriteFailure`、`setPiPrintHook` 与 `volumeCount`，并让
+  `newRemoteContainerFixtureWithStore` / `newPlanningRecoveryFixtureWithStore` 支持注入存储故障；
+  没有第二套测试夹具。
+- 新增 `tests/unit/app/container_start_state_test.go`（10 个顶层用例，远端不可启动状态含 4 个子用例）：
+  本地 running 远端 exited 收敛后启动、本地 unknown 远端 exited、远端 created、已在运行时的幂等、
+  paused / restarting / dead / removing 拒绝启动、inspect 失败不改状态、本地写入失败不启动且恢复写入
+  条件后可继续收敛、清单同步失败保留已落库 `stopped` 且下一轮可继续、Docker 容器 ID 不一致拒绝启动、
+  并发启动只提交一次启动命令。
+- 扩展 `tests/unit/app/container_stop_test.go`（2 个用例）：Pi 主命令执行期间取消调用方上下文后仍读回
+  已落库的 `stopped`；无法确认停止时返回已落库的 `unknown` 而不是旧的 `running`。
+- 扩展 `tests/unit/app/planning_recovery_test.go`（新增 6 个顶层用例，含 5 个子用例）：数据库仍为 running 但
+  远端已 exited 时沿用原容器 ID 与 Docker ID 恢复、本机归档恢复先于 Pi 主调用、容器与快照卷各只有一份、
+  归档内容不变；停止已确认但本地写入失败时如实报告且下一轮重新收敛（不重复停止）；Server 重启（服务
+  实例与协调器全部重建）后通过同一套核验与收敛路径恢复；标签不一致 / Docker 容器 ID 不一致 / 已脱离
+  管理 / 远端 paused / 远端状态无法确认时一律拒绝恢复且不提交启动命令；恢复与 Pi 调用期间同会话的
+  另一处操作必须排队，说明 `PlanningSessionCoordinator` 仍然覆盖整段恢复过程。
+- 已运行（本任务范围内全部通过）：
+
+  ```bash
+  go test -count=1 ./tests/unit/app ./tests/unit/app/planningagent ./tests/unit/agent
+  go test -race -count=20 -timeout 40m ./tests/unit/app -run 'Container|PlanningRole|PlanningRuntime'
+  go test -race -count=1 ./tests/unit/app ./tests/unit/app/planningagent ./tests/unit/agent ./tests/unit/server
+  go test -count=1 ./tests/unit/...
+  go vet ./...
+  .github/scripts/go-test-groups.sh --check --declared-groups unit,local,e2e
+  git diff --check
+  go test -count=1 ./tests/integration/local/...
+  ```
+
+  结果：492 / 2560 / 497 / 1625 passed（`-race` 无数据竞争报告）；`go vet` 与 `git diff --check`
+  无输出；测试分组核验通过（31 个测试包全部分类，本阶段未新增测试包）；
+  `./tests/integration/local/...` 242 passed。`-race -count=20` 需显式提高 `-timeout`：默认 10 分钟
+  包超时会在重复运行中触发测试超时，这不是用例失败。
+- 用例使用 `TestMain` + `testkit` 随机工作空间，不写仓库与用户数据目录；未连接真实 Docker、SSH、Pi 或
+  远程主机，未设置真实测试授权开关，未关闭 SSH 主机密钥校验，未修改 Goose 迁移，也未操作本地开发数据库。
+
+**仍未完成的真实环境验收（不得报告为通过）**
+
+- 真实 Docker 下"停止成功但本地写库失败"后的重启收敛（`docker stop` → `docker inspect` → 写库失败 →
+  再次调用的真实结果）。
+- 真实 Server 崩溃后同一规划容器的收敛与历史 Session 恢复。
+- 真实远程环境下 `paused` / `restarting` / `dead` 容器被拒绝启动的实际行为。
+- 真实取消后 `RunAgent` 返回记录的读取（独立上下文的真实数据库行为）。
+
+上述验收需要真实 Docker / SSH / Pi / 远程主机才能成立，本阶段的受控替身测试**不构成**真实环境验收。
+
+M2 状态继续为 `pending`：退出条件仍缺"真实环境中的只读写入拒绝、Session 与容器生命周期可持久化恢复"
+的证据，以及 M3 编排接入后在真实环境复用同一容器与快照的多轮验证。本阶段只补齐代码侧的状态对账与
+中断恢复能力、受控测试与文档，不改变 M2 的完成判定。

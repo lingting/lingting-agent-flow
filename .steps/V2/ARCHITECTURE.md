@@ -178,6 +178,38 @@ PlanningAgentService.RunRole
   `PlanningAgentService` 复用 `PlanningRuntimeService.prepareHeld` 按原容器 ID 重新启动，再从本机
   最后一份完整稳定 Session 归档恢复上下文。容器已确认停止时不再从该容器导出或复制 Session。
 
+### 4.3 停止状态对账与中断恢复（V2-M2 第十七阶段已落地）
+
+远端容器已经停止而本地 `Container.State` 仍是 `running` 时（写库失败或 Server 在写库前中断），恢复由
+同一套状态对账闭环，规则是"Docker 实际状态优先于本地过期状态"：
+
+```text
+PlanningAgentService.RunRole
+  └─ observePlanningAgentContainer（节点 / 受管理 / 所有权标签 / 规划会话标签 + docker inspect）
+       ├─ 远端 running                    → 直接使用
+       ├─ 远端 exited / created           → prepareHeld → reusePlanningContainer → StartContainer
+       └─ paused / restarting / dead /
+          removing / unknown             → 前置条件错误，不自动启动
+
+ContainerService.StartContainer（持容器锁与远程会话）
+  ├─ 远端已在运行 + 本地 running   → 幂等成功，不重复提交启动命令
+  ├─ 远端 exited / created         → running / unknown 先 MarkStopped + 落库 + 同步清单，再 docker start
+  │                                  收敛写入失败即返回，绝不继续启动
+  └─ 其他远端状态                  → 拒绝启动，不改写管理状态
+```
+
+- 允许进入启动前收敛的远端事实只有 `exited` 与 `created`；`paused` / `restarting` / `dead` / `removing`
+  / `unknown` 与 inspect 失败一律拒绝自动启动，且不写 `stopped`。
+- 管理状态只经 `Container.MarkStopped` / `MarkRunning` / `SyncDockerState` 推进；启动前先收敛再启动，
+  因此不存在 `running → running` 的非法迁移。启动前的 Docker 容器 ID 核验同样必须通过。
+- 收敛顺序固定为"远端已核实 → 管理状态落库 → 远程登记清单收敛 → 启动"；落库失败时不启动，清单失败
+  时保留已落库的 `stopped` 并返回清单错误，下一次调用按真实状态继续收敛。
+- `RunAgent` 触发过终止流程后，用 `context.WithoutCancel` 派生的 5 秒上限上下文读回本地记录（只读
+  Store、不重连远程）：停止成功返回 `stopped`，无法确认返回已落库的 `unknown`；读取失败保留最后一份
+  可用记录并由 `ContainerAgentResult.ContainerStateReloadError` 说明，不覆盖原始 Pi 取消 / 超时结论。
+- 恢复不创建第二个容器、不改写 `HostID` / `ContainerID` / `SourceCommit`、不重置角色 Session 标识、
+  不删除或重新 Clone 快照卷，最后一份完整稳定 Session 归档不被中断调用覆盖。
+
 ## 5. HTTP API 方向
 
 仅在既有路由空间内新增（`/api/v1/...`），Handler 只做协议转换。
@@ -247,6 +279,7 @@ PUT    /api/v1/roles/{roleID}
 | G7 | 无项目级执行租约，`TaskScheduler` 只有全局并发 | `internal/app/task_scheduler.go`、`task_leases` 表按任务 | M5 |
 | G8 | 无项目/需求聚合查询 | `internal/app/projects.go` 只有项目 CRUD | M5 |
 | G9 | ~~取消上下文不能证明远端 Pi 进程已终止~~ **代码已关闭**（V2-M2 第十六阶段） | 现状：`PlanningAgentService.RunRole` 显式设置 `PlanningSessionID` 与 `StopContainerOnUncertain`，`ContainerRunner` 在 `Started && !Certain` 时经 `agent.ContainerTerminator` 调用 `ContainerService.stopContainerLocked`（复用已持有的容器锁与远程会话），以停止后的 `docker inspect` 判定终止并写入 `RemoteTerminationConfirmed` / `RemoteTerminationError`；真实 SSH / Docker 环境下的终止仍未验收，见里程碑 §7.10 / §7.16 | M2 |
+| G10 | ~~远端容器已停止但本地仍为 `running` 时恢复不闭环~~ **代码已关闭**（V2-M2 第十七阶段） | 现状：`ContainerService.StartContainer` 在启动前 inspect 远端事实，本地 `running` / `unknown` 遇远端 `exited` / `created` 时先经领域状态机收敛为 `stopped` 并落库、同步登记清单后才执行 `docker start`，写入失败即返回；`PlanningAgentService.RunRole` 每次先核验远端状态再决定复用或恢复，`paused` / `restarting` / `dead` / `removing` / `unknown` 不自动启动；`RunAgent` 用 `context.WithoutCancel` 派生的有界上下文读回终止后的记录并以 `ContainerStateReloadError` 报告本地读取失败。真实环境下的收敛与 Server 崩溃恢复仍未验收，见里程碑 §7.17 | M2 |
 
 缺口状态说明：标记"已关闭"的条目在对应子任务完成后按当时的代码复核更新，未标记的条目仍按归属
 里程碑待实现；关闭单条缺口不代表里程碑退出条件已满足。

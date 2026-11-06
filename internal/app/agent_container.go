@@ -22,6 +22,11 @@ const (
 	containerExecTimeout = 30 * time.Minute
 	// containerCopyTimeout 是容器内文件复制与下载的默认超时。
 	containerCopyTimeout = 10 * time.Minute
+	// containerStateReloadTimeout 是终止流程结束后重新读取本地容器记录的时间上限。
+	//
+	// 该读取只访问本地 Store，不需要远程连接；给出明确上限是为了避免数据库异常时把已经
+	// 结束的调用挂在一次读取上。
+	containerStateReloadTimeout = 5 * time.Second
 )
 
 // ContainerAgentRequest 是在任务容器内执行一次 Agent 调用的输入。
@@ -85,11 +90,19 @@ type ContainerAgentRequest struct {
 // ContainerAgentResult 是一次容器内 Agent 调用的结果。
 type ContainerAgentResult struct {
 	// Container 是容器登记记录。
+	//
+	// 触发过远端终止流程时它是重新读取的持久化记录（stopped 或 unknown），不是调用前的
+	// 内存副本；读取失败时它是最后一份可用记录，由 ContainerStateReloadError 说明。
 	Container domain.Container
 	// Result 是 Runner 返回的执行结果。
 	Result agent.RunResult
 	// SessionRoot 是本次调用使用的本机 Session 根目录。
 	SessionRoot string
+	// ContainerStateReloadError 是"终止后读回本地容器记录失败"的可诊断说明。
+	//
+	// 它只描述本地读取失败：远端终止结论仍以 Result.RemoteTerminationConfirmed 与
+	// Result.RemoteTerminationError 为准，不得把本地读取失败误报成远端进程终止失败。
+	ContainerStateReloadError string
 }
 
 // RunAgent 在受管理的任务容器内部执行一次 Pi 调用并把 Session 保存到本机。
@@ -205,16 +218,37 @@ func (s *ContainerService) RunAgent(
 			result, runErr := runner.Run(ctx, runRequest, func(event agent.Event) {
 				s.logAgentEvent(ctx, event)
 			})
-			if result.RemoteTerminationConfirmed {
-				// 容器已确认停止：返回停止后的真实记录，避免把中断前的运行状态当成现状。
-				if reloaded, loadErr := s.loadContainer(ctx, request.ContainerID); loadErr == nil {
+			reloadErr := ""
+			if result.RemoteTerminationConfirmed || strings.TrimSpace(result.RemoteTerminationError) != "" {
+				// 触发过远端终止流程：读回本地记录，避免把中断前的运行状态当成现状。停止成功
+				// 时记录是 stopped，无法确认时记录是 unknown，两种情况都必须反映真实落库结果。
+				//
+				// 触发终止的调用通常已经取消（用户取消、Server 停止或超时），原始上下文读取会
+				// 立即失败，因此改用独立的有界上下文；它只读本地 Store，不重新建立远程连接。
+				reloadCtx, cancelReload := context.WithTimeout(
+					context.WithoutCancel(ctx),
+					containerStateReloadTimeout,
+				)
+				reloaded, loadErr := s.loadContainer(reloadCtx, request.ContainerID)
+				cancelReload()
+				if loadErr == nil {
 					current = reloaded
+				} else {
+					// 读取失败不得伪造成已持久化的状态：保留最后一份可用记录并如实报告。
+					reloadErr = loadErr.Error()
+					s.debug(
+						ctx,
+						"读取终止后的容器记录失败",
+						slog.String("container", request.ContainerID),
+						slog.String("error", loadErr.Error()),
+					)
 				}
 			}
 			outcome = ContainerAgentResult{
-				Container:   current,
-				Result:      result,
-				SessionRoot: sessionRoot,
+				Container:                 current,
+				Result:                    result,
+				SessionRoot:               sessionRoot,
+				ContainerStateReloadError: reloadErr,
 			}
 			if runErr != nil {
 				return runErr

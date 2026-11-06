@@ -185,6 +185,12 @@ type StartContainerRequest struct {
 }
 
 // StartContainer 启动受管理容器并核验运行状态。
+//
+// 启动前先 inspect 远端事实：本地管理状态为 running 但容器已经退出（例如停止已生效、本地
+// 记录写入失败或 Server 在写库前中断）时，先经领域状态机收敛为 stopped 并落库，再执行
+// Docker start，因此不会出现 running → running 的非法迁移。远端状态不属于可安全启动的退出
+// 状态（paused / restarting / dead / removing / unknown）时拒绝启动，不改写管理状态。
+// 容器已经在运行时启动是幂等的：不重复提交启动命令。
 func (s *ContainerService) StartContainer(
 	ctx context.Context,
 	request StartContainerRequest,
@@ -201,32 +207,36 @@ func (s *ContainerService) StartContainer(
 		if err != nil {
 			return ContainerDetail{Container: container}, err
 		}
-		if !inspect.Running {
-			if err := session.runner.StartContainer(ctx, container.DockerID); err != nil {
-				return ContainerDetail{Container: container, Inspect: inspect}, err
+		if err := ensureObservedDockerID(container, *inspect); err != nil {
+			return ContainerDetail{Container: container, Inspect: inspect}, err
+		}
+		if inspect.Running {
+			if container.State == domain.ContainerStateRunning {
+				// 远端已在运行且本地记录一致：启动是幂等操作，不重复提交启动命令，也不改写记录。
+				return ContainerDetail{Container: container, Inspect: inspect}, nil
 			}
-			inspect, err = s.observe(ctx, session, container)
-			if err != nil {
-				return ContainerDetail{Container: container}, err
-			}
+			return s.recordStartedContainer(ctx, session, container, inspect)
+		}
+		// 远端事实优先：本地管理状态可能与远端不一致（例如停止已生效但记录写入失败），
+		// 必须先经领域状态机收敛为可启动状态，再执行 Docker start。
+		reconciled, reconcileErr := s.reconcileBeforeStart(ctx, session, container, *inspect)
+		if reconcileErr != nil {
+			return ContainerDetail{Container: reconciled, Inspect: inspect}, reconcileErr
+		}
+		if err := session.runner.StartContainer(ctx, reconciled.DockerID); err != nil {
+			return ContainerDetail{Container: reconciled, Inspect: inspect}, err
+		}
+		inspect, err = s.observe(ctx, session, reconciled)
+		if err != nil {
+			return ContainerDetail{Container: reconciled}, err
 		}
 		if !inspect.Running {
-			return ContainerDetail{Container: container, Inspect: inspect}, fmt.Errorf(
+			return ContainerDetail{Container: reconciled, Inspect: inspect}, fmt.Errorf(
 				"容器启动后仍未运行: Docker 状态 %s",
 				inspect.State,
 			)
 		}
-		updated := container
-		if err := updated.MarkRunning(time.Now()); err != nil {
-			return ContainerDetail{Container: container, Inspect: inspect}, err
-		}
-		if err := s.store.UpdateContainer(ctx, updated); err != nil {
-			return ContainerDetail{Container: updated, Inspect: inspect}, err
-		}
-		if err := s.syncRegistry(ctx, session, updated); err != nil {
-			return ContainerDetail{Container: updated, Inspect: inspect}, err
-		}
-		return ContainerDetail{Container: updated, Inspect: inspect}, nil
+		return s.recordStartedContainer(ctx, session, reconciled, inspect)
 	})
 }
 

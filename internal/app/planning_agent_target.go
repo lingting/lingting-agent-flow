@@ -14,8 +14,9 @@ import (
 // ensurePlanningAgentContainer 确认规划容器的归属与运行状态，必要时准备运行环境。
 //
 // 规划容器必须属于当前规划会话的执行节点、仍带本会话的规划标签并且正在运行；不在本
-// 阶段创建第二个容器，也不接管已 detached 的容器。容器在上一轮调用中断后已停止时，
-// 通过既有准备流程按原容器 ID 重新启动同一个容器。
+// 阶段创建第二个容器，也不接管已 detached 的容器。本地管理状态不能单独决定容器是否可用：
+// 每次调用都先 inspect 远端事实，远端已确认退出（exited / created）时通过既有准备流程按原
+// 容器 ID 重新启动同一个容器，状态无法确认时不自动启动。
 func (s *PlanningAgentService) ensurePlanningAgentContainer(
 	ctx context.Context,
 	session domain.PlanningSession,
@@ -54,32 +55,40 @@ func (s *PlanningAgentService) ensurePlanningAgentContainer(
 	if err != nil {
 		return session, domain.Container{}, err
 	}
-	if container.State == domain.ContainerStateStopped {
-		// 上一轮规划调用中断后容器已停止：这是正常现场，复用运行时既有的准备流程按原
-		// 容器 ID 重新启动它，而不是新建第二个容器或清空运行时绑定。
-		return s.restartPlanningAgentContainer(ctx, session, hostID, container)
+	// 远端事实优先：本地管理状态不能单独决定容器是否可以直接使用。停止已经生效但本地记录
+	// 仍为 running 时（写库失败或 Server 在写库前中断），必须靠 inspect 发现真实状态。
+	session, detail, err := s.observePlanningAgentContainer(ctx, session, container)
+	if err != nil {
+		return session, detail.Container, err
 	}
-	return s.verifyPlanningAgentContainer(ctx, session, container)
+	if detail.Inspect.Running {
+		return session, detail.Container, nil
+	}
+	if !startableDockerExitState(detail.Inspect.State) {
+		// paused / restarting / dead / removing / unknown 都不表示正常退出：不自动启动，
+		// 交由调用方先核验远端现场。
+		return session, detail.Container, fmt.Errorf(
+			"%w: 规划容器当前处于 Docker 状态 %s，不在可自动恢复的退出状态",
+			ErrPlanningAgentPrerequisite,
+			detail.Inspect.State,
+		)
+	}
+	// 远端已确认退出：复用运行时既有准备流程按原容器 ID 重新启动同一个容器。
+	return s.restartPlanningAgentContainer(ctx, session, hostID, detail.Container)
 }
 
-// restartPlanningAgentContainer 重新启动本会话登记且已停止的规划容器。
+// restartPlanningAgentContainer 按原容器 ID 重新启动远端已确认退出的规划容器。
 //
-// 只有本地记录明确表示容器已停止时才自动重启：停止是规划调用被中断后的正常现场，
-// 容器记录、快照卷与运行时绑定都保留。状态不确定的容器不在此自动处理，调用方需要先
-// 核验远端实际状态。
+// 调用方必须先通过 inspect 确认远端容器处于可安全启动的退出状态（exited / created）：停止是
+// 规划调用被中断后的正常现场，容器记录、快照卷与运行时绑定都保留。本地管理状态允许为
+// stopped、running 或 unknown——与远端不一致时由 ContainerService.StartContainer 经领域
+// 状态机先收敛为 stopped 再启动，本方法不直接改写状态字段。
 func (s *PlanningAgentService) restartPlanningAgentContainer(
 	ctx context.Context,
 	session domain.PlanningSession,
 	hostID string,
 	container domain.Container,
 ) (domain.PlanningSession, domain.Container, error) {
-	if container.State != domain.ContainerStateStopped {
-		return session, container, fmt.Errorf(
-			"%w: 规划容器当前状态为 %s，不能自动重新启动",
-			ErrPlanningAgentStateConflict,
-			container.State,
-		)
-	}
 	if err := ensureManaged(container); err != nil {
 		return session, container, fmt.Errorf("%w: %w", ErrPlanningAgentStateConflict, err)
 	}
@@ -157,42 +166,63 @@ func (s *PlanningAgentService) loadPlanningAgentContainer(
 	return *container, nil
 }
 
-// verifyPlanningAgentContainer 核验规划容器仍属于本会话且处于运行状态。
-func (s *PlanningAgentService) verifyPlanningAgentContainer(
+// observePlanningAgentContainer 核验规划容器归属与规划标签，并取得远端实际状态。
+//
+// 归属核验先于状态判断：执行节点、受管理状态与规划会话标签任一不成立都拒绝继续操作，
+// 因此"远端恰好已经退出"不会成为绕过所有权检查的理由。观测结果会同步到本地记录的 Docker
+// 状态（只更新观测事实，不改变管理状态）。
+func (s *PlanningAgentService) observePlanningAgentContainer(
 	ctx context.Context,
 	session domain.PlanningSession,
 	container domain.Container,
-) (domain.PlanningSession, domain.Container, error) {
+) (domain.PlanningSession, ContainerDetail, error) {
 	if session.HostID == nil || container.HostID != *session.HostID {
-		return session, container, fmt.Errorf(
+		return session, ContainerDetail{Container: container}, fmt.Errorf(
 			"%w: 规划容器与规划会话的执行节点不一致，拒绝在错误节点上调用",
 			ErrPlanningAgentStateConflict,
 		)
 	}
 	if err := ensureManaged(container); err != nil {
-		return session, container, fmt.Errorf("%w: %w", ErrPlanningAgentStateConflict, err)
+		return session, ContainerDetail{Container: container}, fmt.Errorf(
+			"%w: %w",
+			ErrPlanningAgentStateConflict,
+			err,
+		)
 	}
 	detail, err := s.containers.InspectContainer(ctx, InspectContainerRequest{
 		ContainerID: container.ID.String(),
 		Sync:        true,
 	})
 	if err != nil {
-		return session, container, fmt.Errorf("%w: 核验规划容器失败: %w", ErrPlanningAgentPrerequisite, err)
+		return session, detail, fmt.Errorf("%w: 核验规划容器失败: %w", ErrPlanningAgentPrerequisite, err)
 	}
 	if detail.Inspect == nil {
-		return session, container, fmt.Errorf(
+		return session, detail, fmt.Errorf(
 			"%w: 未能取得规划容器的实际状态",
 			ErrPlanningAgentPrerequisite,
 		)
 	}
 	if actual := detail.Inspect.Labels[docker.PlanningSessionLabelKey]; actual != session.ID.String() {
-		return session, container, fmt.Errorf(
+		return session, detail, fmt.Errorf(
 			"%w: 规划容器的规划会话标签不一致，拒绝把它当作本会话资源",
 			ErrPlanningAgentStateConflict,
 		)
 	}
+	return session, detail, nil
+}
+
+// verifyPlanningAgentContainer 核验规划容器仍属于本会话且处于运行状态。
+func (s *PlanningAgentService) verifyPlanningAgentContainer(
+	ctx context.Context,
+	session domain.PlanningSession,
+	container domain.Container,
+) (domain.PlanningSession, domain.Container, error) {
+	session, detail, err := s.observePlanningAgentContainer(ctx, session, container)
+	if err != nil {
+		return session, detail.Container, err
+	}
 	if !detail.Inspect.Running {
-		return session, container, fmt.Errorf(
+		return session, detail.Container, fmt.Errorf(
 			"%w: 规划容器当前未运行，无法执行规划调用",
 			ErrPlanningAgentPrerequisite,
 		)
