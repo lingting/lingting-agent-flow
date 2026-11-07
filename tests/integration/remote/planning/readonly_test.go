@@ -1,12 +1,15 @@
 package planning_remote
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
 
 	"github.com/lingting/agentflow/internal/app"
+	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
+	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
 // TestRemotePlanningReadOnlyEnvironment 验收真实只读环境。
@@ -259,6 +262,11 @@ func assertShellWriteRejected(t *testing.T, f *fixture, containerID domain.ID, p
 }
 
 // assertFileAbsentInContainer 断言容器内目标文件没有被创建。
+//
+// 判定只接受确定结论：`test -e <path>` 必须在容器内确认执行、确认结束，且退出码精确
+// 为 1。退出码 0 表示目标文件存在；退出码 2、127 与其他取值表示探针本身失败；连接
+// 中断、超时、取消或状态不确定时同样不得报告"文件不存在"。失败信息打印探针的退出码
+// 与命令结果，不包含任何凭据。
 func assertFileAbsentInContainer(t *testing.T, f *fixture, containerID domain.ID, target string) {
 	t.Helper()
 	result, err := f.containers.Exec(f.ctx, app.ExecRequest{
@@ -267,12 +275,50 @@ func assertFileAbsentInContainer(t *testing.T, f *fixture, containerID domain.ID
 		WorkDir:     planningWorkDir,
 		Timeout:     planningOpTimeout,
 	})
-	if err == nil && result.Result.ExitCode == 0 {
-		t.Fatalf("只读挂载未拒绝写入：文件 %s 被成功创建", target)
+	run := result.Result
+	verdict, verdictErr := testkit.ClassifyFileAbsence(testkit.FileAbsenceProbe{
+		ExitCode:   run.ExitCode,
+		Started:    run.Started,
+		Certain:    run.Certain,
+		Determined: absenceProbeDetermined(run, err),
+	})
+	if verdictErr != nil {
+		t.Fatalf("无法确认容器内文件 %s 是否存在: %v\n探针结果: %s",
+			target, verdictErr, describeAbsenceProbe(run, err))
 	}
-	if err != nil && !result.Result.Certain {
-		t.Fatalf("无法确认容器内文件 %s 是否存在: %v", target, err)
+	if verdict != testkit.FileConfirmedAbsent {
+		t.Fatalf("只读挂载未拒绝写入：文件 %s 被成功创建\n探针结果: %s",
+			target, describeAbsenceProbe(run, err))
 	}
+	t.Logf("FILE_ABSENT target=%s exit=%d", target, run.ExitCode)
+}
+
+// absenceProbeDetermined 判断探针结果是否按退出码返回。
+//
+// 只有命令确实在容器内执行、并且要么正常结束要么以非零退出码结束时，退出码才代表
+// `test -e` 的结论；传输中断、超时、取消与服务前置校验失败都不能按退出码解释。
+func absenceProbeDetermined(run docker.CommandResult, err error) bool {
+	if run.TimedOut() || run.Cancelled() || !run.Certain {
+		return false
+	}
+	if err == nil {
+		return true
+	}
+	return docker.ErrorCodeOf(err) == docker.CodeCommandFailed
+}
+
+// describeAbsenceProbe 返回探针的可诊断描述，不包含连接凭据。
+func describeAbsenceProbe(run docker.CommandResult, err error) string {
+	output := strings.TrimSpace(run.Stderr + "\n" + run.Stdout)
+	return fmt.Sprintf(
+		"exit=%d started=%t certain=%t status=%s err=%v output=%s",
+		run.ExitCode,
+		run.Started,
+		run.Certain,
+		run.Status,
+		err,
+		truncate(output, 300),
+	)
 }
 
 // truncate 截断日志文本，避免把模型输出整段写进测试日志。

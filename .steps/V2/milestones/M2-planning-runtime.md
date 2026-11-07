@@ -1475,3 +1475,128 @@ AGENTFLOW_REAL_TESTS_GRANTED=true bash .github/scripts/run-real-tests.sh \
 - M2 状态继续保持 `pending`。第十九阶段补齐了"真实环境只读写入拒绝、多轮 Session 恢复、容器与快照
   生命周期可持久化恢复、SSH 中断后远端 Pi 终止"的证据，但 M2 的正式退出条件还要求 M3 编排接入后在真实
   环境复用同一容器与快照完成多轮规划，因此本阶段不把 M2 标记为 completed，也不把剩余工作转入 M3。
+
+### 7.20 已交付：真实源码读取验收与文件不存在断言加固（M2 第二十阶段）
+
+第二十阶段补齐 §3 退出条件中「AI 能读取真实项目代码」的第一条直接证据：真实规划角色必须在
+只读规划容器内**实际读取固定 commit 的源码**并准确回报源码里的取值，而不是仅仅"声称读过"。
+本阶段同时修复了一处测试断言缺陷（文件不存在判定可能把"探针自身失败"当成"文件不存在"）。
+M2 状态仍为 `pending`，理由见 §7.20.6。
+
+#### 7.20.1 读取验收样本仓库
+
+读取验收要求快照中存在 `internal/` 或 `cmd/` 下的 Go 源文件，而原有测试仓库
+`lingting/lingting-agent-flow-test` 的 `main` 固定 commit `92f6432…` 只含 `README.md`，无法建立样本
+（按规则不得 Skip 或伪造通过）。本阶段在测试仓库补齐了样本源码并推送：
+
+| 项目 | 值 |
+|---|---|
+| 仓库 | `https://github.com/lingting/lingting-agent-flow-test.git`（匿名 HTTPS 可访问） |
+| 固定 commit | `afe8e9c9b56fca55c48b0c3b4e6a357317987d97`（`main`） |
+| 样本文件 | `internal/oracle/constants.go`、`internal/oracle/endpoints.go`、`cmd/oracle-probe/main.go` |
+| 样本常量 | 27 个带随机后缀的字符串常量（`>= 16` 字符、含数字后缀） |
+
+样本仓库只提供取值样本，不参与产品逻辑；产品仓库不引入任何测试仓库内容。
+
+#### 7.20.2 新增真实读取验收用例
+
+`tests/integration/remote/planning/source_read_test.go` 新增
+`TestRemotePlanningReadsPinnedProjectContent`，全部依赖真实环境与生产装配：真实文件型 SQLite、
+真实 SSH（主机密钥校验开启）、真实远程 Docker Engine、真实只读规划容器、生产
+`PlanningRuntimeService` / `PlanningAgentService` / `PlanningSessionCoordinator` / `RoleService`、
+容器内真实 Pi CLI 与 `docker.pi` 配置模型。没有 Fake Pi、Mock Runner、假文件内容，也没有绕过生产
+规划 Agent 直接调用 Pi CLI。
+
+独立 oracle 的构造方式：
+
+1. 生产 `Prepare` 建立固定 commit 的只读快照（本阶段实测 `afe8e9c9…`）；
+2. 测试侧通过**独立控制连接**执行只读 git 命令：`git -C /workspace/project ls-tree -r --name-only HEAD`
+   取文件清单，`git -C /workspace/project cat-file blob HEAD:<path>` 取真实文件内容；
+3. 用 Go AST（`go/parser` + `go/ast`）读取 `const` 声明的字符串字面量，按"长度 `>= 16`、只含
+   `[A-Za-z0-9._-]`、含数字"过滤后得到候选池，再用 `crypto/rand` 随机打乱文件顺序并随机取一项；
+4. 提示词只包含**源码路径与常量标识符**，不包含取值；用例内另有断言确认提示词中没有出现期望值。
+
+断言：
+
+- 真实 Pi 的 `FinalText` 必须包含独立读取得到的准确取值（本轮实测模型回答 `"oracle-stage-read-1b8f"`）；
+- 规划角色有效工具策略仍为 `[read grep find ls]`，不含 `edit` / `write` / `bash`；
+- 调用后快照 `HEAD` 仍为固定 commit，`git status --porcelain` 为空；
+- 容器记录 ID / Docker 容器 ID、快照卷（只读挂载名）、容器内 Session 路径
+  `/tmp/agentflow/sessions/<规划会话>/<角色会话>/session.jsonl`、本机归档
+  `<SessionRoot>/planning/<规划会话>/<角色会话>/session.jsonl` 均与固定规则一致，归档结构可解析。
+
+样本缺失或候选池为空时用例直接失败并说明"无法建立读取验收样本"，不 Skip、不伪造通过。
+
+#### 7.20.3 文件不存在断言加固
+
+`tests/integration/remote/planning/readonly_test.go` 的 `assertFileAbsentInContainer` 原先在
+"Docker Exec 返回非零但结果不确定"时也可能判为文件不存在。现在改为：
+
+- 探针命令必须在容器内确认执行（`Started`）、确认结束（`Certain`）且按退出码返回；
+- 只有 `test -e <path>` 的**精确退出码 1** 才认定文件不存在；
+- 退出码 0 表示目标文件存在，用例失败；
+- 退出码 2、127、-1 及其他取值均按测试失败上报；
+- 连接中断、超时、取消或状态不确定一律不得报告文件不存在；
+- 失败信息打印退出码、`started/certain/status`、错误与服务前置校验结果，不包含任何凭据。
+
+退出码语义集中在 `tests/internal/testkit/fileabsence.go`（`ClassifyFileAbsence`），并由新增的
+`tests/unit/testkit/fileabsence_test.go` 覆盖：退出码 1 → 不存在、0 → 存在、2/127/-1/3/255 →
+失败，`Started` / `Certain` / `Determined` 任一为假时同样返回错误。本阶段真实运行中两次探针均为
+`FILE_ABSENT … exit=1`，即加固后仍然成立，且不再存在"探针失败被当成不存在"的通道。
+
+#### 7.20.4 真实环境事实（本次实测）
+
+| 项目 | 实测值 |
+|---|---|
+| Docker CLI / Engine | 29.7.2 / 29.7.2（API 1.55，最低 1.40） |
+| 测试镜像 | `agentflow-test-planning:1.0.0`（`sha256:6efc22d7…2d6d64`） |
+| 容器内 Pi CLI | 1.3.0；模型 `group/free`，思考等级 `low` |
+| SSH 目标 | `root@127.0.0.1:22`（专用测试设备，主机密钥校验开启） |
+| 快照固定 commit | `afe8e9c9b56fca55c48b0c3b4e6a357317987d97`（`main`） |
+| 远程测试资源目录 | `/root/.lingting/agentflow-tests/planning/<随机后缀>`（每次用例独立） |
+| 本机产物目录 | `TEST_ARTIFACT_DIR=%TEMP%\lingting-agent-flow-tests\planning-*`（保留，不删除） |
+| 真实测试产物目录 | `.test-artifacts/real-m2-read-verification/`、`.test-artifacts/real-m2-read-verification-rerun/` |
+
+#### 7.20.5 实际测试执行结果（本次）
+
+```bash
+gofmt -w tests/integration/remote/planning
+bash .github/scripts/check-go-static.sh                       # 通过
+bash .github/scripts/go-test-groups.sh --check --declared-groups unit,local,e2e   # 33 个测试包全部分类
+go test -count=1 ./tests/unit/...                              # 1701 passed / 15 packages
+go test -count=1 ./tests/integration/local/...                 # 242 passed / 10 packages
+
+AGENTFLOW_REAL_TESTS_GRANTED=true bash .github/scripts/run-real-tests.sh \
+  --artifact-dir "$PWD/.test-artifacts/real-m2-read-verification" --parallel 1 --timeout 45m
+AGENTFLOW_REAL_TESTS_GRANTED=true bash .github/scripts/run-real-tests.sh \
+  --artifact-dir "$PWD/.test-artifacts/real-m2-read-verification-rerun" --parallel 1 --timeout 45m
+```
+
+- 定向运行（仅新用例）：`TestRemotePlanningReadsPinnedProjectContent` 通过，两次运行的随机样本
+  不同（`DiagnosticStageRead` / `StepTypeRequirementAnalysis`），说明样本确实随机。
+- 第一次全量真实运行：`pi`、`ssh`、`remote/agent`、`remote/codesaver`、`remote/docker`、
+  `remote/planning` 全部通过；`remote/workflow` 的 `TestRemoteE2EFullChain` **失败**——
+  规划步骤在容器内 Pi 执行 600 秒后 `run.timed_out`（上限 10m0s），任务按设计进入
+  `recovery_required`，日志见 `.test-artifacts/real-m2-read-verification/real-tests-output.log`。
+  该失败点在本次改动之外（真实模型接入点单次调用停滞），未通过放宽断言或调大套件预算掩盖。
+- 复跑：`remote/workflow` 单包复跑通过（4 个用例），随后完整真实套件写入
+  `.test-artifacts/real-m2-read-verification-rerun/real-tests-output.log`，7 个真实测试包全部 `ok`
+  （`pi` 4.1s / `ssh` 5.9s / `remote/agent` 24.5s / `remote/codesaver` 13.9s /
+  `remote/docker` 72.1s / `remote/planning` 156.4s / `remote/workflow` 129.0s）。
+- 读取验收证据（复跑原始日志）：`SOURCE_SAMPLE file=internal/oracle/endpoints.go
+  const=DiagnosticStageRead value=oracle-stage-read-1b8f commit=afe8e9c9…`，
+  `SOURCE_READ_ANSWER "oracle-stage-read-1b8f"`，`SNAPSHOT_CLEAN commit=afe8e9c9…`，
+  `ROLE_TOOLS tools=[read grep find ls]`，`SOURCE_READ_BINDING … volume=agentflow-plan-…`。
+- 跳过项（不计为通过）：`tests/integration/pi` 的 `TestRealPiModelRecognition` 输出
+  `WARN [SKIP] 当前 Pi 未识别模型 group/free`（本机 Pi 1.4.0 的模型清单不含该标识），与第十九阶段
+  一致；读取验收只以容器内 Pi 1.3.0 的真实调用为准。
+- 未执行项：Server **进程**级崩溃重启验收、容器 `dead` / `removing` 真实现场（与第十九阶段相同，
+  本阶段未扩大范围）。
+
+#### 7.20.6 仍未完成与 M2 状态
+
+- 本阶段只补齐读取证据与断言缺陷，不重构规划服务、不扩展 HTTP API、不引入 M3 业务编排。
+- 真实模型接入点存在偶发的单次调用停滞（第一次全量运行的 `remote/workflow` 超时即属此类），
+  已如实记录为环境侧不稳定，未通过放宽断言处理。
+- M2 状态保持 `pending`：§3 的"AI 能读取真实项目代码"已获得直接证据，但正式退出条件还要求
+  M3 编排接入后在真实环境复用同一容器与快照完成多轮规划，本阶段不提前标记 `completed`。
