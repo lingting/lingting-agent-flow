@@ -88,6 +88,14 @@ type Options struct {
 	TaskRetry *app.TaskRetryService
 	// TaskContainers 提供任务容器的只读查询与显式处置，为空时两个接口报告服务不可用。
 	TaskContainers *app.TaskContainerDisposalService
+	// PlanningSessions 是规划会话服务，为空时规划会话接口报告服务不可用。
+	//
+	// 它只依赖存储：读取规划会话记录不需要 SSH 或 Docker。
+	PlanningSessions *app.PlanningSessionService
+	// PlanningRuntime 是规划运行时服务，为空时现场核验与准备/释放接口报告服务不可用。
+	//
+	// 核验与恢复必须访问真实远程环境：没有远程能力时不得返回"看起来核验通过"。
+	PlanningRuntime *app.PlanningRuntimeService
 	// Files 是前端静态资源文件系统，为空时使用嵌入资源。
 	Files fs.FS
 	// RequireWebUI 为 true 时，缺少前端构建产物将导致构造失败。
@@ -153,6 +161,8 @@ func New(options Options) (*Server, error) {
 		History:           options.History,
 		TaskRetry:         options.TaskRetry,
 		TaskContainers:    options.TaskContainers,
+		PlanningSessions:  options.PlanningSessions,
+		PlanningRuntime:   options.PlanningRuntime,
 		Logger:            logger,
 	})
 	web, err := buildWebHandler(options.Files, options.RequireWebUI, logger)

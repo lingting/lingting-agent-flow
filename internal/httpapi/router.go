@@ -101,6 +101,15 @@ type Deps struct {
 	// 为空时两个接口返回服务不可用。它与 Containers 分开注入：容器列表只依赖存储，
 	// 处置则要求容器服务存在，两者不是同一种依赖。
 	TaskContainers *app.TaskContainerDisposalService
+	// PlanningSessions 是规划会话服务，为空时规划会话接口返回服务不可用。
+	//
+	// 它只依赖存储：读取会话记录不需要 SSH 或 Docker，因此与 PlanningRuntime 分开注入。
+	PlanningSessions *app.PlanningSessionService
+	// PlanningRuntime 是规划运行时服务，为空时现场核验与准备/释放接口返回服务不可用。
+	//
+	// 它需要容器服务（SSH + Docker）：现场核验与恢复都必须在真实远程环境上执行，
+	// 没有远程能力时不得退化为"看起来核验通过"。
+	PlanningRuntime *app.PlanningRuntimeService
 	// Logger 是日志器，为空时使用 slog.Default。
 	Logger *slog.Logger
 }
@@ -147,7 +156,12 @@ func NewHandler(deps Deps) http.Handler {
 		},
 		history:     newHistoryHandler(deps.History, logger),
 		eventStream: newEventStreamHandler(deps.History, logger, deps.Shutdown),
-		logger:      logger,
+		planning: newPlanningHandler(
+			deps.PlanningSessions,
+			deps.PlanningRuntime,
+			logger,
+		),
+		logger: logger,
 	}
 	return withRequestID(router.newMux())
 }
@@ -191,7 +205,11 @@ type router struct {
 	history *historyHandler
 	// eventStream 提供任务事件的只读实时流，为空时该接口返回服务不可用。
 	eventStream *eventStreamHandler
-	logger      *slog.Logger
+	// planning 处理规划会话诊断与规划运行时核验/准备/释放，缺失依赖时接口返回 503。
+	//
+	// 它只做协议转换：会话读取、现场核验与运行时动作全部由生产 app 服务执行。
+	planning *planningHandler
+	logger   *slog.Logger
 }
 
 // healthHandler 处理健康检查请求。

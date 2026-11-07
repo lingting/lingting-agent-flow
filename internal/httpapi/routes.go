@@ -66,6 +66,12 @@ const (
 	matchEnvironment         = matchEnvironments + "/" + matchEnvType + "/" + matchEnvName
 	matchEnvironmentVersions = matchEnvironment + "/" + environmentVersionsSegment
 	matchEnvironmentVersion  = matchEnvironmentVersions + "/" + matchEnvVersion
+
+	matchPlanningSessions = PathPlanningSessions
+	matchPlanningSession  = matchPlanningSessions + "/" + matchSessionID
+	matchPlanningRuntime  = matchPlanningSession + "/" + planningRuntimeSegment
+	matchPlanningPrepare  = matchPlanningRuntime + "/" + planningPrepareSegment
+	matchPlanningRelease  = matchPlanningRuntime + "/" + planningReleaseSegment
 )
 
 // apiRouteMethod 是路由上允许的一个 HTTP 方法及其处理函数。
@@ -133,6 +139,14 @@ func (rt *router) routes() []apiRoute {
 	workflowService := rt.availabilityGuard(
 		rt.workflow.workflow != nil,
 		"工作流编排服务未初始化",
+	)
+	planningSessionService := rt.availabilityGuard(
+		rt.planning.sessions != nil,
+		"规划会话服务未初始化",
+	)
+	planningRuntimeService := rt.availabilityGuard(
+		rt.planning.runtime != nil,
+		"规划运行时服务未初始化",
 	)
 
 	// 环境接口在判定方法之前只校验段值：非法环境类型、名称或版本号按参数错误返回
@@ -556,6 +570,36 @@ func (rt *router) routes() []apiRoute {
 			guard:            guardFor(workflowService, rt.pathIDGuard(paramTaskID)),
 			allow:            "GET, HEAD",
 			methodNotAllowed: "该接口只支持 GET 请求",
+		},
+
+		// 规划会话与规划运行时：诊断接口只读，准备与释放显式调用生产服务。
+		{
+			pattern:          matchPlanningSession,
+			methods:          get(rt.planning.detail),
+			guard:            guardFor(planningSessionService, rt.pathIDGuard(paramSessionID)),
+			allow:            "GET, HEAD",
+			methodNotAllowed: "该接口只支持 GET 请求",
+		},
+		{
+			pattern:          matchPlanningRuntime,
+			methods:          get(rt.planning.inspectRuntime),
+			guard:            guardFor(planningRuntimeService, rt.pathIDGuard(paramSessionID)),
+			allow:            "GET, HEAD",
+			methodNotAllowed: "该接口只支持 GET 请求",
+		},
+		{
+			pattern:          matchPlanningPrepare,
+			methods:          post(rt.planning.prepareRuntime),
+			guard:            guardFor(planningRuntimeService, rt.pathIDGuard(paramSessionID)),
+			allow:            "POST",
+			methodNotAllowed: "该接口只支持 POST 请求",
+		},
+		{
+			pattern:          matchPlanningRelease,
+			methods:          post(rt.planning.releaseRuntime),
+			guard:            guardFor(planningRuntimeService, rt.pathIDGuard(paramSessionID)),
+			allow:            "POST",
+			methodNotAllowed: "该接口只支持 POST 请求",
 		},
 	}
 }

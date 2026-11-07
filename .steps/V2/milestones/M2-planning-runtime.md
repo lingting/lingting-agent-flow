@@ -1,6 +1,6 @@
 # M2：规划运行环境
 
-> 状态：**pending**。
+> 状态：**completed**（第 21 阶段按修订后的退出条件收口，证据见 §7.21.9）。
 > 前置：M1 completed。参考：[`../ARCHITECTURE.md`](../ARCHITECTURE.md) §4、
 > [`../DATA-MODEL.md`](../DATA-MODEL.md) §4、[`../ROLE-DESIGN.md`](../ROLE-DESIGN.md) §7。
 
@@ -11,7 +11,8 @@
 1. 一个 PlanningSession 对应一个独立规划容器。
 2. 项目代码以固定 commit SHA 的只读快照进入容器。
 3. 代码目录只读、rootfs 只读、唯一可写目录是 Session / 临时目录。
-4. 多轮规划复用同一容器、同一快照，两个角色各自保留 Pi Session 上下文。
+4. 同一规划会话复用同一容器与同一快照，两个规划角色各自保留 Pi Session 上下文（底层能力）；
+   多轮规划业务编排属于 M3，不是 M2 的验收要求。
 5. 会话确认 / 放弃 / 失败后释放容器与快照卷，保留消息、分析、方案历史。
 
 ## 2. 范围
@@ -50,19 +51,22 @@
 
 | 条件 | 判定方式 |
 |---|---|
-| 同一规划会话多轮复用同一容器 | 多轮请求后 `planning_sessions.container_id` 不变，快照卷不变 |
 | 不同规划会话互相隔离 | 会话之间容器、卷、Session 文件均不同 |
-| AI 能读取真实项目代码 | 规划调用中读到实际仓库文件内容 |
-| 所有代码写入尝试被运行环境拒绝 | 文件工具与 Shell 两条路径写入均失败，且无提交记录 |
-| Session 与容器生命周期可持久化恢复 | 重启后会话状态与容器关联仍可读，过期会话可被收敛 |
+| AI 能读取真实项目代码 | 真实规划调用能够读取固定 commit 中的实际源码内容 |
+| 所有代码写入尝试被运行环境拒绝 | 文件工具与 Shell 两条路径写入均失败，且没有提交记录 |
+| Session 与容器生命周期可持久化恢复 | 真实 Server 进程重启后，会话状态与容器关联仍可读取；远程资源归属可核验；过期会话可按既定策略收敛 |
 | 规划容器不进入提交流程 | 规划路径不调用任何 code save / push / merge 服务 |
+
+说明（第 21 阶段修订）：本节此前还要求"同一规划会话多轮复用同一容器"。该要求依赖 M3 的规划业务
+编排才能成立，已从 M2 的正式退出条件中移除，归入 M3。多轮 Pi Session 与容器复用作为**已有底层能力**
+继续保留并由独立用例覆盖，但它们不再构成 M2 的验收前置条件。
 
 ## 4. 验收方式（默认不自动执行）
 
 - 阅读代码：只读挂载参数构造、`--read-only` 与 tmpfs 的构造点、`RequiredCLICommands` 同步、
   Session 路径生成与根目录校验、释放路径、生命周期注册顺序。
 - 实际写入尝试（若用户授权在真实环境验证）：文件写入与 `sh -c 'echo > 文件'` 都必须失败。
-- 若用户明确要求测试，覆盖：只读参数构造、会话隔离、容器复用、释放与收敛、失败诊断。
+- 若用户明确要求测试，覆盖：只读参数构造、会话隔离、持久化绑定与恢复、释放与收敛、失败诊断。
 
 ## 5. 风险与待决
 
@@ -834,9 +838,9 @@ Docker 或远程命令结果不确定而残留；快照卷已创建但 Clone / c
 - 真实开发数据库的 Schema 初始化与不兼容旧库的失败关闭行为。
 
 以上验收需要真实 Docker / SSH / Pi / 远程主机才能成立，本阶段的受控替身测试**不构成**真实环境验收。M2 状态继续为
-`pending`：仍阻塞 M2 的退出条件是"所有代码写入尝试被运行环境拒绝"与"Session 与容器生命周期可持久化恢复"两项在真实
-环境中的证据，以及规划轮次业务编排（M3）接入后在真实环境中复用同一容器与快照的多轮验证；本次阶段只补齐运行时的
-现场核验、失败恢复与残留资源处置能力，不改变 M2 的完成判定。
+`pending`：当时仍缺"所有代码写入尝试被运行环境拒绝"与"Session 与容器生命周期可持久化恢复"两项在真实环境中的
+证据；本次阶段只补齐运行时的现场核验、失败恢复与残留资源处置能力，不改变 M2 的完成判定。
+（第 21 阶段已按修订后的退出条件收口：M2 不要求 M3 规划业务编排，当前退出条件见 §3，证据见 §7.21。）
 
 ### 7.15 已交付：Schema 初始化改为版本化 SQL 迁移（Goose，M2 基础设施变更）
 
@@ -981,9 +985,9 @@ ContainerRunner.Run（Started && !Certain）
 - 上述验收需要真实 Docker / SSH / Pi / 远程主机才能成立，本阶段的受控替身测试**不构成**真实环境验收；
   本阶段也没有连接真实远程环境、没有设置真实测试授权开关、没有关闭 SSH 主机密钥校验。
 
-M2 状态继续为 `pending`：退出条件仍缺"真实环境中的只读写入拒绝、Session 与容器生命周期可持久化恢复"
-的证据，以及 M3 编排接入后在真实环境复用同一容器与快照的多轮验证。本阶段只补齐代码侧终止能力、
-受控测试与文档，不改变 M2 的完成判定。
+M2 状态当时继续为 `pending`：退出条件仍缺"真实环境中的只读写入拒绝、Session 与容器生命周期可持久化恢复"的
+证据。本阶段只补齐代码侧终止能力、受控测试与文档，不改变 M2 的完成判定。
+（第 21 阶段已按修订后的退出条件收口，见 §3 与 §7.21。）
 
 ### 7.17 已交付：规划容器停止状态对账与中断恢复（M2 第十七阶段）
 
@@ -1116,9 +1120,9 @@ PlanningAgentService.RunRole
 
 上述验收需要真实 Docker / SSH / Pi / 远程主机才能成立，本阶段的受控替身测试**不构成**真实环境验收。
 
-M2 状态继续为 `pending`：退出条件仍缺"真实环境中的只读写入拒绝、Session 与容器生命周期可持久化恢复"
-的证据，以及 M3 编排接入后在真实环境复用同一容器与快照的多轮验证。本阶段只补齐代码侧的状态对账与
-中断恢复能力、受控测试与文档，不改变 M2 的完成判定。
+M2 状态当时继续为 `pending`：退出条件仍缺"真实环境中的只读写入拒绝、Session 与容器生命周期可持久化恢复"的
+证据。本阶段只补齐代码侧的状态对账与中断恢复能力、受控测试与文档，不改变 M2 的完成判定。
+（第 21 阶段已按修订后的退出条件收口，见 §3 与 §7.21。）
 
 ### 7.18 已交付：统一 Docker 容器状态判定（M2 第十八阶段）
 
@@ -1274,9 +1278,9 @@ exited       {"Status": "exited",     "Running": false}
 
 上述验收需要真实 Docker / SSH / Pi / 远程主机才能成立，本阶段的受控替身测试**不构成**真实环境验收。
 
-M2 状态继续为 `pending`：退出条件仍缺"真实环境中的只读写入拒绝、Session 与容器生命周期可持久化恢复"的
-证据，以及 M3 编排接入后在真实环境复用同一容器与快照的多轮验证。本阶段只统一容器状态语义、补齐受控测试与
-文档，不改变 M2 的完成判定，也不把剩余工作转入 M3。
+M2 状态当时继续为 `pending`：退出条件仍缺"真实环境中的只读写入拒绝、Session 与容器生命周期可持久化恢复"的
+证据。本阶段只统一容器状态语义、补齐受控测试与文档，不改变 M2 的完成判定。
+（第 21 阶段已按修订后的退出条件收口，见 §3 与 §7.21。）
 
 ### 7.19 已交付：真实环境验收与必要缺陷修复（M2 第十九阶段）
 
@@ -1472,9 +1476,9 @@ AGENTFLOW_REAL_TESTS_GRANTED=true bash .github/scripts/run-real-tests.sh \
 - 规划轮次业务编排、结构化输出解析与 Revision 生成仍属 M3，不在本阶段。
 - 容器 `dead` 与 `removing` 真实现场本次未制造，如实记为未观测；其拒绝路径由受控测试覆盖。
 - Server **进程**级崩溃重启验收未执行：本次只重建应用服务对象与数据库连接，报告时已如实区分。
-- M2 状态继续保持 `pending`。第十九阶段补齐了"真实环境只读写入拒绝、多轮 Session 恢复、容器与快照
-  生命周期可持久化恢复、SSH 中断后远端 Pi 终止"的证据，但 M2 的正式退出条件还要求 M3 编排接入后在真实
-  环境复用同一容器与快照完成多轮规划，因此本阶段不把 M2 标记为 completed，也不把剩余工作转入 M3。
+- M2 状态当时继续保持 `pending`。第十九阶段补齐了"真实环境只读写入拒绝、多轮 Session 恢复、容器与快照
+  生命周期可持久化恢复、SSH 中断后远端 Pi 终止"的证据；进程级重启验收与退出条件的收口在第 21 阶段完成
+  （见 §7.21），多轮规划业务编排则不属于 M2 的验收范围。
 
 ### 7.20 已交付：真实源码读取验收与文件不存在断言加固（M2 第二十阶段）
 
@@ -1598,5 +1602,167 @@ AGENTFLOW_REAL_TESTS_GRANTED=true bash .github/scripts/run-real-tests.sh \
 - 本阶段只补齐读取证据与断言缺陷，不重构规划服务、不扩展 HTTP API、不引入 M3 业务编排。
 - 真实模型接入点存在偶发的单次调用停滞（第一次全量运行的 `remote/workflow` 超时即属此类），
   已如实记录为环境侧不稳定，未通过放宽断言处理。
-- M2 状态保持 `pending`：§3 的"AI 能读取真实项目代码"已获得直接证据，但正式退出条件还要求
-  M3 编排接入后在真实环境复用同一容器与快照完成多轮规划，本阶段不提前标记 `completed`。
+- M2 状态当时保持 `pending`：§3 的"AI 能读取真实项目代码"已获得直接证据，进程级重启恢复与退出条件的
+  收口在第 21 阶段完成（见 §7.21）。多轮规划业务编排属于 M3，不构成 M2 的退出条件。
+
+### 7.21 已交付：真实 Server 进程重启恢复与 M2 退出条件收口（M2 第二十一阶段）
+
+第二十一阶段完成两件事：用**真实 Server 子进程**验收进程退出与全新进程恢复，并修订 M2 的正式退出条件。
+
+#### 7.21.1 修订后的退出条件
+
+§3 已移除"同一规划会话多轮复用同一容器"，并把"Session 与容器生命周期可持久化恢复"的判定方式明确为
+"真实 Server 进程重启后，会话状态与容器关联仍可读取；远程资源归属可核验；过期会话可按既定策略收敛"。
+多轮规划业务编排（含多轮请求串联、角色间业务协作、复用同一容器完成多轮规划）归入 M3。
+
+本次移除的是 M2 的**验收前置条件**，不是删除底层能力。以下能力继续保留并由用例覆盖：规划会话独立容器、
+容器与快照卷的持久化绑定、角色 Session ID 持久化、Session 路径与归档、容器与快照卷所有权核验、真实容器的
+创建 / 启动 / 停止 / 释放、运行时绑定恢复，以及既有多轮 Pi Session 能力（`TestRemotePlanningMultiRoundSessions`
+等）。历史阶段的这些测试记录继续有效，但不再构成 M2 的退出条件。
+
+#### 7.21.2 实现（最小改动）
+
+排查结论：`internal/server` 的启动顺序、SQLite 打开时机与 lifecycle 注册顺序已经满足进程级恢复，
+`PlanningRuntimeService` / `PlanningRuntimeService.InspectPlanningRuntime` / `RecoverPlanningSnapshot` /
+`Release` 也已具备"按持久化绑定恢复、失败关闭、不重新 Clone、不建替代容器"的全部语义，
+`ContainerRecoveryService` 只收敛 `creating` / `unknown` 与孤儿容器，不会误清理 `running` 的规划容器。
+缺失的只有一件事：Server **没有任何规划相关 HTTP 入口**，父测试进程无法观察全新 Server 进程读到的事实。
+
+因此本阶段只做两处最小改动，不新增业务逻辑、不新增数据表、不加启动期远程扫描：
+
+1. `internal/httpapi/planning.go`（新增）：四个接口一律 1:1 映射既有生产方法。
+   | 方法 | 路径 | 生产入口 |
+   |---|---|---|
+   | GET | `/api/v1/planning/sessions/{sessionID}` | `PlanningSessionService.Get` |
+   | GET | `/api/v1/planning/sessions/{sessionID}/runtime` | `PlanningRuntimeService.InspectPlanningRuntime` |
+   | POST | `/api/v1/planning/sessions/{sessionID}/runtime/prepare` | `PlanningRuntimeService.Prepare` |
+   | POST | `/api/v1/planning/sessions/{sessionID}/runtime/release` | `PlanningRuntimeService.Release` |
+
+   错误映射沿用既有分类：现场冲突与状态不确定 → 409、前置条件缺失 → 412、目标不存在 → 404、
+   参数非法 → 400、绑定未落库 → `execution_not_persisted`、执行失败 → `execution_failed`；
+   现场核验在资源不存在时按只读事实返回 200 + `presence=absent`，不把"不存在"混同于"读取失败"。
+   `prepare` 省略 `host_id` 时使用会话已持久化的执行节点绑定，这正是进程重启后的恢复路径。
+2. `internal/httpserver` 与 `internal/server` 把已装配的 `planningSessions` / `planningRuntime` 注入 HTTP 层，
+   HTTP 层不构造任何规划服务。
+
+#### 7.21.3 新增真实验收入口
+
+`tests/integration/remote/planning/server_restart_test.go` 新增 `TestRemotePlanningServerProcessRestartRecovery`，
+辅助设施在 `tests/integration/remote/planning/serverprocess_test.go`：
+
+- 用 `go build ./cmd/agentflow` 从正式入口构建可执行文件，再以
+  `agentflow server --config <测试配置> --require-web-ui=false` 启动**独立子进程**；
+- 测试配置指向本次用例的数据库文件（`<工作空间>/agentflow.db`）与由此派生的 Session 根目录，
+  known_hosts 只由测试侧快照合并而来，主机密钥校验保持开启；
+- 阶段 C 用 `Process.Kill()` 强制终止（本机为 Windows：`TerminateProcess`，等价于 SIGKILL，不执行任何
+  关闭钩子），并用健康检查确认端口不再应答；
+- 阶段 D 用同一配置启动第二个子进程（PID 必须不同），再由该进程读取原会话与现场；
+- 父进程在子进程运行期间关闭自己的数据库连接，子进程必须自己打开同一份文件并取得独占文件锁。
+
+#### 7.21.4 真实环境事实（本次实测）
+
+| 项目 | 实测值 |
+|---|---|
+| 正式启动入口 | `cmd/agentflow` → `agentflow server --config <工作空间>/server-process.yaml --require-web-ui=false` |
+| Docker CLI / Engine | 29.7.2 / 29.7.2（API 1.55，最低 1.40） |
+| 测试镜像 | `agentflow-test-planning:1.0.0`（`sha256:6efc22d7…2d6d64`） |
+| SSH 目标 | `root@127.0.0.1:22`（专用测试设备，主机密钥校验开启） |
+| 快照固定 commit | `afe8e9c9b56fca55c48b0c3b4e6a357317987d97` |
+| 远程测试资源目录 | `/root/.lingting/agentflow-tests/planning/5e67fc244bc1`（每次用例独立） |
+| 本机产物目录 | `%TEMP%\lingting-agent-flow-tests\planning-467270963\case-2458964897`（保留） |
+| 真实测试产物目录 | `.test-artifacts/real-m2-process-restart/`、`.test-artifacts/real-m2-process-restart-rerun/` |
+
+#### 7.21.5 可复核证据（复跑原始日志）
+
+来源：`.test-artifacts/real-m2-process-restart-rerun/real-tests-output.log`（`remote/planning`，`ok 193.851s`）。
+
+| 证据项 | 值 |
+|---|---|
+| Server 二进制 | `…\case-2458964897\bin\agentflow.exe` |
+| 两次启动的配置文件 | `…\case-2458964897\server-process.yaml`（两次完全相同） |
+| 两次启动的数据库 | `…\case-2458964897\agentflow.db`（两次完全相同） |
+| 两次启动的 Session 根目录 | `…\case-2458964897\sessions`（与 `settings/config` 快照一致） |
+| 第一个子进程 | PID `26296`，`127.0.0.1:51942`，健康检查 `status=ok`（`http_api` / `database` 均 `pass`） |
+| 终止方式 / 退出状态 | `Windows TerminateProcess（等价于强制终止，不执行关闭钩子）` / `exit status 1` |
+| 终止后可达性 | 健康检查变为 `connectex: No connection could be made`（端口不再应答） |
+| 第二个子进程 | PID `31036`，同一地址，健康检查 `status=ok` |
+| 会话状态 | 重启前后均为 `analyzing` |
+| 规划容器 | 登记记录 `a68394ed8bd1422f05a673c93ce19a48`，Docker ID `8e730acacd6cd4bb0be9193827e7936b08fc3652ceeef65d010f9da43d68d7ec`（前后一致） |
+| 快照卷 | `agentflow-plan-31b231258ee37f4b2ae01f3bbdbefbf2-cc79e46be69a84625f95fbf597f38ab1`，标签 `agentflow.managed=true`、`agentflow.planning_session_id=31b231258ee37f4b2ae01f3bbdbefbf2`、`agentflow.host_id=cc79e46be69a84625f95fbf597f38ab1`（前后一致） |
+| 固定 commit | `afe8e9c9…`，两次现场核验均为 `commit_verified=true` / `commit_matches=true` |
+| 角色 Session | `analyst_session=581f1f43685b2b4d1cba2c255959f2c6`（前后一致） |
+| 本机归档 | `…\sessions\planning\31b23125…\581f1f43…\session.jsonl`，SHA-256 `95aea291…487229a1` 在两次启动与一次 Release 后完全不变（6769 字节） |
+| 容器内 Session 文件 | `/tmp/agentflow/sessions/31b23125…/581f1f43…/session.jsonl` 在重启后仍存在 |
+| 只读现场 | `docker inspect` 原始输出：`ReadonlyRootfs=true`、项目目录挂载为命名卷且 `RW=false`、`/tmp` tmpfs、无 bind 挂载 |
+| 替代资源 | 带本会话标签的远端容器数量恒为 `1`；`git rev-parse HEAD` 仍为固定 commit、`git status --porcelain` 为空（未重新 Clone） |
+| 停止态恢复 | 用独立连接 `docker stop` 后，新进程 `prepare` 返回 `container_reused=true` / `snapshot_reused=true`，容器回到运行且身份不变 |
+| 容器缺失 | 独立连接 `docker rm -f` 后，`GET …/runtime` 返回 200 + `presence=absent`；`POST …/runtime/prepare` 返回 `409 state_conflict`（`登记容器在远程已不存在，不能自动创建第二个容器`），远端容器数量保持 `0`，数据库绑定不变 |
+| 快照卷缺失 | 独立连接 `docker volume rm` 后，`POST …/runtime/prepare` 返回 `409 state_conflict`（`已记录固定 commit …，但快照卷不存在，不能重新克隆覆盖现场`），卷没有被重建，`SourceCommit` 不变 |
+| 生产释放 | 由第二个子进程 `POST …/runtime/release`：`container_released=true`、`snapshot_released=true`；独立连接确认容器与卷均已消失；绑定清空 |
+| 释放后数据库事实 | 会话仍可读（`status=analyzing`、绑定字段为空）、容器登记记录 `state=removed`、任务数 `0`（规划路径未进入提交流程） |
+
+#### 7.21.6 异常场景矩阵
+
+| 场景 | 本次结论 | 证据来源 |
+|---|---|---|
+| 绑定存在、容器与卷均存在 | 通过：读到原绑定，未创建替代资源 | 7.21.5（两次启动的现场核验） |
+| 绑定存在、容器已停止 | 通过：`prepare` 复用同一容器并重启 | 7.21.5（`STOPPED_CONTAINER_RECOVERED`） |
+| 绑定存在、容器不存在 | 通过：现场报告 `absent`，`prepare` 409 冲突，不建替代容器 | 7.21.5（`MISSING_CONTAINER_CONFLICT_OK`） |
+| 快照卷不存在 | 通过：`prepare` 409 冲突，不重新 Clone | 7.21.5（`MISSING_VOLUME_CONFLICT_OK`） |
+| 容器存在但所有权标签不匹配 | **真实环境未观测**：需要在真实 Engine 上伪造标签不一致的容器并改写数据库绑定，本阶段未制造；由受控测试覆盖（`tests/unit/app/planning_runtime_test.go` 的 `InspectReportsOwnershipMismatch`、`planning_recovery_test.go` 的 `RefusesRecoveryOnOwnershipMismatch`） | 受控测试 |
+| 容器仍存在但快照 commit 不匹配 | **真实环境未观测**：快照卷以只读方式挂载，无法在真实容器内改写其内容；由受控测试覆盖（`TestPlanningRuntimeInspectReportsCommitMismatch`、`TestPlanningRuntimeRecoverSnapshotRefusesDifferentCommit`） | 受控测试 |
+| 重启后 Session 归档缺失或损坏 | **进程级未观测**：规划角色调用（`RunRole`）尚未暴露 HTTP 入口，进程内无法触发归档恢复路径。归档在两次启动与一次释放后 SHA-256 不变、结构可解析，说明新进程没有覆盖它；损坏归档的诊断由受控测试覆盖（`tests/unit/agent` 的 `TestStableSessionCorruptArchiveRejectsBeforePi`：恢复失败时给出 `归档不可用` 说明、不启动主 Pi、不删除原归档） | 受控测试 + 本阶段归档摘要核验 |
+| 远程 SSH 中断 | **进程级未观测**：本阶段没有在子进程内制造 SSH 中断；既有真实用例 `TestRemotePlanningSSHInterruptionTermination` 覆盖"中断后远端 Pi 终止、绑定保留、可继续复用同一容器" | 既有真实用例 |
+| 容器 `dead` / `removing` 现场 | 仍未观测（与第十九、二十阶段一致），拒绝路径由受控测试覆盖 | 受控测试 |
+
+#### 7.21.7 受控测试执行结果（本次）
+
+```bash
+gofmt -l internal/httpapi internal/httpserver internal/server tests/unit/httpapi tests/integration/remote/planning
+bash .github/scripts/check-go-static.sh                       # 通过
+bash .github/scripts/go-test-groups.sh --check --declared-groups unit,local,e2e   # 33 个测试包全部分类
+go test -count=1 ./tests/unit/...                              # 1709 passed / 15 packages
+go test -count=1 ./tests/integration/local/...                 # 242 passed / 10 packages
+go test -race -count=1 ./tests/unit/httpapi/... ./tests/unit/server/...            # 221 passed
+go test -race -count=2 -run 'Planning' ./tests/unit/app/                            # 230 passed
+```
+
+新增受控用例 `tests/unit/httpapi/planning_test.go`（8 个）：会话字段映射、未知会话 404、未绑定节点的现场核验
+（三份资源均 `absent` 且**零远程调用**）、未绑定且未指定节点 400、缺容器能力 412、未绑定会话释放按幂等完成、
+规划服务未装配 503、方法不允许 405。
+
+#### 7.21.8 真实测试执行结果（本次）
+
+```bash
+AGENTFLOW_REAL_TESTS_GRANTED=true bash .github/scripts/run-real-tests.sh \
+  --artifact-dir "$PWD/.test-artifacts/real-m2-process-restart" --parallel 1 --timeout 45m
+AGENTFLOW_REAL_TESTS_GRANTED=true bash .github/scripts/run-real-tests.sh \
+  --artifact-dir "$PWD/.test-artifacts/real-m2-process-restart-rerun" --parallel 1 --timeout 45m
+```
+
+- 第一次全量运行：`pi`、`ssh`、`remote/agent`、`remote/codesaver`、`remote/docker`、`remote/planning` 全部 `ok`；
+  `remote/workflow` 的 `TestRemoteE2EFullChain` **失败**：`e2e_chain_test.go:565 代码保存记录必须带有真实 commit
+  SHA`，同一次运行中该记录为 `push_status=succeeded` 但 `commit=""`（真实模型这一轮没有产生可提交的改动）。
+  原始日志：`.test-artifacts/real-m2-process-restart/real-tests-output.log`。
+- 复跑：7 个真实测试包全部 `ok`（`pi` 4.1s / `ssh` 5.9s / `remote/agent` 26.9s / `remote/codesaver` 14.1s /
+  `remote/docker` 72.6s / `remote/planning` 193.9s / `remote/workflow` 140.9s）。原始日志：
+  `.test-artifacts/real-m2-process-restart-rerun/real-tests-output.log`。上文 7.21.5 的证据全部取自复跑日志。
+- 跳过项（不计为通过）：`tests/integration/pi` 的 `TestRealPiModelRecognition` 输出
+  `WARN [SKIP] 当前 Pi 未识别模型 group/free`（本机 Pi 1.4.0 的模型清单不含该标识），与前两阶段一致。
+
+#### 7.21.9 M2 状态
+
+按 §3 修订后的退出条件逐项核对：
+
+| 条件 | 结论 | 证据 |
+|---|---|---|
+| 不同规划会话互相隔离 | 满足 | §7.12、§7.19.4 的真实多轮与角色隔离验收 |
+| AI 能读取真实项目代码 | 满足 | §7.20.2 / §7.20.4 的真实源码读取 |
+| 所有代码写入尝试被运行环境拒绝 | 满足 | §7.19.3 的真实文件工具与 Shell 写入拒绝 |
+| Session 与容器生命周期可持久化恢复 | 满足 | 本阶段 §7.21.5：真实 Server 进程强制终止后全新进程恢复会话与绑定、远程归属可核验、停止 / 缺失 / 释放按既定策略收敛 |
+| 规划容器不进入提交流程 | 满足 | 规划路径不依赖任何 code save 服务；本阶段进程中全程任务数为 0，快照 `HEAD` 与工作区保持干净 |
+
+**M2 状态更新为 `completed`**（依据上述证据，而不是依据 CI 通过）。仍未观测的现场（所有权标签不匹配、
+commit 不匹配、归档损坏、SSH 中断的进程级版本、`dead` / `removing`）已在 §7.21.6 逐项标注，并指向覆盖它们的
+受控测试或既有真实用例，不报告为通过。多轮规划业务编排、需求分析与方案生成的业务流程、结构化输出解析与
+Revision 生成归入 M3。

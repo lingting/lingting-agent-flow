@@ -1104,11 +1104,15 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		History:           s.historyQueries,
 		TaskRetry:         s.taskRetry,
 		TaskContainers:    s.taskContainers,
-		CodeInitialize:    s.codeInitialize,
-		RequireWebUI:      s.requireWeb,
-		ShutdownTimeout:   s.shutdownTimeout,
-		Report:            s.report,
-		Logger:            s.logger,
+		// 规划会话只读诊断与规划运行时核验/准备/释放：全部复用已装配的生产服务，
+		// HTTP 层不另建规划容器管理器、Session 管理器或恢复逻辑。
+		PlanningSessions: s.planningSessions,
+		PlanningRuntime:  s.planningRuntime,
+		CodeInitialize:   s.codeInitialize,
+		RequireWebUI:     s.requireWeb,
+		ShutdownTimeout:  s.shutdownTimeout,
+		Report:           s.report,
+		Logger:           s.logger,
 	})
 	if err != nil {
 		return err
