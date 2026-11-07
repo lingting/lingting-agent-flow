@@ -45,7 +45,7 @@ type PlanningRuntimeContainerInspection struct {
 	DockerID string
 	// DockerState 是远端 Docker 状态。
 	DockerState domain.DockerContainerState
-	// Running 表示远端容器正在运行。
+	// Running 表示远端容器已确认处于运行状态（State.Status 为 running 且 State.Running 为真）。
 	Running bool
 	// Detail 是补充说明，只包含可公开的诊断信息。
 	Detail string
@@ -276,7 +276,7 @@ func (s *PlanningRuntimeService) inspectRuntimeContainer(
 	inspection.Presence = PlanningRuntimePresencePresent
 	inspection.DockerID = inspect.ID
 	inspection.DockerState = inspect.State
-	inspection.Running = inspect.Running
+	inspection.Running = inspect.IsActivelyRunning()
 	return inspection, nil
 }
 
@@ -322,7 +322,7 @@ func (s *PlanningRuntimeService) inspectRuntimePrepContainer(
 	inspection.Presence = PlanningRuntimePresencePresent
 	inspection.DockerID = inspect.ID
 	inspection.DockerState = inspect.State
-	inspection.Running = inspect.Running
+	inspection.Running = inspect.IsActivelyRunning()
 	return inspection, nil
 }
 

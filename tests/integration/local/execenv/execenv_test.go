@@ -208,7 +208,7 @@ func (f *fakeContainers) CreateContainer(
 	f.mu.Unlock()
 	return app.ContainerDetail{
 		Container: container,
-		Inspect:   &docker.ContainerInspect{ID: testDockerID, Running: true},
+		Inspect:   testkit.ContainerInspectFor(testDockerID, true),
 	}, nil
 }
 
@@ -265,12 +265,11 @@ func (f *fakeContainers) InspectContainer(
 	if f.removed {
 		container.State = domain.ContainerStateRemoved
 	}
+	inspect := testkit.ContainerInspectFor(testDockerID, f.running && !f.removed)
+	inspect.Name = "agentflow-abcdef123456"
 	return app.ContainerDetail{
 		Container: container,
-		Inspect: &docker.ContainerInspect{
-			ID:      testDockerID,
-			Running: f.running && !f.removed,
-		},
+		Inspect:   inspect,
 	}, nil
 }
 
@@ -1244,7 +1243,7 @@ func (c *checkContainer) InspectContainer(
 			Name:     "agentflow-abcdef123456",
 			DockerID: testDockerID,
 		},
-		Inspect: &docker.ContainerInspect{ID: testDockerID, Running: c.running},
+		Inspect: testkit.ContainerInspectFor(testDockerID, c.running),
 	}, nil
 }
 

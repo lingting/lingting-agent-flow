@@ -113,7 +113,7 @@ func (s *PlanningRuntimeService) CleanupPlanningSnapshotPreparation(
 			err,
 		)
 	}
-	if inspect.Running {
+	if inspect.IsActivelyRunning() {
 		return result, planningRuntimeFailure(
 			ErrPlanningRuntimeConflict,
 			stage,

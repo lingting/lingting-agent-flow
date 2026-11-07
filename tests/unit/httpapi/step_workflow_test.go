@@ -53,7 +53,7 @@ func (p *workflowAPIPort) InspectContainer(
 			Name:     "agentflow-workflow-api",
 			DockerID: "docker-" + request.ContainerID,
 		},
-		Inspect: &docker.ContainerInspect{Running: true},
+		Inspect: testkit.ContainerInspectFor("", true),
 	}, nil
 }
 

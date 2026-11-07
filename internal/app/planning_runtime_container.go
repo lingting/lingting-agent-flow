@@ -67,7 +67,8 @@ func (s *PlanningRuntimeService) createPlanningContainer(
 // reusePlanningContainer 核验并复用本会话登记的规划容器。
 //
 // 记录与远程实际资源不一致、容器已脱离管理或已不存在时返回明确错误，不创建第二个
-// 容器覆盖记录；容器已停止时按受管理容器的既定策略重新启动。
+// 容器覆盖记录；容器已确认退出（exited / created）时按受管理容器的既定策略重新启动；暂停、重启中、dead、
+// removing 与状态矛盾一律拒绝启动，也不改写管理状态。
 func (s *PlanningRuntimeService) reusePlanningContainer(
 	ctx context.Context,
 	request planningContainerRequest,
@@ -123,8 +124,18 @@ func (s *PlanningRuntimeService) reusePlanningContainer(
 			fmt.Errorf("期望 %s，实际 %s", request.session.ID, actual),
 		)
 	}
-	if detail.Inspect.Running {
+	if detail.Inspect.IsActivelyRunning() {
 		return detail.Container, nil
+	}
+	// 暂停、重启中、dead、removing 与字段矛盾的现场既不是正常运行，也不是可安全启动的退出
+	// 状态：不自动启动，也不改写管理状态，交由调用方先核验远端实际状态。
+	if !detail.Inspect.IsStartable() {
+		return domain.Container{}, planningRuntimeFailure(
+			ErrPlanningRuntimeConflict,
+			PlanningRuntimeStageContainerReuse,
+			"规划容器当前处于 Docker 状态 "+detail.Inspect.State.String()+"，不在可自动恢复的退出状态",
+			nil,
+		)
 	}
 	started, startErr := s.containers.StartContainer(ctx, StartContainerRequest{
 		ContainerID: container.ID.String(),
@@ -146,7 +157,7 @@ func (s *PlanningRuntimeService) reusePlanningContainer(
 			startErr,
 		)
 	}
-	if started.Inspect == nil || !started.Inspect.Running {
+	if started.Inspect == nil || !started.Inspect.IsActivelyRunning() {
 		return domain.Container{}, planningRuntimeFailure(
 			ErrPlanningRuntimeUncertain,
 			PlanningRuntimeStageContainerReuse,

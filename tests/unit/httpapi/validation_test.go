@@ -51,7 +51,7 @@ func (e *validateExecutor) InspectContainer(
 			Name:     "agentflow-abcdef123456",
 			DockerID: "docker-" + request.ContainerID,
 		},
-		Inspect: &docker.ContainerInspect{Running: e.running},
+		Inspect: testkit.ContainerInspectFor("", e.running),
 	}, nil
 }
 

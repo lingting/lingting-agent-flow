@@ -634,7 +634,7 @@ func (s *TaskWorkflowService) checkContainerReady(
 			ErrWorkflowPrerequisite,
 		)
 	}
-	if detail.Inspect == nil || !detail.Inspect.Running {
+	if detail.Inspect == nil || !detail.Inspect.IsActivelyRunning() {
 		return fmt.Errorf(
 			"%w: 任务容器当前不可执行命令",
 			ErrWorkflowPrerequisite,

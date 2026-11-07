@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -384,5 +385,125 @@ func TestContainerServiceRunAgentReturnsPersistedUnknownState(t *testing.T) {
 	}
 	if outcome.ContainerStateReloadError != "" {
 		t.Fatalf("读回记录不应失败: %s", outcome.ContainerStateReloadError)
+	}
+}
+
+// TestContainerServiceStopDoesNotTreatPausedAsStopped 验证暂停容器不会被当成"已经停止"。
+//
+// paused 容器同样报告 State.Running=true：如果只看 Running 就会跳过停止命令并直接记录 stopped，
+// 因此这里要求真正提交一次 docker stop，并在停止后按实际检查结果收敛。
+func TestContainerServiceStopDoesNotTreatPausedAsStopped(t *testing.T) {
+	t.Parallel()
+	f := newRemoteContainerFixture(t)
+	container := f.seedContainer("", domain.ContainerStateRunning)
+	f.host.setDockerState(container.DockerID, domain.DockerStatePaused, true)
+
+	detail, err := f.containers.StopContainer(f.ctx, app.StopContainerRequest{
+		ContainerID: container.ID.String(),
+	})
+	requireNoError(t, err, "暂停容器应当按真实停止结果收敛")
+	if calls := f.host.countCommands(" docker stop "); calls != 1 {
+		t.Fatalf("暂停容器不是已停止，必须提交停止命令，实际 %d 次", calls)
+	}
+	if detail.Container.State != domain.ContainerStateStopped {
+		t.Fatalf("停止后容器管理状态应为 stopped，实际 %s", detail.Container.State)
+	}
+	if detail.Inspect == nil || detail.Inspect.State != domain.DockerStateExited {
+		t.Fatalf("停止后观测状态应为 exited，实际 %+v", detail.Inspect)
+	}
+	if f.host.isRunning(container.DockerID) {
+		t.Fatal("远程容器应当已经停止")
+	}
+	stored := f.loadContainer(container.ID)
+	if stored.State != domain.ContainerStateStopped || stored.DockerState != domain.DockerStateExited {
+		t.Fatalf("持久化记录应为 stopped / exited，实际 %s / %s", stored.State, stored.DockerState)
+	}
+}
+
+// TestContainerServiceStopRefusesToRecordStoppedForUnconfirmedStates 验证停止后仍未确认退出时不记录 stopped。
+func TestContainerServiceStopRefusesToRecordStoppedForUnconfirmedStates(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		state   domain.DockerContainerState
+		running bool
+	}{
+		{name: "停止后仍然暂停", state: domain.DockerStatePaused, running: true},
+		{name: "停止后仍在重启", state: domain.DockerStateRestarting, running: true},
+		{name: "停止后状态矛盾", state: domain.DockerStateExited, running: true},
+	}
+	for _, testCase := range cases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			f := newRemoteContainerFixture(t)
+			container := f.seedContainer("", domain.ContainerStateRunning)
+			f.host.setDockerState(container.DockerID, testCase.state, testCase.running)
+			// 停止命令报告成功但容器现场没有变化：只有停止后的实际检查能发现真相。
+			f.host.stopIgnored = true
+
+			_, err := f.containers.StopContainer(f.ctx, app.StopContainerRequest{
+				ContainerID: container.ID.String(),
+			})
+			if err == nil {
+				t.Fatalf("Docker 状态 %s 且 Running=%t 时停止必须失败", testCase.state, testCase.running)
+			}
+			if !strings.Contains(err.Error(), "停止后未确认退出") {
+				t.Fatalf("错误应说明停止后未确认退出，实际 %v", err)
+			}
+			if stored := f.loadContainer(container.ID); stored.State != domain.ContainerStateRunning {
+				t.Fatalf("未确认退出时不得改写管理状态，实际 %s", stored.State)
+			}
+			if calls := f.host.countCommands(" docker start "); calls != 0 {
+				t.Fatalf("未确认退出时不得提交启动命令，实际 %d 次", calls)
+			}
+		})
+	}
+}
+
+// TestContainerServiceStopConcurrentCallsStopOnce 验证同一容器的并发停止只提交一次停止命令。
+func TestContainerServiceStopConcurrentCallsStopOnce(t *testing.T) {
+	t.Parallel()
+	f := newRemoteContainerFixture(t)
+	container := f.seedContainer("", domain.ContainerStateRunning)
+
+	var (
+		wait   sync.WaitGroup
+		mu     sync.Mutex
+		states []domain.ContainerState
+		errs   []error
+	)
+	for index := 0; index < 2; index++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			detail, err := f.containers.StopContainer(f.ctx, app.StopContainerRequest{
+				ContainerID: container.ID.String(),
+			})
+			mu.Lock()
+			defer mu.Unlock()
+			states = append(states, detail.Container.State)
+			errs = append(errs, err)
+		}()
+	}
+	wait.Wait()
+	for _, err := range errs {
+		if err != nil {
+			t.Fatalf("并发停止同一容器不应当失败: %v", err)
+		}
+	}
+	for _, state := range states {
+		if state != domain.ContainerStateStopped {
+			t.Fatalf("每次并发停止都应返回 stopped，实际 %s", state)
+		}
+	}
+	if calls := f.host.countCommands(" docker stop "); calls != 1 {
+		t.Fatalf("并发停止同一容器只应提交一次停止命令，实际 %d 次", calls)
+	}
+	if stored := f.loadContainer(container.ID); stored.State != domain.ContainerStateStopped {
+		t.Fatalf("并发停止后容器状态应为 stopped，实际 %s", stored.State)
+	}
+	if f.host.isRunning(container.DockerID) {
+		t.Fatal("并发停止后远程容器应处于停止状态")
 	}
 }

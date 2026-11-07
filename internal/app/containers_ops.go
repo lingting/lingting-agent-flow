@@ -210,7 +210,7 @@ func (s *ContainerService) StartContainer(
 		if err := ensureObservedDockerID(container, *inspect); err != nil {
 			return ContainerDetail{Container: container, Inspect: inspect}, err
 		}
-		if inspect.Running {
+		if inspect.IsActivelyRunning() {
 			if container.State == domain.ContainerStateRunning {
 				// 远端已在运行且本地记录一致：启动是幂等操作，不重复提交启动命令，也不改写记录。
 				return ContainerDetail{Container: container, Inspect: inspect}, nil
@@ -230,7 +230,7 @@ func (s *ContainerService) StartContainer(
 		if err != nil {
 			return ContainerDetail{Container: reconciled}, err
 		}
-		if !inspect.Running {
+		if !inspect.IsActivelyRunning() {
 			return ContainerDetail{Container: reconciled, Inspect: inspect}, fmt.Errorf(
 				"容器启动后仍未运行: Docker 状态 %s",
 				inspect.State,
@@ -321,7 +321,7 @@ func (s *ContainerService) stopContainerLocked(
 			)
 		}
 	}
-	if !observed.Running {
+	if observed.RuntimeCondition().ConfirmsNotRunning() {
 		// 已经停止：按核验结果收敛，不重复提交停止命令。
 		return s.applyStoppedContainer(ctx, session, current, *observed)
 	}
@@ -333,14 +333,25 @@ func (s *ContainerService) stopContainerLocked(
 		s.markUnknown(ctx, current, cause)
 		return ContainerDetail{Container: current}, fmt.Errorf("停止容器结果无法确认: %w", cause)
 	}
-	if after.Running {
+	// 停止完成的口径与"可以安全启动"一致：只有 Docker 明确报告 exited（或从未启动的
+	// created）才能记录 stopped。暂停、重启中、dead、removing 与状态矛盾都不是"已确认退出"。
+	condition := after.RuntimeCondition()
+	if !condition.ConfirmsNotRunning() {
 		if stopErr != nil {
 			return ContainerDetail{Container: current, Inspect: after}, fmt.Errorf("停止容器失败: %w", stopErr)
 		}
+		if condition.IsActivelyRunning() {
+			return ContainerDetail{Container: current, Inspect: after}, fmt.Errorf(
+				"停止容器失败: 容器 %s 停止后仍在运行（Docker 状态 %s）",
+				current.ID,
+				after.State,
+			)
+		}
 		return ContainerDetail{Container: current, Inspect: after}, fmt.Errorf(
-			"停止容器失败: 容器 %s 停止后仍在运行（Docker 状态 %s）",
+			"停止容器失败: 容器 %s 停止后未确认退出（Docker 状态 %s，State.Running=%t）",
 			current.ID,
 			after.State,
+			after.Running,
 		)
 	}
 	// 停止命令报错但容器确实已经停止：以核实的远端事实收敛结果。
@@ -581,7 +592,7 @@ func (s *ContainerService) Exec(
 			if inspectErr != nil {
 				return inspectErr
 			}
-			if !inspect.Running {
+			if !inspect.IsActivelyRunning() {
 				return fmt.Errorf("容器 %s 当前未运行，无法执行命令", container.ID)
 			}
 			run, runErr := s.execInContainer(

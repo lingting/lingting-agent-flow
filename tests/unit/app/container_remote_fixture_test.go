@@ -212,11 +212,16 @@ func (h *fakeRemoteHost) setRunning(dockerID string, running bool) {
 	container.State = domain.DockerStateExited
 }
 
-// setDockerState 覆盖容器的远端状态，用于构造 paused / restarting 等现场。
+// setDockerState 覆盖容器的远端状态与 State.Running，用于构造 paused / restarting / 矛盾等现场。
 //
-// Running 只由状态本身推导：paused / restarting / dead 都不视为在运行，与真实 docker inspect
-// 的语义保持一致。
-func (h *fakeRemoteHost) setDockerState(dockerID string, state domain.DockerContainerState) {
+// 两个参数必须分别给出：Docker Engine 中 State.Status 与 State.Running 不是同一个变量的两种
+// 写法，paused 与 restarting 容器同样报告 Running=true，而 running / exited / created 与
+// Running 取值不一致就是需要失败关闭的矛盾现场。替身不允许把 Running 由 Status 推导出来。
+func (h *fakeRemoteHost) setDockerState(
+	dockerID string,
+	state domain.DockerContainerState,
+	running bool,
+) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	container, ok := h.containers[dockerID]
@@ -224,7 +229,7 @@ func (h *fakeRemoteHost) setDockerState(dockerID string, state domain.DockerCont
 		return
 	}
 	container.State = state
-	container.Running = state == domain.DockerStateRunning
+	container.Running = running
 }
 
 // setInspectUncertain 设置 docker inspect 是否返回不确定结果。
@@ -334,6 +339,9 @@ func (h *fakeRemoteHost) run(command string) (sshclient.CommandResult, error) {
 }
 
 // inspect 处理 docker inspect。
+//
+// 输出结构与真实 docker inspect 一致：State.Status 与 State.Running 分别给出，Paused 与
+// Restarting 由状态推导（它们只是 Docker 的辅助标志，判定以 Status + Running 为准）。
 func (h *fakeRemoteHost) inspect(command string) (sshclient.CommandResult, error) {
 	h.mu.Lock()
 	h.inspectCalls++
@@ -367,9 +375,11 @@ func (h *fakeRemoteHost) inspect(command string) (sshclient.CommandResult, error
 			"Labels": snapshot.Labels,
 		},
 		"State": map[string]any{
-			"Status":   snapshot.State.String(),
-			"Running":  snapshot.Running,
-			"ExitCode": snapshot.ExitCode,
+			"Status":     snapshot.State.String(),
+			"Running":    snapshot.Running,
+			"Paused":     snapshot.State == domain.DockerStatePaused,
+			"Restarting": snapshot.State == domain.DockerStateRestarting,
+			"ExitCode":   snapshot.ExitCode,
 		},
 	}
 	content, err := json.Marshal([]any{payload})

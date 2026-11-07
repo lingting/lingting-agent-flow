@@ -359,7 +359,7 @@ func (s *ExecutionEnvironmentService) Status(
 	if detail.Container.State == domain.ContainerStateRemoved {
 		return execenv.StatusReleased, nil
 	}
-	if detail.Inspect == nil || !detail.Inspect.Running {
+	if detail.Inspect == nil || !detail.Inspect.IsActivelyRunning() {
 		return execenv.StatusNotRunning, nil
 	}
 	return execenv.StatusReady, nil

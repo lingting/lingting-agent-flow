@@ -16,15 +16,6 @@ import (
 // 对账只复用领域状态机与既有存储 / 登记清单写入，不新增状态字段、缓存表、租约或额外后台恢复
 // 进程：下一次调用重新 inspect 就是重试，不需要跨进程仲裁。
 
-// startableDockerExitState 判断远端状态是否属于"容器确实没有在运行且可以安全再次启动"。
-//
-// 只接受 exited 与 created：paused / restarting / dead / removing / unknown 都不在其中。
-// 这些状态既不表示容器已经正常退出，也不保证再次启动能拿到可用的运行环境，因此宁可返回错误
-// 让人工核验，也不自动执行 Docker start。
-func startableDockerExitState(state domain.DockerContainerState) bool {
-	return state == domain.DockerStateExited || state == domain.DockerStateCreated
-}
-
 // ensureObservedDockerID 核验远端容器 ID 与本地记录一致。
 //
 // 只有本地已经记录 Docker 容器 ID 时才比较：记录缺少 ID 时 observe 按名称核验，此时所有权
@@ -61,7 +52,7 @@ func (s *ContainerService) reconcileBeforeStart(
 	container domain.Container,
 	inspect docker.ContainerInspect,
 ) (domain.Container, error) {
-	if !startableDockerExitState(inspect.State) {
+	if !inspect.IsStartable() {
 		return container, fmt.Errorf(
 			"启动容器失败: 容器 %s 当前处于 Docker 状态 %s，不在可安全启动的退出状态",
 			container.ID,

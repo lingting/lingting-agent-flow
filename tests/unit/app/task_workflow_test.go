@@ -16,7 +16,6 @@ import (
 	"github.com/lingting/agentflow/internal/agent"
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/codesaver"
-	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/logging"
 	"github.com/lingting/agentflow/internal/storage"
@@ -255,7 +254,7 @@ func (p *taskWorkflowContainer) InspectContainer(
 			State:    state,
 			Detached: p.detached,
 		},
-		Inspect: &docker.ContainerInspect{Running: p.running},
+		Inspect: testkit.ContainerInspectFor("", p.running),
 	}, nil
 }
 

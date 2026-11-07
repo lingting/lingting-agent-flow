@@ -392,7 +392,7 @@ func verifyTemporaryPlanningContainer(
 			err,
 		)
 	}
-	if !inspect.Running {
+	if !inspect.IsActivelyRunning() {
 		return planningRuntimeFailure(
 			ErrPlanningRuntimeFailed,
 			PlanningRuntimeStageSnapshot,

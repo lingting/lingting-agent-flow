@@ -683,7 +683,10 @@ type ContainerInspect struct {
 	Name string
 	// State 是 Docker 侧状态。
 	State domain.DockerContainerState
-	// Running 表示容器是否正在运行。
+	// Running 是 docker inspect 原样报告的 State.Running。
+	//
+	// 它不能单独决定容器是否可用：paused 与 restarting 同样报告 Running=true。生命周期判定
+	// 一律使用 RuntimeCondition / IsActivelyRunning / IsConfirmedExited / IsStartable。
 	Running bool
 	// ExitCode 是容器退出码。
 	ExitCode int
@@ -697,6 +700,28 @@ type ContainerInspect struct {
 	FinishedAt string
 	// Error 是 Docker 报告的容器错误。
 	Error string
+}
+
+// RuntimeCondition 返回 State.Status 与 State.Running 组合出的生命周期判定。
+//
+// 判定规则集中在 domain.ClassifyDockerContainerCondition，调用方不得自行比较两个字段。
+func (i ContainerInspect) RuntimeCondition() domain.DockerContainerCondition {
+	return domain.ClassifyDockerContainerCondition(i.State, i.Running)
+}
+
+// IsActivelyRunning 判断容器是否已确认正常运行。
+func (i ContainerInspect) IsActivelyRunning() bool {
+	return i.RuntimeCondition().IsActivelyRunning()
+}
+
+// IsConfirmedExited 判断容器是否已确认退出。
+func (i ContainerInspect) IsConfirmedExited() bool {
+	return i.RuntimeCondition().IsConfirmedExited()
+}
+
+// IsStartable 判断容器是否处于可以安全自动启动的状态（已确认未运行的 exited / created）。
+func (i ContainerInspect) IsStartable() bool {
+	return i.RuntimeCondition().IsStartable()
 }
 
 // InspectContainer 检查容器并返回关键字段。
@@ -744,6 +769,10 @@ type containerInspectEntry struct {
 }
 
 // ParseContainerInspect 解析 docker inspect 的 JSON 输出。
+//
+// State.Status 与 State.Running 按 Docker 原样保存：未知的 Status 取值解析为
+// DockerStateUnknown，不会推断成 running 或 exited；两个字段是否自洽由
+// ContainerInspect.RuntimeCondition 统一判定。
 func ParseContainerInspect(output string) (ContainerInspect, error) {
 	trimmed := strings.TrimSpace(output)
 	if trimmed == "" {

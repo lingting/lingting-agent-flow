@@ -79,7 +79,7 @@ func TestContainerServiceStartConvergesCreatedDockerState(t *testing.T) {
 	t.Parallel()
 	f := newRemoteContainerFixture(t)
 	container := f.seedContainer("", domain.ContainerStateRunning)
-	f.host.setDockerState(container.DockerID, domain.DockerStateCreated)
+	f.host.setDockerState(container.DockerID, domain.DockerStateCreated, false)
 
 	detail, err := f.containers.StartContainer(f.ctx, app.StartContainerRequest{
 		ContainerID: container.ID.String(),
@@ -115,13 +115,20 @@ func TestContainerServiceStartDoesNotStartAlreadyRunningContainer(t *testing.T) 
 func TestContainerServiceStartRefusesUnconfirmedDockerStates(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name  string
-		state domain.DockerContainerState
+		name    string
+		state   domain.DockerContainerState
+		running bool
 	}{
-		{name: "paused", state: domain.DockerStatePaused},
-		{name: "restarting", state: domain.DockerStateRestarting},
-		{name: "dead", state: domain.DockerStateDead},
-		{name: "removing", state: domain.DockerStateRemoving},
+		{name: "paused 且 Running 为真", state: domain.DockerStatePaused, running: true},
+		{name: "paused 且 Running 为假", state: domain.DockerStatePaused, running: false},
+		{name: "restarting 且 Running 为真", state: domain.DockerStateRestarting, running: true},
+		{name: "restarting 且 Running 为假", state: domain.DockerStateRestarting, running: false},
+		{name: "dead", state: domain.DockerStateDead, running: false},
+		{name: "removing", state: domain.DockerStateRemoving, running: false},
+		{name: "无法识别的状态", state: domain.DockerStateUnknown, running: false},
+		{name: "running 但 Running 为假（矛盾）", state: domain.DockerStateRunning, running: false},
+		{name: "exited 但 Running 为真（矛盾）", state: domain.DockerStateExited, running: true},
+		{name: "created 但 Running 为真（矛盾）", state: domain.DockerStateCreated, running: true},
 	}
 	for _, testCase := range cases {
 		testCase := testCase
@@ -129,7 +136,7 @@ func TestContainerServiceStartRefusesUnconfirmedDockerStates(t *testing.T) {
 			t.Parallel()
 			f := newRemoteContainerFixture(t)
 			container := f.seedContainer("", domain.ContainerStateRunning)
-			f.host.setDockerState(container.DockerID, testCase.state)
+			f.host.setDockerState(container.DockerID, testCase.state, testCase.running)
 
 			_, err := f.containers.StartContainer(f.ctx, app.StartContainerRequest{
 				ContainerID: container.ID.String(),
@@ -142,6 +149,12 @@ func TestContainerServiceStartRefusesUnconfirmedDockerStates(t *testing.T) {
 			}
 			if calls := f.host.countCommands(" docker start "); calls != 0 {
 				t.Fatalf("拒绝启动时不得提交启动命令，实际 %d 次", calls)
+			}
+			if calls := f.host.countCommands(" docker stop "); calls != 0 {
+				t.Fatalf("拒绝启动时不得提交停止命令，实际 %d 次", calls)
+			}
+			if calls := f.host.countCommands(" docker exec "); calls != 0 {
+				t.Fatalf("拒绝启动时不得触发容器内执行（Pi 主调用），实际 %d 次", calls)
 			}
 			stored := f.loadContainer(container.ID)
 			if stored.State != domain.ContainerStateRunning {

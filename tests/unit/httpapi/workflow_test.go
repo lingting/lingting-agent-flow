@@ -13,7 +13,6 @@ import (
 
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/codesaver"
-	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/httpapi"
 	"github.com/lingting/agentflow/internal/logging"
@@ -157,7 +156,7 @@ func (taskWorkflowAPIContainer) InspectContainer(
 			DockerID: "docker-" + request.ContainerID,
 			State:    domain.ContainerStateRunning,
 		},
-		Inspect: &docker.ContainerInspect{Running: true},
+		Inspect: testkit.ContainerInspectFor("", true),
 	}, nil
 }
 

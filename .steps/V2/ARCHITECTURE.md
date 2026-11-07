@@ -210,6 +210,38 @@ ContainerService.StartContainer（持容器锁与远程会话）
 - 恢复不创建第二个容器、不改写 `HostID` / `ContainerID` / `SourceCommit`、不重置角色 Session 标识、
   不删除或重新 Clone 快照卷，最后一份完整稳定 Session 归档不被中断调用覆盖。
 
+
+### 4.4 Docker 容器状态语义统一（V2-M2 第十八阶段已落地）
+
+容器"能否执行 / 能否自动启动 / 是否已经停止"不允许由 `docker inspect` 的 `State.Running` 单独决定：Docker
+Engine 中 `paused` 与 `restarting` 容器同样报告 `Running=true`，而 `running` / `exited` / `created` 与
+`Running` 不一致就是观测不可信。判定因此收敛到 `internal/domain` 的一处纯函数：
+
+```text
+docker.ContainerInspect{State, Running}
+  └─ domain.ClassifyDockerContainerCondition(status, running)
+       ├─ IsActivelyRunning   running + Running=true            只有它允许 docker exec / Pi 调用
+       ├─ IsConfirmedExited   exited + Running=false            已确认退出的唯一口径
+       ├─ ConfirmsNotRunning  exited / created 且 Running=false  停止完成与残留收敛的肯定结论
+       └─ IsStartable         同上                               唯一的自动启动集合
+paused / restarting / dead / removing / 未知取值 / 字段矛盾 → 不可执行、不可自动启动、不可折叠成 stopped
+```
+
+规则：
+
+- 业务层不得再直接比较 `Running`：`docker.ContainerInspect` 提供 `RuntimeCondition()`、
+  `IsActivelyRunning()`、`IsConfirmedExited()`、`IsStartable()`，所有生产调用方（容器创建后核验、
+  `StartContainer`、`Exec`、`RunAgent`、`sessionContainerGuard`、规划运行时复用与规划 Agent 前置核验、
+  执行环境与预检、代码初始化、步骤执行、任务启动与工作流、验证、续跑资格、残留观测与恢复）统一使用它们。
+- 状态矛盾（`running` + `Running=false`、`exited` + `Running=true`、`created` + `Running=true`）失败关闭：
+  既不当作正常运行，也不当作正常退出，不产生任何肯定性观测结论。
+- `stopContainerLocked` 用 `ConfirmsNotRunning` 判断"已经停止"，否则照常提交 `docker stop` 并以停止后的实际
+  `inspect` 判定；暂停、重启中、dead、removing 与矛盾现场不写 `stopped`，也不伪造停止成功。
+- 残留观测新增 `ContainerObservedIndeterminate`：它既不是 `running` 也不是 `stopped`，
+  `DecideContainerRecovery` 对它只返回"保持现状 + 需要人工"，不自动启动、删除或接管。
+- 测试替身必须同时给出 `State.Status` 与 `State.Running`（`tests/internal/testkit.ContainerInspectFor`），
+  不再用"状态等于 running"推导 `Running`；暂停、重启中与字段矛盾的现场直接写字面量构造。
+
 ## 5. HTTP API 方向
 
 仅在既有路由空间内新增（`/api/v1/...`），Handler 只做协议转换。
@@ -280,6 +312,7 @@ PUT    /api/v1/roles/{roleID}
 | G8 | 无项目/需求聚合查询 | `internal/app/projects.go` 只有项目 CRUD | M5 |
 | G9 | ~~取消上下文不能证明远端 Pi 进程已终止~~ **代码已关闭**（V2-M2 第十六阶段） | 现状：`PlanningAgentService.RunRole` 显式设置 `PlanningSessionID` 与 `StopContainerOnUncertain`，`ContainerRunner` 在 `Started && !Certain` 时经 `agent.ContainerTerminator` 调用 `ContainerService.stopContainerLocked`（复用已持有的容器锁与远程会话），以停止后的 `docker inspect` 判定终止并写入 `RemoteTerminationConfirmed` / `RemoteTerminationError`；真实 SSH / Docker 环境下的终止仍未验收，见里程碑 §7.10 / §7.16 | M2 |
 | G10 | ~~远端容器已停止但本地仍为 `running` 时恢复不闭环~~ **代码已关闭**（V2-M2 第十七阶段） | 现状：`ContainerService.StartContainer` 在启动前 inspect 远端事实，本地 `running` / `unknown` 遇远端 `exited` / `created` 时先经领域状态机收敛为 `stopped` 并落库、同步登记清单后才执行 `docker start`，写入失败即返回；`PlanningAgentService.RunRole` 每次先核验远端状态再决定复用或恢复，`paused` / `restarting` / `dead` / `removing` / `unknown` 不自动启动；`RunAgent` 用 `context.WithoutCancel` 派生的有界上下文读回终止后的记录并以 `ContainerStateReloadError` 报告本地读取失败。真实环境下的收敛与 Server 崩溃恢复仍未验收，见里程碑 §7.17 | M2 |
+| G11 | ~~容器状态判定依赖 `State.Running`，`paused` / `restarting` 被当成正常运行~~ **代码已关闭**（V2-M2 第十八阶段） | 现状：`domain.ClassifyDockerContainerCondition` 以 `State.Status` + `State.Running` 统一判定，`docker.ContainerInspect` 暴露 `RuntimeCondition` / `IsActivelyRunning` / `IsConfirmedExited` / `IsStartable`；`paused` / `restarting` 与字段矛盾在 `StartContainer`、`Exec`、`RunAgent`、`sessionContainerGuard`、规划运行时复用、规划 Agent 前置核验、`stopContainerLocked` 与容器残留观测中一律不进入执行、自动启动或 `stopped` 收敛，残留观测新增 `ContainerObservedIndeterminate`。真实 Docker 下的暂停 / 重启现场仍未验收，见里程碑 §7.18 | M2 |
 
 缺口状态说明：标记"已关闭"的条目在对应子任务完成后按当时的代码复核更新，未标记的条目仍按归属
 里程碑待实现；关闭单条缺口不代表里程碑退出条件已满足。

@@ -190,7 +190,7 @@ func (s *ResumeEligibilityService) containerBlocking(
 	if detail.Container.State == domain.ContainerStateRemoved {
 		return errContainerMissing
 	}
-	if detail.Inspect == nil || !detail.Inspect.Running {
+	if detail.Inspect == nil || !detail.Inspect.IsActivelyRunning() {
 		return errContainerNotRunning
 	}
 	return nil

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/lingting/agentflow/internal/app"
-	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/httpapi"
 	"github.com/lingting/agentflow/internal/logging"
@@ -59,7 +58,7 @@ func (e *codeInitAPIExecutor) InspectContainer(
 			AttemptID: &attemptID,
 			State:     domain.ContainerStateRunning,
 		},
-		Inspect: &docker.ContainerInspect{Running: e.running},
+		Inspect: testkit.ContainerInspectFor("", e.running),
 	}, nil
 }
 

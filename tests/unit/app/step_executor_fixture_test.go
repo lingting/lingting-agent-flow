@@ -14,7 +14,6 @@ import (
 
 	"github.com/lingting/agentflow/internal/agent"
 	"github.com/lingting/agentflow/internal/app"
-	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/logging"
 	"github.com/lingting/agentflow/internal/storage"
@@ -106,7 +105,7 @@ func (f *fakeContainerPort) InspectContainer(
 	}
 	return app.ContainerDetail{
 		Container: container,
-		Inspect:   &docker.ContainerInspect{Running: f.running},
+		Inspect:   testkit.ContainerInspectFor("", f.running),
 	}, nil
 }
 

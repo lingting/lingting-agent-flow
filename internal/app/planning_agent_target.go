@@ -61,10 +61,10 @@ func (s *PlanningAgentService) ensurePlanningAgentContainer(
 	if err != nil {
 		return session, detail.Container, err
 	}
-	if detail.Inspect.Running {
+	if detail.Inspect.IsActivelyRunning() {
 		return session, detail.Container, nil
 	}
-	if !startableDockerExitState(detail.Inspect.State) {
+	if !detail.Inspect.IsStartable() {
 		// paused / restarting / dead / removing / unknown 都不表示正常退出：不自动启动，
 		// 交由调用方先核验远端现场。
 		return session, detail.Container, fmt.Errorf(
@@ -221,7 +221,7 @@ func (s *PlanningAgentService) verifyPlanningAgentContainer(
 	if err != nil {
 		return session, detail.Container, err
 	}
-	if !detail.Inspect.Running {
+	if !detail.Inspect.IsActivelyRunning() {
 		return session, detail.Container, fmt.Errorf(
 			"%w: 规划容器当前未运行，无法执行规划调用",
 			ErrPlanningAgentPrerequisite,

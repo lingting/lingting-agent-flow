@@ -675,7 +675,7 @@ func (e *StepExecutor) requireContainer(
 			detail.Container.ID,
 		)
 	}
-	if detail.Inspect == nil || !detail.Inspect.Running {
+	if detail.Inspect == nil || !detail.Inspect.IsActivelyRunning() {
 		return domain.Container{}, fmt.Errorf(
 			"%w: 任务容器 %s 当前未运行，无法执行步骤",
 			ErrStepExecutionPrerequisite,

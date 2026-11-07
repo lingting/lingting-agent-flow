@@ -222,7 +222,7 @@ func (p *e2ePorts) InspectContainer(
 			DockerID: e2eDockerID,
 			State:    domain.ContainerStateRunning,
 		},
-		Inspect: &docker.ContainerInspect{Running: p.running},
+		Inspect: testkit.ContainerInspectFor("", p.running),
 	}, nil
 }
 

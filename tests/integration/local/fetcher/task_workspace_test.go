@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/lingting/agentflow/internal/app"
-	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/logging"
 	"github.com/lingting/agentflow/internal/source"
@@ -51,7 +50,7 @@ func (c *taskWorkspaceContainers) InspectContainer(
 			DockerID: testDockerID,
 			State:    domain.ContainerStateRunning,
 		},
-		Inspect: &docker.ContainerInspect{Running: true},
+		Inspect: testkit.ContainerInspectFor("", true),
 	}, nil
 }
 

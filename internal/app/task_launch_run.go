@@ -306,7 +306,7 @@ func (s *TaskLaunchService) containerUsable(
 	if detail.Container.State == domain.ContainerStateRemoved {
 		return false, nil
 	}
-	if detail.Inspect == nil || !detail.Inspect.Running {
+	if detail.Inspect == nil || !detail.Inspect.IsActivelyRunning() {
 		return false, nil
 	}
 	return true, nil

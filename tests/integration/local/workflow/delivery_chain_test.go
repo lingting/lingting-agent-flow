@@ -94,7 +94,7 @@ func (c *deliveryContainers) InspectContainer(
 			DockerID: deliveryDockerID,
 			State:    domain.ContainerStateRunning,
 		},
-		Inspect: &docker.ContainerInspect{Running: c.running},
+		Inspect: testkit.ContainerInspectFor("", c.running),
 	}, nil
 }
 

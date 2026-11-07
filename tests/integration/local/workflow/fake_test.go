@@ -14,8 +14,8 @@ import (
 
 	"github.com/lingting/agentflow/internal/agent"
 	"github.com/lingting/agentflow/internal/app"
-	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
+	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
 // errUnexpectedStepRun 表示恢复流程错误地进入了步骤执行。
@@ -79,7 +79,7 @@ func (f *fakeContainer) InspectContainer(
 			DockerID: "docker-" + request.ContainerID,
 			State:    domain.ContainerStateRunning,
 		},
-		Inspect: &docker.ContainerInspect{Running: f.running},
+		Inspect: testkit.ContainerInspectFor("", f.running),
 	}, nil
 }
 

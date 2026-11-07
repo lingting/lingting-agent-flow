@@ -16,6 +16,7 @@ import (
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
+	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
 // e2eImages 是镜像能力的受控替身。
@@ -126,7 +127,7 @@ func (c *e2eEnvContainers) CreateContainer(
 	}
 	return app.ContainerDetail{
 		Container: container,
-		Inspect:   &docker.ContainerInspect{Running: true},
+		Inspect:   testkit.ContainerInspectFor("", true),
 	}, nil
 }
 

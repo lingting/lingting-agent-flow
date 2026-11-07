@@ -72,7 +72,7 @@ func (f *fakeCheckContainer) InspectContainer(
 			DockerID: "docker-" + request.ContainerID,
 			Detached: f.detached,
 		},
-		Inspect: &docker.ContainerInspect{Running: f.running},
+		Inspect: testkit.ContainerInspectFor("", f.running),
 	}, nil
 }
 

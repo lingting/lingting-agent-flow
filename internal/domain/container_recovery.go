@@ -19,6 +19,12 @@ const (
 	ContainerObservedRunning ContainerObservationClass = "running"
 	// ContainerObservedStopped 表示确认存在、所有权匹配但未运行。
 	ContainerObservedStopped ContainerObservationClass = "stopped"
+	// ContainerObservedIndeterminate 表示确认存在、所有权匹配，但状态不足以给出肯定结论。
+	//
+	// 它覆盖 paused、restarting、dead、removing、未知状态与 State.Status / State.Running
+	// 互相矛盾的现场：这些容器既不是"正在运行"，也不是"已确认退出"，任何自动重启、删除或
+	// 接管都必须由人工先核验。
+	ContainerObservedIndeterminate ContainerObservationClass = "indeterminate"
 	// ContainerObservedAbsent 表示确认远程已不存在该容器。
 	ContainerObservedAbsent ContainerObservationClass = "absent"
 	// ContainerObservedOwnershipMismatch 表示同名容器存在，但标签与登记记录不一致。
@@ -42,6 +48,7 @@ func (c ContainerObservationClass) Validate() error {
 	switch c {
 	case ContainerObservedRunning,
 		ContainerObservedStopped,
+		ContainerObservedIndeterminate,
 		ContainerObservedAbsent,
 		ContainerObservedOwnershipMismatch,
 		ContainerObservedUnreachable,
@@ -89,10 +96,12 @@ type ContainerRecoveryDecision struct {
 //  2. 已删除（removed）→ 不处理：终态；
 //  3. 观测到运行中 → running（补写观测到的 Docker ID）；
 //  4. 观测到已停止 → stopped（补写观测到的 Docker ID）；
-//  5. 确认不存在 → removed（结束原因 manual）；
-//  6. 所有权不匹配 → 保持现状 + 需要人工：不得删除、不得标记为已删除；
-//  7. 无法访问 → 保持现状 + 需要人工：保留不确定性，不得改写为任何确定状态；
-//  8. 记录不完整 → 保持现状 + 需要人工：缺 Docker ID 且按名称也无法核验。
+//  5. 状态不确定（暂停 / 重启中 / dead / removing / 字段矛盾）→ 保持现状 + 需要人工：
+//     既不是"正在运行"也不是"已确认退出"，不得改写为任何确定状态；
+//  6. 确认不存在 → removed（结束原因 manual）；
+//  7. 所有权不匹配 → 保持现状 + 需要人工：不得删除、不得标记为已删除；
+//  8. 无法访问 → 保持现状 + 需要人工：保留不确定性，不得改写为任何确定状态；
+//  9. 记录不完整 → 保持现状 + 需要人工：缺 Docker ID 且按名称也无法核验。
 //
 // 该函数是纯函数：不读数据库、不建立远程会话，因此可以被完整地单元测试。
 func DecideContainerRecovery(input ContainerRecoveryInput) ContainerRecoveryDecision {
@@ -132,6 +141,13 @@ func DecideContainerRecovery(input ContainerRecoveryInput) ContainerRecoveryDeci
 			DockerID:   strings.TrimSpace(input.ObservedDockerID),
 			ErrorClass: "container_confirmed_stopped",
 			Summary:    "已确认容器存在但未运行，收敛为停止状态并保留现场",
+		}
+	case ContainerObservedIndeterminate:
+		return ContainerRecoveryDecision{
+			ErrorClass: "container_state_indeterminate",
+			Summary: "容器存在但状态无法给出肯定结论（暂停、重启中、待删除或状态字段不一致），" +
+				"保留原记录等待人工核验",
+			NeedsManual: true,
 		}
 	case ContainerObservedAbsent:
 		return ContainerRecoveryDecision{

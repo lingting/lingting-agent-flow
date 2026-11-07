@@ -356,6 +356,53 @@ func TestPlanningRuntimePrepareRestartsStoppedContainer(t *testing.T) {
 	f.requireContainerBindings(t, session, container)
 }
 
+// TestPlanningRuntimePrepareRefusesUnstableContainer 验证暂停、重启中的规划容器不会被自动启动。
+//
+// paused 与 restarting 容器同样报告 State.Running=true，因此"没有在运行"必须由统一状态判定给出；
+// 拒绝时不得创建第二个容器、不得改写运行时绑定，也不得提交 docker start。
+func TestPlanningRuntimePrepareRefusesUnstableContainer(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		state   domain.DockerContainerState
+		running bool
+	}{
+		{name: "远端暂停", state: domain.DockerStatePaused, running: true},
+		{name: "远端重启中", state: domain.DockerStateRestarting, running: true},
+		{name: "状态字段矛盾", state: domain.DockerStateCreated, running: true},
+	}
+	for _, testCase := range cases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			f := newPlanningRecoveryFixture(t)
+			session, container := f.seedPlanningTarget(t)
+			f.host.setDockerState(container.DockerID, testCase.state, testCase.running)
+
+			_, err := f.runtime.Prepare(f.ctx, app.PreparePlanningRuntimeRequest{
+				PlanningSessionID: session.ID.String(),
+				HostID:            f.node.ID.String(),
+			})
+			if err == nil {
+				t.Fatalf("远端容器处于 %s 且 Running=%t 时不得自动重启", testCase.state, testCase.running)
+			}
+			if !strings.Contains(err.Error(), "不在可自动恢复的退出状态") {
+				t.Fatalf("错误应说明远端状态不允许自动重启，实际 %v", err)
+			}
+			if calls := f.host.countCommands(" docker start "); calls != 0 {
+				t.Fatalf("拒绝重启时不得提交启动命令，实际 %d 次", calls)
+			}
+			if count := f.containerCount(); count != 1 {
+				t.Fatalf("拒绝重启时不得创建第二个规划容器，实际容器记录 %d 条", count)
+			}
+			if stored := f.loadContainer(container.ID); stored.State != domain.ContainerStateRunning {
+				t.Fatalf("拒绝重启时不得改写管理状态，实际 %s", stored.State)
+			}
+			f.requireContainerBindings(t, session, container)
+		})
+	}
+}
+
 // requireRecoveredContainer 断言一次恢复沿用原容器、原绑定与最后一份完整归档。
 func (f *planningRecoveryFixture) requireRecoveredContainer(
 	t *testing.T,
@@ -581,26 +628,48 @@ func TestPlanningRoleRefusesRecoveryOnOwnershipMismatch(t *testing.T) {
 // TestPlanningRoleRefusesRecoveryOnUnconfirmedRemoteState 验证远端状态不确定时不会自动启动。
 func TestPlanningRoleRefusesRecoveryOnUnconfirmedRemoteState(t *testing.T) {
 	t.Parallel()
-	t.Run("远端暂停", func(t *testing.T) {
-		t.Parallel()
-		f := newPlanningRecoveryFixture(t)
-		session, container := f.seedPlanningTarget(t)
-		f.host.setDockerState(container.DockerID, domain.DockerStatePaused)
+	unstable := []struct {
+		name    string
+		state   domain.DockerContainerState
+		running bool
+	}{
+		{name: "远端暂停", state: domain.DockerStatePaused, running: true},
+		{name: "远端暂停且 Running 为假", state: domain.DockerStatePaused, running: false},
+		{name: "远端重启中", state: domain.DockerStateRestarting, running: true},
+		{name: "远端 dead", state: domain.DockerStateDead, running: false},
+		{name: "远端 removing", state: domain.DockerStateRemoving, running: false},
+		{name: "状态字段矛盾", state: domain.DockerStateExited, running: true},
+	}
+	for _, testCase := range unstable {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			f := newPlanningRecoveryFixture(t)
+			session, container := f.seedPlanningTarget(t)
+			f.host.setDockerState(container.DockerID, testCase.state, testCase.running)
 
-		_, err := f.planningAgent.RunRole(f.ctx, f.roleRequest(session))
-		if err == nil {
-			t.Fatal("远端容器处于 paused 时不得自动恢复")
-		}
-		if !strings.Contains(err.Error(), "不在可自动恢复的退出状态") {
-			t.Fatalf("错误应说明远端状态不允许自动恢复，实际 %v", err)
-		}
-		if calls := f.host.countCommands(" docker start "); calls != 0 {
-			t.Fatalf("拒绝恢复时不得提交启动命令，实际 %d 次", calls)
-		}
-		if stored := f.loadContainer(container.ID); stored.State != domain.ContainerStateRunning {
-			t.Fatalf("拒绝恢复时不得改写容器状态，实际 %s", stored.State)
-		}
-	})
+			_, err := f.planningAgent.RunRole(f.ctx, f.roleRequest(session))
+			if err == nil {
+				t.Fatalf("远端容器处于 %s 且 Running=%t 时不得自动恢复", testCase.state, testCase.running)
+			}
+			if !strings.Contains(err.Error(), "不在可自动恢复的退出状态") {
+				t.Fatalf("错误应说明远端状态不允许自动恢复，实际 %v", err)
+			}
+			if calls := f.host.countCommands(" docker start "); calls != 0 {
+				t.Fatalf("拒绝恢复时不得提交启动命令，实际 %d 次", calls)
+			}
+			if calls := f.host.countCommands(" docker exec "); calls != 0 {
+				t.Fatalf("拒绝恢复时不得发起 Pi 主调用，实际 %d 次", calls)
+			}
+			if stored := f.loadContainer(container.ID); stored.State != domain.ContainerStateRunning {
+				t.Fatalf("拒绝恢复时不得改写容器状态，实际 %s", stored.State)
+			}
+			if count := f.containerCount(); count != 1 {
+				t.Fatalf("拒绝恢复时不得创建第二个规划容器，实际容器记录 %d 条", count)
+			}
+			f.requireContainerBindings(t, session, container)
+		})
+	}
 	t.Run("远端状态无法确认", func(t *testing.T) {
 		t.Parallel()
 		f := newPlanningRecoveryFixture(t)

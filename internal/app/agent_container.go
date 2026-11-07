@@ -168,8 +168,19 @@ func (s *ContainerService) RunAgent(
 			if err := ensureManaged(current); err != nil {
 				return fmt.Errorf("容器内 Agent 调用失败: %w", err)
 			}
-			if _, err := s.observe(ctx, session, current); err != nil {
-				return fmt.Errorf("执行前核验容器失败: %w", err)
+			observed, observeErr := s.observe(ctx, session, current)
+			if observeErr != nil {
+				return fmt.Errorf("执行前核验容器失败: %w", observeErr)
+			}
+			if !observed.IsActivelyRunning() {
+				// 暂停与重启中的容器同样报告 State.Running=true，因此不能只凭 Running 判断
+				// 可执行性：只有已确认的 running 状态才允许启动 Pi 主调用。
+				return fmt.Errorf(
+					"容器 %s 当前未处于可执行状态（Docker 状态 %s，判定 %s）",
+					current.ID,
+					observed.State,
+					observed.RuntimeCondition(),
+				)
 			}
 			executor := &containerSessionExecutor{
 				session:   session,
@@ -511,7 +522,7 @@ func (e *containerSessionExecutor) TerminateContainer(
 		TimeoutSeconds:    request.GraceSeconds,
 		PlanningSessionID: request.PlanningSessionID,
 	})
-	if detail.Inspect != nil && !detail.Inspect.Running {
+	if detail.Inspect != nil && detail.Inspect.RuntimeCondition().ConfirmsNotRunning() {
 		// 已核实的远端事实优先：登记同步等收尾失败不改变"容器已停止"这一结论，错误照实返回。
 		return agent.ContainerTerminationResult{Stopped: true}, err
 	}
@@ -556,7 +567,7 @@ func (g *sessionContainerGuard) EnsureExecutable(
 	if err := docker.VerifyOwnership(inspect, container); err != nil {
 		return domain.Container{}, err
 	}
-	if !inspect.Running {
+	if !inspect.IsActivelyRunning() {
 		return domain.Container{}, fmt.Errorf(
 			"容器 %s 当前未运行，无法执行命令",
 			container.ID,

@@ -16,6 +16,10 @@ import (
 //
 // 返回的 DockerID 只在"登记记录缺少 docker_id、但按名称核验成功"时给出：此时缺 ID
 // 不是孤儿，而是"创建成功但 ID 没落库"，补写 ID 才是正确的收敛。
+//
+// 容器存在且所有权匹配、但 Docker 状态不足以给出肯定结论时（暂停、重启中、dead、removing、
+// State.Status 与 State.Running 矛盾）返回 ContainerObservedIndeterminate：它既不是
+// "正在运行"也不是"已确认退出"，因此不得被折叠成 running 或 stopped。
 func ClassifyContainerObservation(
 	container domain.Container,
 	detail ContainerDetail,
@@ -50,17 +54,34 @@ func ClassifyContainerObservation(
 		return domain.ContainerObservedUnreachable, ""
 	}
 	dockerID := strings.TrimSpace(detail.Inspect.ID)
+	observation, decided := observedContainerClass(detail.Inspect.RuntimeCondition())
+	if !decided {
+		// 容器存在但状态不足以给出肯定结论（暂停、重启中、dead、removing、字段矛盾）：
+		// 既不能当作运行中，也不能当作已确认停止，交给调用方按"需要人工核验"处理。
+		return domain.ContainerObservedIndeterminate, ""
+	}
 	if strings.TrimSpace(container.DockerID) == "" && dockerID != "" {
 		// 按名称核验到了真实容器：这是"ID 没落库"，不是"容器不存在"。
-		if detail.Inspect.Running {
-			return domain.ContainerObservedRunning, dockerID
-		}
-		return domain.ContainerObservedStopped, dockerID
+		return observation, dockerID
 	}
-	if detail.Inspect.Running {
-		return domain.ContainerObservedRunning, ""
+	return observation, ""
+}
+
+// observedContainerClass 把 Docker 状态判定映射为观测结论。
+//
+// 只有"确认运行中"与"确认未在运行"两类判定可以产生肯定结论；其余判定统一落到
+// ContainerObservedIndeterminate，避免把暂停、重启中或状态矛盾折叠成 stopped。
+func observedContainerClass(
+	condition domain.DockerContainerCondition,
+) (domain.ContainerObservationClass, bool) {
+	switch {
+	case condition.IsActivelyRunning():
+		return domain.ContainerObservedRunning, true
+	case condition.ConfirmsNotRunning():
+		return domain.ContainerObservedStopped, true
+	default:
+		return "", false
 	}
-	return domain.ContainerObservedStopped, ""
 }
 
 // ErrContainerObservationUnavailable 表示容器观测没有完成。

@@ -65,7 +65,7 @@ func (f *reviewPort) InspectContainer(
 			DockerID: "docker-" + request.ContainerID,
 		},
 		// 容器运行状态由审查链路的核验直接决定：这里始终报告运行中。
-		Inspect: &docker.ContainerInspect{Running: true},
+		Inspect: testkit.ContainerInspectFor("", true),
 	}, nil
 }
 

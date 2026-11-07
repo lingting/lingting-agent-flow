@@ -42,7 +42,8 @@ func printContainerDetail(a *app.App, detail app.ContainerDetail) error {
 		lines = append(
 			lines,
 			fmt.Sprintf("观测状态: %s", detail.Inspect.State),
-			fmt.Sprintf("观测运行中: %s", flagMark(detail.Inspect.Running)),
+			fmt.Sprintf("观测判定: %s", detail.Inspect.RuntimeCondition()),
+			fmt.Sprintf("观测运行中: %s", flagMark(detail.Inspect.IsActivelyRunning())),
 			fmt.Sprintf("观测退出码: %d", detail.Inspect.ExitCode),
 		)
 	}

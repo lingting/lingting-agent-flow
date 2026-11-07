@@ -75,7 +75,7 @@ func (s *ContainerService) ProbeEnvironment(
 			if inspectErr != nil {
 				return inspectErr
 			}
-			if !inspect.Running {
+			if !inspect.IsActivelyRunning() {
 				return fmt.Errorf("容器 %s 当前未运行，无法预检环境", current.ID)
 			}
 			probe.GitVersion = probeCommand(

@@ -285,7 +285,7 @@ func CleanupContainer(
 		return fmt.Errorf("拒绝删除 %s：所有权核验失败: %w", containerLabel(target), ownershipErr)
 	}
 	observedID := inspect.ID
-	if inspect.Running {
+	if !inspect.RuntimeCondition().ConfirmsNotRunning() {
 		// 停止失败不直接判定失败：删除会强制停止，最终结论以复核结果为准。
 		_ = runtime.StopContainer(ctx, observedID, containerStopTimeoutSeconds)
 	}

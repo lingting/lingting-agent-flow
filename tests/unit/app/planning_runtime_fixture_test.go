@@ -428,7 +428,7 @@ func (f *fakeRuntimeRemote) trackContainer(record domain.Container, planningSess
 			ID:      record.DockerID,
 			Name:    record.Name,
 			State:   record.DockerState,
-			Running: record.State == domain.ContainerStateRunning,
+			Running: record.DockerState == domain.DockerStateRunning,
 			Labels: map[string]string{
 				docker.OwnershipLabelKey:       "true",
 				docker.HostLabelKey:            record.HostID.String(),

@@ -1119,3 +1119,161 @@ PlanningAgentService.RunRole
 M2 状态继续为 `pending`：退出条件仍缺"真实环境中的只读写入拒绝、Session 与容器生命周期可持久化恢复"
 的证据，以及 M3 编排接入后在真实环境复用同一容器与快照的多轮验证。本阶段只补齐代码侧的状态对账与
 中断恢复能力、受控测试与文档，不改变 M2 的完成判定。
+
+### 7.18 已交付：统一 Docker 容器状态判定（M2 第十八阶段）
+
+生产代码在判断"容器是否可以执行 / 是否可以恢复 / 是否已经停止"时依赖 `State.Running` 布尔值。Docker
+Engine 的状态模型里 `State.Status` 与 `State.Running` **不是互斥的同一个事实**：暂停与重启中的容器同样
+报告 `Running=true`，因此只凭 `Running` 会把 `paused` 容器当成正常运行，进而允许继续执行 `docker exec`、
+发起 Pi 调用或进入规划 Agent 操作。本阶段把判定收敛到一处，并让所有生产调用方改用统一语义。
+
+**Docker 状态语义（本阶段的事实基线）**
+
+```text
+paused       {"Status": "paused",     "Running": true,  "Paused": true}
+restarting   {"Status": "restarting", "Running": true}
+exited       {"Status": "exited",     "Running": false}
+```
+
+- `paused`：容器内的进程仍然存在但被挂起，**既不能执行命令，也不代表容器已经退出**。把它当作运行中会
+  允许 Pi 调用；把它当作已停止会写入错误的 `stopped` 并掩盖现场。
+- `restarting`：容器正在重启，状态不稳定，既不可执行也不可自动启动；自动启动只会与 Docker 自己的重启
+  策略竞争。
+- 字段矛盾（`running` + `Running=false`、`exited` + `Running=true`、`created` + `Running=true`）说明
+  观测本身不可信，一律失败关闭，不得降级解释为正常运行或正常退出。
+
+**统一判定（`internal/domain/container_docker_condition.go`）**
+
+| Docker Status | Running | 判定 | 可执行 | 可自动启动 |
+|---|---|---|---|---|
+| running | true | `running` | 是 | 否（已在运行） |
+| running | false | `indeterminate` | 否 | 否 |
+| exited | false | `exited` | 否 | 是 |
+| exited | true | `indeterminate` | 否 | 否 |
+| created | false | `created` | 否 | 是 |
+| created | true | `indeterminate` | 否 | 否 |
+| paused | 任意 | `paused` | 否 | 否 |
+| restarting | 任意 | `restarting` | 否 | 否 |
+| dead | 任意 | `dead` | 否 | 否 |
+| removing | 任意 | `removing` | 否 | 否 |
+| unknown / 无法识别 | 任意 | `indeterminate` | 否 | 否 |
+
+- `domain.ClassifyDockerContainerCondition(status, running)` 是唯一判定入口；`docker.ContainerInspect` 在
+  它之上提供 `RuntimeCondition()`、`IsActivelyRunning()`、`IsConfirmedExited()`、`IsStartable()`，业务
+  层不得再直接比较 `Running`。
+- `IsActivelyRunning` 只对 `running` 且 `Running=true` 为真；`IsConfirmedExited` 只对 `exited` 且
+  `Running=false` 为真；`ConfirmsNotRunning` / `IsStartable` 只接受 `exited` 与 `created`（且
+  `Running=false`）。暂停、重启中、dead、removing 与不确定状态既不属"未在运行"，也不可自动启动。
+- `docker inspect` 解析保持 Docker 原样：`State.Status` 未知时解析为 `DockerStateUnknown`，不推断成
+  `running` 或 `exited`；`State.Running` 原样保留供诊断与一致性判定。
+
+**受影响的普通容器调用路径**
+
+- 创建后运行核验（`ContainerService.createLocked`）、`StartContainer`、`Exec`、
+  `sessionContainerGuard.EnsureExecutable`、`RunAgent` 执行前核验：只有 `IsActivelyRunning` 为真才继续。
+- `StartContainer` 启动前对账（`reconcileBeforeStart`）：可启动集合由 `IsStartable` 给出，`paused` /
+  `restarting` / `dead` / `removing` / 不确定状态与字段矛盾一律拒绝，不改写管理状态、不提交 `docker start`。
+- `stopContainerLocked`：不再用 `!Running` 认定"已经停止"。只有 `ConfirmsNotRunning`（已确认退出或从未
+  启动）才直接收敛；否则照常提交 `docker stop`，并以停止后的实际 `inspect` 判定，未确认退出时不写
+  `stopped`、不伪造停止成功（`paused` / `restarting` / 字段矛盾分别给出可诊断错误）。
+- `TerminateContainer`：只有已确认未在运行才报告终止完成；`paused` 停止后仍暂停时不报告终止确认。
+- `ExecutionEnvironmentService` 状态判定、环境预检、代码初始化、步骤执行、步骤工作区、任务启动、任务工作流、
+  验证与续跑资格：全部改用 `IsActivelyRunning`，暂停容器不再被当成可执行环境。
+- CLI `docker inspect` 输出新增"观测判定"，"观测运行中"按 `IsActivelyRunning()` 显示。
+
+**受影响的规划调用路径**
+
+- `PlanningRuntimeService.reusePlanningContainer`：只有已确认运行中才直接复用；`exited` / `created` 才进入
+  既有重启流程；暂停、重启中、dead、removing 与字段矛盾返回 `ErrPlanningRuntimeConflict` 且不改写管理状态。
+- `PlanningAgentService.ensurePlanningAgentContainer` / `verifyPlanningAgentContainer`：可复用与可恢复集合
+  分别由 `IsActivelyRunning` 与 `IsStartable` 给出；其余状态返回前置条件错误，不自动启动、不调用 Pi。
+- `ContainerService.RunAgent` 追加执行前核验：`observe` 的结果不是 `IsActivelyRunning` 时直接失败，Pi 主
+  调用不会被提交（`sessionContainerGuard` 仍然是容器内命令前的第二道核验）。
+- `PlanningRuntimeContainerInspection.Running` 改由 `IsActivelyRunning()` 填充，"Running" 字段不再可能把
+  暂停容器报告为运行中。
+- 一次性准备容器核验与快照流程改用同一判定：仍在运行的准备容器继续拒绝删除，未确认退出的状态继续按
+  "无法确认"拒绝操作。
+
+**容器残留观测与恢复**
+
+- 新增观测结论 `domain.ContainerObservedIndeterminate`：暂停、重启中、dead、removing、未知状态与字段矛盾
+  的容器既不是"正在运行"也不是"已确认退出"。
+- `ClassifyContainerObservation` 只对 `IsActivelyRunning`（→ running）与 `ConfirmsNotRunning`（→ stopped）
+  给出肯定结论，其余统一落到 `indeterminate`，不再把暂停折叠成 `stopped`。
+- `DecideContainerRecovery` 对 `indeterminate` 返回"保持现状 + 需要人工"（`needs_manual`，不产生收敛目标）：
+  残留收敛不会自动启动、删除或接管这些容器，也不会清空诊断摘要。
+
+**测试替身修复**
+
+- `tests/unit/app/container_remote_fixture_test.go` 的 `setDockerState` 改为
+  `setDockerState(dockerID, status, running)`：`State.Status` 与 `State.Running` 必须分别给出，替身不再用
+  "state == running" 推导 `Running`，因此可以构造 `paused + Running=true`、`restarting + Running=true` 与
+  各类矛盾组合；`docker inspect` 输出同时给出 `Paused` / `Restarting` 辅助标志，与真实输出结构一致。
+- 新增 `tests/internal/testkit` 的 `ContainerInspectFor(dockerID, running)`：只关心"运行中 / 未运行"的既有
+  替身用它同时给出自洽的 `State.Status` 与 `State.Running`，22 处替身不再只设置 `Running`。
+
+**测试范围与实际结果（本任务明确授权测试）**
+
+- 新增 `tests/unit/container/docker_status_test.go`：`docker inspect` 状态矩阵（running / exited / created /
+  paused / restarting / dead / removing / 未知取值 × `Running` 真假共 14 个用例）与判定函数全覆盖校验。
+- 扩展 `tests/unit/app/container_start_state_test.go`：拒绝启动的状态扩展到 paused（两个 `Running` 取值）、
+  restarting（两个取值）、dead、removing、未知状态与三种字段矛盾，并断言不提交 `docker start`、不提交
+  `docker stop`、不触发容器内执行、管理状态与观测状态都不被改写。
+- 新增 `tests/unit/app/container_exec_state_test.go`：`Exec` 在 paused / restarting / 字段矛盾 / 未知状态下
+  拒绝且不提交 `docker exec`；`RunAgent` 在同样状态下不发起 Pi 主调用；确认运行中的对照用例正常执行一次
+  `docker exec`；`docker inspect` 无法确认时不产生任何容器内执行；并发 `Exec` 与 `Stop` 在同一把
+  per-container 键控锁上串行、有界返回，且只提交一次停止命令。
+- 新增 `tests/unit/app/container_recovery_state_test.go`：观测结论矩阵、`indeterminate` 不产生收敛目标，
+  以及 `ContainerRecoveryService` 对 paused / restarting / dead / removing / 字段矛盾保持原记录且不启动、
+  不停止、不删除；已确认退出的对照用例仍收敛为 `stopped`。
+- 扩展 `tests/unit/app/container_stop_test.go`：暂停容器必须真正提交一次停止命令（不得被当作已停止）；停止后
+  仍暂停 / 仍在重启 / 状态矛盾时不写 `stopped`；并发停止同一容器只提交一次停止命令。
+- 扩展 `tests/unit/app/planning_recovery_test.go`：规划调用在远端 paused（两个取值）、restarting、dead、
+  removing、字段矛盾时拒绝恢复且不提交启动、不发起 Pi 调用、不创建第二个容器、绑定不变；`Prepare` 对
+  paused / restarting / 字段矛盾同样拒绝并保留绑定。
+- 已运行（本任务范围内全部通过）：
+
+  ```bash
+  go test -count=1 ./tests/unit/container                       # 49 passed
+  go test -count=1 ./tests/unit/app                             # 499 passed
+  go test -count=1 ./tests/unit/...                             # 1696 passed / 14 packages
+  go test -count=1 ./tests/integration/local/...                # 242 passed / 10 packages
+  go test -count=1 ./tests/e2e/...                              # 65 passed
+  go test -race -count=1 ./tests/unit/...                       # 1696 passed
+  go test -race -count=1 ./tests/integration/local/ssh/... \
+       ./tests/integration/local/workflow/...                   # 114 passed
+  go test -race -count=20 ./tests/unit/app -run 'Container|Planning'   # 4220 passed
+  bash .github/scripts/check-go-static.sh                       # gofmt / go vet / go build 通过
+  bash .github/scripts/go-test-groups.sh --check --declared-groups unit,local,e2e  # 31 个测试包全部分类
+  ```
+
+  前端（本阶段未修改前端代码）：`pnpm test:unit:safe` → 291 passed；`pnpm check`（vp fmt / vp lint --fix /
+  tsc --noEmit）通过；`pnpm build` 通过。Playwright 浏览器 E2E 未在本机执行：本机未安装 Chromium，属环境限制，
+  不计为通过。
+
+**本次失败的测试与修复记录**
+
+- `internal/app/container_observation.go` 首次改动后多出一个右花括号，`go vet` 报语法错误 → 修正函数闭合位置。
+- `TestClassifyContainerObservationStatusMatrix` 的 `created + Running=false` 等用例漏填期望值，导致期望为
+  空字符串 → 补全期望结论。
+- `TestContainerServiceRunAgentRequiresActivelyRunning` 断言 "不可执行"，实际错误文本是 "未处于可执行状态"
+  → 修正断言。
+- `TestContainerServiceStopRefusesToRecordStoppedForUnconfirmedStates` 断言读取远程登记清单，但该现场从未
+  写过清单文件 → 改为断言未提交 `docker start`。
+- 既有多处测试替身只设置 `docker.ContainerInspect{Running: ...}` 而没有 `State`，在新语义下被判为未知状态，
+  导致 `TestWorkflowCloseoutRequiresSessionArchive`、`TestGeneratePlanRejectsInvalidOutput` 与若干步骤执行
+  超时用例失败 → 统一改用 `testkit.ContainerInspectFor(dockerID, running)` 让替身同时给出自洽的两个字段。
+
+**仍未完成的真实环境验收（不得报告为通过）**
+
+- 真实 Docker 下暂停容器的真实字段组合（`docker pause` 后 `docker inspect`）与拒绝执行 / 拒绝启动的实际行为。
+- 真实 `docker stop` 打在暂停容器上的实际结果（报错 / 生效），以及本阶段"未确认退出即不记录 stopped"的
+  真实收敛表现。
+- 真实 `restarting` 容器（重启策略触发的窗口）与 `dead` / `removing` 现场下的拒绝路径。
+- 真实环境下的规划容器恢复、Session 归档恢复与远端 Pi 终止。
+
+上述验收需要真实 Docker / SSH / Pi / 远程主机才能成立，本阶段的受控替身测试**不构成**真实环境验收。
+
+M2 状态继续为 `pending`：退出条件仍缺"真实环境中的只读写入拒绝、Session 与容器生命周期可持久化恢复"的
+证据，以及 M3 编排接入后在真实环境复用同一容器与快照的多轮验证。本阶段只统一容器状态语义、补齐受控测试与
+文档，不改变 M2 的完成判定，也不把剩余工作转入 M3。

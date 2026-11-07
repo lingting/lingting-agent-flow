@@ -322,6 +322,7 @@ func (f *fakeContainerPort) InspectContainer(
 		Container: container,
 		Inspect: &docker.ContainerInspect{
 			ID:      container.DockerID,
+			State:   domain.DockerStateRunning,
 			Running: true,
 			Labels:  map[string]string{docker.PlanningSessionLabelKey: label},
 		},

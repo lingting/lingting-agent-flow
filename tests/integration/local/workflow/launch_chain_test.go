@@ -16,7 +16,6 @@ import (
 
 	"github.com/lingting/agentflow/internal/agent"
 	"github.com/lingting/agentflow/internal/app"
-	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/source"
 	"github.com/lingting/agentflow/tests/internal/testkit"
@@ -72,7 +71,7 @@ func (c *chainContainers) InspectContainer(
 			Name:     "agentflow-chain",
 			State:    domain.ContainerStateRunning,
 		},
-		Inspect: &docker.ContainerInspect{Running: c.running},
+		Inspect: testkit.ContainerInspectFor("", c.running),
 	}, nil
 }
 

@@ -210,7 +210,7 @@ func (s *ContainerService) createLocked(
 		s.markUnknown(ctx, container, err)
 		return ContainerDetail{}, fmt.Errorf("容器所有权核验失败: %w", err)
 	}
-	if !inspect.Running {
+	if !inspect.IsActivelyRunning() {
 		markErr := fmt.Errorf(
 			"容器启动后未进入运行状态: Docker 状态 %s，退出码 %d",
 			inspect.State,
