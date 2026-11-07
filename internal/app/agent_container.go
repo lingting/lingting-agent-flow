@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path"
@@ -359,9 +360,14 @@ func convertExecResult(run docker.CommandResult) agent.ContainerExecResult {
 	}
 }
 
-// CopyFromContainer 用 docker cp 把容器内文件复制到远程宿主机临时目录。
+// CopyFromContainer 把容器内文件复制到远程宿主机临时目录。
 //
 // 复制目标目录会先被创建；命令通过已转义的参数构造，用户输入不会进入 shell。
+//
+// docker cp 只解析容器的 rootfs 层，看不到挂在 tmpfs 上的路径：只读规划容器把 Session
+// 放在 /tmp（tmpfs）内，此时 docker cp 会报告"容器内不存在该文件"。因此 docker cp 失败
+// 时退回 `docker exec cat` 加宿主机重定向读取同一路径，仍由远程宿主机负责落盘，不把文件
+// 内容经本进程转发。
 func (e *containerSessionExecutor) CopyFromContainer(
 	ctx context.Context,
 	dockerID, containerPath, hostPath string,
@@ -388,11 +394,42 @@ func (e *containerSessionExecutor) CopyFromContainer(
 		hostPath,
 		containerCopyTimeout,
 	)
+	if runErr == nil && run.Succeeded() {
+		return nil
+	}
+	cpFailure := runErr
+	if cpFailure == nil {
+		cpFailure = fmt.Errorf("退出码 %d: %s", run.ExitCode, strings.TrimSpace(run.Stderr))
+	}
+	if fallbackErr := e.copyFromContainerByExec(ctx, dockerID, containerPath, hostPath); fallbackErr != nil {
+		return fmt.Errorf("导出容器文件失败: docker cp 失败（%v），容器内读取也失败（%v）",
+			cpFailure, fallbackErr)
+	}
+	return nil
+}
+
+// copyFromContainerByExec 用容器内读取加宿主机重定向把文件取到远程宿主机。
+//
+// 只用于 docker cp 看不到挂载点（例如 tmpfs）的现场：命令由固定子命令与转义后的参数
+// 构造，重定向目标同样经过转义，文件内容不经过本进程。
+func (e *containerSessionExecutor) copyFromContainerByExec(
+	ctx context.Context,
+	dockerID, containerPath, hostPath string,
+) error {
+	command, err := sshclient.ShellCommand("docker", "exec", dockerID, "cat", containerPath)
+	if err != nil {
+		return err
+	}
+	redirected := command + " > " + sshclient.ShellQuote(hostPath)
+	run, runErr := e.session.client.Run(ctx, redirected, sshclient.RunOptions{
+		Timeout: containerCopyTimeout,
+	})
 	if runErr != nil {
-		return fmt.Errorf("docker cp 失败: %w", runErr)
+		return runErr
 	}
 	if !run.Succeeded() {
-		return fmt.Errorf("docker cp 失败（退出码 %d）: %s", run.ExitCode, run.Stderr)
+		return fmt.Errorf("容器内读取失败（退出码 %d）: %s",
+			run.ExitCode, strings.TrimSpace(run.Stderr))
 	}
 	return nil
 }
@@ -448,11 +485,45 @@ func (e *containerSessionExecutor) CopyToContainer(
 		containerPath,
 		containerCopyTimeout,
 	)
+	if runErr == nil && run.Succeeded() {
+		return nil
+	}
+	// docker cp 看不到 tmpfs 上的路径，也无法写入只读 rootfs 的挂载点之外的目录；
+	// 只读规划容器的稳定 Session 位于 /tmp（tmpfs）内，因此退回容器内重定向写入。
+	cpFailure := runErr
+	if cpFailure == nil {
+		cpFailure = fmt.Errorf("退出码 %d: %s", run.ExitCode, strings.TrimSpace(run.Stderr))
+	}
+	if fallbackErr := e.copyToContainerByExec(ctx, dockerID, hostPath, containerPath); fallbackErr != nil {
+		return fmt.Errorf("写入容器文件失败: docker cp 失败（%v），容器内写入也失败（%v）",
+			cpFailure, fallbackErr)
+	}
+	return nil
+}
+
+// copyToContainerByExec 用容器内重定向写入把远程宿主机文件放到容器内路径。
+//
+// 只用于 docker cp 无法触达的挂载点（例如只读容器的 tmpfs）：写入内容由远程宿主机上的
+// 文件重定向提供，不经过本进程；路径全部经过 shell 转义。
+func (e *containerSessionExecutor) copyToContainerByExec(
+	ctx context.Context,
+	dockerID, hostPath, containerPath string,
+) error {
+	script := "cat > " + sshclient.ShellQuote(containerPath)
+	command, err := sshclient.ShellCommand("docker", "exec", "-i", dockerID, "sh", "-c", script)
+	if err != nil {
+		return err
+	}
+	redirected := command + " < " + sshclient.ShellQuote(hostPath)
+	run, runErr := e.session.client.Run(ctx, redirected, sshclient.RunOptions{
+		Timeout: containerCopyTimeout,
+	})
 	if runErr != nil {
-		return fmt.Errorf("docker cp 失败: %w", runErr)
+		return runErr
 	}
 	if !run.Succeeded() {
-		return fmt.Errorf("docker cp 失败（退出码 %d）: %s", run.ExitCode, run.Stderr)
+		return fmt.Errorf("容器内写入失败（退出码 %d）: %s",
+			run.ExitCode, strings.TrimSpace(run.Stderr))
 	}
 	return nil
 }
@@ -526,10 +597,27 @@ func (e *containerSessionExecutor) TerminateContainer(
 		// 已核实的远端事实优先：登记同步等收尾失败不改变"容器已停止"这一结论，错误照实返回。
 		return agent.ContainerTerminationResult{Stopped: true}, err
 	}
-	if err != nil {
-		return agent.ContainerTerminationResult{}, err
+	// 本次调用使用的 SSH 会话可能已经失效（连接中断、会话被关闭）：只用它无法核验也无法
+	// 执行停止。规划容器由单个 PlanningSession 独占，因此改用一条独立连接重新读取本地记录、
+	// 核验节点 / Docker 容器 ID / 管理标签 / 规划会话标签后执行停止，并以停止后的真实
+	// inspect 判定结果。普通任务调用不启用终止策略，不会走到这里。
+	independent, independentErr := e.service.terminateWithIndependentSession(
+		ctx,
+		e.container,
+		request,
+	)
+	if independent.Inspect != nil && independent.Inspect.RuntimeCondition().ConfirmsNotRunning() {
+		return agent.ContainerTerminationResult{Stopped: true}, errors.Join(err, independentErr)
 	}
-	if detail.Inspect == nil {
+	if combined := errors.Join(err, independentErr); combined != nil {
+		return agent.ContainerTerminationResult{}, combined
+	}
+	// 两条路径都未能确认容器已停止：以最后一次可用的观测结果给出可诊断错误，不伪造终止。
+	last := detail.Inspect
+	if independent.Inspect != nil {
+		last = independent.Inspect
+	}
+	if last == nil {
 		return agent.ContainerTerminationResult{}, fmt.Errorf(
 			"终止容器失败: 容器 %s 停止后没有取得实际状态",
 			e.container.ID,
@@ -538,7 +626,7 @@ func (e *containerSessionExecutor) TerminateContainer(
 	return agent.ContainerTerminationResult{}, fmt.Errorf(
 		"终止容器失败: 容器 %s 停止后仍在运行（Docker 状态 %s）",
 		e.container.ID,
-		detail.Inspect.State,
+		last.State,
 	)
 }
 
@@ -581,3 +669,57 @@ var _ agent.ContainerExecutor = (*containerSessionExecutor)(nil)
 var _ agent.ContainerFileWriter = (*containerSessionExecutor)(nil)
 var _ agent.ContainerTerminator = (*containerSessionExecutor)(nil)
 var _ agent.ContainerGuard = (*sessionContainerGuard)(nil)
+
+// terminateWithIndependentSession 用独立连接复核并停止规划会话独占的容器。
+//
+// 调用时机固定为"本次调用使用的 SSH 会话无法确认容器状态"：连接中断、会话被关闭或远端
+// 命令结果不确定时，继续沿用同一个会话既不能观察也不能停止远端进程。这里建立一条新连接，
+// 并重新完成全部内联核验：
+//   - 重新读取本地容器登记记录，要求仍未删除、未脱离管理；
+//   - 要求记录中的 Docker 容器 ID 与本次调用使用的容器一致；
+//   - 要求容器标签仍指向同一执行节点、同一容器记录与同一规划会话。
+//
+// 只有全部核验通过才对这一个容器提交停止，并以停止后的真实 inspect 判定结果。容器记录与
+// 规划会话绑定不会被清空：远端已停止但本地仍可复用的是同一个规划容器。
+func (s *ContainerService) terminateWithIndependentSession(
+	ctx context.Context,
+	container domain.Container,
+	request agent.ContainerTerminationRequest,
+) (ContainerDetail, error) {
+	planningSessionID := strings.TrimSpace(request.PlanningSessionID)
+	if planningSessionID == "" {
+		return ContainerDetail{}, fmt.Errorf("独立连接终止容器失败: 缺少规划会话标识")
+	}
+	if strings.TrimSpace(container.DockerID) == "" {
+		return ContainerDetail{}, fmt.Errorf("独立连接终止容器失败: 容器 %s 缺少 Docker 容器 ID", container.ID)
+	}
+	var detail ContainerDetail
+	err := s.withRemoteDocker(
+		ctx,
+		container.HostID.String(),
+		false,
+		func(ctx context.Context, session *remoteDocker) error {
+			current, loadErr := s.loadContainer(ctx, container.ID.String())
+			if loadErr != nil {
+				return loadErr
+			}
+			if current.DockerID != container.DockerID {
+				return fmt.Errorf(
+					"独立连接终止容器失败: 本地记录中的 Docker 容器 ID 已改变（记录 %s，本次调用 %s）",
+					current.DockerID,
+					container.DockerID,
+				)
+			}
+			stopped, stopErr := s.stopContainerLocked(ctx, session, current, stopContainerOptions{
+				TimeoutSeconds:    request.GraceSeconds,
+				PlanningSessionID: planningSessionID,
+			})
+			detail = stopped
+			return stopErr
+		},
+	)
+	if err != nil {
+		return detail, fmt.Errorf("独立连接终止容器失败: %w", err)
+	}
+	return detail, nil
+}

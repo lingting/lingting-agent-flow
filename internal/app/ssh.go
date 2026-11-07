@@ -31,7 +31,11 @@ type SSHOptions struct {
 	KnownHostsPath string
 	// ConnectTimeout 是 TCP 连接与认证的超时时间，零值使用默认值。
 	ConnectTimeout time.Duration
-	// Connector 是连接替身，仅供单元测试注入；生产装配始终留空。
+	// Connector 是连接入口的测试缝隙；生产装配始终留空。
+	//
+	// 它有两种合法用途：单元测试注入受控替身，以及集成测试在真实连接外面包一层可控的
+	// 生命周期封装（例如模拟链路中断）。无论哪种用途，连接归属仍以数据库中的执行节点为准，
+	// 替身不能把连接指向另一个节点。
 	Connector Connector
 }
 
@@ -411,8 +415,8 @@ func (s *SSHService) Connect(
 		return nil, fmt.Errorf("连接执行节点失败: 节点 %s 已禁用", host.ID)
 	}
 	if s.connector != nil {
-		// 连接替身只用于单元测试：它必须返回已建立的连接与远程 Home 目录，节点归属
-		// 仍以数据库记录为准，替身不能把连接指向另一个节点。
+		// 连接入口由测试提供时必须返回已建立的连接与远程 Home 目录，节点归属仍以数据库
+		// 记录为准，实现不能把连接指向另一个节点。
 		connection, connectErr := s.connector(ctx, host)
 		if connectErr != nil {
 			return nil, fmt.Errorf("连接执行节点失败: %w", connectErr)

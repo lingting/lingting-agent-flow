@@ -1277,3 +1277,201 @@ exited       {"Status": "exited",     "Running": false}
 M2 状态继续为 `pending`：退出条件仍缺"真实环境中的只读写入拒绝、Session 与容器生命周期可持久化恢复"的
 证据，以及 M3 编排接入后在真实环境复用同一容器与快照的多轮验证。本阶段只统一容器状态语义、补齐受控测试与
 文档，不改变 M2 的完成判定，也不把剩余工作转入 M3。
+
+### 7.19 已交付：真实环境验收与必要缺陷修复（M2 第十九阶段）
+
+第十九阶段在**真实环境**中验收规划运行时：真实文件型 SQLite、真实 SSH（主机密钥校验开启）、真实远程
+Docker Engine、真实只读规划容器、真实固定 commit 快照卷、真实容器内 Pi CLI 与真实模型。验收过程发现
+两处**生产缺陷**并已在本阶段修复，另发现一处**测试基础设施缺陷**（真实测试执行入口的 `go test` 超时
+与套件预算不匹配）并修复。M2 状态仍为 `pending`，理由见本节末尾。
+
+#### 7.19.1 真实环境事实（本次实测）
+
+| 项目 | 实测值 |
+|---|---|
+| Docker CLI / Engine | 29.7.2 / 29.7.2 |
+| Docker API / 最低 API | 1.55 / 1.40 |
+| 测试镜像 | `agentflow-test-planning:1.0.0`（`sha256:6efc22d7…2d6d64`），基础为 `agentflow-test-agent:1.0.0` |
+| 容器内 Pi CLI | 1.3.0（`pi --version`，容器内实测） |
+| 容器内 Git | 2.39.5 |
+| 模型标识（不含凭据） | `group/free`，思考等级 `low` |
+| 测试项目固定 commit | `92f6432678902c7532b27c713dbbd026cbbed5a0`（`main`） |
+| 远程测试资源目录 | `~/.lingting/agentflow-tests/planning/<随机后缀>` |
+| 本机测试产物 | `%TEMP%\lingting-agent-flow-tests\planning-*`（保留，不删除） |
+| 真实测试产物目录 | `.test-artifacts/real-m2/`（`TEST_ARTIFACT_DIR` 见 `real-tests-output.log`） |
+
+#### 7.19.2 生产缺陷与修复
+
+**缺陷一：只读规划容器的 Session 提取与恢复不可用。**
+
+`docker cp` 只解析容器 rootfs 层，看不到挂在 tmpfs 上的路径。规划容器 `--read-only` 且唯一可写目录是
+`/tmp`（tmpfs），因此：
+
+- `docker cp <容器>:/tmp/agentflow/sessions/...` 报"容器内不存在该文件"，`persistSession` 判定"未能取得
+  Session 文件"，规划角色调用在**真实成功执行 Pi**之后仍被判定失败；
+- 反方向的 `docker cp <宿主机文件> <容器>:/tmp/...` 在只读 rootfs 上直接失败，历史 Session 无法恢复到
+  容器内固定路径，多轮上下文恢复不可能成立。
+
+修复（`internal/app/agent_container.go`）：`containerSessionExecutor.CopyFromContainer` /
+`CopyToContainer` 在 `docker cp` 失败时退回宿主机重定向方式——`docker exec cat <容器路径> > <宿主机路径>`
+与 `docker exec -i sh -c 'cat > <容器路径>' < <宿主机路径>`。文件内容仍由远程宿主机落盘/读取，不经过本
+进程；命令由固定子命令与 `sshclient.ShellCommand` / `ShellQuote` 转义后的参数构造。普通任务容器 `docker cp`
+成功时行为完全不变。
+
+**缺陷二：SSH 中断后的远端 Pi 终止依赖已失效的连接。**
+
+第十六阶段的终止流程复用本次调用使用的 SSH 会话执行停止。真实 SSH 中断后该会话已失效，`inspect` 与
+`docker stop` 都无从执行，容器与容器内 Pi 可能仍在运行，而本地只能记录 `unknown`。这不满足"中断后必须
+通过独立连接核验并终止"的要求。
+
+修复（`internal/app/agent_container.go`）：`containerSessionExecutor.TerminateContainer` 在本次会话无法
+确认终止时，改为调用新增的 `ContainerService.terminateWithIndependentSession`，用一条**独立连接**重新
+读取本地容器记录、核验执行节点 / Docker 容器 ID（必须与本次调用一致）、管理标签与规划会话标签后，只对
+该容器提交停止，并以停止后的真实 `inspect` 判定结果；两条路径都未确认时如实返回错误，不写 `stopped`。
+容器记录、快照卷与规划会话绑定全部保留，下一次调用按原容器 ID 重启。普通 Task 调用不启用终止策略，
+不会进入该路径。
+
+**测试基础设施修复：真实测试入口的 `go test` 超时。**
+
+`.github/scripts/run-real-tests.sh` 原先使用 `go test` 默认的 10 分钟超时，而 `tests/integration/remote/
+workflow` 的端到端用例自己声明了 60 分钟运行预算（`e2eRunTimeout`），真实运行需要数分钟到数十分钟，
+因此该套件必然被默认超时打断（本次实测在执行到步骤执行阶段后 601.8 秒被 `panic: test timed out` 终止）。
+修复：脚本新增 `--timeout DURATION`（默认 `90m`）并传给 `go test -timeout`；超时仍按失败上报，不放宽
+任何断言。
+
+#### 7.19.3 真实只读环境验收结果
+
+- 真实 `docker inspect` 取值：`HostConfig.ReadonlyRootfs=true`；项目快照以 `type=volume` 只读挂载到
+  `/workspace/project`（`Mounts[].RW=false`，卷名与 `Prepare` 返回的 `CodeVolumeName` 一致）；
+  `HostConfig.Tmpfs` 只含 `/tmp`；`Binds` 为空、无 `bind` 挂载、无 Docker Socket、非特权、非 `--pid=host`、
+  非 `--network=host`。
+- 角色工具策略：`requirement_analyst` 与 `planner` 的实际工具均为 `[read grep find ls]`，不含
+  `edit` / `write` / `bash`。
+- 真实文件工具拒绝：以 `--tools write` 的独立诊断调用尝试写入 `/workspace/project/...`，Pi 报告
+  "目标路径所在的文件系统为只读（EROFS），写入工具无法在此处创建文件"，目标文件不存在。
+- 真实 Shell 拒绝：`sh -c 'printf probe > /workspace/project/...'` 退出码 2，
+  `cannot create …: Read-only file system`，目标文件不存在。
+- 两次写入尝试之后，容器内 `git rev-parse HEAD` 仍为 `92f6432…`，`git status --porcelain` 为空。
+
+#### 7.19.4 真实多轮 Session 结果
+
+- 需求分析师两轮真实调用：角色会话标识、容器内路径 `/tmp/agentflow/sessions/<会话>/<角色>/session.jsonl`
+  与本机归档路径全程不变；第二轮 `StableSession.Restored=true`，输出包含第一轮的唯一标记，归档字节数
+  由 6774 增长到 7383 之后继续增长。
+- 方案规划师独立会话：两个角色的 Pi 会话标识、容器内 Session 文件与本机归档文件互不相同；调用方案规划师
+  不改变需求分析师的会话标识。
+- 取消的调用：在真实 Pi 开始执行后取消，调用返回错误、容器按终止策略停止，最后一份完整归档字节内容
+  **未发生变化**。
+
+#### 7.19.5 真实容器停止、应用服务重建与恢复结果
+
+- 生产 `ContainerService.StopContainer` 停止容器后，独立控制连接确认 `State.Status=exited`。
+- 关闭 SQLite 连接与全部应用服务，然后用同一数据库文件、同一 Session 根目录重建服务对象后：容器记录 ID、
+  Docker 容器 ID、执行节点、固定 commit、角色会话标识全部不变；快照卷仍存在。
+- 用生产 `Prepare` 重新启动同一个容器（记录 ID 与 Docker 容器 ID 均未变化，快照卷与 commit 未变化），
+  再执行第二轮真实 Pi 调用：`StableSession.Restored=true`，输出包含停止前记录的标记，归档继续增长
+  （6537 → 7867 字节）。
+- 范围说明：本项重建的是**应用服务对象与数据库连接**，不是 Server 进程崩溃重启；本阶段没有以子进程
+  方式重启 Server 进程，因此不得把本项表述为进程级崩溃验收。
+
+#### 7.19.6 真实 SSH 中断与远端 Pi 终止结果
+
+- 测试用连接包装器只包装**真实认证后的客户端**（主机密钥校验与私钥认证与生产一致），在独立控制连接确认
+  容器内 `pi` 进程已启动后关闭该连接（`SSH_CONNECTIONS_BROKEN count=1`）。
+- 中断后的调用返回
+  `规划角色调用失败: pi: 容器内执行失败（退出码 -1）: 远程 Docker 操作失败(ssh_unavailable): docker exec: 远程命令未能确认结束`，
+  且 `RemoteTerminationConfirmed=true`。
+- 独立控制连接核验：容器 `State.Status=exited`，容器内已无 `pi` 进程（`REMOTE_PI_ABSENT
+  reason=container_not_running`）；本地记录 `state=stopped / docker_state=exited`，规划会话的
+  执行节点 / 容器 / 固定 commit 绑定不变；最后一份完整归档未被覆盖。
+- 中断后仍可复用同一容器：`Prepare` 重启后第二轮真实调用恢复历史上下文，角色会话标识与本机归档路径不变。
+- 本项的终止动作由**独立连接**完成（缺陷二的修复），不再依赖已经中断的会话。
+
+#### 7.19.7 真实资源释放结果
+
+- `PlanningRuntimeService.Release` 返回 `ContainerReleased=true` / `SnapshotReleased=true`；独立控制连接
+  确认容器与快照卷都不存在，一次性准备容器也不存在；规划会话的 `ContainerID`、`HostID`、`SourceCommit`
+  已清空，规划消息仍然保留。
+- 绑定已清空时再次 `Release` 返回成功且不谎称删除过资源（`container_released=false`
+  `snapshot_released=false`），远端资源仍然不存在，绑定没有被重新写回。
+- 测试包结束时按真实 `docker ps -a` 与命名卷核验：`REMOTE_CONTAINER_VERIFY status=PASS`、
+  `REMOTE_VOLUME_VERIFY status=absent`，远程只保留运行前后既有的非测试容器（`pgsql-server`）。
+
+#### 7.19.8 真实 Docker 状态结果
+
+- `paused`：真实 `docker pause` 后 `docker inspect` 给出 `State.Status=paused`、`State.Running=true`、
+  `State.Paused=true`。业务侧：`StartContainer` 拒绝（"不在可安全启动的退出状态"，且容器仍为 `paused`）、
+  `Exec` 拒绝（"当前未运行，无法执行命令"）、`RunRole` 拒绝且不发起 Pi 调用、`Prepare` 返回
+  `ErrPlanningRuntimeConflict` 且绑定与容器状态不变、`ClassifyContainerObservation` 给出
+  `indeterminate`、本地记录没有被写成 `stopped`（`state=running docker_state=paused`）。解除暂停后容器
+  恢复 `running`。
+- `restarting`：用本次测试专用的一次性容器（`--restart=always` 立即退出）捕获到
+  `RESTARTING_OBSERVED status=restarting running=true condition=restarting`。
+- `dead` 与 `removing`：本次未制造对应真实现场，如实记录为**未观测**，未编造状态。受控测试中的状态矩阵
+  （`tests/unit/container/docker_status_test.go` 等）保持不变并通过。
+
+#### 7.19.9 全新数据库的 Goose 初始化结果
+
+`tests/unit/store/migrations_test.go` 通过生产 `sqlite.Open` 在测试工作空间的全新文件上验证：
+
+- 迁移成功执行，`goose_db_version` 含 Goose 基线记录（`version=0, is_applied=1`）与初始脚本记录
+  （`version=1, is_applied=1`），没有未执行记录；
+- `planning_sessions` / `planning_messages` / `planning_revisions` 的必需字段与
+  `idx_planning_sessions_project` / `idx_planning_sessions_status` / `idx_planning_messages_sequence` /
+  `idx_planning_revisions_number` 存在；`projects.default_host_id` 与 `idx_projects_default_host` 存在；
+- 关闭后用同一文件重新打开：迁移记录数不变、结构与版本记录一致，没有重复执行迁移。
+- 未对任何现存开发数据库执行迁移，也未引入旧库兼容、回填或升级逻辑。
+
+#### 7.19.10 新增与调整的测试
+
+- 新增 `tests/integration/remote/planning/`（真实依赖验收入口，自动归入 `remote` 分组）：
+  `TestRemotePlanningReadOnlyEnvironment`（只读容器 / 工具策略 / 文件工具与 Shell 写入拒绝 / 释放与
+  重复释放）、`TestRemotePlanningMultiRoundSessions`（两角色多轮上下文、角色隔离、取消不覆盖归档）、
+  `TestRemotePlanningContainerRestartRecovery`（停止 + 服务与数据库重建 + 同一容器恢复）、
+  `TestRemotePlanningSSHInterruptionTermination`（真实 SSH 中断、独立连接核验与终止、恢复）、
+  `TestRemotePlanningPausedState`（真实 paused 字段与全部业务拒绝）、
+  `TestRemotePlanningRestartingObservation`（restarting 观测，dead/removing 如实记未观测）、
+  `TestRemotePlanningPreconditions`（Docker 版本、镜像、容器内 Pi 与 Git 版本、模型、仓库与分支）。
+  该包只用真实依赖并复用生产服务装配（`ContainerService` / `PlanningRuntimeService` /
+  `PlanningAgentService` / `PlanningSessionCoordinator` / 当前 `storage.Store` / `RoleService`），
+  没有第二套容器管理、Pi Runner 或 Session 管理实现。
+- 新增 `tests/integration/remote/planning/Dockerfile`（`agentflow-test-planning:1.0.0`）：在通用测试镜像
+  之上只设置 `PI_CODING_AGENT_DIR=/tmp/pi-agent`，使只读 rootfs 规划容器仍有可写的 Pi 配置目录；不含任何
+  凭据，模型配置由测试在运行期写入容器内 tmpfs。
+- `tests/internal/testkit/remotedir.go` 登记 `RemoteTestPackagePlanning`（远程测试子目录白名单的唯一
+  来源）。
+- 扩展 `tests/unit/store/migrations_test.go`：`goose_db_version` 记录、M2 规划表字段与索引、
+  `projects.default_host_id` 与索引、重复打开不重复迁移。
+- 修复 `.github/scripts/run-real-tests.sh`：新增 `--timeout`（默认 `90m`）并传给 `go test`。
+
+#### 7.19.11 实际测试执行结果（本次）
+
+```bash
+# 定向受控回归
+go test -count=1 ./tests/unit/...                        # 1696 passed / 14 packages
+go test -count=1 ./tests/integration/local/...           # 242 passed / 10 packages
+go test -count=1 ./tests/e2e/...                         # 65 passed / 1 package
+go test -race -count=20 -timeout 45m ./tests/unit/app -run 'Container|Planning'   # 4220 passed
+bash .github/scripts/run-go-race-tests.sh --artifact-dir .test-artifacts/go-race --parallel 4  # 全部通过
+bash .github/scripts/check-go-static.sh                  # gofmt / go vet / go build 通过
+bash .github/scripts/go-test-groups.sh --check --declared-groups unit,local,e2e   # 32 个测试包全部分类
+
+# 真实外部依赖测试（授权后执行，包之间串行）
+AGENTFLOW_REAL_TESTS_GRANTED=true bash .github/scripts/run-real-tests.sh \
+  --artifact-dir "$PWD/.test-artifacts/real-m2" --parallel 1 --timeout 45m
+# pi 4.0s / ssh 6.1s / remote/agent 24.1s / remote/codesaver 14.1s / remote/docker 71.9s
+# remote/planning 131.9s / remote/workflow 196.5s —— 全部 ok
+```
+
+跳过项（不计为通过）：`tests/integration/pi` 的 `TestRealPiModelRecognition` 类用例输出
+`WARN [SKIP] 当前 Pi 未识别模型 group/free`（本机 Pi 1.4.0 的模型清单不含该标识）。规划运行时真实验收
+只以容器内 Pi（1.3.0）的实际调用为准。
+
+#### 7.19.12 仍未完成与 M2 状态
+
+- 规划轮次业务编排、结构化输出解析与 Revision 生成仍属 M3，不在本阶段。
+- 容器 `dead` 与 `removing` 真实现场本次未制造，如实记为未观测；其拒绝路径由受控测试覆盖。
+- Server **进程**级崩溃重启验收未执行：本次只重建应用服务对象与数据库连接，报告时已如实区分。
+- M2 状态继续保持 `pending`。第十九阶段补齐了"真实环境只读写入拒绝、多轮 Session 恢复、容器与快照
+  生命周期可持久化恢复、SSH 中断后远端 Pi 终止"的证据，但 M2 的正式退出条件还要求 M3 编排接入后在真实
+  环境复用同一容器与快照完成多轮规划，因此本阶段不把 M2 标记为 completed，也不把剩余工作转入 M3。

@@ -75,7 +75,10 @@ go test -count=1 -v ./tests/integration/ssh/...
 # （docker.yml 的 docker.remote_enabled 与 ssh.yml 的 ssh.enable 都必须为 true）
 go test -count=1 -v ./tests/integration/remote/docker/...
 go test -count=1 -v ./tests/integration/remote/agent/...
+go test -count=1 -v ./tests/integration/remote/planning/...
 go test -count=1 -v ./tests/integration/remote/workflow/...
+# 真实包自带分钟级预算，本机单包执行时按需放宽 go test 超时：
+go test -count=1 -v -timeout 45m ./tests/integration/remote/workflow/...
 
 # CLI 端到端测试
 go test -count=1 -v ./tests/e2e/...
@@ -259,6 +262,7 @@ tests/integration/ssh/                # ssh 分组：真实远程 Linux 机器
 tests/integration/remote/docker/      # remote 分组：真实远程 Docker Engine
 tests/integration/remote/agent/       # remote 分组：真实远程容器与容器内真实 Pi
 tests/integration/remote/codesaver/   # remote 分组：真实远程容器与容器内 Git
+tests/integration/remote/planning/    # remote 分组：真实规划运行时（只读容器 / 快照 / 容器内 Pi）
 tests/integration/remote/workflow/    # remote 分组：真实远程端到端工作流
 ```
 
@@ -282,6 +286,9 @@ tests/integration/remote/workflow/    # remote 分组：真实远程端到端工
 - 真实测试 Job 的执行清单只写在 `.github/scripts/run-real-tests.sh`，它要求
   `AGENTFLOW_REAL_TESTS_GRANTED=true` 才肯执行：缺少授权标记时脚本直接失败，不会跑出一堆
   SKIP 后把"一个用例都没跑"报告成成功。
+- 该脚本用 `--timeout`（默认 `90m`）显式设置 `go test -timeout`：真实套件自带分钟级运行预算
+  （`tests/integration/remote/workflow` 的端到端用例声明 60 分钟），`go test` 默认的 10 分钟
+  上限会让它们必然超时；超时仍然按失败上报，不放宽任何断言。
 
 要在本机复现 CI 的跳过行为，可以显式设置 CI 标记（默认本机运行不需要，见上文）：
 
@@ -647,6 +654,39 @@ go test -count=1 -v ./tests/integration/remote/agent/...
 
 容器内 Pi CLI 是否可用由测试在容器内实际执行 `pi --version` 确认，不依据本机是否安装 Pi。
 远程测试只删除本次测试创建并已核验所有权的容器，不执行全局 prune。
+
+### 真实规划运行时验收（`tests/integration/remote/planning/`）
+
+该目录是 M2 规划运行时的真实环境验收入口：真实文件型 SQLite、真实 SSH、真实远程 Docker
+Engine、真实只读规划容器、真实固定 commit 快照卷与真实容器内 Pi CLI，全部通过生产服务装配
+（`app.ContainerService` / `app.PlanningRuntimeService` / `app.PlanningAgentService` /
+`app.PlanningSessionCoordinator` / 当前 `storage.Store` / `app.RoleService`），不存在第二套
+容器管理、Pi Runner 或 Session 管理实现。
+
+| 用例 | 覆盖内容 |
+|---|---|
+| `TestRemotePlanningReadOnlyEnvironment` | 真实 `docker inspect` 的 `ReadonlyRootfs` / 只读代码卷挂载 / tmpfs / 无 bind、无 Socket / 非特权；角色工具策略只有只读工具；真实文件工具与 Shell 写入被文件系统拒绝且快照 commit 与工作区不变；`Release` 真实删除容器与卷、保留消息、重复释放幂等 |
+| `TestRemotePlanningMultiRoundSessions` | 两个规划角色的真实 Pi 调用、角色会话标识与容器内 / 本机路径隔离、同一角色多轮上下文连续、归档随轮次增长、取消的调用不覆盖最后一份完整归档 |
+| `TestRemotePlanningContainerRestartRecovery` | 生产 `StopContainer` 停止容器并核验 `exited`；关闭服务与 SQLite 后用同一数据库文件与 Session 根目录重建；`Prepare` 复用启动同一容器并恢复历史 Session |
+| `TestRemotePlanningSSHInterruptionTermination` | 在真实 Pi 执行期间关闭该次调用使用的真实 SSH 连接；独立控制连接核验容器退出与进程消失；本地记录 `stopped`、绑定不变；中断后可复用同一容器继续上下文 |
+| `TestRemotePlanningPausedState` | 真实 `docker pause` 后的 `Status` / `Running` / `Paused`；启动、执行、规划调用与 `Prepare` 复用全部拒绝且不改写状态；观测结论为 `indeterminate`；本地不写 `stopped` |
+| `TestRemotePlanningRestartingObservation` | 用一次性容器尝试观察真实 `restarting`；`dead` / `removing` 未制造时如实报告未观测，不编造状态 |
+| `TestRemotePlanningPreconditions` | 记录 Docker CLI / Engine / API 版本、测试镜像、容器内 Pi 与 Git 版本、模型标识与测试仓库分支 |
+
+测试镜像 `tests/integration/remote/planning/Dockerfile`（`agentflow-test-planning:1.0.0`）
+在通用测试镜像之上只设置 `PI_CODING_AGENT_DIR=/tmp/pi-agent`：规划容器 rootfs 只读，唯一
+可写目录是 `/tmp`（tmpfs），因此 Pi 的配置目录必须落在其中。镜像内不含任何凭据，模型接入
+配置由测试在运行期写入该目录，容器删除后随之消失。
+
+```bash
+# 需要 docker.remote_enabled、ssh.enable 与完整的 docker.pi 配置
+go test -count=1 -v ./tests/integration/remote/planning/...
+```
+
+已知的真实环境行为：`docker cp` 只解析容器 rootfs，看不到 tmpfs 上的路径，因此只读规划
+容器的 Session 提取与恢复由生产代码退回 `docker exec` 加宿主机重定向；本目录的用例覆盖
+该路径。测试包结束时按真实 `docker ps -a` 与命名卷核验零残留，只清理本次测试创建并核验过
+所有权的容器与卷。
 
 ## 开发—验证闭环测试分层
 

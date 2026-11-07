@@ -9,6 +9,10 @@
 #   --artifact-dir DIR  必填。测试产物目录，同时作为 TMPDIR。
 #   --parallel N        可选，默认 4。go test 的 -parallel（包内并行度）。包之间固定
 #                       以 -p 1 串行，避免多个真实套件同时操作同一台远程设备。
+#   --timeout DURATION  可选，默认 90m。go test 的 -timeout（单个测试包的整体上限）。
+#                       真实套件自带分钟级运行预算（例如 remote/workflow 的端到端用例声明
+#                       60 分钟），go test 默认的 10 分钟上限会让它们必然超时；这里显式给出
+#                       与套件预算匹配的上限，超时仍然按失败上报。
 #
 # 环境变量（输入）:
 #   AGENTFLOW_REAL_TESTS_GRANTED  必须是 true。它由授权判定 Job 产生，不是第二个
@@ -29,12 +33,13 @@
 set -euo pipefail
 
 usage() {
-    echo "用法: run-real-tests.sh --artifact-dir DIR [--parallel N]"
+    echo "用法: run-real-tests.sh --artifact-dir DIR [--parallel N] [--timeout DURATION]"
     echo "  执行真实外部依赖测试包，并把日志与测试工作空间写入 --artifact-dir。"
 }
 
 artifact_dir=""
 parallel="4"
+timeout="90m"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -52,6 +57,14 @@ while [ $# -gt 0 ]; do
                 exit 2
             fi
             parallel="$2"
+            shift 2
+            ;;
+        --timeout)
+            if [ $# -lt 2 ] || [ -z "$2" ]; then
+                echo "错误: --timeout 缺少取值" >&2
+                exit 2
+            fi
+            timeout="$2"
             shift 2
             ;;
         -h | --help)
@@ -122,7 +135,7 @@ status=0
 # 包之间固定串行（-p 1）：全部真实套件共享同一台远程机器与同一个 Docker Engine，
 # 并发执行时各套件会在"零残留核验"里把对方刚创建的一次性容器当成未登记残留而互相失败。
 # --parallel 只作用于包内并行度（-parallel），不用于叠加跨套件并发。
-go test -count=1 -v -p 1 -parallel "$parallel" "${packages[@]}" 2>&1 | tee "$log_file" || status=$?
+go test -count=1 -v -p 1 -parallel "$parallel" -timeout "$timeout" "${packages[@]}" 2>&1 | tee "$log_file" || status=$?
 if [ "$status" -ne 0 ]; then
     echo "::error::真实外部依赖测试失败（退出码 $status），测试日志: $log_file"
     exit "$status"

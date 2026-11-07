@@ -242,6 +242,27 @@ paused / restarting / dead / removing / 未知取值 / 字段矛盾 → 不可�
 - 测试替身必须同时给出 `State.Status` 与 `State.Running`（`tests/internal/testkit.ContainerInspectFor`），
   不再用"状态等于 running"推导 `Running`；暂停、重启中与字段矛盾的现场直接写字面量构造。
 
+
+### 4.5 真实环境验收与两处生产缺陷修复（V2-M2 第十九阶段已落地）
+
+真实环境验收（真实 SSH / 远程 Docker / 只读规划容器 / 容器内 Pi）暴露了两处只在真实依赖下成立的缺陷，
+修复仍留在原有调用链内，没有新增第二套容器、Session 或 Pi 执行路径：
+
+- **只读容器的 Session 进出容器**：`docker cp` 只解析容器 rootfs，看不到挂在 tmpfs 上的路径，而规划容器
+  `--read-only` 的唯一可写目录就是 `/tmp`（tmpfs）。`containerSessionExecutor.CopyFromContainer` 与
+  `CopyToContainer` 因此在 `docker cp` 失败时退回宿主机重定向：`docker exec cat <容器路径> > <宿主机路径>`
+  与 `docker exec -i sh -c 'cat > <容器路径>' < <宿主机路径>`。数据只经过远程宿主机，不经过本进程；命令
+  仍由 `sshclient.ShellCommand` / `ShellQuote` 构造。普通任务容器 `docker cp` 成功时行为不变。
+- **SSH 中断后的远端终止**：`TerminateContainer` 原先复用本次调用的 SSH 会话停止容器，连接中断后该会话已
+  失效，停止与核验都无从执行。现在本次会话无法确认终止时改用 `ContainerService.
+  terminateWithIndependentSession`：新连接 → 重新读取本地容器记录 → 核验执行节点、Docker 容器 ID、管理
+  标签与规划会话标签 → 只停止这一个容器 → 以停止后的真实 `inspect` 判定。两条路径都未确认时返回错误，
+  不写 `stopped`，容器记录 / 快照卷 / 规划会话绑定全部保留。普通 Task 调用不启用终止策略，不进入该路径。
+- **测试入口超时**：`.github/scripts/run-real-tests.sh` 增加 `--timeout`（默认 `90m`）并传给 `go test`，
+  使真实套件自带的运行预算（例如 remote/workflow 的 60 分钟）能够成立；超时仍按失败上报。
+- 真实验收只使用生产装配：`ContainerService` / `PlanningRuntimeService` / `PlanningAgentService` /
+  `PlanningSessionCoordinator` / 当前 `storage.Store` / `RoleService`；测试侧只注入模型配置（写入规划容器
+  tmpfs 内的 `PI_CODING_AGENT_DIR`）与真实 SSH 连接的包装器（只改变连接生命周期）。
 ## 5. HTTP API 方向
 
 仅在既有路由空间内新增（`/api/v1/...`），Handler 只做协议转换。

@@ -106,6 +106,14 @@
   判断。测试镜像由该目录下的 `Dockerfile` 构建，基础镜像与 Pi CLI 版本都固定到具体版本。
 - 真实远程工作流测试放在 `tests/integration/remote/workflow/`，同样要求 `docker.remote_enabled` 与
   `ssh.enable` 都已启用；只操作带随机后缀、属于本次测试的容器与远程目录。
+- 真实规划运行时测试放在 `tests/integration/remote/planning/`，同样要求 `docker.remote_enabled`、
+  `ssh.enable` 与完整的 `docker.pi` 配置；它只使用生产服务装配（容器服务、规划运行时、规划 Agent、
+  会话协调器、当前存储与角色服务），不新增第二套容器 / Session / Pi Runner 实现。测试镜像
+  `tests/integration/remote/planning/Dockerfile` 只设置 `PI_CODING_AGENT_DIR=/tmp/pi-agent`：只读规划容器的
+  唯一可写目录是 `/tmp`，模型配置只在运行期写入容器内 tmpfs，不进入镜像层、日志或数据库。
+- 真实套件自带分钟级运行预算，`go test` 默认的 10 分钟上限会让它们必然超时；统一入口
+  `.github/scripts/run-real-tests.sh` 因此用 `--timeout`（默认 `90m`）显式设置 `go test -timeout`，
+  超时仍按失败上报。本机单独执行真实包时同样需要按需传入 `-timeout`。
 
 ## 6. 数据库与状态测试
 

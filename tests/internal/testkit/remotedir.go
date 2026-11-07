@@ -44,6 +44,8 @@ const (
 	RemoteTestPackageWorkflow = "workflow"
 	// RemoteTestPackageSSH 是 tests/integration/ssh 的子目录。
 	RemoteTestPackageSSH = "ssh"
+	// RemoteTestPackagePlanning 是 tests/integration/remote/planning 的子目录。
+	RemoteTestPackagePlanning = "planning"
 )
 
 // remoteTestPackages 是允许使用的测试包子目录白名单。
@@ -56,6 +58,7 @@ var remoteTestPackages = map[string]struct{}{
 	RemoteTestPackageCodeSaver: {},
 	RemoteTestPackageWorkflow:  {},
 	RemoteTestPackageSSH:       {},
+	RemoteTestPackagePlanning:  {},
 }
 
 // defaultRemoteDirTimeout 是解析与创建远程目录的默认超时。
