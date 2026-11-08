@@ -110,6 +110,10 @@ type Deps struct {
 	// 它需要容器服务（SSH + Docker）：现场核验与恢复都必须在真实远程环境上执行，
 	// 没有远程能力时不得退化为"看起来核验通过"。
 	PlanningRuntime *app.PlanningRuntimeService
+	// PlanningAnalysis 是两阶段分析编排服务，为空时分析接口返回服务不可用。
+	//
+	// 它需要规划角色调用能力（容器内 Pi）：没有远程能力时不得产出"看起来成功"的分析。
+	PlanningAnalysis *app.PlanningAnalysisService
 	// Logger 是日志器，为空时使用 slog.Default。
 	Logger *slog.Logger
 }
@@ -159,6 +163,7 @@ func NewHandler(deps Deps) http.Handler {
 		planning: newPlanningHandler(
 			deps.PlanningSessions,
 			deps.PlanningRuntime,
+			deps.PlanningAnalysis,
 			logger,
 		),
 		logger: logger,

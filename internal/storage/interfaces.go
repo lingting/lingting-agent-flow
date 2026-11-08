@@ -205,6 +205,18 @@ type PlanningSessionStore interface {
 		ctx context.Context,
 		sessionID domain.ID,
 	) ([]domain.PlanningRevision, error)
+	// ClaimPlanningAnalysis 以数据库条件更新抢占一轮分析的执行权。
+	//
+	// 抢占条件固定为"会话状态是 analyzing 且当前没有任何占用"：影响行数为 0 说明状态
+	// 不允许或已被其他执行者占用，返回 storage.ErrConflict。占用标识由调用方生成，
+	// 释放时必须提交同一个标识，因此并发抢占只有一方能开始两阶段模型调用。
+	ClaimPlanningAnalysis(ctx context.Context, id domain.ID, claimID string, at time.Time) error
+	// ReleasePlanningAnalysis 以占用标识为条件释放一轮分析的执行权。
+	//
+	// 只清除 analysis_claim_id 与 analysis_claimed_at 并刷新 updated_at：会话状态、
+	// 结束时间、采纳的方案版本、失败摘要与运行时绑定保持数据库中的值。标识不匹配说明
+	// 占用已不属于本次调用，返回 storage.ErrConflict，调用方不得覆盖别人的结论。
+	ReleasePlanningAnalysis(ctx context.Context, id domain.ID, claimID string, at time.Time) error
 }
 
 // PlanningSessionRuntimeBinding 是规划会话的运行期绑定。

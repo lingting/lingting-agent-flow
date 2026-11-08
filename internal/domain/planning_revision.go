@@ -2,21 +2,34 @@ package domain
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 )
 
+// PlanningRevisionSnapshotVersion 是当前程序写入的规划快照结构版本。
+//
+// 版本号写在每一版 Revision 上而不是只写在代码里：持久化之后，读取方必须能独立判断
+// 这一版快照的字段含义，而不是依赖"数据库里出现的都是当前版本"这一假设。
+const PlanningRevisionSnapshotVersion = 1
+
 // PlanningRevision 是某一轮规划产生的分析与方案快照。
 //
 // 每个版本只追加不覆盖：后续轮次产生新的 Revision，历史版本仍然可读，用户确认时
-// 指出采纳的是哪一版。本阶段只保存结构化 JSON 快照，不解析内部分析字段与任务拆分
-// 规则；字段结构由后续里程碑定义，数据库侧只约束 JSON 结构合法。
+// 指出采纳的是哪一版。分析与方案快照的字段结构由 RequirementAnalysis 与
+// ImplementationPlan 定义，快照版本记录在 SnapshotVersion 上；本类型只保证"能落库的
+// 一定是一份结构版本明确、JSON 合法的文档"，内部字段的语义校验发生在生成快照之前。
 type PlanningRevision struct {
 	ID ID `json:"id"`
 	// PlanningSessionID 是版本所属规划会话。
 	PlanningSessionID ID `json:"planning_session_id"`
 	// RevisionNumber 是会话内的版本号，从 1 开始且唯一。
 	RevisionNumber int `json:"revision_number"`
+	// SnapshotVersion 是这一版快照的结构版本，由写入方固定为当前支持的版本。
+	//
+	// 它与版本号不同：RevisionNumber 表示"会话内的第几版方案"，SnapshotVersion 表示
+	// "这一版 JSON 用哪一套字段结构"，两者都必须落库且不得互相替代。
+	SnapshotVersion int `json:"snapshot_version"`
 	// RequirementAnalysisJSON 是需求分析师的结构化分析快照。
 	RequirementAnalysisJSON json.RawMessage `json:"requirement_analysis_json"`
 	// ImplementationPlanJSON 是方案规划师的结构化方案快照。
@@ -42,6 +55,7 @@ func NewPlanningRevision(
 		PlanningSessionID:       sessionID,
 		RevisionNumber:          number,
 		RequirementAnalysisJSON: analysis,
+		SnapshotVersion:         PlanningRevisionSnapshotVersion,
 		ImplementationPlanJSON:  plan,
 		ValidationResultJSON:    validation,
 		CreatedAt:               normalizeTime(at),
@@ -65,6 +79,9 @@ func (r PlanningRevision) Validate() error {
 	}
 	if r.RevisionNumber <= 0 {
 		return invalidField("PlanningRevision", "revision_number", "版本号必须大于 0")
+	}
+	if r.SnapshotVersion <= 0 {
+		return invalidField("PlanningRevision", "snapshot_version", "快照版本必须大于 0")
 	}
 	if err := validatePlanningJSON("requirement_analysis_json", r.RequirementAnalysisJSON, true); err != nil {
 		return err
@@ -100,4 +117,42 @@ func validatePlanningJSON(field string, value json.RawMessage, required bool) er
 		return invalidField("PlanningRevision", field, "JSON 快照不能是 null")
 	}
 	return nil
+}
+
+// CheckSnapshotVersion 校验这一版快照的结构版本能否被当前程序解析。
+//
+// 版本不一致时拒绝解析而不是尽力而为：字段含义随版本变化，按当前结构读旧快照会得到
+// 一份"看起来完整但内容错位"的方案，这比明确报错更危险。
+func (r PlanningRevision) CheckSnapshotVersion() error {
+	if r.SnapshotVersion == PlanningRevisionSnapshotVersion {
+		return nil
+	}
+	return invalidField(
+		"PlanningRevision",
+		"snapshot_version",
+		fmt.Sprintf(
+			"不支持的快照版本 %d，当前支持 %d",
+			r.SnapshotVersion,
+			PlanningRevisionSnapshotVersion,
+		),
+	)
+}
+
+// RequirementAnalysis 解析本版本保存的需求分析快照。
+//
+// 解析只依赖这一行记录本身：快照版本、JSON 文档与领域校验都在读取路径完成，不依赖
+// 产生它的会话状态或进程内缓存。
+func (r PlanningRevision) RequirementAnalysis() (RequirementAnalysis, error) {
+	if err := r.CheckSnapshotVersion(); err != nil {
+		return RequirementAnalysis{}, err
+	}
+	return ParseRequirementAnalysisSnapshot(r.RequirementAnalysisJSON)
+}
+
+// ImplementationPlan 解析本版本保存的实施方案快照。
+func (r PlanningRevision) ImplementationPlan() (ImplementationPlan, error) {
+	if err := r.CheckSnapshotVersion(); err != nil {
+		return ImplementationPlan{}, err
+	}
+	return ParseImplementationPlanSnapshot(r.ImplementationPlanJSON)
 }

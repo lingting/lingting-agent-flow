@@ -165,10 +165,11 @@ type planningPrepareRequest struct {
 	HostID string `json:"host_id"`
 }
 
-// planningHandler 处理规划会话与规划运行时的诊断接口与两个显式动作接口。
+// planningHandler 处理规划会话业务、规划运行时诊断与两阶段分析接口。
 type planningHandler struct {
 	sessions *app.PlanningSessionService
 	runtime  *app.PlanningRuntimeService
+	analysis *app.PlanningAnalysisService
 	logger   *slog.Logger
 }
 
@@ -178,12 +179,18 @@ type planningHandler struct {
 func newPlanningHandler(
 	sessions *app.PlanningSessionService,
 	runtime *app.PlanningRuntimeService,
+	analysis *app.PlanningAnalysisService,
 	logger *slog.Logger,
 ) *planningHandler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &planningHandler{sessions: sessions, runtime: runtime, logger: logger}
+	return &planningHandler{
+		sessions: sessions,
+		runtime:  runtime,
+		analysis: analysis,
+		logger:   logger,
+	}
 }
 
 // detail 处理 GET /api/v1/planning/sessions/{sessionID}。
@@ -292,18 +299,28 @@ func (h *planningHandler) writeError(w http.ResponseWriter, r *http.Request, err
 	status := http.StatusInternalServerError
 	code := CodeInternal
 	switch {
+	case isPlanningAnalysisError(err):
+		// 两阶段分析已经真实执行但没有产出可用结论：既不能报成功，也不能当作参数错误。
+		status = http.StatusInternalServerError
+		code = CodeExecutionFailed
+	case errors.Is(err, app.ErrPlanningAnalysisNotPersisted):
+		status = http.StatusInternalServerError
+		code = CodeExecutionNotPersisted
 	case errors.Is(err, app.ErrPlanningRuntimeInvalidInput),
+		errors.Is(err, app.ErrPlanningAnalysisInvalidInput),
 		errors.Is(err, app.ErrPlanningSessionInvalidInput),
 		errors.Is(err, domain.ErrInvalidValue),
 		errors.Is(err, domain.ErrEmptyID):
 		status = http.StatusBadRequest
 		code = CodeInvalidRequest
 	case errors.Is(err, app.ErrPlanningRuntimeNotFound),
+		errors.Is(err, app.ErrPlanningAnalysisNotFound),
 		errors.Is(err, app.ErrPlanningSessionNotFound),
 		errors.Is(err, storage.ErrNotFound):
 		status = http.StatusNotFound
 		code = CodeNotFound
 	case errors.Is(err, app.ErrPlanningRuntimeConflict),
+		errors.Is(err, app.ErrPlanningAnalysisConflict),
 		errors.Is(err, app.ErrPlanningSessionStateConflict),
 		errors.Is(err, app.ErrPlanningRuntimeUncertain),
 		errors.Is(err, domain.ErrInvalidState),

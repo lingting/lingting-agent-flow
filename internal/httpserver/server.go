@@ -96,6 +96,10 @@ type Options struct {
 	//
 	// 核验与恢复必须访问真实远程环境：没有远程能力时不得返回"看起来核验通过"。
 	PlanningRuntime *app.PlanningRuntimeService
+	// PlanningAnalysis 是两阶段分析编排服务，为空时分析接口报告服务不可用。
+	//
+	// 它需要规划角色调用能力：没有远程能力时不得产出"看起来成功"的分析。
+	PlanningAnalysis *app.PlanningAnalysisService
 	// Files 是前端静态资源文件系统，为空时使用嵌入资源。
 	Files fs.FS
 	// RequireWebUI 为 true 时，缺少前端构建产物将导致构造失败。
@@ -163,6 +167,7 @@ func New(options Options) (*Server, error) {
 		TaskContainers:    options.TaskContainers,
 		PlanningSessions:  options.PlanningSessions,
 		PlanningRuntime:   options.PlanningRuntime,
+		PlanningAnalysis:  options.PlanningAnalysis,
 		Logger:            logger,
 	})
 	web, err := buildWebHandler(options.Files, options.RequireWebUI, logger)

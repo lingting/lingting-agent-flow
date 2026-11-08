@@ -264,6 +264,8 @@ type Server struct {
 	//
 	// 容器服务缺失时保持为空：规划运行环境不可用，不退化成任何本机执行路径。
 	planningRuntime *app.PlanningRuntimeService
+	// planningAnalysis 是两阶段分析编排服务，复用规划 Agent 与规划会话能力。
+	planningAnalysis *app.PlanningAnalysisService
 	// planningAgent 是规划角色 Pi 调用入口，注册进统一生命周期。
 	//
 	// 它复用同一份存储、角色服务、容器服务与本机 Session 根目录；为空表示规划 Agent
@@ -1012,6 +1014,17 @@ func (s *Server) planningServices() error {
 		return fmt.Errorf("初始化规划 Agent 服务失败: %w", err)
 	}
 	s.planningAgent = agent
+	// 两阶段分析复用上面的调用入口：它只负责编排顺序、结构化校验与事务持久化，
+	// 不重新实现容器准备、角色配置或 Pi 执行。
+	analysis, err := app.NewPlanningAnalysisService(app.PlanningAnalysisServiceOptions{
+		Store:  s.store,
+		Agent:  agent,
+		Logger: s.logger,
+	})
+	if err != nil {
+		return fmt.Errorf("初始化规划分析服务失败: %w", err)
+	}
+	s.planningAnalysis = analysis
 	return nil
 }
 
@@ -1108,6 +1121,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		// HTTP 层不另建规划容器管理器、Session 管理器或恢复逻辑。
 		PlanningSessions: s.planningSessions,
 		PlanningRuntime:  s.planningRuntime,
+		PlanningAnalysis: s.planningAnalysis,
 		CodeInitialize:   s.codeInitialize,
 		RequireWebUI:     s.requireWeb,
 		ShutdownTimeout:  s.shutdownTimeout,

@@ -67,11 +67,16 @@ const (
 	matchEnvironmentVersions = matchEnvironment + "/" + environmentVersionsSegment
 	matchEnvironmentVersion  = matchEnvironmentVersions + "/" + matchEnvVersion
 
-	matchPlanningSessions = PathPlanningSessions
-	matchPlanningSession  = matchPlanningSessions + "/" + matchSessionID
-	matchPlanningRuntime  = matchPlanningSession + "/" + planningRuntimeSegment
-	matchPlanningPrepare  = matchPlanningRuntime + "/" + planningPrepareSegment
-	matchPlanningRelease  = matchPlanningRuntime + "/" + planningReleaseSegment
+	matchPlanningSessions  = PathPlanningSessions
+	matchPlanningSession   = matchPlanningSessions + "/" + matchSessionID
+	matchPlanningMessages  = matchPlanningSession + "/" + planningMessagesSegment
+	matchPlanningRevisions = matchPlanningSession + "/" + planningRevisionsSegment
+	matchPlanningAnalysis  = matchPlanningSession + "/" + planningAnalysisSegment
+	matchPlanningRetry     = matchPlanningAnalysis + "/" + retrySegment
+	matchPlanningAbandon   = matchPlanningSession + "/" + planningAbandonSegment
+	matchPlanningRuntime   = matchPlanningSession + "/" + planningRuntimeSegment
+	matchPlanningPrepare   = matchPlanningRuntime + "/" + planningPrepareSegment
+	matchPlanningRelease   = matchPlanningRuntime + "/" + planningReleaseSegment
 )
 
 // apiRouteMethod 是路由上允许的一个 HTTP 方法及其处理函数。
@@ -147,6 +152,10 @@ func (rt *router) routes() []apiRoute {
 	planningRuntimeService := rt.availabilityGuard(
 		rt.planning.runtime != nil,
 		"规划运行时服务未初始化",
+	)
+	planningAnalysisService := rt.availabilityGuard(
+		rt.planning.analysis != nil,
+		"规划分析服务未初始化",
 	)
 
 	// 环境接口在判定方法之前只校验段值：非法环境类型、名称或版本号按参数错误返回
@@ -572,7 +581,17 @@ func (rt *router) routes() []apiRoute {
 			methodNotAllowed: "该接口只支持 GET 请求",
 		},
 
-		// 规划会话与规划运行时：诊断接口只读，准备与释放显式调用生产服务。
+		// 规划会话业务：集合支持按项目列表与创建，单会话提供详情、消息、版本与放弃。
+		{
+			pattern: matchPlanningSessions,
+			methods: []apiRouteMethod{
+				{method: http.MethodGet, handler: rt.planning.list},
+				{method: http.MethodPost, handler: rt.planning.create},
+			},
+			guard:            planningSessionService,
+			allow:            "GET, HEAD, POST",
+			methodNotAllowed: "该接口只支持 GET 与 POST 请求",
+		},
 		{
 			pattern:          matchPlanningSession,
 			methods:          get(rt.planning.detail),
@@ -580,6 +599,50 @@ func (rt *router) routes() []apiRoute {
 			allow:            "GET, HEAD",
 			methodNotAllowed: "该接口只支持 GET 请求",
 		},
+		{
+			pattern: matchPlanningMessages,
+			methods: []apiRouteMethod{
+				{method: http.MethodGet, handler: rt.planning.listMessages},
+				{method: http.MethodPost, handler: rt.planning.submitMessage},
+			},
+			guard:            guardFor(planningSessionService, rt.pathIDGuard(paramSessionID)),
+			allow:            "GET, HEAD, POST",
+			methodNotAllowed: "该接口只支持 GET 与 POST 请求",
+		},
+		{
+			pattern:          matchPlanningRevisions,
+			methods:          get(rt.planning.listRevisions),
+			guard:            guardFor(planningSessionService, rt.pathIDGuard(paramSessionID)),
+			allow:            "GET, HEAD",
+			methodNotAllowed: "该接口只支持 GET 请求",
+		},
+		{
+			pattern:          matchPlanningAbandon,
+			methods:          post(rt.planning.abandon),
+			guard:            guardFor(planningSessionService, rt.pathIDGuard(paramSessionID)),
+			allow:            "POST",
+			methodNotAllowed: "该接口只支持 POST 请求",
+		},
+		// 两阶段分析：显式触发，占用由数据库条件更新保证并发唯一。
+		{
+			pattern:          matchPlanningAnalysis,
+			methods:          post(rt.planning.analyze),
+			guard:            guardFor(planningAnalysisService, rt.pathIDGuard(paramSessionID)),
+			allow:            "POST",
+			methodNotAllowed: "该接口只支持 POST 请求",
+		},
+		{
+			pattern: matchPlanningRetry,
+			methods: post(rt.planning.retryAnalysis),
+			guard: guardFor(
+				planningAnalysisService,
+				planningSessionService,
+				rt.pathIDGuard(paramSessionID),
+			),
+			allow:            "POST",
+			methodNotAllowed: "该接口只支持 POST 请求",
+		},
+		// 规划运行时：诊断接口只读，准备与释放显式调用生产服务。
 		{
 			pattern:          matchPlanningRuntime,
 			methods:          get(rt.planning.inspectRuntime),

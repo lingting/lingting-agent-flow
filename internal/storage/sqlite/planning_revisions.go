@@ -10,11 +10,11 @@ import (
 )
 
 // planningRevisionColumns 是规划版本表的完整列顺序。
-const planningRevisionColumns = `id, planning_session_id, revision_number,
+const planningRevisionColumns = `id, planning_session_id, revision_number, snapshot_version,
 	requirement_analysis_json, implementation_plan_json, validation_result_json, created_at`
 
 // planningRevisionInsertCount 是写入规划版本时的参数个数。
-const planningRevisionInsertCount = 7
+const planningRevisionInsertCount = 8
 
 // planningRevisionStore 实现 storage.PlanningSessionStore 的方案版本部分。
 type planningRevisionStore struct {
@@ -84,6 +84,7 @@ func (s planningRevisionStore) append(
 		toIDParam(revision.ID),
 		toIDParam(revision.PlanningSessionID),
 		revision.RevisionNumber,
+		revision.SnapshotVersion,
 		string(revision.RequirementAnalysisJSON),
 		string(revision.ImplementationPlanJSON),
 		nullIfBlank(string(revision.ValidationResultJSON)),
@@ -152,22 +153,24 @@ type planningRevisionScanner interface {
 
 // scanPlanningRevision 从一行结果还原规划版本。
 //
-// JSON 快照按原始文本读回，不在这里解析内部字段：内部结构由后续里程碑定义，读取
-// 路径只负责把已保存的快照原样交出。
+// JSON 快照按原始文本读回，不在这里解析内部字段：快照结构由 internal/domain 定义，
+// 读取路径只负责把已保存的快照与结构版本原样交出。
 func scanPlanningRevision(row planningRevisionScanner) (domain.PlanningRevision, error) {
 	var (
-		id         string
-		sessionID  string
-		number     int
-		analysis   string
-		plan       string
-		validation sql.NullString
-		createdAt  int64
+		id              string
+		sessionID       string
+		number          int
+		snapshotVersion int
+		analysis        string
+		plan            string
+		validation      sql.NullString
+		createdAt       int64
 	)
 	if err := row.Scan(
 		&id,
 		&sessionID,
 		&number,
+		&snapshotVersion,
 		&analysis,
 		&plan,
 		&validation,
@@ -183,6 +186,7 @@ func scanPlanningRevision(row planningRevisionScanner) (domain.PlanningRevision,
 		ID:                      domain.ID(id),
 		PlanningSessionID:       domain.ID(sessionID),
 		RevisionNumber:          number,
+		SnapshotVersion:         snapshotVersion,
 		RequirementAnalysisJSON: json.RawMessage(analysis),
 		ImplementationPlanJSON:  json.RawMessage(plan),
 		ValidationResultJSON:    validationJSON,
