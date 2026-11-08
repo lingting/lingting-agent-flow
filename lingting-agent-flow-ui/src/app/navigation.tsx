@@ -1,4 +1,5 @@
 import {
+  BulbOutlined,
   DashboardOutlined,
   DeploymentUnitOutlined,
   ProjectOutlined,
@@ -9,6 +10,7 @@ import type { MenuRouteDefinition } from "lingting-react-ui";
 
 import { MachinesPage } from "@/pages/machines";
 import { OverviewPage } from "@/pages/overview";
+import { PlanningWorkbenchPage } from "@/pages/planning";
 import { ProjectsPage } from "@/pages/projects";
 import { SettingsPage } from "@/pages/settings";
 import { TasksPage } from "@/pages/tasks";
@@ -20,6 +22,12 @@ export const navigationRoutes: readonly MenuRouteDefinition[] = [
     icon: <DashboardOutlined />,
     path: "overview",
     title: "概览",
+  },
+  {
+    component: PlanningWorkbenchPage,
+    icon: <BulbOutlined />,
+    path: "planning",
+    title: "需求工作台",
   },
   {
     component: TasksPage,

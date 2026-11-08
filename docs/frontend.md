@@ -82,3 +82,53 @@
 - 前端测试位于 `lingting-agent-flow-ui/tests/`，测试产物写入操作系统临时目录下的随机唯一目录并保留，
   不得自动清理。
 - 不得声称未运行的测试已经通过；跳过与失败必须如实报告。测试授权的通用规则见 [testing.md](testing.md)。
+
+## 8. 需求工作台
+
+需求工作台（`/planning`）是 M3 交付的前端页面，围绕规划会话与两阶段分析展开；本阶段不提供方案
+确认与正式任务生成。
+
+### 8.1 结构
+
+```text
+src/pages/planning/
+├── PlanningWorkbenchPage.tsx        页面编排：只组织面板，不实现请求与状态迁移
+├── planning.ts                      纯函数：状态展示、操作可用性、错误分类、快照字段、节点判定
+├── hooks/
+│   ├── usePlanningSessions.ts       当前项目的会话列表与新建会话
+│   ├── usePlanningSessionFacts.ts   会话、消息与方案版本（服务端事实，唯一数据源）
+│   ├── usePlanningAnalysisRun.ts    提交需求、两阶段分析、显式重试与放弃
+│   └── usePlanningWorkbench.ts      选择状态（项目 → 会话 → 执行节点）与刷新编排
+└── components/                      上下文、会话状态、消息、输入框与 Revision 预览面板
+```
+
+- 会话状态、消息与 Revision 一律来自服务端读取；动作结束后重新读取，不用请求返回值就地拼装界面。
+- 切换 Project 会清空当前会话、消息与 Revision 的页面上下文，不使用浏览器存储替代服务端事实。
+
+### 8.2 API 接入
+
+- 规划接口集中在 `src/lib/api/planning.ts`（会话、消息、方案版本、`analysis`、`analysis/retry`、
+  `abandon`），经 `src/lib/api/index.ts` 统一导出，页面不直接调用 `fetch`。
+- `POST .../analysis` 与 `POST .../analysis/retry` 是同步长请求：显式使用 `timeoutMs: 0`，且不传
+  调用方取消信号，页面卸载不会取消仍在服务端执行的模型调用。
+- 错误分类沿用统一 `ApiError`：`409` 表示执行权或状态冲突，`503` 表示规划能力不可用，网络中断与
+  超时表示"结果无法确认"，三者都不得显示成模型执行失败。
+
+### 8.3 状态与操作可用性
+
+- 状态取值来自服务端：`active` / `analyzing` / `preview_ready` / `confirmed` / `abandoned` /
+  `failed`；未知取值原样展示，不映射成成功或失败，也不开放写操作。
+- 追加需求只在 `active` / `preview_ready` 开放；`failed` 只提供显式重试，`confirmed` /
+  `abandoned` 只读，放弃规划只调用正式接口。
+- 执行节点优先取会话已绑定的值，其次是项目 `default_host_id`；两者都没有时必须由用户显式选择，
+  页面不自动选中列表中的第一个节点，已绑定的节点不允许改指。
+- 分析进行中禁止重复提交；服务端仍为 `analyzing` 但页面没有在途请求时，只展示现场并提供显式恢复，
+  不自动重发。
+
+### 8.4 测试约定
+
+- 单元测试（`tests/unit/planning.test.ts`）覆盖接口路径与请求体、`409` / `500` / `503` / 网络错误
+  分类、长请求越过默认超时不被中断、状态与操作可用性、执行节点判定、Revision 选择与预览字段。
+- 浏览器测试（`tests/e2e/planning-*.spec.ts`）用 `tests/e2e/planning-backend.ts` 提供的受控后端
+  拦截规划接口，不调用真实模型；覆盖完整闭环、失败与重试、并发冲突、网络中断、执行节点选择、
+  空状态、未知状态、只读状态与桌面 / 窄屏布局。

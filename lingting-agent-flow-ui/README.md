@@ -92,6 +92,7 @@ src/
 │   └── product-brand/       侧栏产品标识
 └── pages/
     ├── overview/            概览（含真实连接状态面板）
+    ├── planning/            需求工作台（规划会话、两阶段分析、Revision 预览）
     ├── tasks/               任务
     ├── projects/            项目
     ├── machines/            机器
@@ -118,6 +119,9 @@ tests/
   挂载、窗口重新获得焦点、页面从 bfcache 恢复时各检查一次，并按 30 秒间隔轮询。
 - 连接指示器只表示 AgentFlow HTTP API 的可用性，不代表 SSH、Docker、远程机器或 Pi Agent
   已经就绪。
+- 需求工作台接口集中在 `src/lib/api/planning.ts`，并由 `src/lib/api/index.ts` 统一导出。
+  `/analysis` 与 `/analysis/retry` 是同步长请求，显式使用 `timeoutMs: 0` 且不传调用方取消信号：
+  页面卸载不会取消仍在服务端执行的模型调用。
 
 
 ## 路由与布局
@@ -137,10 +141,13 @@ tests/
 
 - 单元测试（`tests/unit`）：`pnpm test`，覆盖 `lingting-react-ui` 实际安装版本、依赖去重配置的
   推导方式、脚本命令、导航元数据、API 客户端（成功、非成功状态码、非法 JSON、网络失败、
-  超时、取消、错误结构解析、路径不带开发地址）、连接文案与构建输出配置。
+  超时、取消、错误结构解析、路径不带开发地址）、连接文案与构建输出配置，以及需求工作台
+  的接口路径与请求体、长请求超时覆盖、错误分类、状态可用性、执行节点判定与 Revision 选择。
 - 浏览器测试（`tests/e2e`）：`pnpm exec playwright test`，由 Playwright 自动启动 `vp dev`，覆盖
   六个路由、根重定向、刷新后状态、导航切换、404、桌面与窄视口布局、水平溢出与渲染错误，以及
-  通过拦截 `/api/v1/health` 验证的已连接、未连接、503 与服务端错误说明。
+  通过拦截 `/api/v1/health` 验证的已连接、未连接、503 与服务端错误说明；需求工作台用例通过
+  `tests/e2e/planning-backend.ts` 的受控后端覆盖完整闭环、失败重试、`409`、网络中断、历史会话
+  恢复、放弃规划、未知 / 已确认状态与空状态，不调用真实模型。
 - 两个测试入口都会输出 `TEST_ARTIFACT_DIR=<绝对路径>`，产物写入操作系统临时目录
   `lingting-agent-flow-ui-tests/run-*`，测试结束后保留，不自动清理。
 - 测试默认不依赖 Go 后端、Docker、SSH、Pi CLI 或真实模型服务。
