@@ -114,6 +114,10 @@ type Deps struct {
 	//
 	// 它需要规划角色调用能力（容器内 Pi）：没有远程能力时不得产出"看起来成功"的分析。
 	PlanningAnalysis *app.PlanningAnalysisService
+	// Requirement 是方案确认与正式需求查询服务，为空时相关接口返回服务不可用。
+	//
+	// 它只依赖存储：确认时生成正式需求与任务不接触 SSH、Docker 或 Pi。
+	Requirement *app.RequirementService
 	// Logger 是日志器，为空时使用 slog.Default。
 	Logger *slog.Logger
 }
@@ -166,7 +170,8 @@ func NewHandler(deps Deps) http.Handler {
 			deps.PlanningAnalysis,
 			logger,
 		),
-		logger: logger,
+		requirement: newRequirementHandler(deps.Requirement, logger),
+		logger:      logger,
 	}
 	return withRequestID(router.newMux())
 }
@@ -214,7 +219,11 @@ type router struct {
 	//
 	// 它只做协议转换：会话读取、现场核验与运行时动作全部由生产 app 服务执行。
 	planning *planningHandler
-	logger   *slog.Logger
+	// requirement 处理方案确认与正式需求查询，缺失依赖时接口返回 503。
+	//
+	// 确认接口挂在规划的会话路径下：它操作的对象是某个规划会话采纳的方案版本。
+	requirement *requirementHandler
+	logger      *slog.Logger
 }
 
 // healthHandler 处理健康检查请求。

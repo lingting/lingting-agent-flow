@@ -298,6 +298,14 @@ func (s *TaskService) resolveHost(ctx context.Context, hostID string) (domain.ID
 
 // ensureRoles 校验角色存在且类型匹配。
 func (s *TaskService) ensureRoles(ctx context.Context, cfg domain.TaskConfig) error {
+	return ensureTaskRoles(ctx, s.store, cfg)
+}
+
+// ensureTaskRoles 校验任务配置引用的角色存在、类型匹配且未被禁用。
+//
+// 规则只在这里定义一次：建任务入口与方案确认生成入口都必须通过同一份校验，否则两条
+// 路径会得到不同的角色准入结论。参数使用 storage.Tx，调用方可以在事务内复用。
+func ensureTaskRoles(ctx context.Context, tx storage.Tx, cfg domain.TaskConfig) error {
 	checks := []struct {
 		id       domain.ID
 		expected domain.RoleType
@@ -312,7 +320,7 @@ func (s *TaskService) ensureRoles(ctx context.Context, cfg domain.TaskConfig) er
 		}{cfg.ValidatorRoleID, domain.RoleTypeValidator})
 	}
 	for _, check := range checks {
-		role, err := s.store.GetRole(ctx, check.id)
+		role, err := tx.GetRole(ctx, check.id)
 		if err != nil {
 			return fmt.Errorf("创建任务失败: 读取角色 %s 失败: %w", check.id, err)
 		}

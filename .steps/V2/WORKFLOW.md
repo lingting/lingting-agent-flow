@@ -86,24 +86,34 @@ active ──发送消息──> analyzing ──方案生成并落 Revision─�
 
 `RequirementService.Confirm(planningSessionID, revisionID)`：
 
-前置条件（任一不满足即返回 409 / 412，不写入任何记录）：
+前置条件（任一不满足即返回 409 / 412 / 404，不写入任何记录）：
 
-1. 会话 `status = preview_ready`；
-2. `revisionID` 属于该会话，且是该会话已生成的有效 Revision；
-3. 方案通过 §3 的结构化校验；
-4. 会话所属 Project 存在且未逻辑删除，且有可用执行节点（项目默认节点或调用时指定）；
+1. 会话存在且 `status = preview_ready`（`confirmed` 是终态，不再接受确认）；
+2. `revisionID` 由用户显式指定，且属于该会话、快照版本可读、需求分析与实施方案都能独立解析；
+3. 方案通过 §3 的结构化校验（至少 1 个任务、依赖只指向更早的任务、标题 / 描述 / 验收条件非空），
+   任务顺序由数组下标 +1 推导并连续唯一；
+4. 会话所属 Project 存在且未逻辑删除，且有可用执行节点（调用时指定优先，其次项目
+   `default_host_id`；两者都没有时失败，不回退本机执行，也不读规划会话绑定的规划容器节点）；
 5. 会话与 Project 一致，防止把 A 项目的草案落到 B 项目。
 
 事务内一次性创建（同一事务，失败整体回滚，不留部分任务）：
 
 - `requirements`：1 条，`project_id`、`planning_session_id`、`final_analysis_json`、
-  `final_plan_json`、`confirmed_at` 来自确认的 Revision；
-- `tasks`：N 条，`requirement_id` 指向新需求，`requirement_sequence` = 方案顺序，
-  项目/环境/节点/工作目录从 Project 继承并写入 `config_json` 快照；
-- 步骤：按 V1 既有计划生成约定写入（不在 HTTP Handler 内临时拼装）；
-- `planning_sessions`：`status = confirmed`、`adopted_revision_id`、`finished_at`。
+  `final_plan_json`、`confirmed_at` 来自确认的 Revision；标题取最终需求分析的摘要，描述是
+  "摘要 + 目标 + 范围 + 约束 + 验收标准"的确定性摘要；初始状态沿用需求领域的既有约定（`queued`）；
+- `tasks`：N 条，`requirement_id` 指向新需求，`requirement_sequence` = 方案数组顺序，
+  仓库 / 分支 / 环境 / 环境版本 / 缓存 / 工作目录 / 执行节点从 Project 继承并写入 `config_json` 快照；
+- 步骤：**确认阶段不创建 Step**。V1 的约定是任务进入执行流程后由 Planner 在任务容器内生成计划，
+  因此 `queued` 任务在开始执行前没有 Step 是既定事实，`GeneratePlan` 的职责不变，也不在两处生成同一组步骤；
+- `planning_sessions`：`status = confirmed`、`adopted_revision_id`、`finished_at`，以 `preview_ready`
+  为前置条件做条件更新。
 
-确认完成后：任务处于待执行（`queued`），**不**调用 `TaskLaunchService`，**不**进入 Scheduler。
+并发语义：同一会话只允许确认成功一次。状态条件更新以 `preview_ready` 为前置条件，并发确认只有一个
+返回成功，其余返回 409 且整体回滚，不会创建第二个需求或第二批任务，也不会覆盖其他执行者写入的
+`adopted_revision_id`。前端按钮禁用只是体验层，不承担并发安全。
+
+确认完成后：任务处于待执行（`queued`），**不**调用 `TaskLaunchService`，**不**进入 Scheduler，
+**不**创建 Step / Attempt / Session / WorkflowRun / 容器。
 
 ## 6. 项目级执行调度
 

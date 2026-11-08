@@ -100,6 +100,10 @@ type Options struct {
 	//
 	// 它需要规划角色调用能力：没有远程能力时不得产出"看起来成功"的分析。
 	PlanningAnalysis *app.PlanningAnalysisService
+	// Requirement 是方案确认与正式需求查询服务，为空时相关接口报告服务不可用。
+	//
+	// 它只依赖存储：确认生成正式需求与任务不接触远程资源，生成后的任务保持待执行。
+	Requirement *app.RequirementService
 	// Files 是前端静态资源文件系统，为空时使用嵌入资源。
 	Files fs.FS
 	// RequireWebUI 为 true 时，缺少前端构建产物将导致构造失败。
@@ -168,6 +172,7 @@ func New(options Options) (*Server, error) {
 		PlanningSessions:  options.PlanningSessions,
 		PlanningRuntime:   options.PlanningRuntime,
 		PlanningAnalysis:  options.PlanningAnalysis,
+		Requirement:       options.Requirement,
 		Logger:            logger,
 	})
 	web, err := buildWebHandler(options.Files, options.RequireWebUI, logger)

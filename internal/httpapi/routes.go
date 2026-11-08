@@ -9,36 +9,38 @@ import (
 // 路由模式中的 {name} 与 Request.PathValue 共用同一组常量，避免两处拼写漂移：
 // 参数名写错会让取值静默变空，而不是在注册阶段报错。
 const (
-	paramTaskID      = "taskID"
-	paramStepID      = "stepID"
-	paramAttemptID   = "attemptID"
-	paramProjectID   = "projectID"
-	paramHostID      = "hostID"
-	paramRoleID      = "roleID"
-	paramContainerID = "containerID"
-	paramRecordID    = "recordID"
-	paramSessionID   = "sessionID"
-	paramRunID       = "runID"
-	paramEnvType     = "environmentType"
-	paramEnvName     = "environmentName"
-	paramEnvVersion  = "versionNumber"
+	paramTaskID        = "taskID"
+	paramStepID        = "stepID"
+	paramAttemptID     = "attemptID"
+	paramProjectID     = "projectID"
+	paramHostID        = "hostID"
+	paramRoleID        = "roleID"
+	paramContainerID   = "containerID"
+	paramRecordID      = "recordID"
+	paramSessionID     = "sessionID"
+	paramRequirementID = "requirementID"
+	paramRunID         = "runID"
+	paramEnvType       = "environmentType"
+	paramEnvName       = "environmentName"
+	paramEnvVersion    = "versionNumber"
 )
 
 // 路由模式中的动态路径段。
 const (
-	matchTaskID      = "{" + paramTaskID + "}"
-	matchStepID      = "{" + paramStepID + "}"
-	matchAttemptID   = "{" + paramAttemptID + "}"
-	matchProjectID   = "{" + paramProjectID + "}"
-	matchHostID      = "{" + paramHostID + "}"
-	matchRoleID      = "{" + paramRoleID + "}"
-	matchContainerID = "{" + paramContainerID + "}"
-	matchRecordID    = "{" + paramRecordID + "}"
-	matchSessionID   = "{" + paramSessionID + "}"
-	matchRunID       = "{" + paramRunID + "}"
-	matchEnvType     = "{" + paramEnvType + "}"
-	matchEnvName     = "{" + paramEnvName + "}"
-	matchEnvVersion  = "{" + paramEnvVersion + "}"
+	matchTaskID        = "{" + paramTaskID + "}"
+	matchStepID        = "{" + paramStepID + "}"
+	matchAttemptID     = "{" + paramAttemptID + "}"
+	matchProjectID     = "{" + paramProjectID + "}"
+	matchHostID        = "{" + paramHostID + "}"
+	matchRoleID        = "{" + paramRoleID + "}"
+	matchContainerID   = "{" + paramContainerID + "}"
+	matchRecordID      = "{" + paramRecordID + "}"
+	matchSessionID     = "{" + paramSessionID + "}"
+	matchRequirementID = "{" + paramRequirementID + "}"
+	matchRunID         = "{" + paramRunID + "}"
+	matchEnvType       = "{" + paramEnvType + "}"
+	matchEnvName       = "{" + paramEnvName + "}"
+	matchEnvVersion    = "{" + paramEnvVersion + "}"
 )
 
 // 路由模式前缀。
@@ -77,6 +79,11 @@ const (
 	matchPlanningRuntime   = matchPlanningSession + "/" + planningRuntimeSegment
 	matchPlanningPrepare   = matchPlanningRuntime + "/" + planningPrepareSegment
 	matchPlanningRelease   = matchPlanningRuntime + "/" + planningReleaseSegment
+	matchPlanningConfirm   = matchPlanningSession + "/" + planningConfirmSegment
+
+	matchRequirements        = PathRequirements
+	matchRequirement         = matchRequirements + "/" + matchRequirementID
+	matchProjectRequirements = matchProject + "/" + requirementsSegment
 )
 
 // apiRouteMethod 是路由上允许的一个 HTTP 方法及其处理函数。
@@ -156,6 +163,10 @@ func (rt *router) routes() []apiRoute {
 	planningAnalysisService := rt.availabilityGuard(
 		rt.planning.analysis != nil,
 		"规划分析服务未初始化",
+	)
+	requirementService := rt.availabilityGuard(
+		rt.requirement.service != nil,
+		"需求服务未初始化",
 	)
 
 	// 环境接口在判定方法之前只校验段值：非法环境类型、名称或版本号按参数错误返回
@@ -663,6 +674,29 @@ func (rt *router) routes() []apiRoute {
 			guard:            guardFor(planningRuntimeService, rt.pathIDGuard(paramSessionID)),
 			allow:            "POST",
 			methodNotAllowed: "该接口只支持 POST 请求",
+		},
+		// 方案确认：把指定 Revision 转换成正式 Requirement + Task，任务保持待执行。
+		{
+			pattern:          matchPlanningConfirm,
+			methods:          post(rt.requirement.confirm),
+			guard:            guardFor(requirementService, rt.pathIDGuard(paramSessionID)),
+			allow:            "POST",
+			methodNotAllowed: "该接口只支持 POST 请求",
+		},
+		// 正式需求只读查询：需求详情与项目需求列表。
+		{
+			pattern:          matchRequirement,
+			methods:          get(rt.requirement.detail),
+			guard:            guardFor(requirementService, rt.pathIDGuard(paramRequirementID)),
+			allow:            "GET, HEAD",
+			methodNotAllowed: "该接口只支持 GET 请求",
+		},
+		{
+			pattern:          matchProjectRequirements,
+			methods:          get(rt.requirement.listByProject),
+			guard:            guardFor(requirementService, rt.pathIDGuard(paramProjectID)),
+			allow:            "GET, HEAD",
+			methodNotAllowed: "该接口只支持 GET 请求",
 		},
 	}
 }

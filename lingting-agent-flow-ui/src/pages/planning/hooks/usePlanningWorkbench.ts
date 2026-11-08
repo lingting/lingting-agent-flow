@@ -13,11 +13,13 @@ import { useCallback, useState } from "react";
 import type { PlanningSession } from "@/lib/api";
 import {
   planningCapabilities,
+  resolveConfirmHost,
   resolvePlanningHost,
   type PlanningCapabilities,
   type PlanningHostReadiness,
 } from "@/pages/planning/planning";
 import { usePlanningAnalysisRun } from "@/pages/planning/hooks/usePlanningAnalysisRun";
+import { usePlanningConfirm } from "@/pages/planning/hooks/usePlanningConfirm";
 import { usePlanningSessionFacts } from "@/pages/planning/hooks/usePlanningSessionFacts";
 import { usePlanningSessions } from "@/pages/planning/hooks/usePlanningSessions";
 import { findProject } from "@/pages/projects/projects";
@@ -54,6 +56,12 @@ export type PlanningWorkbench = {
   /** 显式恢复 / 重试当前会话 */
   resumeAnalysis: () => Promise<void>;
   abandonSession: () => Promise<void>;
+  /** 方案确认：确认动作状态与已采纳结果 */
+  confirm: ReturnType<typeof usePlanningConfirm>;
+  /** 确认方案时使用的执行节点判定（不读会话已绑定的规划节点） */
+  confirmHost: { hostID?: string; blockedReason?: string };
+  /** 确认选定的 Revision 并生成正式需求与任务 */
+  confirmRevision: (revisionID: string) => Promise<void>;
 };
 
 export function usePlanningWorkbench(): PlanningWorkbench {
@@ -97,6 +105,28 @@ export function usePlanningWorkbench(): PlanningWorkbench {
     running: run.state.running !== undefined,
     status: session?.status ?? "",
   });
+
+  /** 确认方案时使用的执行节点：只看显式选择与项目默认节点，不看会话已绑定的规划节点 */
+  const confirmHost = resolveConfirmHost({
+    hostsStatus:
+      hosts.status === "ready" ? "ready" : hosts.status === "error" ? "error" : "loading",
+    projectDefaultHostID: project?.default_host_id,
+    selectedHostID,
+  });
+
+  const confirm = usePlanningConfirm({
+    projectID,
+    refresh,
+    sessionID,
+    status: session?.status ?? "",
+  });
+
+  const confirmRevision = useCallback(
+    async (revisionID: string) => {
+      await confirm.confirm(revisionID, confirmHost.hostID);
+    },
+    [confirm, confirmHost.hostID],
+  );
 
   /** 切换项目：清空执行节点选择与当前会话，避免把上一个项目的上下文带进新项目 */
   const selectProject = useCallback((nextProjectID?: string) => {
@@ -143,6 +173,9 @@ export function usePlanningWorkbench(): PlanningWorkbench {
     capabilities,
     createSession,
     facts,
+    confirm,
+    confirmHost,
+    confirmRevision,
     hostReadiness,
     hosts,
     project,

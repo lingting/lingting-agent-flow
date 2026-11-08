@@ -261,6 +261,10 @@ type Task struct {
 	FailureSummary string `json:"failure_summary,omitempty"`
 	// IdempotencyKey 是客户端请求标识，用于阻止同一请求重复创建任务。
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	// RequirementSequence 是该任务在所属需求内的执行顺序，从 1 开始连续唯一。
+	//
+	// 空值表示该任务不是由方案确认生成（历史任务没有这个事实，读取层不得补造顺序）。
+	RequirementSequence *int `json:"requirement_sequence,omitempty"`
 	// DeletedAt 是逻辑删除时间，空值表示未被删除。
 	//
 	// 删除只标记时间，任务行与其历史记录永久保留，不做物理删除，也不级联删除。
@@ -338,6 +342,9 @@ func (t Task) Validate() error {
 	}
 	if t.CancelRequested && t.CancelRequestedAt == nil {
 		return invalidField("Task", "cancel_requested_at", "取消请求必须记录时间")
+	}
+	if t.RequirementSequence != nil && *t.RequirementSequence < 1 {
+		return invalidField("Task", "requirement_sequence", "需求内顺序必须大于 0")
 	}
 	return nil
 }
@@ -432,6 +439,22 @@ func (t *Task) SetContainer(containerID string) error {
 		return invalidField("Task", "", "实体为空")
 	}
 	t.ContainerID = strings.TrimSpace(containerID)
+	return nil
+}
+
+// SetRequirementSequence 记录任务在所属需求内的执行顺序。
+//
+// 顺序是确认方案时确定的业务事实，只能由确认流程写入；开始执行、重试与恢复都不得改写
+// 它，否则需求内的执行顺序会随执行过程漂移。
+func (t *Task) SetRequirementSequence(sequence int) error {
+	if t == nil {
+		return invalidField("Task", "", "实体为空")
+	}
+	if sequence < 1 {
+		return invalidField("Task", "requirement_sequence", "需求内顺序必须大于 0")
+	}
+	value := sequence
+	t.RequirementSequence = &value
 	return nil
 }
 

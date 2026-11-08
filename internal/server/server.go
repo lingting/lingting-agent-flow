@@ -260,6 +260,10 @@ type Server struct {
 	//
 	// 它只依赖存储：会话创建、消息与 Revision 追加都在同一事务内完成，不接触远程资源。
 	planningSessions *app.PlanningSessionService
+	// requirements 是正式需求确认与查询服务，由已打开的数据库构造。
+	//
+	// 它只依赖存储：确认在单个事务内生成需求、任务与顺序，并把规划会话推进为 confirmed。
+	requirements *app.RequirementService
 	// planningRuntime 是规划运行环境服务，复用上面的 containerService。
 	//
 	// 容器服务缺失时保持为空：规划运行环境不可用，不退化成任何本机执行路径。
@@ -998,6 +1002,17 @@ func (s *Server) planningServices() error {
 		}
 		s.planningSessions = sessions
 	}
+	// 需求确认与查询只依赖存储：确认生成正式需求与任务不接触 SSH、Docker 或 Pi，
+	// 因此容器能力缺失时仍可装配（生成后的任务保持 queued，不会自动开始执行）。
+	if s.requirements == nil {
+		requirements, err := app.NewRequirementService(app.RequirementServiceOptions{
+			Store: s.store,
+		})
+		if err != nil {
+			return fmt.Errorf("初始化需求服务失败: %w", err)
+		}
+		s.requirements = requirements
+	}
 	// 分析占用恢复只依赖存储：它把上一次进程中断留下的 analyzing 占用收敛为 failed，
 	// 不接触容器或 Session 文件，因此在容器能力缺失时同样需要装配。
 	analysisRecovery, err := app.NewPlanningAnalysisRecoveryService(
@@ -1145,6 +1160,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		PlanningSessions: s.planningSessions,
 		PlanningRuntime:  s.planningRuntime,
 		PlanningAnalysis: s.planningAnalysis,
+		Requirement:      s.requirements,
 		CodeInitialize:   s.codeInitialize,
 		RequireWebUI:     s.requireWeb,
 		ShutdownTimeout:  s.shutdownTimeout,

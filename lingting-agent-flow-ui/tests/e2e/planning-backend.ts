@@ -31,6 +31,18 @@ export type AnalysisMode =
   /** 挂起请求，直到用例调用 `release` 指定后续行为 */
   | { kind: "deferred" };
 
+/**
+ * 确认请求的响应行为。
+ *
+ * `success` 生成正式需求与任务并把会话推进为 `confirmed`；`conflict` 模拟并发确认或
+ * 状态不允许；`prerequisite` 模拟缺少可用执行节点；`network` 模拟连接中断。
+ */
+export type ConfirmMode =
+  | { kind: "success" }
+  | { kind: "conflict" }
+  | { kind: "prerequisite" }
+  | { kind: "network" };
+
 /** 预置会话：用于"重新打开历史会话"场景 */
 export type SessionSeed = {
   id: string;
@@ -58,13 +70,21 @@ type BackendState = {
   revisions: Map<string, RevisionRecord[]>;
   /** 分析请求携带过的 host_id */
   analysisHosts: string[];
+  /** 确认请求携带过的 revision_id 与 host_id */
+  confirmRequests: Array<{ revisionID: string; hostID: string }>;
+  /** 确认生成的正式需求 */
+  requirements: Map<string, Record<string, unknown> & { id: string }>;
+  /** 确认生成的正式任务：按需求分组，顺序即 requirement_sequence */
+  requirementTasks: Map<string, Array<Record<string, unknown> & { id: string }>>;
   counters: {
     analysis: number;
     retry: number;
     message: number;
     abandon: number;
     create: number;
+    /** 正式任务接口调用次数：确认流程不得触发它 */
     task: number;
+    confirm: number;
   };
 };
 
@@ -75,6 +95,8 @@ export type PlanningBackend = {
   setAnalysis: (mode: AnalysisMode) => void;
   /** 释放挂起中的分析请求，并指定它后续的行为 */
   release: (mode: AnalysisMode) => void;
+  /** 切换下一次确认请求的行为 */
+  setConfirm: (mode: ConfirmMode) => void;
 };
 
 /** 固定的时间戳，避免断言依赖真实时钟 */
@@ -209,6 +231,68 @@ function revisionPayload(sessionID: string, revisionNumber: number): RevisionRec
   };
 }
 
+/**
+ * 正式需求响应体，字段与 Go 端 `httpapi.RequirementResponse` 一致。
+ *
+ * 标题与描述按服务端规则由需求分析快照推导：标题取摘要，描述由摘要与目标、范围、
+ * 约束、验收标准组成。
+ */
+function requirementPayload(input: {
+  id: string;
+  projectID: string;
+  sessionID: string;
+  analysis: ReturnType<typeof requirementAnalysisPayload>;
+}): Record<string, unknown> & { id: string } {
+  const blocks = [
+    ["目标", input.analysis.goals],
+    ["范围", input.analysis.scope],
+    ["约束", input.analysis.constraints],
+    ["验收标准", input.analysis.acceptance_criteria],
+  ] as const;
+  const description = [
+    input.analysis.summary,
+    ...blocks.map(([label, items]) => `${label}：\n${items.map((item) => `- ${item}`).join("\n")}`),
+  ].join("\n\n");
+  return {
+    confirmed_at: TIMESTAMP,
+    created_at: TIMESTAMP,
+    description,
+    id: input.id,
+    planning_session_id: input.sessionID,
+    priority: "normal",
+    project_id: input.projectID,
+    source: "manual",
+    status: "queued",
+    title: input.analysis.summary,
+    updated_at: TIMESTAMP,
+  };
+}
+
+/** 正式任务响应体，字段与 Go 端 `httpapi.RequirementTaskResponse` 一致 */
+function requirementTaskPayload(input: {
+  id: string;
+  requirementID: string;
+  sequence: number;
+  hostID?: string;
+  title: string;
+  description: string;
+  acceptanceCriteria: string[];
+}): Record<string, unknown> & { id: string } {
+  const payload: Record<string, unknown> & { id: string } = {
+    acceptance_criteria: input.acceptanceCriteria,
+    base_ref: "main",
+    created_at: TIMESTAMP,
+    goal: `${input.title}\n\n${input.description}`,
+    id: input.id,
+    repository_path: "ssh://git.example.com/team/demo-service",
+    requirement_id: input.requirementID,
+    requirement_sequence: input.sequence,
+    status: "queued",
+  };
+  if (input.hostID) payload.host_id = input.hostID;
+  return payload;
+}
+
 /** 返回 JSON 响应 */
 async function fulfillJSON(route: Route, status: number, body: unknown) {
   await route.fulfill({
@@ -240,18 +324,36 @@ export async function installPlanningBackend(
     hosts?: MockHost[];
     sessions?: SessionSeed[];
     analysis?: AnalysisMode;
+    /** 确认请求的行为 */
+    confirm?: ConfirmMode;
   } = {},
 ): Promise<PlanningBackend> {
   const state: BackendState = {
     analysisHosts: [],
-    counters: { abandon: 0, analysis: 0, create: 0, message: 0, retry: 0, task: 0 },
+    confirmRequests: [],
+    counters: {
+      abandon: 0,
+      analysis: 0,
+      confirm: 0,
+      create: 0,
+      message: 0,
+      retry: 0,
+      task: 0,
+    },
     hosts: options.hosts ?? [],
     messages: new Map(),
     projects: options.projects ?? [{ id: "demo-service", name: "示例服务" }],
+    requirementTasks: new Map(),
+    requirements: new Map(),
     revisions: new Map(),
     sessions: new Map(),
   };
-  const control: { mode: AnalysisMode; pending: Array<() => void> } = {
+  const control: {
+    mode: AnalysisMode;
+    confirmMode: ConfirmMode;
+    pending: Array<() => void>;
+  } = {
+    confirmMode: options.confirm ?? { kind: "success" },
     mode: options.analysis ?? { kind: "success" },
     pending: [],
   };
@@ -294,6 +396,9 @@ export async function installPlanningBackend(
     },
     setAnalysis: (mode) => {
       control.mode = mode;
+    },
+    setConfirm: (mode) => {
+      control.confirmMode = mode;
     },
     state,
   };
@@ -506,6 +611,75 @@ export async function installPlanningBackend(
       await fulfillJSON(route, 200, { session });
       return;
     }
+    if (resource === "confirm") {
+      state.counters.confirm += 1;
+      const body = route.request().postDataJSON() as {
+        revision_id?: string;
+        host_id?: string;
+      } | null;
+      const revisionID = body?.revision_id?.trim() ?? "";
+      const hostID = body?.host_id?.trim() ?? "";
+      state.confirmRequests.push({ hostID, revisionID });
+      const mode = control.confirmMode;
+      if (mode.kind === "network") {
+        await route.abort("connectionreset");
+        return;
+      }
+      if (mode.kind === "conflict") {
+        await fulfillError(route, 409, "state_conflict", "规划会话状态不允许确认");
+        return;
+      }
+      if (mode.kind === "prerequisite") {
+        await fulfillError(
+          route,
+          412,
+          "precondition_failed",
+          "项目未设置默认执行节点，确认必须显式指定执行节点",
+        );
+        return;
+      }
+      if (session.status !== "preview_ready") {
+        await fulfillError(route, 409, "state_conflict", "规划会话状态不允许确认");
+        return;
+      }
+      const revisions = state.revisions.get(sessionID) ?? [];
+      const revision = revisions.find((item) => item.id === revisionID);
+      if (!revision) {
+        await fulfillError(route, 404, "not_found", "方案版本不属于当前会话");
+        return;
+      }
+      const requirementID = `${sessionID}-requirement`;
+      const requirement = requirementPayload({
+        analysis: requirementAnalysisPayload(revision.revision_number),
+        id: requirementID,
+        projectID: typeof session.project_id === "string" ? session.project_id : "",
+        sessionID,
+      });
+      const plan = revision.implementation_plan as ReturnType<typeof implementationPlanPayload>;
+      const tasks = plan.tasks.map((task, index) =>
+        requirementTaskPayload({
+          acceptanceCriteria: [...task.acceptance_criteria],
+          description: task.description,
+          hostID: hostID || undefined,
+          id: `${requirementID}-task-${index + 1}`,
+          requirementID,
+          sequence: index + 1,
+          title: task.title,
+        }),
+      );
+      state.requirements.set(requirementID, requirement);
+      state.requirementTasks.set(requirementID, tasks);
+      session.status = "confirmed";
+      session.adopted_revision_id = revision.id;
+      session.finished_at = TIMESTAMP;
+      session.updated_at = TIMESTAMP;
+      await fulfillJSON(route, 201, {
+        adopted_revision_id: revision.id,
+        requirement,
+        tasks,
+      });
+      return;
+    }
     if (resource === "analysis") {
       if (rest[3] === "retry") {
         await runAnalysis(route, sessionID, "retry");
@@ -515,6 +689,38 @@ export async function installPlanningBackend(
       return;
     }
     await fulfillError(route, 404, "not_found", "未知的规划接口路径");
+  });
+
+  // 正式需求只读查询：/api/v1/requirements/{id} 与 /api/v1/projects/{id}/requirements
+  await page.route("**/api/v1/requirements/**", async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.fallback();
+      return;
+    }
+    const segments = segmentsOf(route);
+    const requirementID = segments[3] ?? "";
+    const requirement = state.requirements.get(requirementID);
+    if (!requirement) {
+      await fulfillError(route, 404, "not_found", "需求不存在");
+      return;
+    }
+    await fulfillJSON(route, 200, {
+      requirement,
+      tasks: state.requirementTasks.get(requirementID) ?? [],
+    });
+  });
+
+  await page.route("**/api/v1/projects/*/requirements", async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.fallback();
+      return;
+    }
+    const segments = segmentsOf(route);
+    const projectID = segments[3] ?? "";
+    const records = [...state.requirements.values()].filter(
+      (requirement) => requirement.project_id === projectID,
+    );
+    await fulfillJSON(route, 200, { records, total: records.length });
   });
 
   return backend;

@@ -23,7 +23,7 @@
 | 表 | 关键事实 |
 |---|---|
 | `roles` | `id`、`name`、`type`（无取值白名单）、`runner`、`model`、`system_prompt`、`tools_policy_json`（`json_valid`）、`enabled`、时间戳、`deleted_at`（逻辑删除）；索引 `idx_roles_type (type, enabled)` |
-| `requirements` | `id`、`title`、`description`、`priority`（非负整数，0 最高）、`status`（无白名单）、`source`、`source_id`、时间戳；索引 `idx_requirements_queue (status, priority, created_at)` |
+| `requirements` | `id`、`title`、`description`、`priority`（非负整数，0 最高）、`status`（无白名单）、`source`、`source_id`、时间戳；确认生成相关列 `project_id`、`planning_session_id`、`final_analysis_json` / `final_plan_json`（`json_valid`）、`confirmed_at`、`deleted_at`（全部可空，业务完整性由应用层强制）；索引 `idx_requirements_queue (status, priority, created_at)`、`idx_requirements_project (project_id, created_at) WHERE project_id IS NOT NULL AND deleted_at IS NULL`、`idx_requirements_active (created_at) WHERE deleted_at IS NULL` |
 | `execution_hosts` | 连接目标（`host` / `port` 1–65535 / `username` / `workspace_root`）、`is_default`（部分唯一索引保证最多一个）、`enabled`、认证配置（`auth_method`、`private_key_path`、主机密钥算法/指纹/信任时间）、最近连接状态与错误、`validation_*` 预检状态与代次、`deleted_at`；触发器保证"私钥认证必须给出私钥路径" |
 
 `execution_hosts` 的索引：`idx_execution_hosts_default (is_default) WHERE is_default = 1`、
@@ -33,7 +33,7 @@
 
 | 表 | 关键事实 |
 |---|---|
-| `tasks` | `requirement_id`、`status`（无白名单）、`host_id`、`config_json`、`repository_path`、`base_ref`、`worktree_path`、`container_id`、`current_step_id` / `current_attempt_id`、取消请求、`final_result`、`failure_summary`、`idempotency_key`（部分唯一索引）、租约三列（`lease_owner` / `lease_expires_at` / `lease_epoch`）、`deleted_at` |
+| `tasks` | `requirement_id`、`status`（无白名单）、`host_id`、`config_json`、`repository_path`、`base_ref`、`worktree_path`、`container_id`、`current_step_id` / `current_attempt_id`、取消请求、`final_result`、`failure_summary`、`idempotency_key`（部分唯一索引）、`requirement_sequence`（可空，部分唯一索引 `(requirement_id, requirement_sequence) WHERE requirement_sequence IS NOT NULL`）、租约三列（`lease_owner` / `lease_expires_at` / `lease_epoch`）、`deleted_at` |
 | `steps` | `task_id`、`sequence`（`UNIQUE (task_id, sequence)`）、`step_type`（默认 `develop`，无白名单）、`title`、`objective`、`instructions_json`、`role_id` / `role_snapshot_json`（非 Agent 阶段为空）、`verification_spec_json`、`retry_json`、`max_attempts`（1–10）、`current_attempt_id`、`status`、`result`、`failure_stage`、`failure_summary`、时间戳 |
 | `attempts` | `step_id`、`task_id`（可空，仅供历史孤立记录）、`attempt_number`（`UNIQUE (step_id, attempt_number)`）、`status`、`container_id` / `docker_id`、`input_digest`、`exit_code`、`timed_out` / `cancelled`、重试与失败分类、`verification_verdict` / `verification_summary` / `verification_id`、`session_ids_json`、`code_save_id`、Git 快照（`git_branch` / `git_before_json` / `git_after_json`）、修复预算归属（`budget_scope` / `budget_scope_id`）、时间戳 |
 | `sessions` | `task_id`、`step_id` / `attempt_id`（`attempt_id` 非空时 `step_id` 必须非空）、`role_id` / `role_snapshot_json`、`provider` / `model`、`external_session_id`、`process_id`、`status`、Session 与输出路径（`session_jsonl_path` / `session_html_path` / `stdout_path` / `stderr_path` / `archive_path` / `archive_status`）、`run_status` / `completeness` / `export_status` / `exit_code` / `failure_summary`、`invocation_id`、`container_id` / `docker_id`、时间戳 |
@@ -87,7 +87,7 @@
 它，确定性验证结论由 `validation_runs` 与 `validation_check_results` 承载。禁止在业务代码中重新写入或
 读取，也禁止在没有可靠数据保全方案时删除该表定义。
 
-## 3. V2 已交付的结构（M2）
+## 3. V2 已交付的结构（M2 / M3 / M4）
 
 - **规划会话**（M2 第二阶段）：`planning_sessions` / `planning_messages` / `planning_revisions` 三张表
   与四个索引（两个会话列表索引、消息序号唯一索引、方案版本唯一索引）。
@@ -97,6 +97,14 @@
 - **规划会话租约表已删除**：M2 第九阶段曾引入 `planning_session_leases`（含部分索引
   `idx_planning_session_leases_expiry`）做跨进程互斥；单 Server 架构确认后该表与对应的 owner、epoch、
   TTL、续租机制一起删除，迁移脚本中不再存在，也不需要为旧开发数据库保留迁移路径。
+- **需求的项目关联与规划快照**（M4，迁移 `00003_requirement_confirmation.sql`）：
+  `requirements` 增加 `project_id`、`planning_session_id`、`final_analysis_json`、`final_plan_json`、
+  `confirmed_at`、`deleted_at` 与两个索引（项目需求列表、未删除需求列表）。这些列全部可空：
+  "有规划来源就必须完整"由 `internal/domain` 与确认流程在应用层强制，数据库不复制这套组合判定；
+  `final_*` 只存用户确认的那一版 Revision 快照，只做 `json_valid` 结构约束。
+- **需求内任务顺序**（M4，同一个迁移）：`tasks` 增加 `requirement_sequence` 与部分唯一索引
+  `(requirement_id, requirement_sequence) WHERE requirement_sequence IS NOT NULL`。顺序是业务事实而不是
+  时间戳推断值，由确认生成流程按下标写入；历史任务是 NULL，不参与唯一索引，也不补造顺序。
 
 固定四角色不需要结构变化：`roles.type` 没有取值白名单，新增角色类型可直接写入；"固定身份"由 `domain`
 常量与 `app.RoleService` 保证，不是数据库约束；缺失角色由应用层按固定 ID 补齐，已有角色不被覆盖。
@@ -105,12 +113,6 @@
 
 以下变化落地时**追加新的迁移脚本**，不提供旧库升级：已有的开发数据库需要用户自行备份后手动重建。
 
-- **M3 需求项目关联**：`requirements` 增加 `project_id`、`planning_session_id`、`final_analysis_json`、
-  `final_plan_json`、`confirmed_at`、`deleted_at`，并增加覆盖"项目下需求列表"的索引。这些列全部可空：
-  业务必填性由确认流程在应用层强制；`final_*` 只存用户确认的那一版 Revision 快照。
-- **M4 需求内任务顺序**：`tasks` 增加 `requirement_sequence` 与部分唯一索引
-  `(requirement_id, requirement_sequence) WHERE requirement_sequence IS NOT NULL`。顺序是业务事实而不是
-  时间戳推断值，由确认生成流程写入。
 - **M5 项目执行租约**：新增 `project_execution_leases`，以 `project_id` 为主键表达"每个项目最多一份
   执行权"，释放不删行、以单调 `epoch` 做 fencing，与 `tasks` 的任务租约并存且互不替代。
 

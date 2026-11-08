@@ -329,14 +329,14 @@ func (s *ProjectService) resolveDefaultHostID(
 // 而言这是参数错误（写错标识），不是"要操作的项目不存在"。
 func resolveTaskProject(
 	ctx context.Context,
-	store storage.Store,
+	tx storage.Tx,
 	projectID string,
 ) (domain.Project, error) {
 	trimmed := strings.ToLower(strings.TrimSpace(projectID))
 	if err := domain.RequireProjectID(trimmed); err != nil {
 		return domain.Project{}, fmt.Errorf("%w: %w", ErrTaskInvalidInput, err)
 	}
-	project, err := store.GetProject(ctx, domain.ID(trimmed))
+	project, err := tx.GetProject(ctx, domain.ID(trimmed))
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return domain.Project{}, fmt.Errorf(

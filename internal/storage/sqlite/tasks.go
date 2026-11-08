@@ -16,10 +16,10 @@ const taskColumns = `id, requirement_id, status, host_id, config_json, repositor
 	base_ref, worktree_path, container_id, current_step_id, current_attempt_id,
 	cancel_requested, cancel_requested_at, final_result, failure_summary,
 	idempotency_key, deleted_at, created_at,
-	started_at, finished_at, updated_at`
+	started_at, finished_at, updated_at, requirement_sequence`
 
 // taskInsertCount 是写入任务时的参数个数。
-const taskInsertCount = 21
+const taskInsertCount = 22
 
 // taskStore 实现 storage.TaskStore。
 type taskStore struct {
@@ -61,7 +61,8 @@ UPDATE tasks SET
 	status = ?, host_id = ?, config_json = ?, repository_path = ?, base_ref = ?,
 	worktree_path = ?, container_id = ?, current_step_id = ?, current_attempt_id = ?,
 	cancel_requested = ?, cancel_requested_at = ?, final_result = ?, failure_summary = ?,
-	idempotency_key = ?, deleted_at = ?, started_at = ?, finished_at = ?, updated_at = ?
+	idempotency_key = ?, deleted_at = ?, started_at = ?, finished_at = ?, updated_at = ?,
+	requirement_sequence = ?
 WHERE id = ?`
 	result, err := s.q.ExecContext(
 		ctx,
@@ -84,6 +85,7 @@ WHERE id = ?`
 		toMillisPtr(record.task.StartedAt),
 		toMillisPtr(record.task.FinishedAt),
 		toMillis(record.task.UpdatedAt),
+		toIntPtrParam(record.task.RequirementSequence),
 		toIDParam(record.task.ID),
 	)
 	if err != nil {
@@ -132,6 +134,7 @@ func (s taskStore) UpdateTaskIfStatus(
 		toMillisPtr(record.task.StartedAt),
 		toMillisPtr(record.task.FinishedAt),
 		toMillis(record.task.UpdatedAt),
+		toIntPtrParam(record.task.RequirementSequence),
 		toIDParam(record.task.ID),
 	)
 	for _, status := range expected {
@@ -143,7 +146,8 @@ UPDATE tasks SET
 	status = ?, host_id = ?, config_json = ?, repository_path = ?, base_ref = ?,
 	worktree_path = ?, container_id = ?, current_step_id = ?, current_attempt_id = ?,
 	cancel_requested = ?, cancel_requested_at = ?, final_result = ?, failure_summary = ?,
-	idempotency_key = ?, deleted_at = ?, started_at = ?, finished_at = ?, updated_at = ?
+	idempotency_key = ?, deleted_at = ?, started_at = ?, finished_at = ?, updated_at = ?,
+	requirement_sequence = ?
 WHERE id = ? AND status IN (` + strings.Join(conditions, ", ") + `)`
 	result, err := s.q.ExecContext(ctx, statement, args...)
 	if err != nil {
@@ -474,6 +478,7 @@ func taskInsertArgs(record taskRecord) []any {
 		toMillisPtr(task.StartedAt),
 		toMillisPtr(task.FinishedAt),
 		toMillis(task.UpdatedAt),
+		toIntPtrParam(task.RequirementSequence),
 	}
 }
 
@@ -500,6 +505,8 @@ func scanTask(row scanner) (*domain.Task, error) {
 		startedAt         sql.NullInt64
 		finishedAt        sql.NullInt64
 		updatedAt         int64
+		// requirementSequence 是可空的顺序列：NULL 表示该任务不是确认生成的。
+		requirementSequence sql.NullInt64
 	)
 	err := row.Scan(
 		&rawID,
@@ -523,6 +530,7 @@ func scanTask(row scanner) (*domain.Task, error) {
 		&startedAt,
 		&finishedAt,
 		&updatedAt,
+		&requirementSequence,
 	)
 	if err != nil {
 		return nil, err
@@ -545,6 +553,7 @@ func scanTask(row scanner) (*domain.Task, error) {
 	task.StartedAt = fromMillisPtr(startedAt)
 	task.FinishedAt = fromMillisPtr(finishedAt)
 	task.UpdatedAt = fromMillis(updatedAt)
+	task.RequirementSequence = fromIntPtr(requirementSequence)
 	if err := unmarshalJSON("Task.config", configJSON, &task.Config); err != nil {
 		return nil, err
 	}

@@ -6,6 +6,8 @@
  * - 路径与服务端 `httpapi.PathPlanningSessions` 一致，标识按段编码；
  * - 会话状态、消息发送方与 Revision 快照都原样保留服务端取值，前端不新增状态名，
  *   也不在本层补默认值；
+ * - 确认（`/confirm`）只提交 `revision_id` 与可选 `host_id`：正式需求与任务由服务端
+ *   依据已采纳的 Revision 与项目计算，前端不提交任务列表、顺序或任务配置；
  * - 两阶段分析是同步长请求（后端每个阶段默认 30 分钟），因此 `/analysis` 与
  *   `/analysis/retry` 显式覆盖客户端默认超时，生命周期交给服务端阶段超时与请求上下文。
  */
@@ -295,4 +297,129 @@ export function abandonPlanningSession(sessionID: string, options: ApiRequestOpt
     ...options,
     method: "POST",
   });
+}
+
+/**
+ * 正式需求：由方案确认在服务端生成，前端只读展示。
+ *
+ * `status` 保留服务端原值（确认生成后是需求领域既有初态），未知取值不做映射；
+ * `project_id` / `planning_session_id` / `confirmed_at` 缺失表示该需求不是确认生成的。
+ */
+export type ConfirmedRequirement = {
+  id: string;
+  title: string;
+  description: string;
+  priority: string;
+  status: string;
+  source: string;
+  project_id?: string;
+  planning_session_id?: string;
+  confirmed_at?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+/**
+ * 确认生成的正式任务。
+ *
+ * `requirement_sequence` 由服务端按方案数组顺序写入，前端不得改写、重排或让用户调整；
+ * `status` 确认后固定为 `queued`，页面不把它显示成正在执行。
+ */
+export type ConfirmedTask = {
+  id: string;
+  requirement_id: string;
+  status: string;
+  requirement_sequence?: number;
+  host_id?: string;
+  repository_path: string;
+  base_ref: string;
+  goal: string;
+  acceptance_criteria: string[];
+  created_at: string;
+};
+
+/** 一次确认的创建结果：需求、按顺序排列的任务与被采纳的 Revision */
+export type ConfirmPlanningSessionResponse = {
+  requirement: ConfirmedRequirement;
+  tasks: ConfirmedTask[];
+  adopted_revision_id: string;
+};
+
+/** 需求详情：需求本身与按顺序排列的任务 */
+export type RequirementDetailResponse = {
+  requirement: ConfirmedRequirement;
+  tasks: ConfirmedTask[];
+};
+
+/** 项目需求列表响应 */
+export type RequirementListResponse = {
+  records: ConfirmedRequirement[];
+  total: number;
+};
+
+/** 确认方案的请求体：只允许两个标识，任务列表、顺序与配置由服务端计算 */
+export type ConfirmPlanningSessionRequest = {
+  revision_id: string;
+  host_id?: string;
+};
+
+/** 正式需求集合路径 */
+export const REQUIREMENTS_PATH = `${API_PREFIX}/requirements`;
+
+/** 确认方案（生成正式需求与任务）的动作路径 */
+export function planningConfirmPath(sessionID: string): string {
+  return `${planningSessionPath(sessionID)}/confirm`;
+}
+
+/** 单个正式需求的路径 */
+export function requirementPath(requirementID: string): string {
+  const trimmed = requirementID.trim();
+  if (!trimmed) {
+    throw new Error("需求标识不能为空");
+  }
+  return `${REQUIREMENTS_PATH}/${encodeURIComponent(trimmed)}`;
+}
+
+/** 项目下需求集合的路径 */
+export function projectRequirementsPath(projectID: string): string {
+  const trimmed = projectID.trim();
+  if (!trimmed) {
+    throw new Error("查询项目需求列表必须指定项目标识");
+  }
+  return `${API_PREFIX}/projects/${encodeURIComponent(trimmed)}/requirements`;
+}
+
+/**
+ * 确认指定方案版本并生成正式实体。
+ *
+ * 请求只提交 `revision_id` 与可选的 `host_id`：需求标题、需求描述、任务列表、任务顺序
+ * 与任务配置全部由服务端依据该 Revision 与项目计算。确认是短请求，超时沿用统一默认值；
+ * 页面在失败后重新读取服务端事实，不自动重放。
+ */
+export function confirmPlanningSession(
+  sessionID: string,
+  body: ConfirmPlanningSessionRequest,
+  options: ApiRequestOptions = {},
+) {
+  const payload: Record<string, string> = { revision_id: body.revision_id };
+  const hostID = body.host_id?.trim();
+  if (hostID) {
+    payload.host_id = hostID;
+  }
+  return apiRequest<ConfirmPlanningSessionResponse>(planningConfirmPath(sessionID), {
+    ...options,
+    body: JSON.stringify(payload),
+    headers: { "Content-Type": "application/json", ...options.headers },
+    method: "POST",
+  });
+}
+
+/** 查询单个正式需求与它按顺序排列的任务 */
+export function fetchRequirement(requirementID: string, options: ApiRequestOptions = {}) {
+  return apiRequest<RequirementDetailResponse>(requirementPath(requirementID), options);
+}
+
+/** 按项目查询正式需求列表；服务端排序是确定性的 */
+export function fetchProjectRequirements(projectID: string, options: ApiRequestOptions = {}) {
+  return apiRequest<RequirementListResponse>(projectRequirementsPath(projectID), options);
 }

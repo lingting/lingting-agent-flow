@@ -7,7 +7,13 @@
  *   仍然只由服务端领域状态机判定，前端不复制迁移规则；
  * - 错误分类保留"服务端拒绝"与"结果无法确认"的区别，不把网络中断显示成业务失败。
  */
-import type { ImplementationPlan, PlanningRevision, RequirementAnalysis } from "@/lib/api";
+import type {
+  ConfirmedRequirement,
+  ConfirmedTask,
+  ImplementationPlan,
+  PlanningRevision,
+  RequirementAnalysis,
+} from "@/lib/api";
 
 /** 已知的规划会话状态；与服务端 `domain.PlanningSessionStatus` 取值一一对应 */
 export type KnownPlanningSessionStatus =
@@ -168,7 +174,9 @@ export function describePlanningStage(input: {
       };
     case "confirmed":
       return {
-        detail: "会话方案已确认，本阶段为只读展示，确认与任务生成属于后续里程碑。",
+        detail:
+          "会话方案已确认：服务端已采纳一版 Revision 并生成正式需求与任务。" +
+          "采纳结果只读展示，任务保持待执行；本阶段不提供开始执行入口。",
         key: "confirmed",
         label: PLANNING_STATUS_LABEL.confirmed,
       };
@@ -544,4 +552,268 @@ function describeMessageBlocker(status: string): string {
     default:
       return `服务端状态「${status}」不在当前页面已知取值中，不开放写操作。`;
   }
+}
+
+/**
+ * 页面用于展示的"将要生成的需求草案"。
+ *
+ * 与服务端 `domain.RequirementTitleFromAnalysis` / `RequirementDescriptionFromAnalysis`
+ * 使用同一条规则：标题取需求分析摘要，描述由摘要与目标、范围、约束、验收标准逐条组成。
+ * 这里只用于确认前的预览，实际落库内容以服务端返回的需求为准。
+ */
+export type PlanningRequirementDraft = {
+  title: string;
+  description: string;
+};
+
+/** 由需求分析快照推导确认后将生成的需求草案 */
+export function draftRequirementFromAnalysis(
+  analysis?: RequirementAnalysis | null,
+): PlanningRequirementDraft {
+  if (!analysis) return { description: "", title: "" };
+  const title = (analysis.summary ?? "").trim();
+  const sections: Array<[string, string[] | undefined]> = [
+    ["目标", analysis.goals],
+    ["范围", analysis.scope],
+    ["约束", analysis.constraints],
+    ["验收标准", analysis.acceptance_criteria],
+  ];
+  const blocks = sections.map(([label, items]) => {
+    const lines = analysisItems(items).map((item) => `- ${item.trim()}`);
+    return `${label}：\n${lines.join("\n")}`;
+  });
+  return { description: [title, ...blocks].join("\n\n"), title };
+}
+
+/** 确认前摘要中的一行任务草案 */
+export type PlanningConfirmTaskRow = {
+  order: number;
+  task_id: string;
+  title: string;
+  depends_on: string[];
+};
+
+/** 确认前摘要：采纳哪一版、生成什么 */
+export type PlanningConfirmSummary = {
+  revisionID: string;
+  revisionLabel: string;
+  requirement: PlanningRequirementDraft;
+  tasks: PlanningConfirmTaskRow[];
+  taskCount: number;
+};
+
+/**
+ * 构造确认摘要。
+ *
+ * 全部内容来自选定 Revision 的快照：版本号说明采纳的是哪一版，需求标题与描述说明将生成
+ * 什么，任务行说明会生成多少个正式任务以及它们的顺序。任务顺序取数组位置，与服务端写入
+ * `requirement_sequence` 的规则一致。
+ */
+export function describePlanningConfirmSummary(
+  revision?: PlanningRevision | null,
+): PlanningConfirmSummary | undefined {
+  if (!revision) return undefined;
+  const rows = implementationPlanTaskRows(revision.implementation_plan);
+  return {
+    requirement: draftRequirementFromAnalysis(revision.requirement_analysis),
+    revisionID: revision.id,
+    revisionLabel: planningRevisionLabel(revision),
+    taskCount: rows.length,
+    tasks: rows.map((row) => ({
+      depends_on: row.depends_on,
+      order: row.order,
+      task_id: row.task_id,
+      title: row.title,
+    })),
+  };
+}
+
+/** 确认操作的可用性判定结果 */
+export type PlanningConfirmAvailability = {
+  available: boolean;
+  /** 不可确认时的可读原因；可以确认时为 undefined */
+  reason?: string;
+};
+
+/**
+ * 判定当前是否允许确认选定的 Revision。
+ *
+ * 判定顺序固定为"选会话 → 选版本 → 会话状态 → 是否已有在途动作"，与用户实际可见的
+ * 前置条件一致；任何一项不成立都不会发出确认请求。并发安全仍由服务端条件更新保证，
+ * 这里的判定只用于禁用按钮并说明原因。
+ */
+export function describePlanningConfirmAvailability(input: {
+  hasSession: boolean;
+  status: string;
+  selectedRevisionID?: string;
+  running: boolean;
+  confirming: boolean;
+  /** 执行节点前置条件未满足时的原因 */
+  hostBlockedReason?: string;
+}): PlanningConfirmAvailability {
+  if (!input.hasSession) {
+    return { available: false, reason: "请先创建或选择一个规划会话。" };
+  }
+  if (!input.selectedRevisionID?.trim()) {
+    return { available: false, reason: "请先在方案预览中选择要采纳的方案版本。" };
+  }
+  if (input.confirming) {
+    return {
+      available: false,
+      reason: "确认请求正在处理中：请等待服务端返回结果，页面不会重复提交。",
+    };
+  }
+  if (input.running) {
+    return { available: false, reason: "本轮分析仍在进行：请等待分析收敛后再确认方案。" };
+  }
+  if (input.status !== "preview_ready") {
+    return {
+      available: false,
+      reason: describeConfirmBlocker(input.status),
+    };
+  }
+  if (input.hostBlockedReason) {
+    return { available: false, reason: input.hostBlockedReason };
+  }
+  return { available: true };
+}
+
+/**
+ * 解析确认生成正式任务时使用的执行节点。
+ *
+ * 与服务端规则一致：请求里的 `host_id` 优先，为空时由服务端使用项目默认节点。规划会话
+ * 已绑定的节点只描述规划容器，不能当作任务默认配置，因此这里不读它；两者都没有时不
+ * 自动选择列表中的第一个节点。
+ */
+export function resolveConfirmHost(input: {
+  projectDefaultHostID?: string | null;
+  selectedHostID?: string;
+  hostsStatus: "loading" | "ready" | "error";
+}): { hostID?: string; blockedReason?: string } {
+  const selected = input.selectedHostID?.trim();
+  if (selected) {
+    return { hostID: selected };
+  }
+  if (input.projectDefaultHostID?.trim()) {
+    return {};
+  }
+  const blockedReason =
+    input.hostsStatus === "loading"
+      ? "正在查询执行节点，请等待查询完成后再确认方案。"
+      : input.hostsStatus === "error"
+        ? "执行节点查询失败，无法确认可用的执行节点，请先重试查询。"
+        : "该项目没有默认执行节点，请先显式选择执行节点后再确认；页面不会自动选择节点。";
+  return { blockedReason };
+}
+
+/** 状态不允许确认的原因 */
+function describeConfirmBlocker(status: string): string {
+  switch (status) {
+    case "active":
+      return "会话还没有生成方案版本：确认的前提是至少存在一版已落库的 Revision。";
+    case "analyzing":
+      return "会话处于分析中：本轮收敛之前无法确认方案。";
+    case "confirmed":
+      return "会话方案已确认：已采纳的方案版本与生成的正式实体是只读事实。";
+    case "abandoned":
+      return "会话已放弃：不再接受确认。";
+    case "failed":
+      return "本轮分析失败：请先显式重试并生成可用的方案版本。";
+    default:
+      return `服务端状态「${status}」不在当前页面已知取值中，不开放确认入口。`;
+  }
+}
+
+/**
+ * 把确认失败翻译成可读说明。
+ *
+ * 三类不能混：网络中断时结果不确定（可能已生成正式实体）、409 是状态冲突（并发确认或
+ * 会话已被推进）、412 是前置条件不满足（项目已删除、缺少可用执行节点、角色不可用）。
+ */
+export function describePlanningConfirmError(error: unknown): PlanningErrorFacts {
+  const fallback = error instanceof Error ? error.message : "未知错误";
+  const status = (error as { status?: unknown }).status;
+  const kind = (error as { kind?: unknown }).kind;
+  if (kind === "network" || kind === "timeout" || kind === "aborted") {
+    return {
+      conflict: false,
+      message:
+        "确认请求的连接中断，无法确认服务端是否已经生成正式需求与任务。" +
+        "页面不会自动重放确认，请以重新读取到的会话状态与需求列表为准。",
+      uncertain: true,
+      unavailable: false,
+    };
+  }
+  if (status === 409) {
+    return {
+      conflict: true,
+      message:
+        "服务端返回状态冲突（409）：该会话可能已被其他确认请求采纳，或当前状态不允许确认。" +
+        "已重新读取会话与方案版本，请以服务端事实为准，不要重复确认。",
+      uncertain: false,
+      unavailable: false,
+    };
+  }
+  if (status === 412) {
+    return {
+      conflict: false,
+      message:
+        "确认前置条件不满足（412）：项目可能已下线、缺少可用执行节点，或任务角色配置不可用。" +
+        "请先修复前置条件，本次没有生成任何正式实体。",
+      uncertain: false,
+      unavailable: false,
+    };
+  }
+  if (status === 503) {
+    return {
+      conflict: false,
+      message: "需求服务当前不可用（503），本次确认没有被执行，请稍后再试。",
+      uncertain: false,
+      unavailable: true,
+    };
+  }
+  return { conflict: false, message: fallback, uncertain: false, unavailable: false };
+}
+
+/** 确认结果中的一行任务：顺序与状态都是服务端原值 */
+export type ConfirmedTaskRow = {
+  key: string;
+  order?: number;
+  task_id: string;
+  title: string;
+  status: string;
+};
+
+/** 把正式任务整理成展示行：按 requirement_sequence 升序，缺失顺序的排在后面 */
+export function confirmedTaskRows(tasks: ReadonlyArray<ConfirmedTask>): ConfirmedTaskRow[] {
+  const sorted = [...tasks].sort((left, right) => {
+    const leftOrder = left.requirement_sequence;
+    const rightOrder = right.requirement_sequence;
+    if (leftOrder !== undefined && rightOrder !== undefined) return leftOrder - rightOrder;
+    if (leftOrder !== undefined) return -1;
+    if (rightOrder !== undefined) return 1;
+    return left.created_at.localeCompare(right.created_at) || left.id.localeCompare(right.id);
+  });
+  return sorted.map((task) => ({
+    key: task.id,
+    order: task.requirement_sequence,
+    status: task.status,
+    task_id: task.id,
+    title: task.goal.split("\n")[0] ?? "",
+  }));
+}
+
+/**
+ * 从项目需求列表中找出当前会话采纳生成的需求。
+ *
+ * 已确认的会话本身不保存需求标识，因此恢复一个已确认会话时按 `planning_session_id`
+ * 匹配；没有任何匹配时返回 undefined，页面如实说明"尚未读取到正式需求"，不补造结果。
+ */
+export function findSessionRequirement(
+  requirements: ReadonlyArray<ConfirmedRequirement>,
+  sessionID?: string,
+): ConfirmedRequirement | undefined {
+  const trimmed = sessionID?.trim();
+  if (!trimmed) return undefined;
+  return requirements.find((requirement) => requirement.planning_session_id === trimmed);
 }

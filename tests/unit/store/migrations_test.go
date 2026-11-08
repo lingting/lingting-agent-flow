@@ -18,6 +18,7 @@ func TestMigrationsBootstrap(t *testing.T) {
 	assertGooseVersionRecords(t, ctx, first)
 	assertPlanningSchema(t, ctx, first)
 	assertProjectDefaultHostColumn(t, ctx, first)
+	assertRequirementConfirmationSchema(t, ctx, first)
 	applied := countMigrationRecords(t, ctx, first)
 	if err := first.Close(); err != nil {
 		t.Fatalf("关闭数据库失败: %v", err)
@@ -32,6 +33,7 @@ func TestMigrationsBootstrap(t *testing.T) {
 	assertMigratedSchema(t, ctx, second)
 	assertPlanningSchema(t, ctx, second)
 	assertProjectDefaultHostColumn(t, ctx, second)
+	assertRequirementConfirmationSchema(t, ctx, second)
 	if after := countMigrationRecords(t, ctx, second); after != applied {
 		t.Fatalf("再次打开重复执行了迁移: 迁移记录数 %d → %d", applied, after)
 	}
@@ -136,6 +138,35 @@ func assertProjectDefaultHostColumn(t *testing.T, ctx context.Context, db *sqlit
 	}
 	if !hasIndex(t, ctx, db, "projects", "idx_projects_default_host") {
 		t.Fatalf("迁移后 projects 表缺少 idx_projects_default_host 索引")
+	}
+}
+
+// assertRequirementConfirmationSchema 核验方案确认相关内容的结构守点。
+//
+// Schema 没有自动化审计，因此显式核对：需求表的项目关联与规划快照列、任务表的需求内
+// 顺序列，以及项目需求列表与需求内顺序唯一性依赖的索引。
+func assertRequirementConfirmationSchema(t *testing.T, ctx context.Context, db *sqlite.DB) {
+	t.Helper()
+	requirementColumns := []string{
+		"project_id", "planning_session_id", "final_analysis_json",
+		"final_plan_json", "confirmed_at", "deleted_at",
+	}
+	for _, column := range requirementColumns {
+		if !hasColumn(t, ctx, db, "requirements", column) {
+			t.Fatalf("迁移后 requirements 表缺少 %s 字段", column)
+		}
+	}
+	if !hasColumn(t, ctx, db, "tasks", "requirement_sequence") {
+		t.Fatalf("迁移后 tasks 表缺少 requirement_sequence 字段")
+	}
+	for index, table := range map[string]string{
+		"idx_requirements_project":       "requirements",
+		"idx_requirements_active":        "requirements",
+		"idx_tasks_requirement_sequence": "tasks",
+	} {
+		if !hasIndex(t, ctx, db, table, index) {
+			t.Fatalf("迁移后表 %s 缺少索引 %s", table, index)
+		}
 	}
 }
 

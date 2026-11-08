@@ -45,7 +45,8 @@ export function PlanningWorkbenchPage() {
           "选择项目并打开一个规划会话后，提交需求会先追加用户消息，再显式执行两阶段分析" +
           "（需求分析师 → 方案规划师）。分析成功并完成持久化后，页面展示新的方案版本；" +
           "历史版本只读保留。消息提交成功不等于分析成功，失败摘要与冲突都会如实展示，" +
-          "页面不自动重试。本阶段不提供方案确认与正式任务生成。"
+          "页面不自动重试。会话待确认时可以选择一版方案确认：服务端会在同一个事务内生成" +
+          "1 条正式需求与全部正式任务，任务保持待执行，本阶段不提供开始执行入口。"
         }
         showIcon
         title="需求工作台"
@@ -96,7 +97,16 @@ export function PlanningWorkbenchPage() {
       />
 
       {workbench.facts.state.status === "ready" && (
-        <PlanningRevisionPanel revisions={workbench.facts.state.facts.revisions} />
+        <PlanningRevisionPanel
+          adopted={workbench.confirm.adopted}
+          confirmState={workbench.confirm.state}
+          hostBlockedReason={workbench.confirmHost.blockedReason}
+          onConfirm={(revisionID) => void workbench.confirmRevision(revisionID)}
+          revisions={workbench.facts.state.facts.revisions}
+          running={running}
+          sessionID={workbench.sessionID}
+          status={session?.status ?? ""}
+        />
       )}
     </Flex>
   );

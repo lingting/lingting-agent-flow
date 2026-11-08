@@ -365,3 +365,59 @@
 | 角色调用未产出可用结果、输出非法 | 500 | `execution_failed` |
 | 结果未持久化（含 Revision / 角色消息 / 状态 / 占用任一步失败） | 500 | `execution_not_persisted` |
 | 规划服务未装配或已停止 | 503 | `internal_error` |
+
+## 16. 方案确认与正式需求
+
+确认接口把用户指定的那一版 Revision 变成正式 Requirement / Task，是唯一写入正式实体的入口。
+生成后的任务保持 `queued`：接口不启动执行，也不创建 Step / Attempt / Session / 容器。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/api/v1/planning/sessions/{sessionID}/confirm` | 确认指定 Revision 并生成正式实体（`201`） |
+| `GET` | `/api/v1/requirements/{requirementID}` | 正式需求详情与按 `requirement_sequence` 排列的任务 |
+| `GET` | `/api/v1/projects/{projectID}/requirements` | 项目正式需求列表（排序确定性） |
+
+请求边界：
+
+```json
+{"revision_id": "…", "host_id": "…"}
+```
+
+- `revision_id` 必填；`host_id` 可选，为空时使用项目的 `default_host_id`。两者都没有可用节点时
+  返回 `412`，不回退本机执行，也不使用规划会话绑定的规划容器节点。
+- 不接受需求标识、任务列表、任务顺序、任务标题 / 描述覆盖、`TaskConfig`、仓库地址覆盖、任务状态、
+  Step 或 Attempt；携带未知字段返回 `400`（`invalid_request`）。
+
+响应（`201`）：
+
+```json
+{
+  "requirement": {"id": "…", "title": "…", "description": "…", "priority": "normal",
+                  "status": "queued", "source": "manual", "project_id": "…",
+                  "planning_session_id": "…", "confirmed_at": "…", "created_at": "…",
+                  "updated_at": "…"},
+  "tasks": [{"id": "…", "requirement_id": "…", "status": "queued", "requirement_sequence": 1,
+             "host_id": "…", "repository_path": "…", "base_ref": "main", "goal": "…",
+             "acceptance_criteria": ["…"], "created_at": "…"}],
+  "adopted_revision_id": "…"
+}
+```
+
+- `tasks` 按 `requirement_sequence` 升序排列，顺序与方案任务数组一致；任务状态固定为 `queued`。
+- 需求标题取最终需求分析的摘要，描述是"摘要 + 目标 + 范围 + 约束 + 验收标准"的确定性摘要；
+  需求初始状态沿用需求领域既有约定（`queued`）。
+- 需求、任务、任务顺序与会话状态（`confirmed` + `adopted_revision_id` + `finished_at`）在同一个事务内
+  写入：任一步失败整体回滚，不留下半成品实体，也不会返回未落库的结果。
+- 同一会话只允许确认成功一次：并发确认只有一个返回 `201`，其余返回 `409`；重复确认同样返回 `409`。
+- 未装配需求服务返回 `503`。
+
+错误语义：
+
+| 情形 | 状态码 | `error.code` |
+|---|---|---|
+| 请求体非法、未知字段、`revision_id` 缺失、方案结构不合法 | 400 | `invalid_request` |
+| 会话、项目或 Revision 不存在，或 Revision 不属于该会话 | 404 | `not_found` |
+| 会话状态不是 `preview_ready`、并发确认、重复确认 | 409 | `state_conflict` |
+| 项目已逻辑删除、缺少可用执行节点、任务角色不可用 | 412 | `precondition_failed` |
+| 事务或存储失败 | 500 | `internal_error` / `execution_not_persisted` |
+| 需求服务未装配或已停止 | 503 | `internal_error` |

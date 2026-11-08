@@ -93,6 +93,11 @@ type ExecutionHostStore interface {
 type RequirementFilter struct {
 	// Statuses 限制需求状态，为空表示不限制。
 	Statuses []domain.RequirementStatus
+	// ProjectID 限制需求所属项目，空值表示不限制。
+	//
+	// 历史手工需求没有项目关联，因此它不会出现在任何项目需求列表中：空值不是
+	// "默认项目"，而是"这个需求确实没有项目来源"。
+	ProjectID string
 	// Limit 限制返回条数，小于等于 0 表示不限制。
 	Limit int
 }

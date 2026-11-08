@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 )
@@ -129,6 +130,10 @@ func (s RequirementSource) Validate() error {
 }
 
 // Requirement 是用户提交的原始需求。
+//
+// 确认生成的需求（字段 ProjectID / PlanningSessionID / Final*JSON / ConfirmedAt 有值）
+// 记录的是"用户采纳了哪一版规划"，因此这些列可空：历史的手工需求没有规划来源，读取层
+// 不得为空值补造默认项目或默认快照。
 type Requirement struct {
 	ID          ID                `json:"id"`
 	Title       string            `json:"title"`
@@ -137,11 +142,23 @@ type Requirement struct {
 	Status      RequirementStatus `json:"status"`
 	Source      RequirementSource `json:"source"`
 	SourceID    string            `json:"source_id,omitempty"`
-	CreatedAt   time.Time         `json:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at"`
+	// ProjectID 是需求所属项目标识；空值表示该需求不是由确认流程生成。
+	ProjectID string `json:"project_id,omitempty"`
+	// PlanningSessionID 是产生该需求的规划会话标识；空值表示没有规划来源。
+	PlanningSessionID *ID `json:"planning_session_id,omitempty"`
+	// FinalAnalysisJSON 是用户确认那一版 Revision 的需求分析快照。
+	FinalAnalysisJSON json.RawMessage `json:"final_analysis_json,omitempty"`
+	// FinalPlanJSON 是用户确认那一版 Revision 的实施方案快照。
+	FinalPlanJSON json.RawMessage `json:"final_plan_json,omitempty"`
+	// ConfirmedAt 是用户确认方案的时间；只有确认生成的需求才有值。
+	ConfirmedAt *time.Time `json:"confirmed_at,omitempty"`
+	// DeletedAt 是逻辑删除时间，空值表示未删除。
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
 }
 
-// NewRequirement 创建并校验需求。
+// NewRequirement 创建并校验手工提交的需求。
 func NewRequirement(title, description string, priority Priority, at time.Time) (Requirement, error) {
 	createdAt := normalizeTime(at)
 	requirement := Requirement{
@@ -153,6 +170,60 @@ func NewRequirement(title, description string, priority Priority, at time.Time) 
 		Source:      RequirementSourceManual,
 		CreatedAt:   createdAt,
 		UpdatedAt:   createdAt,
+	}
+	if err := requirement.Validate(); err != nil {
+		return Requirement{}, err
+	}
+	return requirement, nil
+}
+
+// ConfirmedRequirementInput 是一次"采纳方案并生成正式需求"的输入。
+//
+// 输入只包含服务端依据已确认 Revision 与项目计算出的事实：需求标识、初始状态、来源与
+// 时间戳由领域层决定，调用方无法指定任务列表、任务顺序或任务配置。
+type ConfirmedRequirementInput struct {
+	// ProjectID 是需求所属项目标识。
+	ProjectID string
+	// PlanningSessionID 是产生该需求的规划会话标识。
+	PlanningSessionID ID
+	// Title 是需求标题，由最终需求分析的摘要确定。
+	Title string
+	// Description 是需求描述，由最终需求分析的目标、范围、约束与验收标准确定。
+	Description string
+	// Priority 是需求优先级，确认流程使用 normal。
+	Priority Priority
+	// AnalysisJSON 是最终需求分析快照。
+	AnalysisJSON json.RawMessage
+	// PlanJSON 是最终实施方案快照。
+	PlanJSON json.RawMessage
+	// At 是确认时间。
+	At time.Time
+}
+
+// NewConfirmedRequirement 创建并校验确认生成的需求。
+//
+// 初始状态沿用需求领域的既有约定（queued）：本阶段不新增第二套需求状态机，需求进度
+// 聚合属于后续里程碑。确认时间同时写入 ConfirmedAt。
+func NewConfirmedRequirement(input ConfirmedRequirementInput) (Requirement, error) {
+	confirmedAt := normalizeTime(input.At)
+	sessionID := input.PlanningSessionID
+	requirement := Requirement{
+		ID:                NewID(),
+		Title:             strings.TrimSpace(input.Title),
+		Description:       strings.TrimSpace(input.Description),
+		Priority:          input.Priority,
+		Status:            RequirementStatusQueued,
+		Source:            RequirementSourceManual,
+		ProjectID:         strings.ToLower(strings.TrimSpace(input.ProjectID)),
+		PlanningSessionID: &sessionID,
+		FinalAnalysisJSON: input.AnalysisJSON,
+		FinalPlanJSON:     input.PlanJSON,
+		ConfirmedAt:       &confirmedAt,
+		CreatedAt:         confirmedAt,
+		UpdatedAt:         confirmedAt,
+	}
+	if requirement.Priority == "" {
+		requirement.Priority = PriorityNormal
 	}
 	if err := requirement.Validate(); err != nil {
 		return Requirement{}, err
@@ -177,7 +248,79 @@ func (r Requirement) Validate() error {
 	if err := r.Status.Validate(); err != nil {
 		return err
 	}
-	return r.Source.Validate()
+	if err := r.Source.Validate(); err != nil {
+		return err
+	}
+	return r.validateConfirmation()
+}
+
+// validateConfirmation 校验"确认生成"相关字段的组合一致性。
+//
+// 这些列在数据库里全部可空（历史手工需求没有规划来源），但只要有规划来源，就必须能
+// 指出完整的确认事实：所属项目、需求分析快照、实施方案快照与确认时间缺一不可。
+func (r Requirement) validateConfirmation() error {
+	projectID := strings.ToLower(strings.TrimSpace(r.ProjectID))
+	if projectID != r.ProjectID {
+		return invalidField("Requirement", "project_id", "项目标识必须是小写规范形式")
+	}
+	if err := ValidateProjectID(projectID); err != nil {
+		return err
+	}
+	if r.PlanningSessionID != nil {
+		if err := r.PlanningSessionID.Validate(); err != nil {
+			return err
+		}
+	}
+	if err := validateRequirementSnapshot("final_analysis_json", r.FinalAnalysisJSON); err != nil {
+		return err
+	}
+	if err := validateRequirementSnapshot("final_plan_json", r.FinalPlanJSON); err != nil {
+		return err
+	}
+	hasPlanningSource := r.PlanningSessionID != nil
+	if !hasPlanningSource {
+		if projectID != "" || len(r.FinalAnalysisJSON) > 0 || len(r.FinalPlanJSON) > 0 || r.ConfirmedAt != nil {
+			return invalidField(
+				"Requirement",
+				"planning_session_id",
+				"只有确认生成的需求才能记录项目、规划快照与确认时间",
+			)
+		}
+		return nil
+	}
+	if projectID == "" {
+		return invalidField("Requirement", "project_id", "确认生成的需求必须关联项目")
+	}
+	if len(strings.TrimSpace(string(r.FinalAnalysisJSON))) == 0 {
+		return invalidField("Requirement", "final_analysis_json", "确认生成的需求必须保存需求分析快照")
+	}
+	if len(strings.TrimSpace(string(r.FinalPlanJSON))) == 0 {
+		return invalidField("Requirement", "final_plan_json", "确认生成的需求必须保存实施方案快照")
+	}
+	if r.ConfirmedAt == nil {
+		return invalidField("Requirement", "confirmed_at", "确认生成的需求必须记录确认时间")
+	}
+	if r.ConfirmedAt.IsZero() {
+		return invalidField("Requirement", "confirmed_at", "确认时间不能为空")
+	}
+	return nil
+}
+
+// validateRequirementSnapshot 校验一段需求快照的结构。
+//
+// 只做结构约束：快照内部字段的语义由产生它的 Revision 解析路径负责，这里不解释内容。
+func validateRequirementSnapshot(field string, value json.RawMessage) error {
+	trimmed := strings.TrimSpace(string(value))
+	if trimmed == "" {
+		return nil
+	}
+	if !json.Valid([]byte(trimmed)) {
+		return invalidField("Requirement", field, "必须是合法 JSON")
+	}
+	if trimmed == "null" {
+		return invalidField("Requirement", field, "JSON 快照不能是 null")
+	}
+	return nil
 }
 
 // Transition 将需求迁移到下一个状态，并记录更新时间。

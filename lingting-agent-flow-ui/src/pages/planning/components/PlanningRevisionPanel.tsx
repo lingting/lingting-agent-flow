@@ -1,17 +1,25 @@
 /**
- * 方案版本预览：历史版本切换 + 需求分析 + 实施方案。
+ * 方案版本预览：历史版本切换 + 需求分析 + 实施方案 + 方案确认。
  *
  * 版本只追加：页面可以切换查看历史版本，任何时候都不提供编辑或覆盖旧版本的入口。
  * 默认选中最新版本；新一轮分析追加版本后自动跟随最新版本，用户手动选中的历史版本
  * 在数据没有新增时保持不变。
+ *
+ * 确认只作用于当前选中的 Revision：选中历史版本时，确认提交的就是该历史版本标识。
  */
 import { Alert, Flex, Radio, Space, Tag, Typography } from "antd";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { PlanningRevision } from "@/lib/api";
 import { ImplementationPlanPanel } from "@/pages/planning/components/ImplementationPlanPanel";
+import { PlanningConfirmPanel } from "@/pages/planning/components/PlanningConfirmPanel";
 import { RequirementAnalysisPanel } from "@/pages/planning/components/RequirementAnalysisPanel";
+import type {
+  PlanningAdoptedState,
+  PlanningConfirmState,
+} from "@/pages/planning/hooks/usePlanningConfirm";
 import {
+  describePlanningConfirmAvailability,
   formatPlanningTime,
   planningRevisionLabel,
   resolvePlanningRevisionSelection,
@@ -19,7 +27,20 @@ import {
 } from "@/pages/planning/planning";
 
 /** 方案版本预览面板 */
-export function PlanningRevisionPanel(props: { revisions: PlanningRevision[] }) {
+export function PlanningRevisionPanel(props: {
+  revisions: PlanningRevision[];
+  /** 当前会话标识，用于确认前置条件判定 */
+  sessionID?: string;
+  /** 当前会话状态：确认只允许在 preview_ready 上发起 */
+  status: string;
+  /** 是否有在途的分析动作：在途时不开放确认 */
+  running: boolean;
+  confirmState: PlanningConfirmState;
+  adopted: PlanningAdoptedState;
+  onConfirm: (revisionID: string) => void;
+  /** 确认时执行节点前置条件未满足的原因 */
+  hostBlockedReason?: string;
+}) {
   const revisions = useMemo(() => sortPlanningRevisions(props.revisions), [props.revisions]);
   const latestID = revisions.at(-1)?.id;
   const [selectedID, setSelectedID] = useState<string | undefined>(latestID);
@@ -48,6 +69,14 @@ export function PlanningRevisionPanel(props: { revisions: PlanningRevision[] }) 
   }
 
   const selected = revisions.find((revision) => revision.id === selectedID) ?? revisions.at(-1);
+  const availability = describePlanningConfirmAvailability({
+    confirming: props.confirmState.status === "confirming",
+    hasSession: Boolean(props.sessionID?.trim()),
+    hostBlockedReason: props.hostBlockedReason,
+    running: props.running,
+    selectedRevisionID: selected?.id,
+    status: props.status,
+  });
   return (
     <Flex gap="middle" vertical>
       <Space align="center" size={8} wrap>
@@ -90,6 +119,15 @@ export function PlanningRevisionPanel(props: { revisions: PlanningRevision[] }) 
 
           <Typography.Text strong>实施方案</Typography.Text>
           <ImplementationPlanPanel plan={selected.implementation_plan} />
+
+          <PlanningConfirmPanel
+            adopted={props.adopted}
+            availability={availability}
+            confirmed={props.status === "confirmed"}
+            confirmState={props.confirmState}
+            onConfirm={props.onConfirm}
+            revision={selected}
+          />
         </Flex>
       )}
     </Flex>

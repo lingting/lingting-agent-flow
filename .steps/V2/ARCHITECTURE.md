@@ -29,8 +29,9 @@ V2 不引入第二套工作流引擎，也不新增分层。新能力一律按�
 | `ProjectExecutionLease` | 项目级执行权 | 原子获取/续租/释放，`epoch` 单调递增 |
 | `RequirementProgress` / `ProjectProgress` | 进度聚合结果 | 只由 Task 真实状态计算，不接受模型输入 |
 
-`Requirement` 扩展字段（`ProjectID`、`PlanningSessionID`、最终快照、`ConfirmedAt`、`DeletedAt`）
-与结构变化见 [`DATA-MODEL.md`](./DATA-MODEL.md)。
+`Requirement` 扩展字段（`ProjectID`、`PlanningSessionID`、最终快照、`ConfirmedAt`、`DeletedAt`）已于
+M4 落地；`Task.RequirementSequence` 记录需求内顺序。结构变化见 [`DATA-MODEL.md`](./DATA-MODEL.md)。
+
 
 ## 3. 新增应用服务（`internal/app`）
 
@@ -53,8 +54,9 @@ V2 不引入第二套工作流引擎，也不新增分层。新能力一律按�
 ### 3.1 编排关系
 
 ```text
-RequirementService.Confirm(planningSessionID)
-  └─ 单个事务：requirements(1) + tasks(N) + steps(初版计划) 引用确认 Revision
+RequirementService.Confirm(planningSessionID, revisionID)   ← M4 已落地
+  └─ 单个事务：requirements(1) + tasks(N, 含 requirement_sequence) + 会话 confirmed
+     不创建 Step：Step 由 Planner 在任务执行期生成（GeneratePlan 职责不变）
 
 ProjectExecutionService.Start(projectID)
   └─ 领取 ProjectExecutionLease（事务 + epoch）
@@ -271,11 +273,11 @@ paused / restarting / dead / removing / 未知取值 / 字段矛盾 → 不可�
 POST   /api/v1/projects/{projectID}/planning-sessions
 GET    /api/v1/planning-sessions/{sessionID}
 POST   /api/v1/planning-sessions/{sessionID}/messages
-POST   /api/v1/planning-sessions/{sessionID}/confirm
-POST   /api/v1/planning-sessions/{sessionID}/abandon
+POST   /api/v1/planning/sessions/{sessionID}/confirm          ← M4 已落地
+POST   /api/v1/planning/sessions/{sessionID}/abandon
 
-GET    /api/v1/projects/{projectID}/requirements
-GET    /api/v1/requirements/{requirementID}
+GET    /api/v1/projects/{projectID}/requirements              ← M4 已落地
+GET    /api/v1/requirements/{requirementID}                   ← M4 已落地
 GET    /api/v1/requirements/{requirementID}/progress
 DELETE /api/v1/requirements/{requirementID}
 
@@ -294,6 +296,8 @@ PUT    /api/v1/roles/{roleID}
 - 错误映射沿用现有约定（400 参数 / 404 不存在或归属不符 / 409 状态冲突 / 412 前置条件缺失 /
   500 执行发生但未成功 / 503 服务未装配或已停止）。
 - 响应必须区分"规划草案"与"正式 Task"，草案不得带正式 Task ID。
+- 确认接口只接受 `revision_id` 与可选 `host_id`：需求与任务由服务端依据已采纳的 Revision 计算，
+  响应返回真实需求与按 `requirement_sequence` 排列的任务，不接受任务列表、顺序或任务字段覆盖。
 - 请求不接受 Session 路径、工作目录、命令行参数、步骤列表或角色覆盖。
 
 ## 6. 前端结构

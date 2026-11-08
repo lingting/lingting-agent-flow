@@ -130,7 +130,7 @@ test("已确认会话只读，不提供普通消息编辑", async ({ page }) => 
 
   await expect(page.getByText("已确认").first()).toBeVisible();
   await expect(page.getByText("当前状态不开放普通消息编辑：本阶段只提供只读展示。")).toBeVisible();
-  await expect(page.getByText("会话方案已确认，本阶段只读展示。").first()).toBeVisible();
+  await expect(page.getByText(/会话方案已确认/).first()).toBeVisible();
   await expect(page.getByRole("button", { name: "提交需求并分析" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "放弃规划" })).toHaveCount(0);
   // 历史方案仍然可读
