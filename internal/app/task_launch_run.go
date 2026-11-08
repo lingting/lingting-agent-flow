@@ -79,6 +79,11 @@ func (s *TaskLaunchService) Launch(
 	if err := s.checkLaunchExecution(runCtx, task, grant); err != nil {
 		return s.failLaunch(result, domain.TaskLaunchStageValidate, err)
 	}
+	// 同一项目同时只允许一个任务执行：自动分派由项目执行权保证，显式启动在这里补一次
+	// 项目内串行核验，避免两条入口对同一项目各启动一个任务。
+	if err := s.checkProjectSerialization(runCtx, task); err != nil {
+		return s.failLaunch(result, domain.TaskLaunchStageValidate, err)
+	}
 	input, err := s.loadLaunchInput(runCtx, task)
 	if err != nil {
 		return s.failLaunch(result, domain.TaskLaunchStageValidate, err)

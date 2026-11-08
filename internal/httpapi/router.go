@@ -118,6 +118,11 @@ type Deps struct {
 	//
 	// 它只依赖存储：确认时生成正式需求与任务不接触 SSH、Docker 或 Pi。
 	Requirement *app.RequirementService
+	// ProjectExecution 是项目执行协调服务，为空时项目执行与进度接口返回服务不可用。
+	//
+	// 它需要既有任务取消入口，但不实现任何任务执行流程：开始项目执行只取得项目执行权
+	// 并触发一次调度扫描，启动仍由统一启动服务完成。
+	ProjectExecution *app.ProjectExecutionService
 	// Logger 是日志器，为空时使用 slog.Default。
 	Logger *slog.Logger
 }
@@ -171,7 +176,12 @@ func NewHandler(deps Deps) http.Handler {
 			logger,
 		),
 		requirement: newRequirementHandler(deps.Requirement, logger),
-		logger:      logger,
+		projectExecution: newProjectExecutionHandler(
+			deps.ProjectExecution,
+			deps.Requirement,
+			logger,
+		),
+		logger: logger,
 	}
 	return withRequestID(router.newMux())
 }
@@ -223,7 +233,11 @@ type router struct {
 	//
 	// 确认接口挂在规划的会话路径下：它操作的对象是某个规划会话采纳的方案版本。
 	requirement *requirementHandler
-	logger      *slog.Logger
+	// projectExecution 处理项目执行动作、项目状态与需求进度，缺失依赖时接口返回 503。
+	//
+	// 它只做协议转换与错误映射：执行权、项目内顺序与进度聚合全部由 domain / app 决定。
+	projectExecution *projectExecutionHandler
+	logger           *slog.Logger
 }
 
 // healthHandler 处理健康检查请求。

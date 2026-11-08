@@ -270,11 +270,14 @@ func runServer(cmd *cobra.Command, a *app.App, configPath, address string, requi
 			cfg *config.Config,
 			coordination *app.TaskExecutionCoordinator,
 			launch *app.TaskLaunchService,
+			projects *app.ProjectExecutionService,
 		) (*app.TaskScheduler, error) {
 			return app.NewTaskScheduler(app.TaskSchedulerOptions{
 				Store:        store,
 				Coordination: coordination,
 				Launch:       launch,
+				// 项目闸门约束项目级执行权与同项目顺序：它不实现启动流程。
+				ProjectGate: projects,
 				// 并发上限复用既有配置：不新增第二套并发配置。
 				MaxConcurrentTasks: cfg.Scheduler.MaxConcurrentTasks,
 				Logger:             a.Logger().Slog(),

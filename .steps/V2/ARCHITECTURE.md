@@ -26,8 +26,9 @@ V2 不引入第二套工作流引擎，也不新增分层。新能力一律按�
 | `PlanningRevision` | 一轮结构化分析 + 方案 + 校验结果 | 追加写入，旧版本不被覆盖 |
 | `RequirementAnalysis` | 结构化需求分析 | 字段见 [`WORKFLOW.md`](./WORKFLOW.md) §2；解析失败即规划失败 |
 | `ImplementationPlan` | 结构化实施方案 + 任务草案列表 | 至少 1 个任务，校验由 domain 纯函数完成 |
-| `ProjectExecutionLease` | 项目级执行权 | 原子获取/续租/释放，`epoch` 单调递增 |
-| `RequirementProgress` / `ProjectProgress` | 进度聚合结果 | 只由 Task 真实状态计算，不接受模型输入 |
+| `ProjectExecutionLease` | 项目级执行权（**M5 已落地**） | `project_id` / `owner` / 单调递增 `epoch` / `expires_at`；取得、续租、释放都是纯判定，写入由存储层条件完成；旧 epoch 的迟到写入被拒绝 |
+| `ProjectExecutionPlan` | 项目内执行顺序、队首分类与可领取任务（**M5 已落地**） | 按需求创建时间 → `requirement_sequence` → 任务创建时间 → 任务 ID 排序；只有队首 `queued` 任务可领取 |
+| `RequirementProgress` / `ProjectProgress` | 进度聚合结果（**M5 已落地**） | 只由 Task 真实状态、执行权与停止意图计算，不接受模型输入；`current = completed` |
 
 `Requirement` 扩展字段（`ProjectID`、`PlanningSessionID`、最终快照、`ConfirmedAt`、`DeletedAt`）已于
 M4 落地；`Task.RequirementSequence` 记录需求内顺序。结构变化见 [`DATA-MODEL.md`](./DATA-MODEL.md)。
@@ -44,7 +45,8 @@ M4 落地；`Task.RequirementSequence` 记录需求内顺序。结构变化见 [
 | `RequirementAnalysisService` | 调用需求分析师、解析结构化分析、落 Revision | 不创建正式 Requirement |
 | `RequirementPlanningService` | 调用方案规划师、解析实施方案、结构化校验 | 不写数据库正式实体 |
 | `RequirementService` | 正式需求的创建（含事务）、查询、逻辑删除、进度聚合 | 不调度、不执行 |
-| `ProjectExecutionService` | 项目级启动/停止、执行租约、同项目串行、项目状态汇总 | 不实现第二套任务执行流程 |
+| `ProjectExecutionService`（**M5 已落地**） | 项目级开始/停止、项目执行权、项目内顺序与阻塞判定、项目状态与需求进度投影；对调度器提供"项目闸门"（`FilterClaims` / `Reconcile`） | 不实现第二套任务执行流程；不准备容器、不生成计划、不执行步骤；不直接启动 `TaskWorkflowService` |
+| `ProjectExecutionKeeper`（**M5 已落地**） | 后台续租与收敛项目执行权（TTL 2 分钟、周期 40 秒），停止时释放没有在途任务的执行权 | 不领取任务、不启动工作流、不接触容器；续租失败只停该项目的领取 |
 | `RoleConfigService` | 固定四角色读取与更新、配置快照（`app.RoleService`，V2-M1-E2/E3 已落地） | 不增删角色、不放宽安全边界；工具策略只能收敛在角色能力上限内 |
 
 复用（不得重写）：`TaskWorkflowService`、`StepWorkflowService`、`StepExecutor`、
@@ -58,11 +60,22 @@ RequirementService.Confirm(planningSessionID, revisionID)   ← M4 已落地
   └─ 单个事务：requirements(1) + tasks(N, 含 requirement_sequence) + 会话 confirmed
      不创建 Step：Step 由 Planner 在任务执行期生成（GeneratePlan 职责不变）
 
-ProjectExecutionService.Start(projectID)
-  └─ 领取 ProjectExecutionLease（事务 + epoch）
-  └─ 选择该项目的下一个 Task（requirement_sequence + status 事实）
-  └─ 调用既有 TaskLaunchService / TaskWorkflowService（不新建执行路径）
-  └─ 收敛后释放或续租；失败/不确定一律停止继续领取
+ProjectExecutionService.Start(projectID)                    ← M5 已落地
+  └─ 读项目 + 项目内正式任务（requirements.project_id），领域排序与队首判定
+  └─ 拒绝：已有任务在执行 / 队首需人工处置 / 没有可执行任务（409 / 412）
+  └─ 复用 domain.DecideTaskQueueAdmission 核验队首任务前置条件
+  └─ 条件写入取得 project_execution_leases（epoch 递增；同一持有者重复开始幂等）
+  └─ 清除停止意图（project_execution_states）并触发一次 TaskScheduler.Scan
+  └─ 返回真实项目执行状态（不返回"可能已开始"）
+
+TaskScheduler.Scan                                          ← M5 只增加闸门，不新增调度循环
+  └─ 名额统计（scheduler.max_concurrent_tasks）→ queued 候选 → 既有准入与排序
+  └─ ProjectExecutionGate.FilterClaims：有效执行权 + 未停止 + 项目队首
+  └─ 取得任务执行权 → 既有 TaskLaunchService.Launch → 既有 TaskWorkflowService
+  └─ ProjectExecutionGate.Reconcile：真实收敛后释放执行权（成功/阻塞/完成/停止）
+
+TaskLaunchService.Launch                                    ← M5 增加一次只读核验
+  └─ 带项目关联的任务：同项目已有在途任务时拒绝启动（避免绕过项目执行权）
 ```
 
 ### 3.2 角色工具策略执行路径（V2-M1-E3 已落地）
@@ -278,13 +291,13 @@ POST   /api/v1/planning/sessions/{sessionID}/abandon
 
 GET    /api/v1/projects/{projectID}/requirements              ← M4 已落地
 GET    /api/v1/requirements/{requirementID}                   ← M4 已落地
-GET    /api/v1/requirements/{requirementID}/progress
-DELETE /api/v1/requirements/{requirementID}
+GET    /api/v1/requirements/{requirementID}/progress           ← M5 已落地
+DELETE /api/v1/requirements/{requirementID}                    ← M6
 
-GET    /api/v1/projects/{projectID}/tasks
-GET    /api/v1/projects/{projectID}/execution
-POST   /api/v1/projects/{projectID}/start
-POST   /api/v1/projects/{projectID}/cancel
+GET    /api/v1/projects/{projectID}/tasks                      ← M5 已落地
+GET    /api/v1/projects/{projectID}/execution                  ← M5 已落地
+POST   /api/v1/projects/{projectID}/start                      ← M5 已落地
+POST   /api/v1/projects/{projectID}/cancel                     ← M5 已落地
 
 GET    /api/v1/roles
 GET    /api/v1/roles/{roleID}
@@ -299,17 +312,24 @@ PUT    /api/v1/roles/{roleID}
 - 确认接口只接受 `revision_id` 与可选 `host_id`：需求与任务由服务端依据已采纳的 Revision 计算，
   响应返回真实需求与按 `requirement_sequence` 排列的任务，不接受任务列表、顺序或任务字段覆盖。
 - 请求不接受 Session 路径、工作目录、命令行参数、步骤列表或角色覆盖。
+- 项目执行接口不接受请求体：任务状态、执行权、`owner`、`epoch`、任务顺序与执行结果全部由服务端
+  依据持久化事实计算，也不提供"提前启动某个后续任务"或"跳过前序任务"的入口（M5 已落地）。
 
 ## 6. 前端结构
 
-导航调整为：概览 / 需求 / 项目 / 任务 / 机器 / 设置（环境管理迁入设置，独立环境入口移除）。
+导航：概览 / 需求工作台 / 需求 / 任务 / 项目 / 机器 / 设置（环境管理在设置内，无独立环境入口）。
 
-- 需求页是独立工作台（项目选择 → 对话 → 预览 → 确认/放弃），不用「新增需求」弹窗；
-  未选择 Project 时禁止发送消息；切换 Project 必须丢弃当前会话上下文。
-- 项目页增加需求列表、任务列表、执行状态、开始/停止执行、执行记录聚合。
-- 需求详情增加原文、最终分析、最终方案、任务列表与顺序、各 Task 执行记录、进度。
+- 需求工作台（`/planning`）是规划阶段的独立页面（项目选择 → 对话 → 预览 → 确认/放弃），不用
+  「新增需求」弹窗；未选择 Project 时禁止发送消息；切换 Project 必须丢弃当前会话上下文。
+- 需求页（`/requirements`，M5 已落地）按项目浏览正式需求，展示进度统计（已完成 / 执行中 / 待执行 /
+  失败 / 待核验 / 已取消 / 已暂停）、当前与下一个任务、阻塞原因与阻塞任务，以及按需求内顺序排列的
+  任务；任务可深链接到任务页（`/tasks?task_id=`）。只读：不提供调整顺序、提前启动或删除入口。
+- 项目页增加项目执行面板（M5 已落地）：执行状态、进度统计、开始/停止执行、执行权与当前/下一个任务、
+  按项目顺序排列的任务列表与阻塞原因；列表顺序由服务端固定，前端不重排。
 - 设置页承载环境管理与角色管理（四角色不可增删，只可改 Prompt / 工具策略 / 模型）。
-- 状态与进度只来自接口真实字段；不渲染会让用户误以为能力已可用的入口；禁用操作必须有原因。
+- 状态与进度只来自接口真实字段；未知取值原样只读展示；开始/停止失败后重新读取服务端状态，
+  网络中断只提示"结果未知"，不自动重复提交有副作用的请求；禁用操作必须给出原因。
+- 项目执行状态未提供全局并发的 HTTP 出口：页面不展示全局并发上限或在跑任务数，避免用推断值冒充事实。
 - 所有请求经 `src/lib/api/` 统一客户端；页面不直接 `fetch`。
 
 ## 7. 实施依赖与顺序
@@ -320,7 +340,7 @@ PUT    /api/v1/roles/{roleID}
 | M2 | M1（角色配置快照） | 只读规划容器、PlanningSession 持久化、多轮 Session |
 | M3 | M2 | 需求工作台、分析/方案两个角色、Revision 预览 |
 | M4 | M3 | 方案校验、事务化生成 Requirement + Task |
-| M5 | M4 | ProjectExecutionLease、项目串行调度、进度聚合 |
+| M5 | M4 | ProjectExecutionLease（`project_execution_leases`）、项目闸门与同项目串行、`Cancel` 语义、需求/项目进度聚合（已完成） |
 | M6 | M5 | 停止/删除流程、端到端验收 |
 
 ## 8. 已知代码缺口（M0 核实）
@@ -333,8 +353,8 @@ PUT    /api/v1/roles/{roleID}
 | G4 | `execenv` 无只读挂载与只读 rootfs 能力 | `internal/execenv/workspace.go`、`internal/docker/container.go` | M2 |
 | G5 | `Requirement` 无项目关联、无规划快照、无逻辑删除 | `domain/requirement.go`、迁移脚本的 `requirements` 表 | M3/M4 |
 | G6 | ~~无 PlanningSession / Message / Revision 持久化~~ **已交付**（M2 第二阶段） | `domain/planning_*.go`、初始迁移的三张规划表 | M2/M3 |
-| G7 | 无项目级执行租约，`TaskScheduler` 只有全局并发 | `internal/app/task_scheduler.go`、`task_leases` 表按任务 | M5 |
-| G8 | 无项目/需求聚合查询 | `internal/app/projects.go` 只有项目 CRUD | M5 |
+| G7 | ~~无项目级执行租约，`TaskScheduler` 只有全局并发~~ **已关闭**（M5） | 现状：`internal/domain/project_execution.go` 定义 `ProjectExecutionLease` 与取得/续租/释放判定，迁移 `00004_project_execution_leases.sql` 提供 `project_execution_leases`（`project_id` 主键、`owner`、单调 `epoch`、`expires_at`）与 `project_execution_states`，`app.ProjectExecutionService` 负责开始/停止与闸门，`TaskScheduler` 只增加 `ProjectGate` 过滤器；本仓库中没有 `task_leases` 表，任务级执行权仍是进程内协调器 | M5 |
+| G8 | ~~无项目/需求聚合查询~~ **已关闭**（M5） | 现状：`GET /api/v1/projects/{projectID}/tasks`、`/execution` 与 `GET /api/v1/requirements/{requirementID}/progress` 由 `app.ProjectExecutionService` 与 `app.RequirementService.Progress` 提供，聚合规则唯一实现在 `domain.DecideProjectExecutionPlan` / `DecideRequirementProgress` / `DecideProjectExecution` | M5 |
 | G9 | ~~取消上下文不能证明远端 Pi 进程已终止~~ **代码已关闭**（V2-M2 第十六阶段） | 现状：`PlanningAgentService.RunRole` 显式设置 `PlanningSessionID` 与 `StopContainerOnUncertain`，`ContainerRunner` 在 `Started && !Certain` 时经 `agent.ContainerTerminator` 调用 `ContainerService.stopContainerLocked`（复用已持有的容器锁与远程会话），以停止后的 `docker inspect` 判定终止并写入 `RemoteTerminationConfirmed` / `RemoteTerminationError`；真实 SSH / Docker 环境下的终止仍未验收，见里程碑 §7.10 / §7.16 | M2 |
 | G10 | ~~远端容器已停止但本地仍为 `running` 时恢复不闭环~~ **代码已关闭**（V2-M2 第十七阶段） | 现状：`ContainerService.StartContainer` 在启动前 inspect 远端事实，本地 `running` / `unknown` 遇远端 `exited` / `created` 时先经领域状态机收敛为 `stopped` 并落库、同步登记清单后才执行 `docker start`，写入失败即返回；`PlanningAgentService.RunRole` 每次先核验远端状态再决定复用或恢复，`paused` / `restarting` / `dead` / `removing` / `unknown` 不自动启动；`RunAgent` 用 `context.WithoutCancel` 派生的有界上下文读回终止后的记录并以 `ContainerStateReloadError` 报告本地读取失败。真实环境下的收敛与 Server 崩溃恢复仍未验收，见里程碑 §7.17 | M2 |
 | G11 | ~~容器状态判定依赖 `State.Running`，`paused` / `restarting` 被当成正常运行~~ **代码已关闭**（V2-M2 第十八阶段） | 现状：`domain.ClassifyDockerContainerCondition` 以 `State.Status` + `State.Running` 统一判定，`docker.ContainerInspect` 暴露 `RuntimeCondition` / `IsActivelyRunning` / `IsConfirmedExited` / `IsStartable`；`paused` / `restarting` 与字段矛盾在 `StartContainer`、`Exec`、`RunAgent`、`sessionContainerGuard`、规划运行时复用、规划 Agent 前置核验、`stopContainerLocked` 与容器残留观测中一律不进入执行、自动启动或 `stopped` 收敛，残留观测新增 `ContainerObservedIndeterminate`。真实 Docker 下的暂停 / 重启现场仍未验收，见里程碑 §7.18 | M2 |

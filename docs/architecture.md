@@ -757,6 +757,45 @@ WorkflowRun / 容器，也不调用 Scheduler 或 `TaskLaunchService`。
   （`GeneratePlan` 要求受管理的任务容器，并拒绝覆盖已有计划），因此 `queued` 任务在开始执行前没有 Step
   是既定事实，同一组步骤不会在两处生成。
 
+## 项目级执行协调边界
+
+项目级执行协调（M5）只决定"哪个任务现在应该有执行者"，不实现任何执行阶段：领取仍由
+`TaskScheduler` 完成，启动仍由 `TaskLaunchService` 完成，步骤、验证、代码保存与收敛全部是 V1 的既有路径。
+
+```text
+POST /projects/{id}/start
+  └─ app.ProjectExecutionService.Start
+       ├─ 读取项目与项目内正式任务（requirements.project_id）
+       ├─ domain.DecideProjectExecutionPlan：排序 + 队首分类 + 是否被阻塞
+       ├─ domain.DecideTaskQueueAdmission：复用自动调度准入（不复制前置条件）
+       ├─ 条件写入 project_execution_leases（epoch 递增，owner + 到期判定）
+       ├─ 清除停止意图（project_execution_states）
+       └─ 触发一次 TaskScheduler.Scan
+
+TaskScheduler.Scan（唯一的分派循环）
+  ├─ ProjectExecutionGate（TaskSchedulerProjectGate）.Reconcile：真实收敛后释放执行权
+  ├─ 既有名额统计 → queued 候选 → 既有准入与排队
+  ├─ 同一闸门的 FilterClaims：有效执行权 + 未停止 + 项目队首
+  └─ 既有任务执行权 → TaskLaunchService.Launch → 既有工作流
+```
+
+- **状态分层**：`domain` 只做纯判定（租约取得/续租/释放、队首与阻塞、需求/项目进度），`app` 负责
+  事务边界与外部调用，`httpapi` 只做协议转换。调度器不读执行权表，项目服务不实现启动流程。
+- **持久化事实**：`project_execution_leases`（`project_id` 主键、`owner`、单调 `epoch`、`expires_at`）
+  与 `project_execution_states`（最后一次决策的 `state` 与 `stop_requested_at`）。取得、续租、释放都是
+  带条件的 SQL，影响行数为 0 即按冲突处理；释放不删行、不重置 epoch。
+- **单进程模型不变**：进程锁仍排除第二个 Server；执行权表不用于多实例仲裁，`epoch` 只用于让旧
+  持有者的迟到写入失效，`expires_at` 只用于重启后可重新取得。
+- **续租**：`app.ProjectExecutionKeeper` 每 40 秒续租一次（TTL 2 分钟）；续租失败只停止该项目的后续
+  领取，不重放远程操作，也不影响其他项目。
+- **项目内串行**：自动分派由闸门保证"只有队首任务可领取"；显式启动入口（用户直接开始某个任务或
+  既有重试入口）在 `TaskLaunchService.Launch` 内补一次只读核验，同项目存在其他在途任务时拒绝启动。
+- **停止语义**：先落库停止意图，再调用既有 `TaskService.CancelTask`；当前任务真实收敛后才释放执行权。
+  不确定现场保留真实状态，不伪造 `paused` / `cancelled`。
+- **进度口径**：`domain.DecideRequirementProgress` / `DecideProjectExecution` 是唯一实现；
+  `current = completed`，`cancelled` 不并入 `failed`，不使用时间戳或模型输出推断完成度。
+- **不做**：第二套调度循环、跨项目依赖、任务 DAG、优先级抢占、自动合并分支、Git 回滚。
+
 ## SSH 与执行节点边界
 
 SSH 探测、SSH 连接层（主机密钥校验、私钥认证、远程执行、SFTP、远端套接字）、执行节点环境预检与

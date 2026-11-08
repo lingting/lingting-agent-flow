@@ -84,6 +84,12 @@ const (
 	matchRequirements        = PathRequirements
 	matchRequirement         = matchRequirements + "/" + matchRequirementID
 	matchProjectRequirements = matchProject + "/" + requirementsSegment
+
+	matchProjectStart        = matchProject + "/" + projectStartSegment
+	matchProjectCancel       = matchProject + "/" + projectCancelSegment
+	matchProjectExecution    = matchProject + "/" + projectExecutionSegment
+	matchProjectTasks        = matchProject + "/" + projectTasksSegment
+	matchRequirementProgress = matchRequirement + "/" + requirementProgressSegment
 )
 
 // apiRouteMethod 是路由上允许的一个 HTTP 方法及其处理函数。
@@ -167,6 +173,10 @@ func (rt *router) routes() []apiRoute {
 	requirementService := rt.availabilityGuard(
 		rt.requirement.service != nil,
 		"需求服务未初始化",
+	)
+	projectExecutionService := rt.availabilityGuard(
+		rt.projectExecution.execution != nil,
+		"项目执行服务未初始化",
 	)
 
 	// 环境接口在判定方法之前只校验段值：非法环境类型、名称或版本号按参数错误返回
@@ -695,6 +705,45 @@ func (rt *router) routes() []apiRoute {
 			pattern:          matchProjectRequirements,
 			methods:          get(rt.requirement.listByProject),
 			guard:            guardFor(requirementService, rt.pathIDGuard(paramProjectID)),
+			allow:            "GET, HEAD",
+			methodNotAllowed: "该接口只支持 GET 请求",
+		},
+		// 项目执行：开始 / 停止是显式动作，状态与任务列表是只读投影。
+		//
+		// 开始与停止不接受请求体：任务状态、执行权、epoch 与执行结果全部由服务端依据
+		// 持久化事实计算，客户端无法指定"执行哪个任务"或"跳过前序任务"。
+		{
+			pattern:          matchProjectStart,
+			methods:          post(rt.projectExecution.start),
+			guard:            guardFor(projectExecutionService, rt.pathIDGuard(paramProjectID)),
+			allow:            "POST",
+			methodNotAllowed: "该接口只支持 POST 请求",
+		},
+		{
+			pattern:          matchProjectCancel,
+			methods:          post(rt.projectExecution.cancel),
+			guard:            guardFor(projectExecutionService, rt.pathIDGuard(paramProjectID)),
+			allow:            "POST",
+			methodNotAllowed: "该接口只支持 POST 请求",
+		},
+		{
+			pattern:          matchProjectExecution,
+			methods:          get(rt.projectExecution.executionStatus),
+			guard:            guardFor(projectExecutionService, rt.pathIDGuard(paramProjectID)),
+			allow:            "GET, HEAD",
+			methodNotAllowed: "该接口只支持 GET 请求",
+		},
+		{
+			pattern:          matchProjectTasks,
+			methods:          get(rt.projectExecution.tasks),
+			guard:            guardFor(projectExecutionService, rt.pathIDGuard(paramProjectID)),
+			allow:            "GET, HEAD",
+			methodNotAllowed: "该接口只支持 GET 请求",
+		},
+		{
+			pattern:          matchRequirementProgress,
+			methods:          get(rt.projectExecution.requirementProgress),
+			guard:            guardFor(projectExecutionService, rt.pathIDGuard(paramRequirementID)),
 			allow:            "GET, HEAD",
 			methodNotAllowed: "该接口只支持 GET 请求",
 		},

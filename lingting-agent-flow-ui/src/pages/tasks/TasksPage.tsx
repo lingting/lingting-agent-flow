@@ -51,6 +51,23 @@ import { useTaskLiveSnapshot } from "@/pages/tasks/useTaskLiveSnapshot";
 const DEFAULT_PAGE_SIZE = 20;
 
 /**
+ * 从地址栏读取初始任务标识。
+ *
+ * 需求页用 `?task_id=` 深链接到任务页，使"需求 → 关联任务"的跳转发生在真实记录上：
+ * 打开页面即展示该任务的真实状态与执行记录，而不是一个需要用户再搜索一次的空列表。
+ * 地址栏不参与后续交互，用户点选其他任务时以页面内选择为准。
+ */
+function readInitialTaskID(): string | undefined {
+  if (typeof window === "undefined") return undefined;
+  const value = new URLSearchParams(window.location.search).get("task_id");
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+/** 初始任务标识在模块加载时读取一次，避免每次渲染都解析地址栏 */
+const initialTaskIDFromLocation = readInitialTaskID();
+
+/**
  * 任务状态字典。
  *
  * 取值与中文标签完全来自 `status.ts` 的单一映射，这里只把它转换成 DictTag 需要的形状，
@@ -256,7 +273,9 @@ export function TasksPage() {
    * 任务详情与工作流进度全部由 `useTaskLiveSnapshot` 按这个标识维护：打开详情即开始
    * 自动刷新，关闭详情（置空）立即停止。这里不再保存详情快照，避免出现两份数据源。
    */
-  const [selectedTaskID, setSelectedTaskID] = useState<string>();
+  const [selectedTaskID, setSelectedTaskID] = useState<string | undefined>(
+    initialTaskIDFromLocation,
+  );
   const [createOpen, setCreateOpen] = useState(false);
   /** 正在启动的任务标识：用于阻止重复提交并给出进行中反馈 */
   const [startingTaskID, setStartingTaskID] = useState<string>();

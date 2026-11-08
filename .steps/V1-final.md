@@ -38,7 +38,9 @@ AgentFlow 是**本地优先的 AI Coding Workflow Orchestrator**。它把一条�
 
 - 项目（`projects`）登记仓库地址、基础分支、语言环境与版本、缓存类型、容器内工作目录、逻辑删除。
 - 任务创建、列表分页、详情、取消、逻辑删除；任务状态机只在 `internal/domain` 内迁移。
-- 统一任务启动（`TaskLaunchService`）与任务租约（`task_leases`，含 `lease_epoch` fencing）。
+- 统一任务启动（`TaskLaunchService`）。（历史记录：V1 曾用 `task_leases` 与 `lease_epoch` 做任务租约，
+  该表已随 V2 单 Server 架构删除；当前任务级执行权由进程内的 `app.TaskExecutionCoordinator` 登记，
+  数据库没有 `task_leases` 表，也没有任务级租约列。）
 - 任务级工作流编排（`TaskWorkflowService`）：计划 → 逐步骤开发与验证 → 代码保存 → 收尾。
 - 显式重试（`failed` 任务重开为新的执行周期）、续跑资格查询、修复周期（有上限）与周期历史。
 - 失败现场的容器处置：只允许显式 `delete` / `detach`，detached 容器不被自动接管。

@@ -2,6 +2,7 @@ import {
   BulbOutlined,
   DashboardOutlined,
   DeploymentUnitOutlined,
+  ProfileOutlined,
   ProjectOutlined,
   SettingOutlined,
   UnorderedListOutlined,
@@ -12,6 +13,7 @@ import { MachinesPage } from "@/pages/machines";
 import { OverviewPage } from "@/pages/overview";
 import { PlanningWorkbenchPage } from "@/pages/planning";
 import { ProjectsPage } from "@/pages/projects";
+import { RequirementsPage } from "@/pages/requirements";
 import { SettingsPage } from "@/pages/settings";
 import { TasksPage } from "@/pages/tasks";
 
@@ -28,6 +30,12 @@ export const navigationRoutes: readonly MenuRouteDefinition[] = [
     icon: <BulbOutlined />,
     path: "planning",
     title: "需求工作台",
+  },
+  {
+    component: RequirementsPage,
+    icon: <ProfileOutlined />,
+    path: "requirements",
+    title: "需求",
   },
   {
     component: TasksPage,

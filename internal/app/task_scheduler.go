@@ -76,6 +76,11 @@ type TaskSchedulerOptions struct {
 	Logger *slog.Logger
 	// Now 是可注入的时钟，零值使用当前时间。
 	Now func() time.Time
+	// ProjectGate 约束项目级执行权与同项目顺序，为空表示不启用项目闸门。
+	//
+	// 启用后，只有持有有效项目执行权且通过项目内顺序判定的任务才能成为自动分派候选；
+	// 没有项目关联的历史任务不受约束。闸门不实现启动流程，也不改进程内名额统计。
+	ProjectGate TaskSchedulerProjectGate
 }
 
 // TaskScheduler 是任务队列的有界并发调度器。
@@ -89,10 +94,13 @@ type TaskSchedulerOptions struct {
 //
 // 它不创建、启动、删除或接管容器，不生成计划，不执行步骤，不保存代码，也不把
 // "Launch 返回 nil"当作任务完成：任务结论只能来自持久化状态。
+// 项目执行权约束由 ProjectGate 承担：调度器不读项目执行权表，也不判定项目内顺序，
+// 只按闸门给出的候选与拒绝原因处理。
 type TaskScheduler struct {
 	store        TaskSchedulerStore
 	coordination *TaskExecutionCoordinator
 	launch       TaskSchedulerLaunchPort
+	projects     TaskSchedulerProjectGate
 	logger       *slog.Logger
 	now          func() time.Time
 	limit        int
@@ -158,6 +166,7 @@ func NewTaskScheduler(options TaskSchedulerOptions) (*TaskScheduler, error) {
 		store:        options.Store,
 		coordination: options.Coordination,
 		launch:       options.Launch,
+		projects:     options.ProjectGate,
 		logger:       logger,
 		now:          now,
 		limit:        options.MaxConcurrentTasks,
@@ -285,13 +294,14 @@ func (s *TaskScheduler) runScan(ctx context.Context) {
 // Scan 执行一次完整的队列扫描与分派。
 //
 // 语义固定为：
-//  1. 统计真实占用名额的任务，达到上限时不再领取；
-//  2. 只读取 queued 任务作为候选，逐条调用领域准入判定；
-//  3. 通过准入的候选按领域排序规则排序后依次尝试领取；
-//  4. 领取成功后登记在途分派并异步启动，启动不阻塞后续候选。
+//  1. 收敛本进程持有的项目执行权（已真实收敛的项目释放执行权）；
+//  2. 统计真实占用名额的任务，达到上限时不再领取；
+//  3. 只读取 queued 任务作为候选，逐条调用领域准入判定；
+//  4. 通过准入的候选按领域排序规则排序，再由项目闸门过滤掉无执行权或非队首的任务；
+//  5. 领取成功后登记在途分派并异步启动，启动不阻塞后续候选。
 //
 // 读取失败不会伪造"可调度"：无法判断候选资格时跳过该候选，并记录日志，不让一个
-// 有问题的候选阻塞整条队列。
+// 有问题的候选阻塞整条队列。项目闸门的失败只影响它自己的项目：其他项目继续执行。
 // 并发扫描串行执行：名额统计与领取必须在同一个临界区内完成，否则两次扫描会基于
 // 同一份空名额快照各自领取，使本进程的领取数超过配置上限。
 func (s *TaskScheduler) Scan(ctx context.Context) error {
@@ -306,6 +316,7 @@ func (s *TaskScheduler) Scan(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return ErrSchedulerStopped
 	}
+	s.reconcileProjects(ctx)
 	occupied, err := s.countOccupiedSlots(ctx)
 	if err != nil {
 		return err
@@ -318,6 +329,7 @@ func (s *TaskScheduler) Scan(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	candidates = s.filterProjectClaims(ctx, candidates)
 	for _, candidate := range candidates {
 		if available <= 0 {
 			return nil
@@ -404,6 +416,65 @@ func (s *TaskScheduler) loadCandidates(
 		sorted = append(sorted, candidates[index[key.TaskID]])
 	}
 	return sorted, nil
+}
+
+// reconcileProjects 收敛本进程持有的项目执行权。
+//
+// 收敛失败不阻断本次扫描：项目闸门会独立读取执行权事实，因此不会因为一次收敛失败而
+// 出现"看起来可调度"的候选。
+func (s *TaskScheduler) reconcileProjects(ctx context.Context) {
+	if s.projects == nil {
+		return
+	}
+	if err := s.projects.Reconcile(ctx); err != nil {
+		s.logger.WarnContext(ctx, "项目执行权收敛失败", slog.String("error", errorSummary(err)))
+	}
+}
+
+// filterProjectClaims 用项目闸门过滤候选任务。
+//
+// 闸门只允许"持有有效项目执行权且位于项目队首"的任务通过；被拒绝的候选记录稳定原因，
+// 不改变其他项目的候选资格。没有配置闸门时原样返回，保持既有行为。
+func (s *TaskScheduler) filterProjectClaims(
+	ctx context.Context,
+	candidates []schedulerCandidate,
+) []schedulerCandidate {
+	if s.projects == nil || len(candidates) == 0 {
+		return candidates
+	}
+	claims := make([]TaskSchedulerClaimCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		var requirement *domain.Requirement
+		if candidate.input.Requirement != nil {
+			copied := *candidate.input.Requirement
+			requirement = &copied
+		}
+		claims = append(claims, TaskSchedulerClaimCandidate{
+			Task:        candidate.Task,
+			Requirement: requirement,
+		})
+	}
+	allowed, rejections := s.projects.FilterClaims(ctx, claims)
+	for _, rejection := range rejections {
+		s.logger.DebugContext(
+			ctx,
+			"项目闸门未允许自动分派",
+			slog.String("task_id", rejection.TaskID.String()),
+			slog.String("reason", rejection.Reason),
+			slog.String("detail", rejection.Detail),
+		)
+	}
+	permitted := make(map[domain.ID]struct{}, len(allowed))
+	for _, candidate := range allowed {
+		permitted[candidate.Task.ID] = struct{}{}
+	}
+	filtered := make([]schedulerCandidate, 0, len(allowed))
+	for _, candidate := range candidates {
+		if _, ok := permitted[candidate.Task.ID]; ok {
+			filtered = append(filtered, candidate)
+		}
+	}
+	return filtered
 }
 
 // loadQueueInput 读取计算队列准入与排序所需的持久化事实。

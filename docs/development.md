@@ -217,6 +217,25 @@ make release                                         # 单文件生产构建：�
 9. 不要在 CLI 里重新装配执行栈：`agentflow task start` 只是 HTTP 客户端，新增执行参数只能通过
    `POST .../start` 的请求体表达。
 
+### 修改项目级执行协调时
+
+1. 排序、队首分类、阻塞与进度只在 `internal/domain/project_execution_plan.go` /
+   `project_progress.go` 修改；不得在 `app`、`httpapi` 或前端复制第二份判定。
+2. 项目执行权只能在存储层用带条件的 SQL 变更（取得 = 更新已到期行或插入；续租、释放带 `owner + epoch`），
+   影响行数为 0 必须按冲突处理；不得改成"先查再写"，也不得用进程内互斥替代条件写入。
+3. 不得修改或删除已执行过的迁移脚本：执行权与执行意图的结构变化一律追加更高版本的脚本。
+4. 领取资格必须继续由调度器的项目闸门（`TaskSchedulerProjectGate`）约束：不要新增与 `TaskScheduler`
+   竞争同一批任务的扫描循环，也不要让项目服务自己调用 `TaskLaunchService` 之外的启动流程。
+5. 确认"同项目串行"仍然成立：新增显式启动入口时，必须在 `TaskLaunchService.Launch` 这条统一路径上
+   核验同项目没有其他在途任务，而不是在每个 Handler 里各写一次。
+6. 续租与收敛周期必须保持"续租周期 < 有效期"（当前 40 秒 / 2 分钟）；调整常量时同步检查
+   `NewProjectExecutionService` 的校验与本文档。
+7. 任务结论只能来自持久化状态：不得因 `Launch` 返回 `nil`、接口返回或 Agent 输出就把任务当作完成，
+   也不得因执行权到期推断远端任务已停止。
+8. 停止入口只记录意图并调用既有取消入口，不直接改写任务状态；不确定现场保留真实状态。
+9. 项目执行状态与需求进度的接口字段发生变化时，同步更新 `docs/http-api.md` §17 与
+   `.steps/V2/WORKFLOW.md` §7。
+
 ## 新增角色类型或状态
 
 - 新增角色类型：在 `internal/domain/role.go` 增加 `RoleType` 常量与 `Validate` 分支，同时补齐

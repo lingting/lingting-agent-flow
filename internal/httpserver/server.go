@@ -104,6 +104,10 @@ type Options struct {
 	//
 	// 它只依赖存储：确认生成正式需求与任务不接触远程资源，生成后的任务保持待执行。
 	Requirement *app.RequirementService
+	// ProjectExecution 是项目执行协调服务，为空时项目执行与进度接口报告服务不可用。
+	//
+	// 它只依赖存储与既有任务取消入口：开始项目执行不接触 SSH、Docker 或 Pi。
+	ProjectExecution *app.ProjectExecutionService
 	// Files 是前端静态资源文件系统，为空时使用嵌入资源。
 	Files fs.FS
 	// RequireWebUI 为 true 时，缺少前端构建产物将导致构造失败。
@@ -173,6 +177,7 @@ func New(options Options) (*Server, error) {
 		PlanningRuntime:   options.PlanningRuntime,
 		PlanningAnalysis:  options.PlanningAnalysis,
 		Requirement:       options.Requirement,
+		ProjectExecution:  options.ProjectExecution,
 		Logger:            logger,
 	})
 	web, err := buildWebHandler(options.Files, options.RequireWebUI, logger)

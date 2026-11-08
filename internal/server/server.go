@@ -100,13 +100,14 @@ type Options struct {
 	) (*app.TaskWorkflowService, error)
 	// TaskSchedulerFactory 在数据库打开后构造任务调度器。
 	//
-	// 调度器依赖数据库、任务执行协调器与统一启动服务，因此必须在它们之后构造；
-	// 返回 nil 表示本次运行不提供自动调度，此时 queued 任务只能由用户显式启动。
+	// 调度器依赖数据库、任务执行协调器、统一启动服务与项目级执行约束，因此必须在它们
+	// 之后构造；返回 nil 表示本次运行不提供自动调度，此时 queued 任务只能由用户显式启动。
 	TaskSchedulerFactory func(
 		store storage.Store,
 		cfg *config.Config,
 		coordination *app.TaskExecutionCoordinator,
 		launch *app.TaskLaunchService,
+		projects *app.ProjectExecutionService,
 	) (*app.TaskScheduler, error)
 	// TaskLaunchFactory 在数据库打开后构造统一任务启动服务。
 	//
@@ -170,11 +171,15 @@ type Server struct {
 		buildLocks *app.EnvironmentBuildLocks,
 	) (*app.TaskLaunchService, error)
 	// taskSchedulerFactory 在数据库打开后构造任务调度器。
+	//
+	// projects 是项目级执行约束（项目执行权与同项目顺序），为空表示不启用项目闸门：
+	// 调度器只按全局并发与任务准入分派，不判定项目归属。
 	taskSchedulerFactory func(
 		store storage.Store,
 		cfg *config.Config,
 		coordination *app.TaskExecutionCoordinator,
 		launch *app.TaskLaunchService,
+		projects *app.ProjectExecutionService,
 	) (*app.TaskScheduler, error)
 	// validationFactory 在数据库打开后构造确定性验证引擎。
 	validationFactory func(store storage.Store, cfg *config.Config) (*app.ValidationService, error)
@@ -234,6 +239,12 @@ type Server struct {
 	lock *ProcessLock
 	// scheduler 是有界并发任务调度器，为空时不自动领取 queued 任务。
 	scheduler *app.TaskScheduler
+	// projectExecution 是项目执行协调服务，为空时不提供项目执行接口。
+	//
+	// 它只协调项目执行权与项目内顺序，不实现第二套任务执行流程。
+	projectExecution *app.ProjectExecutionService
+	// projectExecutionKeeper 续租并收敛项目执行权，为空时不注册后台续租。
+	projectExecutionKeeper *app.ProjectExecutionKeeper
 	// containerRecovery 收敛状态不明的容器记录并报告孤儿容器。
 	//
 	// 它只做只读观测与条件写入，不创建、启动、删除或接管容器。
@@ -613,6 +624,38 @@ func (s *Server) openDatabase(ctx context.Context) error {
 		}
 		s.taskLaunch = launcher
 	}
+	// 项目执行协调服务在调度器之前构造：调度器需要它作为项目闸门，而它需要调度器
+	// 只是"触发一次扫描"，因此扫描入口在调度器构造完成后绑定。
+	if s.projectExecution == nil {
+		tasks, taskErr := s.taskService()
+		if taskErr != nil {
+			return taskErr
+		}
+		// 复用同一实例：HTTP 侧的任务管理接口与项目停止入口共用同一份服务。
+		s.tasks = tasks
+		projectExecution, projectErr := app.NewProjectExecutionService(
+			app.ProjectExecutionServiceOptions{
+				Store:    store,
+				Canceler: tasks,
+				Logger:   s.logger,
+			},
+		)
+		if projectErr != nil {
+			return fmt.Errorf("初始化项目执行服务失败: %w", projectErr)
+		}
+		s.projectExecution = projectExecution
+	}
+	if s.projectExecutionKeeper == nil && s.projectExecution != nil {
+		// 续租与收敛由独立后台服务承担：它只续租 / 释放执行权，不领取任何任务。
+		keeper, keeperErr := app.NewProjectExecutionKeeper(app.ProjectExecutionKeeperOptions{
+			Service: s.projectExecution,
+			Logger:  s.logger,
+		})
+		if keeperErr != nil {
+			return fmt.Errorf("初始化项目执行续租服务失败: %w", keeperErr)
+		}
+		s.projectExecutionKeeper = keeper
+	}
 	if s.taskSchedulerFactory != nil && s.taskLaunch != nil {
 		// 调度器在启动服务之后构造：它只调用既有启动流程，不重复实现任何阶段。
 		scheduler, schedulerErr := s.taskSchedulerFactory(
@@ -620,11 +663,16 @@ func (s *Server) openDatabase(ctx context.Context) error {
 			s.cfg,
 			s.coordination,
 			s.taskLaunch,
+			s.projectExecution,
 		)
 		if schedulerErr != nil {
 			return fmt.Errorf("初始化任务调度器失败: %w", schedulerErr)
 		}
 		s.scheduler = scheduler
+		if s.projectExecution != nil {
+			// 扫描入口在调度器构造完成后绑定：开始项目执行只请求"现在扫描一次"。
+			s.projectExecution.AttachScanTrigger(scheduler)
+		}
 	}
 	// 显式重试复用统一启动流程：它只负责重开任务与取得执行权，不实现第二套启动逻辑。
 	if s.taskLaunch != nil {
@@ -779,6 +827,11 @@ func (s *Server) startServices(ctx context.Context) error {
 		// 统一启动服务注册在编排器之后：它依赖编排器，停止顺序因此反过来，
 		// 先停止新的启动请求，再让下层服务收敛在途工作。
 		services = append(services, s.taskLaunch)
+	}
+	if s.projectExecutionKeeper != nil {
+		// 续租服务注册在调度器之前：停止顺序因此反转为"先停止调度分派，再停止续租"，
+		// 否则续租先停会让仍可能被分派的项目执行权提前到期。
+		services = append(services, s.projectExecutionKeeper)
 	}
 	if s.scheduler != nil {
 		// 调度器注册在最后：它依赖数据库、任务执行协调器与统一启动服务，因此启动
@@ -1161,6 +1214,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		PlanningRuntime:  s.planningRuntime,
 		PlanningAnalysis: s.planningAnalysis,
 		Requirement:      s.requirements,
+		ProjectExecution: s.projectExecution,
 		CodeInitialize:   s.codeInitialize,
 		RequireWebUI:     s.requireWeb,
 		ShutdownTimeout:  s.shutdownTimeout,

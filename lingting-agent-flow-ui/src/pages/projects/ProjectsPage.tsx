@@ -5,6 +5,7 @@ import { Button, type ExTableColumn, ExTable, LinkButton } from "lingting-react-
 import { useCallback, useMemo, useRef, useState } from "react";
 
 import { ApiError, deleteProject, fetchProjects, type Project } from "@/lib/api";
+import { ProjectExecutionPanel } from "@/pages/projects/ProjectExecutionPanel";
 import { ProjectFormModal } from "@/pages/projects/ProjectFormModal";
 import {
   describeProjectCaches,
@@ -48,6 +49,8 @@ export function ProjectsPage() {
   const actionRef = useRef<ActionType>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<Project>();
+  // 正在查看执行状态的项目：执行面板读取服务端真实状态，不做本地推断。
+  const [executing, setExecuting] = useState<Project>();
   const [loadError, setLoadError] = useState<string>();
   const [actionError, setActionError] = useState<string>();
   // 执行节点只查询一次：列表用它把节点标识显示成真实名称，表单用它作为可选项来源。
@@ -145,6 +148,7 @@ export function ProjectsPage() {
         dataIndex: "option",
         render: (_dom, record) => (
           <Space>
+            <LinkButton onClick={() => setExecuting(record)} text="执行" />
             <LinkButton
               onClick={() => {
                 setEditing(record);
@@ -258,6 +262,10 @@ export function ProjectsPage() {
         }}
         hostState={hosts}
       />
+
+      {executing && (
+        <ProjectExecutionPanel project={executing} onClose={() => setExecuting(undefined)} />
+      )}
     </Flex>
   );
 }

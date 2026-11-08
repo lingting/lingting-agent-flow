@@ -378,6 +378,14 @@ func taskFilterConditions(filter storage.TaskFilter) ([]string, []any) {
 		conditions = append(conditions, `requirement_id = ?`)
 		args = append(args, toIDParam(filter.RequirementID))
 	}
+	if projectID := strings.TrimSpace(filter.ProjectID); projectID != "" {
+		// 归属项目只经过需求关联：已逻辑删除的需求不再把任务带进任何项目视图。
+		conditions = append(
+			conditions,
+			`requirement_id IN (SELECT id FROM requirements WHERE project_id = ? AND deleted_at IS NULL)`,
+		)
+		args = append(args, projectID)
+	}
 	if !filter.HostID.IsEmpty() {
 		conditions = append(conditions, `host_id = ?`)
 		args = append(args, toIDParam(filter.HostID))

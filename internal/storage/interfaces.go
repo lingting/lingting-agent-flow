@@ -134,6 +134,95 @@ type ProjectStore interface {
 	ListProjects(ctx context.Context, filter ProjectFilter) ([]domain.Project, error)
 }
 
+// ProjectExecutionState 是项目执行意图的持久化记录。
+//
+// 它不是第二套状态机：接口返回的项目状态由 domain.DecideProjectExecution 依据任务真实
+// 状态、执行权与停止意图计算；这里只保存"最后一次决策写下的记录"与用户的停止意图，
+// 使停止请求与执行权归属在进程重启后仍然可识别。
+type ProjectExecutionState struct {
+	// ProjectID 是项目标识。
+	ProjectID domain.ID
+	// State 是最后一次决策写下的状态记录，枚举式取值不受数据库白名单限制。
+	State domain.ProjectExecutionState
+	// StopRequestedAt 非空表示用户已请求停止领取新任务。
+	StopRequestedAt *time.Time
+	// UpdatedAt 是记录写入时间。
+	UpdatedAt time.Time
+}
+
+// StopRequested 判断用户是否已请求停止领取新任务。
+func (s ProjectExecutionState) StopRequested() bool {
+	return s.StopRequestedAt != nil
+}
+
+// ProjectTaskFact 是项目内一个正式任务连同所属需求的持久化事实。
+//
+// 任务归属项目只有一条路径：requirements.project_id。历史手工任务没有项目关联，因此
+// 不属于任何项目，也不会出现在项目执行计划里。
+type ProjectTaskFact struct {
+	// Requirement 是任务所属需求的持久化记录。
+	Requirement domain.Requirement
+	// Task 是项目内的正式任务。
+	Task domain.Task
+}
+
+// ProjectExecutionStore 保存项目级执行权、项目执行意图与项目任务集合。
+//
+// 三种能力都只做条件写入或只读查询：
+//   - 取得执行权只允许"没有登记"或"已到期"，未到期的执行权不能被抢占；
+//   - 续租、释放都带 owner + epoch 条件，旧持有者的迟到写入被拒绝；
+//   - 释放不删除行、不重置 epoch，释放后按到期处理，允许重新取得并递增 epoch。
+//
+// 并发正确性由 SQL 条件写入保证：调用方不得把进程内互斥当作唯一保证。
+type ProjectExecutionStore interface {
+	// AcquireProjectExecutionLease 以条件写入取得项目执行权。
+	//
+	// 没有登记或已有登记已到期时成功，并返回取得后的记录（epoch 已递增）；未到期时
+	// 返回 storage.ErrConflict，调用方必须按"项目正忙"处理。
+	AcquireProjectExecutionLease(
+		ctx context.Context,
+		projectID domain.ID,
+		owner string,
+		now time.Time,
+		expiresAt time.Time,
+	) (domain.ProjectExecutionLease, error)
+	// RenewProjectExecutionLease 以 owner + epoch 为条件延长执行权有效期。
+	//
+	// 条件不成立（执行权已换人、已过期或记录不存在）时返回 storage.ErrConflict，
+	// 调用方必须停止继续领取任务。
+	RenewProjectExecutionLease(
+		ctx context.Context,
+		projectID domain.ID,
+		owner string,
+		epoch int64,
+		now time.Time,
+		expiresAt time.Time,
+	) error
+	// ReleaseProjectExecutionLease 以 owner + epoch 为条件释放执行权。
+	//
+	// 释放只把有效期置为 now，不删除行、不重置 epoch；条件不成立返回
+	// storage.ErrConflict，旧持有者不得释放新持有者的执行权。
+	ReleaseProjectExecutionLease(
+		ctx context.Context,
+		projectID domain.ID,
+		owner string,
+		epoch int64,
+		now time.Time,
+	) error
+	// GetProjectExecutionLease 读取项目执行权，不存在时返回 storage.ErrNotFound。
+	GetProjectExecutionLease(ctx context.Context, projectID domain.ID) (*domain.ProjectExecutionLease, error)
+	// ListProjectExecutionLeases 返回指定持有者的全部执行权登记，按项目标识排序。
+	ListProjectExecutionLeases(ctx context.Context, owner string) ([]domain.ProjectExecutionLease, error)
+	// GetProjectExecutionState 读取项目执行意图，不存在时返回 storage.ErrNotFound。
+	GetProjectExecutionState(ctx context.Context, projectID domain.ID) (*ProjectExecutionState, error)
+	// SetProjectExecutionState 整体写入项目执行意图（按项目标识覆盖）。
+	SetProjectExecutionState(ctx context.Context, state ProjectExecutionState) error
+	// ListProjectTaskFacts 返回项目内未逻辑删除的正式任务与所属需求。
+	//
+	// 顺序由领域层的项目内排序规则决定，存储层不实现业务排序。
+	ListProjectTaskFacts(ctx context.Context, projectID domain.ID) ([]ProjectTaskFact, error)
+}
+
 // PlanningSessionStore 保存需求规划会话及其消息与方案版本。
 //
 // 规划会话与 Task / Step / Attempt / Session 执行记录是两套模型：规划阶段只产生
@@ -349,6 +438,11 @@ type AppendPlanningRevisionRequest struct {
 type TaskFilter struct {
 	// RequirementID 限制任务所属需求。
 	RequirementID domain.ID
+	// ProjectID 限制任务所属项目。
+	//
+	// 任务归属项目只有一条路径：requirements.project_id。该条件因此按需求表的项目关联
+	// 过滤，并且只匹配未逻辑删除的需求：已删除需求下的任务不再属于任何项目视图。
+	ProjectID string
 	// HostID 限制任务所属执行节点。
 	HostID domain.ID
 	// Statuses 限制任务状态，为空表示不限制。
@@ -1041,6 +1135,10 @@ type Tx interface {
 	TaskStore
 	// ProjectStore 提供项目登记信息的读写；项目是任务必填的关联对象。
 	ProjectStore
+	// ProjectExecutionStore 提供项目执行权、项目执行意图与项目任务集合的读写。
+	//
+	// 它只做条件写入与只读查询：并发正确性来自 SQL 条件，不来自进程内互斥。
+	ProjectExecutionStore
 	// PlanningSessionStore 提供规划会话、消息与方案版本的读写；规划会话不进入
 	// Task 执行记录。
 	PlanningSessionStore

@@ -63,24 +63,38 @@ active ──发送消息──> analyzing ──方案生成并落 Revision─�
 
 ### 4.2 Requirement 状态
 
-需求状态只表达业务阶段，**不表达执行进度**：
+需求有**两个不同口径**，不得混用：
 
-- `planned`：已确认生成（初态）
-- `executing`：至少一个关联 Task 正在执行或已执行
-- `completed`：全部关联 Task 均为 `completed`
-- `blocked`：存在 `failed` / `recovery_required` / `cancelled` 的关联 Task，且不满足完成条件
-- `deleted` 语义由 `deleted_at` 表达，不新增状态值
+1. `requirements.status`（持久化业务阶段，V1 既有枚举，M5 未改动）：`queued` / `processing` /
+   `completed` / `failed` / `cancelled`。它由既有需求状态机推进，不由任务状态反推。
+2. `RequirementProgress`（M5 交付的进度投影，不落库）：`planned` / `executing` / `blocked` /
+   `completed`，只由 `domain.DecideRequirementProgress` 依据关联 Task 的真实状态计算，与项目
+   进度同源。`deleted` 语义由 `deleted_at` 表达，不新增状态值。
 
-状态由 `domain` 纯函数依据关联 Task 的真实状态计算，与 `RequirementProgress` 同源。
+进度投影的判定顺序固定：
+
+- `completed`：存在任务且全部关联 Task 都是 `completed`（这是唯一的完成口径）；
+- `blocked`：存在 `failed` / `recovery_required` / `cancelled` / `paused` 的关联 Task，且不满足
+  完成条件；阻塞任务取**按执行顺序第一个**阻止完成判定的任务，而不是只看队首：
+  "已有任务完成、后面有任务失败"的现场必须显示阻塞；
+- `executing`：有任务仍在执行，或已有任务完成但未全部完成；
+- `planned`：其余情况。
 
 ### 4.3 项目执行状态（只读投影）
 
-- `idle`：没有关联 Task 在执行
-- `running`：当前有 Task 在执行
-- `blocked`：存在需要人工处置的 Task（失败 / 待恢复），且没有 Task 在执行
-- `paused`：用户显式停止
+- `idle`：没有关联 Task 在执行，也没有持有项目执行权
+- `running`：存在执行中的 Task，或项目仍持有有效执行权（正在按顺序领取任务）
+- `blocked`：队首任务需要人工处置（失败 / 待恢复 / 取消 / 暂停 / 无执行记录的中间状态），
+  且没有 Task 在执行、也没有执行权
+- `paused`：用户已请求停止领取，且当前没有 Task 在执行
 
-项目状态是**投影**，不落库为独立状态机，也不允许覆盖 Task 状态。
+优先级固定为"执行中 > 已停止 > 阻塞 > 空闲"。
+
+项目状态是**投影**：只由 `domain.DecideProjectExecution` 依据项目内全部正式 Task 的真实状态、
+项目执行权与用户停止意图计算，不落库为独立状态机，也不允许覆盖 Task 状态。
+
+`project_execution_states` 只保存**执行意图**（最后一次决策写下的 `state` 与 `stop_requested_at`），
+用于跨重启保留"用户已请求停止领取"这一事实；接口返回的状态一律重新计算，不读该表当作状态机。
 
 ## 5. 确认与原子生成
 
@@ -120,32 +134,69 @@ active ──发送消息──> analyzing ──方案生成并落 Revision─�
 ### 6.1 领取流程
 
 ```text
-用户点击「开始执行」（项目级显式动作）
-  → 校验项目存在、未删除、有可执行任务、执行节点通过环境预检
-  → 进程内取得项目级执行权（同一份数据目录只有一个 Server 进程，进程锁已排除第二个执行者）
-  → 选择该项目下一个 Task（按 requirement_sequence，其次 created_at；跳过已终态）
-  → 候选 Task 必须满足：同项目无更早的未完成/失败/待恢复 Task
-  → 调用既有 TaskLaunchService + TaskWorkflowService 执行
-  → 收敛后：成功则释放执行权并允许领取下一个
-            失败 / 待恢复 / 取消 → 停止继续领取，项目进入 blocked
+用户点击「开始执行」（项目级显式动作，POST /api/v1/projects/{projectID}/start）
+  → 校验项目存在且未逻辑删除（否则 404）
+  → 读取项目内正式任务（经 requirements.project_id，排除已删除需求与任务）
+  → 按领域规则排序并判定队首；已有任务在执行 / 队首需人工处置 / 没有可执行任务一律拒绝
+  → 复用自动调度准入（domain.DecideTaskQueueAdmission）核验队首任务的前置条件
+  → 原子取得项目执行权（project_execution_leases，epoch 递增；同一持有者重复开始是幂等的）
+  → 清除停止意图并触发一次 TaskScheduler.Scan
+  → 返回真实项目执行状态（不返回"可能已开始"）
+
+TaskScheduler.Scan（唯一的自动分派循环，仍在原位置）
+  → 收敛本进程持有的项目执行权（真实收敛的项目释放执行权）
+  → 统计全局名额（scheduler.max_concurrent_tasks）
+  → 读取 queued 候选 → 既有准入判定 → 既有队列排序
+  → 项目闸门过滤：必须持有有效执行权、未收到停止意图、且是项目队首任务
+  → 取得任务执行权 → 既有 TaskLaunchService.Launch（不新建启动流程）
+
+收敛后
+  → 成功：队首前移，下一次扫描自动领取下一个任务（自动连续领取，无需再次确认）
+  → 失败 / 待恢复：项目阻塞（队首任务挡住后续任务），执行权释放
+  → 用户停止且任务已真实收敛：意图记为 paused，执行权释放
+  → 全部任务真实完成：意图记为 idle，执行权释放
 ```
+
+项目执行权是**数据库事实**（`project_execution_leases`：`project_id` 主键、`owner`、单调递增
+`epoch`、`expires_at`），不是进程内 map：
+
+- 取得：`UPDATE ... WHERE project_id=? AND expires_at <= now`，影响 0 行再插入；仍冲突即"项目正忙"。
+- 续租 / 释放：必须带 `owner + epoch` 条件，0 行按冲突处理，旧持有者的迟到写入被拒绝。
+- 释放不删行、不重置 epoch；释放后按到期处理，重新取得时 epoch 递增。
+- 有效期 2 分钟，续租与收敛周期 40 秒（`app.ProjectExecutionKeeper`）。
+- 单 Server 进程锁不变：本表不用于多实例仲裁，只用于跨请求、跨重启识别执行权与停止意图。
 
 ### 6.2 必须覆盖的失败与并发场景
 
-| 场景 | 要求 |
+| 场景 | 实现 |
 |---|---|
-| 同一进程并发领取 | 进程内项目级执行权串行化同一项目的领取；状态写入仍用条件更新兜底 |
+| 同一项目并发开始 | 条件写入只有一个成功，其余返回 409；进程内按项目串行化只是第一道防线 |
+| 同一项目并发领取 | 项目闸门只放行队首任务；任务执行权仍由进程内协调器按任务互斥 |
 | 第二个 Server 进程 | 进程锁在打开数据库之前失败退出，不存在第二个执行者，也不做跨进程仲裁 |
-| 服务重启 | 按既有恢复规则收敛未完成的执行记录，不重放 Agent 调用；进程内执行权不跨进程存活 |
-| 任务取消 | 取消经既有 `cancelling` → `cancelled` 收敛后才释放执行权 |
+| 服务重启 | 新进程的 owner 与旧租约不同，不会自动领取项目任务；未过期租约到期后按 epoch 递增重取；不重放任何 Agent 调用 |
+| 任务取消 | 项目停止只记录停止意图并调用既有取消入口；任务真实收敛（`cancelling` → `cancelled`）后才释放执行权 |
 | 执行超时 | 映射为 `timed_out`，按阻塞处理，不自动领取下一个 |
-| 执行权丢失 | 持有者在收敛前不得继续写任务状态；状态写入带条件，冲突时读取数据库真实值 |
-| 迟到结果 | 所有状态写入带条件（必要时用记录版本做比较并交换），冲突时读取数据库真实值 |
-| 同项目失败阻塞 | 后续 Task 不得越过失败任务；其他项目不受影响 |
+| 执行权丢失 / 续租失败 | 停止按该执行权领取任务（闸门按 owner + epoch 判定），不重放远程操作，不影响其他项目 |
+| 迟到结果 | 任务状态写入继续使用既有条件更新；项目租约的续租与释放同样带条件 |
+| 同项目失败阻塞 | 后续 Task 不得越过失败任务；执行权释放，项目状态为 blocked；其他项目不受影响 |
+| 显式启动入口 | 统一启动流程额外核验"同项目没有其他在途任务"，避免绕过项目执行权并发执行两个任务 |
 | 全局并发 | 仍受 `scheduler.max_concurrent_tasks` 限制；项目串行不等于降低全局上限 |
 
-上述场景在 M5 实施时按**单 Server** 架构重新确定具体执行协调方式：项目级执行权是否只保存在进程内、
-是否需要辅助的数据库进度记录，都在那时决定；不引入多实例 epoch 仲裁或数据库租约表。
+
+### 6.3 项目停止语义
+
+`POST /api/v1/projects/{projectID}/cancel` 的语义固定为：
+
+1. 先把停止意图落库（`project_execution_states`：`state=stopping`、`stop_requested_at`），因此下一次
+   扫描就不会再领取该项目的新任务；
+2. 有在途任务时调用**既有**任务取消入口（`TaskService.CancelTask`），只记录取消请求并推进到
+   `cancelling`，不直接改写任务状态；
+3. 当前任务真实收敛到终态后，才释放项目执行权并记录 `paused`；收敛前执行权保留；
+4. 没有在途任务时立即释放执行权并记录 `paused`；
+5. 结果不确定（任务进入 `failed` / `recovery_required`）时保留真实状态，不伪造 `paused`；
+6. 取消不删除任务、不删除执行记录、不回滚 Git，也不影响其他项目。
+
+重复停止是幂等的：已停止且没有在途任务时按当前状态返回，不再生成新的写操作。
 
 ## 7. 进度计算
 
@@ -153,15 +204,18 @@ active ──发送消息──> analyzing ──方案生成并落 Revision─�
 `requirement_sequence`，输出结构化结果：
 
 ```text
-total / completed / running / pending / failed / recovery_required
+total / completed / running / pending / failed / recovery_required / cancelled / paused
 current = completed
 status  = completed | blocked | executing | planned
 ```
 
-- 完成判定：全部关联 Task 均 `completed`（且需求未删除）。
-- 阻塞判定：存在 `failed` / `recovery_required` / `cancelled` 时不判完成。
+- 完成判定：存在任务且全部关联 Task 均 `completed`（且需求未删除）。
+- 阻塞判定：存在 `failed` / `recovery_required` / `cancelled` / `paused` 时不判完成。
+  `cancelled` 单独计数，**不并入 `failed`**：两者都阻止完成判定，但原因不同，接口与前端分别展示。
 - 进度是**任务完成数量比**，不是语义完成度；不显示模型生成的百分比或总结。
 - 项目进度由项目下全部正式 Task 状态聚合，规则同源，不另建一套判定。
+- 唯一实现：`domain.DecideRequirementProgress` / `domain.DecideProjectExecution`；
+  接口字段见 `docs/http-api.md` §17。
 
 ## 8. 需求删除流程
 
@@ -193,8 +247,8 @@ status  = completed | blocked | executing | planned
 
 ## 10. 待决问题
 
-1. 项目级"开始执行"是**自动连续领取**下一个 Task，还是每完成一个任务需要用户再次确认。
-   默认倾向：自动连续领取，失败即停（与 V1 任务级工作流一致的收敛语义）。
+1. ~~项目级"开始执行"是自动连续领取还是每个任务人工确认~~ **已定稿（M5）**：自动连续领取，
+   失败 / 待恢复 / 取消即停；不需要逐任务确认，也不提供"跳过前序任务"的入口。
 2. 需求删除时，已结束 Task 是随需求一起逻辑删除，还是保留可见（见
    [`PRODUCT-SCOPE.md`](./PRODUCT-SCOPE.md) §7）。
 3. 同一需求内是否允许用户显式调整已生成任务的执行顺序。默认倾向：不允许，顺序由方案确认时固定。

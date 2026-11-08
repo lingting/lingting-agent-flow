@@ -421,3 +421,83 @@
 | 项目已逻辑删除、缺少可用执行节点、任务角色不可用 | 412 | `precondition_failed` |
 | 事务或存储失败 | 500 | `internal_error` / `execution_not_persisted` |
 | 需求服务未装配或已停止 | 503 | `internal_error` |
+
+## 17. 项目执行与进度
+
+项目执行是**显式动作**：`queued` 任务不会自动开始执行，只有项目取得执行权后才由既有调度器按项目内
+顺序领取。开始与停止**不接受请求体**——任务状态、执行权 `owner` / `epoch`、任务顺序与执行结果全部
+由服务端依据持久化事实计算，也不提供"提前启动某个后续任务"或"跳过前序任务"的入口。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/api/v1/projects/{projectID}/start` | 开始项目执行：核验现场、取得执行权并触发一次扫描 |
+| `POST` | `/api/v1/projects/{projectID}/cancel` | 请求停止项目执行（记录停止意图并调用既有取消入口） |
+| `GET` | `/api/v1/projects/{projectID}/execution` | 项目执行状态（只读，无副作用） |
+| `GET` | `/api/v1/projects/{projectID}/tasks` | 项目正式任务列表（按项目内执行顺序） |
+| `GET` | `/api/v1/requirements/{requirementID}/progress` | 需求进度（只读） |
+
+响应（`/start`、`/cancel`、`/execution`）：
+
+```json
+{
+  "project_id": "demo",
+  "execution": {
+    "project_id": "demo",
+    "status": "running",
+    "counts": {"total": 3, "completed": 1, "running": 0, "pending": 2,
+               "failed": 0, "recovery_required": 0, "cancelled": 0, "paused": 0},
+    "requirements": 1,
+    "blocked": false,
+    "current_task_id": "…",
+    "next_task_id": "…",
+    "lease_active": true,
+    "lease_epoch": 2,
+    "lease_expires_at": "…",
+    "stop_requested": false,
+    "stopping": false
+  },
+  "tasks": [{"id": "…", "requirement_id": "…", "requirement_title": "…",
+             "requirement_sequence": 1, "position": 1, "status": "completed",
+             "cancel_requested": false, "blocking": false, "created_at": "…"}]
+}
+```
+
+- `status` 是**投影**，取值 `idle` / `running` / `blocked` / `paused`，只由任务真实状态、执行权与
+  停止意图计算；`project_execution_states` 中的记录只表达停止意图，不作为状态机读取。
+- `counts` 中 `cancelled` 单独统计，**不并入** `failed`；`current = completed`。
+- 阻塞时给出 `blocked`、`blocked_task_id` 与稳定的 `blocked_reason`（如 `task_failed`、
+  `task_recovery_required`、`task_cancelled`、`task_paused`、`task_in_flight`、`cancel_requested`）。
+- `tasks` 顺序由服务端固定：需求创建时间 → `requirement_sequence` → 任务创建时间 → 任务标识；
+  `blocking` 标记当前阻塞项目的任务。历史任务没有 `requirement_sequence` 时为 `null`，排在后面。
+- `stop_requested` 表示用户已请求停止领取；`stopping` 表示请求已记录但当前任务仍在收敛。
+  `status` 在收敛前仍是 `running`，**不**显示为已停止。
+
+需求进度响应：
+
+```json
+{"requirement_id": "…", "status": "blocked",
+ "counts": {"total": 2, "completed": 1, "running": 0, "pending": 0,
+            "failed": 1, "recovery_required": 0, "cancelled": 0, "paused": 0},
+ "current": 1, "total": 2, "blocked": true,
+ "blocked_task_id": "…", "blocked_reason": "task_failed",
+ "current_task_id": "…", "next_task_id": "…"}
+```
+
+- `status` 是进度投影：`planned` / `executing` / `blocked` / `completed`，与持久化的
+  `requirements.status`（`queued` / `processing` / …）是两个不同口径。
+- `completed` 只在全部关联任务真实 `completed` 时成立；阻塞任务取按执行顺序第一个阻止完成判定的任务。
+
+错误语义：
+
+| 情形 | 状态码 | `error.code` |
+|---|---|---|
+| 项目标识或需求标识非法 | 400 | `invalid_request` |
+| 项目不存在或已逻辑删除；需求不存在或已删除 | 404 | `not_found` |
+| 项目已在执行（并发开始或另一执行者持有执行权） | 409 | `state_conflict` |
+| 项目当前没有执行（停止请求没有对象）、项目没有待执行任务 | 409 | `state_conflict` |
+| 队首任务需要人工处置（失败 / 待核验 / 取消 / 暂停）、队首任务启动前置条件不满足 | 412 | `precondition_failed` |
+| 存储失败 | 500 | `internal_error` / `execution_not_persisted` |
+| 项目执行服务或调度器未装配 | 503 | `internal_error` |
+
+只读约束：`/execution`、`/tasks` 与需求进度查询不触发启动、续租、释放或其他写操作；它们不做任何
+状态迁移，重复查询结果只随时间与真实任务状态变化。

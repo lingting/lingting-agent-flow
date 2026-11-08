@@ -33,7 +33,7 @@
 
 | 表 | 关键事实 |
 |---|---|
-| `tasks` | `requirement_id`、`status`（无白名单）、`host_id`、`config_json`、`repository_path`、`base_ref`、`worktree_path`、`container_id`、`current_step_id` / `current_attempt_id`、取消请求、`final_result`、`failure_summary`、`idempotency_key`（部分唯一索引）、`requirement_sequence`（可空，部分唯一索引 `(requirement_id, requirement_sequence) WHERE requirement_sequence IS NOT NULL`）、租约三列（`lease_owner` / `lease_expires_at` / `lease_epoch`）、`deleted_at` |
+| `tasks` | `requirement_id`、`status`（无白名单）、`host_id`、`config_json`、`repository_path`、`base_ref`、`worktree_path`、`container_id`、`current_step_id` / `current_attempt_id`、取消请求、`final_result`、`failure_summary`、`idempotency_key`（部分唯一索引）、`requirement_sequence`（可空，部分唯一索引 `(requirement_id, requirement_sequence) WHERE requirement_sequence IS NOT NULL`）、`deleted_at`；**没有租约列**：任务级执行权由进程内任务协调器登记，数据库不保存 |
 | `steps` | `task_id`、`sequence`（`UNIQUE (task_id, sequence)`）、`step_type`（默认 `develop`，无白名单）、`title`、`objective`、`instructions_json`、`role_id` / `role_snapshot_json`（非 Agent 阶段为空）、`verification_spec_json`、`retry_json`、`max_attempts`（1–10）、`current_attempt_id`、`status`、`result`、`failure_stage`、`failure_summary`、时间戳 |
 | `attempts` | `step_id`、`task_id`（可空，仅供历史孤立记录）、`attempt_number`（`UNIQUE (step_id, attempt_number)`）、`status`、`container_id` / `docker_id`、`input_digest`、`exit_code`、`timed_out` / `cancelled`、重试与失败分类、`verification_verdict` / `verification_summary` / `verification_id`、`session_ids_json`、`code_save_id`、Git 快照（`git_branch` / `git_before_json` / `git_after_json`）、修复预算归属（`budget_scope` / `budget_scope_id`）、时间戳 |
 | `sessions` | `task_id`、`step_id` / `attempt_id`（`attempt_id` 非空时 `step_id` 必须非空）、`role_id` / `role_snapshot_json`、`provider` / `model`、`external_session_id`、`process_id`、`status`、Session 与输出路径（`session_jsonl_path` / `session_html_path` / `stdout_path` / `stderr_path` / `archive_path` / `archive_status`）、`run_status` / `completeness` / `export_status` / `exit_code` / `failure_summary`、`invocation_id`、`container_id` / `docker_id`、时间戳 |
@@ -78,7 +78,8 @@
 | `planning_revisions` | 每轮完整快照：`(planning_session_id, revision_number)` 唯一，需求分析 / 实施方案 / 校验结果均为 JSON 文档（只做 `json_valid`） |
 
 规划会话的互斥不是数据库事实：同一份数据目录只允许一个 Server 进程，`RunRole` / `Prepare` / `Release`
-由进程内的 `app.PlanningSessionCoordinator` 串行化，Schema 中没有租约表、owner、epoch 或 TTL。
+由进程内的 `app.PlanningSessionCoordinator` 串行化，规划会话**没有**租约表、owner、epoch 或 TTL。
+（M5 的 `project_execution_leases` 属于项目级执行协调，与规划会话的互斥无关，两者互不替代。）
 
 ### 2.7 冻结的遗留表
 
@@ -87,7 +88,7 @@
 它，确定性验证结论由 `validation_runs` 与 `validation_check_results` 承载。禁止在业务代码中重新写入或
 读取，也禁止在没有可靠数据保全方案时删除该表定义。
 
-## 3. V2 已交付的结构（M2 / M3 / M4）
+## 3. V2 已交付的结构（M2 / M3 / M4 / M5）
 
 - **规划会话**（M2 第二阶段）：`planning_sessions` / `planning_messages` / `planning_revisions` 三张表
   与四个索引（两个会话列表索引、消息序号唯一索引、方案版本唯一索引）。
@@ -105,16 +106,27 @@
 - **需求内任务顺序**（M4，同一个迁移）：`tasks` 增加 `requirement_sequence` 与部分唯一索引
   `(requirement_id, requirement_sequence) WHERE requirement_sequence IS NOT NULL`。顺序是业务事实而不是
   时间戳推断值，由确认生成流程按下标写入；历史任务是 NULL，不参与唯一索引，也不补造顺序。
+- **项目执行权与执行意图**（M5，迁移 `00004_project_execution_leases.sql`）：
+  `project_execution_leases` 以 `project_id` 为主键表达"每个项目最多一份执行权"，列为 `owner`、
+  单调递增 `epoch`、`expires_at`、`acquired_at`、`updated_at`，另有按 `owner` 的索引（续租与收敛按
+  持有者列出自己的登记）。取得只允许"没有登记"或"已到期"，并把 `epoch` 原子递增；释放只把
+  `expires_at` 置为当前时间，**不删行、不重置 epoch**，因此旧持有者的续租 / 释放（条件为
+  `owner + epoch`）会被拒绝。它不用于多实例仲裁，只用于跨请求、跨重启识别执行权归属。
+  `project_execution_states` 以 `project_id` 为主键，保存 `state`（无白名单，最后一次决策的投影记录）
+  与可空 `stop_requested_at`（用户已请求停止领取的事实）。两者都不声明外键、不使用枚举白名单、
+  不做数据回填；项目被逻辑删除或任务被删除后，孤立行允许保留。
 
 固定四角色不需要结构变化：`roles.type` 没有取值白名单，新增角色类型可直接写入；"固定身份"由 `domain`
 常量与 `app.RoleService` 保证，不是数据库约束；缺失角色由应用层按固定 ID 补齐，已有角色不被覆盖。
 
 ## 4. 后续里程碑需要的结构变化（尚未实现）
 
-以下变化落地时**追加新的迁移脚本**，不提供旧库升级：已有的开发数据库需要用户自行备份后手动重建。
+M5 之后只剩 M6（需求停止与逻辑删除、端到端验收），它不新增表、不新增列：删除只写既有
+`requirements.deleted_at` 与 `tasks.deleted_at`，执行历史（Step / Attempt / Session / Event /
+CodeSave / 容器记录）保持原样。因此当前没有待实现的 Schema 变化。
 
-- **M5 项目执行租约**：新增 `project_execution_leases`，以 `project_id` 为主键表达"每个项目最多一份
-  执行权"，释放不删行、以单调 `epoch` 做 fencing，与 `tasks` 的任务租约并存且互不替代。
+后续若出现新的结构变化，仍按同一规则**追加新的迁移脚本**，不提供旧库升级：已有的开发数据库需要
+用户自行备份后手动重建。
 
 不再保留历史数据回填规则：单文件 Schema 只用于全新数据库初始化，既有开发库不升级，因此不需要用
 `json_extract` 从 `tasks.config_json` 推导 `requirements.project_id`，也不需要在 Schema 初始化中做任何
@@ -139,5 +151,5 @@
    并确认仓储 SQL 依赖的列与索引全部存在；未执行的核对不得报告为已完成。
 2. **不兼容旧库的边界**：程序不识别旧的手写 Schema 数据库，也没有在真实旧库上执行过；需要重建时必须
    明确提示用户自行备份后手动重建数据库文件，不得让用户误以为程序会自动升级。
-3. **后续结构变化的重建成本**：因为不提供升级，M3–M5 的结构变化落地后，已有的开发数据库需要人工备份
-   与重建，`README.md` 的本地开发说明需要同步这一操作方式。
+3. **结构变化的重建成本**：因为不提供升级，`M3`–`M5` 已落地的结构变化（`00002`–`00004` 迁移脚本）意味着
+   在此之前创建的开发数据库必须人工备份后重建；`docs/development.md` 已写明该操作方式。

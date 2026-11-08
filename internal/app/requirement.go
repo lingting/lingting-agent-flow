@@ -248,6 +248,43 @@ func (s *RequirementService) ListByProject(
 	return requirements, nil
 }
 
+// Progress 计算需求进度。
+//
+// 它只读取关联任务的真实持久化状态并交给 domain.DecideRequirementProgress 聚合：不使用
+// 时间戳、接口调用结果或模型输出来推断完成度，也不在应用层重写阻塞判定。
+//
+// 已逻辑删除的需求按"不存在"处理：删除后的需求不再出现在默认视图，进度查询也不应
+// 返回一条看起来仍然可执行的需求。
+func (s *RequirementService) Progress(
+	ctx context.Context,
+	requirementIDValue string,
+) (domain.RequirementProgress, error) {
+	requirement, err := s.Get(ctx, requirementIDValue)
+	if err != nil {
+		return domain.RequirementProgress{}, err
+	}
+	if requirement.DeletedAt != nil {
+		return domain.RequirementProgress{}, fmt.Errorf(
+			"%w: 需求 %s 已删除",
+			ErrRequirementNotFound,
+			requirement.ID,
+		)
+	}
+	tasks, err := s.listRequirementTasks(ctx, s.store, requirement.ID)
+	if err != nil {
+		return domain.RequirementProgress{}, err
+	}
+	facts := make([]domain.ProjectTaskFact, 0, len(tasks))
+	for _, task := range tasks {
+		facts = append(facts, domain.ProjectTaskFact{Requirement: requirement, Task: task})
+	}
+	progress := domain.DecideRequirementProgress(requirement.ID, facts)
+	if err := progress.Validate(); err != nil {
+		return domain.RequirementProgress{}, fmt.Errorf("需求进度计算失败: %w", err)
+	}
+	return progress, nil
+}
+
 // parseConfirmRequirementRequest 校验确认请求的标识书写形式。
 func parseConfirmRequirementRequest(
 	request ConfirmRequirementRequest,
