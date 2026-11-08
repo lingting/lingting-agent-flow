@@ -685,6 +685,43 @@ CodeSaver 缺失时编排器仍会按顺序执行并验证全部步骤，但收�
 - 同一任务由进程内任务执行协调器串行化；跨任务并发由调度器按 `scheduler.max_concurrent_tasks`
   领取 `queued` 任务，`workflow_runs` 的部分唯一索引仍拒绝同一任务的第二条未结束执行记录。
 
+## 需求规划分析边界
+
+规划阶段把一句需求变成可确认的方案草案，只产生 `PlanningSession` / `PlanningMessage` /
+`PlanningRevision`，不创建正式 Requirement / Task / Step / Attempt，也不写项目文件。
+
+- **服务分工**：`PlanningSessionService` 负责会话业务（创建、提交消息、显式重试、Revision 与角色消息
+  读写、确认与放弃），`PlanningRuntimeService` 负责只读规划容器与固定 commit 快照卷，
+  `PlanningAgentService` 负责在容器内执行角色 Pi 调用与两个角色的稳定 Session，
+  `PlanningAnalysisService` 只做编排：占用、两阶段顺序、结构化校验与事务持久化。
+- **两阶段与角色**：需求分析阶段固定使用 `requirement_analyst`，方案规划阶段固定使用 `planner`，
+  顺序执行；规划师的输入是需求分析师的完整结构化快照（约束、非目标与验收标准不省略）。两个角色各自
+  使用独立的稳定 Pi Session，不会共用同一个会话上下文。
+- **结构化契约**：两个阶段的最终文本都由 `internal/domain` 的单一入口解析
+  （`ParseRequirementAnalysis` / `ParseImplementationPlan`）：拒绝未知字段、重复 Key、必填字段缺失与
+  `null`、非 JSON 对象、尾随内容与第二份文档，未闭合或多层代码块围栏不做猜测修复；解析通过后还要通过
+  领域校验（长度、列表项、任务标识唯一性、依赖引用与拓扑顺序）。错误固定分为"无法解析"与"不合法"
+  两类，都满足 `errors.Is(err, domain.ErrInvalidValue)`。
+- **执行权**：一轮分析由数据库条件更新占用（`planning_sessions.analysis_claim_id`）：
+  `status = analyzing` 且占用为空时抢占成功；同一标识的再次抢占视为同一次执行的确认（幂等），其他标识
+  一律冲突。占用不参与状态机，也不构成跨进程租约：`Server.Run` 用独占进程锁保证同一份数据目录只有
+  一个进程，因此不需要 owner / epoch / TTL / 后台续租。
+- **成功路径**：Revision、两条角色消息、`preview_ready` 状态条件更新与占用释放在同一个事务内提交，
+  任一步失败整体回滚，绝不返回未落库的 Revision。
+- **失败路径**：模型调用失败、输出不可解析、持久化事务失败都收敛为 `failed`：原持久化事务回滚之后，
+  用独立事务重新读取会话、确认仍是 `analyzing`、经领域状态迁移写 `failed` 与脱敏摘要，并以原占用标识
+  释放占用。失败记录使用未取消的上下文但带明确超时上限；状态条件更新或占用标识条件不成立时整体回滚，
+  因此不覆盖其他执行者推进的事实，也不虚报 `failed`。
+- **重试**：`failed` 会话只能经显式重试回到 `analyzing`；重试在同一个事务内完成状态推进、执行权取得与
+  可选补充消息，所以重复请求既不会重复追加消息，也不会启动第二轮模型调用。"`analyzing` 但没有占用"
+  是提交消息之后进程退出的现场，同样允许重试；已有占用的会话一律冲突。
+- **启动恢复**：`PlanningAnalysisRecoveryService` 在取得进程锁、打开数据库之后、HTTP 开始接收请求之前
+  运行，只处理"`analyzing` 且仍有占用"的会话：读占用、经领域 `Fail` 收敛为 `failed`、以原占用标识
+  释放，三步在同一事务内；条件不成立即回滚。它不重建、不删除、不重新准备规划容器，也不改变规划运行时
+  的生命周期；无占用的 `analyzing` 不做推断。
+- **项目只读**：分析与规划都在只读规划容器内进行，工作区来自固定 commit 的快照卷；编排层没有任何写
+  工作区的入口，也不接受客户端提供的角色、模型、容器、Session 路径或命令参数。
+
 ## SSH 与执行节点边界
 
 SSH 探测、SSH 连接层（主机密钥校验、私钥认证、远程执行、SFTP、远端套接字）、执行节点环境预检与

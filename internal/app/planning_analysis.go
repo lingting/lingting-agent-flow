@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -30,10 +31,15 @@ var (
 	ErrPlanningAnalysisNotPersisted = errors.New("app: 规划分析结果未能保存")
 )
 
-// 两阶段分析单阶段的默认调用超时。
+// 两阶段分析的单阶段调用超时与失败记录超时。
 const (
 	defaultPlanningAnalystTimeout = 30 * time.Minute
 	defaultPlanningPlannerTimeout = 30 * time.Minute
+	// planningFailureWriteTimeout 是失败事实落库的超时上限。
+	//
+	// 失败记录使用未取消的上下文（取消与超时正是最需要留下结论的场景），但必须有明确
+	// 上限：数据库不可用时不能让请求无限期挂起。
+	planningFailureWriteTimeout = 30 * time.Second
 )
 
 // PlanningAnalysisAgentPort 是两阶段分析对规划角色调用能力的需求。
@@ -126,6 +132,19 @@ type RunPlanningAnalysisRequest struct {
 	PlanningSessionID string
 	// HostID 仅在规划运行环境尚未准备时用于准备容器；已准备时不得指向其他执行节点。
 	HostID string
+	// ClaimID 是调用方已经取得的分析占用标识，为空时由本次调用自行生成。
+	//
+	// 它只由服务端内部的显式重试入口传入：重试在推进状态时就已经完成占用，这样"状态
+	// 推进"与"取得执行权"之间不存在窗口。是否真正持有执行权仍由数据库条件更新确认。
+	ClaimID string
+}
+
+// resolveAnalysisClaimID 返回本次执行使用的占用标识。
+func resolveAnalysisClaimID(preset string) string {
+	if trimmed := strings.TrimSpace(preset); trimmed != "" {
+		return trimmed
+	}
+	return domain.NewID().String()
 }
 
 // PlanningAnalysisResult 是一轮两阶段分析的持久化事实。
@@ -155,6 +174,9 @@ type PlanningAnalysisResult struct {
 //
 // 占用在返回之前一定会被释放：成功路径在持久化事务内释放，失败路径在失败事务内释放，
 // 其余提前返回的路径由 defer 兜底释放。占用未取得时不做任何模型调用。
+//
+// 持久化事务失败时本方法不会把会话留在"analyzing 且没有占用"的状态：原事务整体回滚
+// 之后用独立事务把本轮记为 failed，因此失败结论既能解释原因，也能通过显式重试恢复。
 func (s *PlanningAnalysisService) Analyze(
 	ctx context.Context,
 	request RunPlanningAnalysisRequest,
@@ -164,13 +186,15 @@ func (s *PlanningAnalysisService) Analyze(
 		return PlanningAnalysisResult{}, err
 	}
 	startedAt := s.now()
-	claimID := domain.NewID().String()
+	claimID := resolveAnalysisClaimID(request.ClaimID)
+	// 兜底释放：成功与失败路径都会在事务内释放占用，这里只处理"提前返回"的路径。
+	//
+	// 它先于抢占注册：显式重试入口可能已经把执行权交给本次调用，此时即使确认占用失败
+	// （例如请求被取消），也必须把同一标识的占用收回去。
+	defer s.releaseClaim(sessionID, claimID)
 	if err := s.store.ClaimPlanningAnalysis(ctx, sessionID, claimID, startedAt); err != nil {
 		return PlanningAnalysisResult{}, s.mapClaimFailure(ctx, err, sessionID)
 	}
-	// 兜底释放：成功与失败路径都会在事务内释放占用，这里只处理"提前返回"的路径。
-	defer s.releaseClaim(sessionID, claimID)
-
 	session, project, err := s.loadAnalysisTarget(ctx, sessionID)
 	if err != nil {
 		return PlanningAnalysisResult{}, s.failAnalysis(ctx, sessionID, claimID, err)
@@ -193,9 +217,33 @@ func (s *PlanningAnalysisService) Analyze(
 	if err != nil {
 		return PlanningAnalysisResult{}, s.failAnalysis(ctx, sessionID, claimID, err)
 	}
-	result, err := s.completeAnalysis(ctx, sessionID, claimID, analysis, plan, startedAt)
+	validation, err := planningValidationSnapshot(plan)
 	if err != nil {
-		return PlanningAnalysisResult{}, err
+		return PlanningAnalysisResult{}, s.failAnalysis(
+			ctx,
+			sessionID,
+			claimID,
+			fmt.Errorf("%w: 生成结构化校验结论失败: %w", ErrPlanningAnalysisOutputInvalid, err),
+		)
+	}
+	result, err := s.completeAnalysis(
+		ctx,
+		sessionID,
+		claimID,
+		analysis,
+		plan,
+		validation,
+		startedAt,
+	)
+	if err != nil {
+		// 持久化事务已整体回滚：Revision 与两条角色消息都不存在。失败事实必须在独立
+		// 事务里落库，否则会话会停在 analyzing 且没有占用，既不能重试也无法解释。
+		return PlanningAnalysisResult{}, s.failAnalysis(
+			ctx,
+			sessionID,
+			claimID,
+			fmt.Errorf("%w: %w", ErrPlanningAnalysisNotPersisted, err),
+		)
 	}
 	s.logger.InfoContext(
 		ctx,
@@ -384,36 +432,41 @@ func (s *PlanningAnalysisService) loadAnalysisTarget(
 	return session, *project, nil
 }
 
+// planningValidationSnapshot 生成这一版方案的结构化校验结论。
+//
+// 结论只记录"哪些确定性校验通过了"与任务条数，不复制模型原文：原文可能超长，也可能
+// 包含不应落库的内容。
+func planningValidationSnapshot(
+	plan planningStageSnapshot,
+) (json.RawMessage, error) {
+	return domain.PlanningValidationResult{
+		SnapshotVersion:          domain.PlanningRevisionSnapshotVersion,
+		RequirementAnalysisValid: true,
+		ImplementationPlanValid:  true,
+		TaskCount:                len(plan.Plan.Tasks),
+	}.Snapshot()
+}
+
 // completeAnalysis 在一个事务内保存两个阶段的结果。
 //
 // 执行顺序固定为：读取并确认会话处于 analyzing → 追加方案版本 → 追加两个角色消息 →
 // MarkPreviewReady → 以 analyzing 为前置条件写回 → 释放占用。任一步失败都整体回滚：
 // 不会留下没有状态的版本，也不会出现"未完成的输出被标记为待确认"。
+//
+// 它不记录失败：失败事实必须由调用方在独立事务里写入，否则"回滚持久化事务"与"记录
+// 失败"会耦合在同一个事务里，回滚连失败结论一起丢掉。
 func (s *PlanningAnalysisService) completeAnalysis(
 	ctx context.Context,
 	sessionID domain.ID,
 	claimID string,
 	analysis planningStageSnapshot,
 	plan planningStageSnapshot,
+	validation json.RawMessage,
 	startedAt time.Time,
 ) (PlanningAnalysisResult, error) {
-	validation, err := domain.PlanningValidationResult{
-		SnapshotVersion:          domain.PlanningRevisionSnapshotVersion,
-		RequirementAnalysisValid: true,
-		ImplementationPlanValid:  true,
-		TaskCount:                len(plan.Plan.Tasks),
-	}.Snapshot()
-	if err != nil {
-		return PlanningAnalysisResult{}, s.failAnalysis(
-			ctx,
-			sessionID,
-			claimID,
-			fmt.Errorf("生成结构化校验结论失败: %w", err),
-		)
-	}
 	result := PlanningAnalysisResult{Analysis: analysis.Analysis, Plan: plan.Plan}
 	at := s.now()
-	err = s.store.WithTx(ctx, func(ctx context.Context, tx storage.Tx) error {
+	err := s.store.WithTx(ctx, func(ctx context.Context, tx storage.Tx) error {
 		loaded, err := readPlanningSession(ctx, tx, sessionID)
 		if err != nil {
 			return err
@@ -465,7 +518,7 @@ func (s *PlanningAnalysisService) completeAnalysis(
 			slog.String("planning_session_id", sessionID.String()),
 			slog.String("error", err.Error()),
 		)
-		return PlanningAnalysisResult{}, fmt.Errorf("%w: %w", ErrPlanningAnalysisNotPersisted, err)
+		return PlanningAnalysisResult{}, err
 	}
 	result.AnalystSessionID = result.Session.AnalystSessionID
 	result.PlannerSessionID = result.Session.PlannerSessionID
@@ -522,10 +575,15 @@ func senderTypeOf(roleType domain.RoleType) domain.PlanningSenderType {
 
 // failAnalysis 在一个事务内记录本轮失败并释放占用。
 //
-// 失败摘要经 domain.ClipFeedbackText 脱敏与裁剪：只保留定位本轮失败所需的信息，不保存
-// 模型密钥、私钥、SSH 凭据或完整环境变量。失败不写方案版本，也不写成功消息。
+// 事务内固定做三件事：重新读取会话并确认它仍处于 analyzing、用领域状态迁移方法把它
+// 收敛为 failed 并写入脱敏摘要、以本次占用标识为条件释放占用。三者共享同一个事务，
+// 因此：
+//   - 失败记录写入失败时不会虚报 failed：整个事务回滚，会话保持原样；
+//   - 不会覆盖其他执行者已经推进的状态：状态条件更新与占用标识条件都不成立时回滚；
+//   - 不会释放其他执行者的占用：释放条件要求占用标识仍是本次执行。
 //
-// 写入使用未取消的上下文：取消与超时恰恰是最需要留下失败结论的场景。
+// 写入使用未取消的上下文并带明确超时上限：取消与超时恰恰是最需要留下失败结论的场景，
+// 但失败记录不能无限期占用请求。
 func (s *PlanningAnalysisService) failAnalysis(
 	ctx context.Context,
 	sessionID domain.ID,
@@ -533,7 +591,11 @@ func (s *PlanningAnalysisService) failAnalysis(
 	cause error,
 ) error {
 	summary := cause.Error()
-	writeCtx := context.WithoutCancel(ctx)
+	writeCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		planningFailureWriteTimeout,
+	)
+	defer cancel()
 	at := s.now()
 	err := s.store.WithTx(writeCtx, func(ctx context.Context, tx storage.Tx) error {
 		loaded, err := readPlanningSession(ctx, tx, sessionID)

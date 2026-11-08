@@ -271,6 +271,11 @@ type Server struct {
 	// 它复用同一份存储、角色服务、容器服务与本机 Session 根目录；为空表示规划 Agent
 	// 能力不可用（SSH 或容器服务缺失），此时不伪造调用入口。
 	planningAgent *app.PlanningAgentService
+	// planningAnalysisRecovery 收敛上一次进程中断遗留的规划分析占用。
+	//
+	// 它只处理"状态是 analyzing 且仍有占用"的会话：状态迁移与占用释放共用同一事务，
+	// 条件不成立时整体回滚，因此不覆盖其他执行者已经推进的事实，也不释放别人的占用。
+	planningAnalysisRecovery *app.PlanningAnalysisRecoveryService
 	// taskContainers 提供任务容器的只读查询与显式处置。
 	//
 	// 查询部分只依赖存储；处置部分在容器服务缺失时返回服务不可用，不会伪造结论。
@@ -755,6 +760,12 @@ func (s *Server) startServices(ctx context.Context) error {
 		// 初始化，若编排器先启动，用户会在无法解释的冲突里反复重试。
 		services = append(services, s.codeFetchRecovery)
 	}
+	if s.planningAnalysisRecovery != nil {
+		// 它与其他残留收敛服务一起在 HTTP 开始接收请求之前完成收敛：把上一次进程
+		// 中断留下的分析占用收敛为 failed，因此任何新的规划分析调用都不会读到
+		// "analyzing 且无人推进"的现场。它依赖 Server 已取得的独占进程锁。
+		services = append(services, s.planningAnalysisRecovery)
+	}
 	if s.taskWorkflow != nil {
 		// 任务级编排器注册在最后：它依赖单步骤闭环，停止顺序因此自动反过来，
 		// 先停止新工作流请求，再让下层服务收敛在途工作。
@@ -987,6 +998,18 @@ func (s *Server) planningServices() error {
 		}
 		s.planningSessions = sessions
 	}
+	// 分析占用恢复只依赖存储：它把上一次进程中断留下的 analyzing 占用收敛为 failed，
+	// 不接触容器或 Session 文件，因此在容器能力缺失时同样需要装配。
+	analysisRecovery, err := app.NewPlanningAnalysisRecoveryService(
+		app.PlanningAnalysisRecoveryOptions{
+			Store:  s.store,
+			Logger: s.logger,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("初始化规划分析占用恢复服务失败: %w", err)
+	}
+	s.planningAnalysisRecovery = analysisRecovery
 	if s.containerService == nil || s.roleQuery == nil {
 		return nil
 	}

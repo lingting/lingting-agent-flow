@@ -112,13 +112,70 @@ func TestParseRequirementAnalysisRejectsUnusableOutput(t *testing.T) {
 			name: "缺少摘要",
 			text: `{"goals":["a"],"current_state":["b"],"scope":["c"],` +
 				`"out_of_scope":["d"],"constraints":["e"],"risks":["f"],"acceptance_criteria":["g"]}`,
-			want: domain.ErrPlanningOutputInvalid,
+			// 必填字段缺失是文档结构问题：它在结构化解码之前就被拒绝，因此归入
+			// "无法解析"，而不是"结构合法但领域校验失败"。
+			want: domain.ErrPlanningOutputUnparseable,
 		},
 		{
 			name: "缺少风险列表",
 			text: `{"summary":"s","goals":["a"],"current_state":["b"],"scope":["c"],` +
 				`"out_of_scope":["d"],"constraints":["e"],"acceptance_criteria":["g"]}`,
-			want: domain.ErrPlanningOutputInvalid,
+			want: domain.ErrPlanningOutputUnparseable,
+		},
+		{
+			name: "摘要为 null",
+			text: strings.Replace(
+				validRequirementAnalysisJSON(),
+				`"summary":"补齐规划会话的结构化分析"`,
+				`"summary":null`,
+				1,
+			),
+			want: domain.ErrPlanningOutputUnparseable,
+		},
+		{
+			name: "必填列表为 null",
+			text: strings.Replace(
+				validRequirementAnalysisJSON(),
+				`"risks":["模型输出不稳定"]`,
+				`"risks":null`,
+				1,
+			),
+			want: domain.ErrPlanningOutputUnparseable,
+		},
+		{
+			name: "顶层重复字段",
+			text: strings.Replace(
+				validRequirementAnalysisJSON(),
+				`"scope":["internal/domain"],`,
+				`"scope":["internal/domain"],"scope":["另一处范围"],`,
+				1,
+			),
+			want: domain.ErrPlanningOutputUnparseable,
+		},
+		{
+			name: "围栏没有闭合",
+			text: "```json\n" + validRequirementAnalysisJSON(),
+			want: domain.ErrPlanningOutputUnparseable,
+		},
+		{
+			name: "多层代码块围栏",
+			text: "```json\n```json\n" + validRequirementAnalysisJSON() + "\n```\n```",
+			want: domain.ErrPlanningOutputUnparseable,
+		},
+		{
+			name: "顶层为字符串",
+			text: `"需求分析"`,
+			want: domain.ErrPlanningOutputUnparseable,
+		},
+		{
+			name: "顶层为数字",
+			text: `42`,
+			want: domain.ErrPlanningOutputUnparseable,
+		},
+		{
+			name: "顶层为布尔值",
+			text: `true`,
+			want: domain.ErrPlanningOutputUnparseable,
 		},
 		{
 			name: "列表项为空",
@@ -210,7 +267,7 @@ func TestParseImplementationPlanRejectsUnusableOutput(t *testing.T) {
 		{
 			name: "缺少任务列表",
 			text: `{"summary":"没有任务"}`,
-			want: domain.ErrPlanningOutputInvalid,
+			want: domain.ErrPlanningOutputUnparseable,
 		},
 		{
 			name: "任务列表为空",
@@ -218,15 +275,54 @@ func TestParseImplementationPlanRejectsUnusableOutput(t *testing.T) {
 			want: domain.ErrPlanningOutputInvalid,
 		},
 		{
+			name: "任务列表为 null",
+			text: `{"summary":"没有任务","tasks":null}`,
+			want: domain.ErrPlanningOutputUnparseable,
+		},
+		{
 			name: "缺少任务描述",
 			text: `{"summary":"s","tasks":[{"id":"task-1","title":"标题",` +
 				`"depends_on":[],"acceptance_criteria":["c"]}]}`,
-			want: domain.ErrPlanningOutputInvalid,
+			want: domain.ErrPlanningOutputUnparseable,
 		},
 		{
 			name: "任务缺少验收条件",
 			text: `{"summary":"s","tasks":[{"id":"task-1","title":"标题",` +
 				`"description":"描述","depends_on":[]}]}`,
+			want: domain.ErrPlanningOutputUnparseable,
+		},
+		{
+			name: "任务缺少 depends_on",
+			text: `{"summary":"s","tasks":[{"id":"task-1","title":"标题",` +
+				`"description":"描述","acceptance_criteria":["c"]}]}`,
+			want: domain.ErrPlanningOutputUnparseable,
+		},
+		{
+			name: "depends_on 为 null",
+			text: `{"summary":"s","tasks":[{"id":"task-1","title":"标题",` +
+				`"description":"描述","depends_on":null,"acceptance_criteria":["c"]}]}`,
+			want: domain.ErrPlanningOutputUnparseable,
+		},
+		{
+			name: "任务对象重复字段",
+			text: `{"summary":"s","tasks":[{"id":"task-1","title":"标题",` +
+				`"title":"另一个标题","description":"描述","depends_on":[],` +
+				`"acceptance_criteria":["c"]}]}`,
+			want: domain.ErrPlanningOutputUnparseable,
+		},
+		{
+			name: "任务标识带首尾空白",
+			text: `{"summary":"s","tasks":[{"id":" task-1","title":"标题",` +
+				`"description":"描述","depends_on":[],"acceptance_criteria":["c"]}]}`,
+			want: domain.ErrPlanningOutputInvalid,
+		},
+		{
+			name: "依赖引用带首尾空白",
+			text: `{"summary":"s","tasks":[` +
+				`{"id":"task-1","title":"A","description":"a","depends_on":[],` +
+				`"acceptance_criteria":["c"]},` +
+				`{"id":"task-2","title":"B","description":"b",` +
+				`"depends_on":[" task-1"],"acceptance_criteria":["c"]}]}`,
 			want: domain.ErrPlanningOutputInvalid,
 		},
 		{

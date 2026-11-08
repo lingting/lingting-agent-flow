@@ -11,6 +11,7 @@ import (
 	"github.com/lingting/agentflow/internal/agent"
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/domain"
+	"github.com/lingting/agentflow/internal/storage"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
 )
 
@@ -98,6 +99,47 @@ func TestAnalyzeProducesSingleRevision(t *testing.T) {
 	}
 	if messages[1].Content != string(revision.RequirementAnalysisJSON) {
 		t.Fatal("分析师消息正文与版本快照不一致")
+	}
+}
+
+// TestAnalyzeKeepsRoleSessionsDistinct 验证两个角色各自使用独立的 Pi Session 绑定。
+//
+// 两个阶段共用同一份 Pi 会话会让规划师读到分析师的中间对话，因此角色会话标识必须成对
+// 保存且互不相同；分析结果如实回传这两个标识，不合并、不互相替代。
+func TestAnalyzeKeepsRoleSessionsDistinct(t *testing.T) {
+	t.Parallel()
+	f := newAnalysisFixture(t, analysisFixtureOptions{})
+	session := f.analyzingSession(t)
+	const analystSession = "planning-analyst-session"
+	const plannerSession = "planning-planner-session"
+	if err := f.db.UpdatePlanningSessionRoleBindings(
+		f.ctx,
+		session.ID,
+		storage.PlanningSessionRoleBindingOf(session),
+		storage.PlanningSessionRoleBinding{
+			AnalystSessionID: analystSession,
+			PlannerSessionID: plannerSession,
+		},
+		time.Now().UTC(),
+	); err != nil {
+		t.Fatalf("写入角色会话绑定失败: %v", err)
+	}
+
+	result, err := f.analysis.Analyze(f.ctx, app.RunPlanningAnalysisRequest{
+		PlanningSessionID: session.ID.String(),
+	})
+	if err != nil {
+		t.Fatalf("执行两阶段分析失败: %v", err)
+	}
+	if result.AnalystSessionID != analystSession || result.PlannerSessionID != plannerSession {
+		t.Fatalf("角色会话标识不符: %q / %q", result.AnalystSessionID, result.PlannerSessionID)
+	}
+	if result.AnalystSessionID == result.PlannerSessionID {
+		t.Fatal("两个角色不得共用同一个 Pi 会话")
+	}
+	stored := f.loadSession(t, session.ID)
+	if stored.AnalystSessionID != analystSession || stored.PlannerSessionID != plannerSession {
+		t.Fatalf("落库的角色会话标识不符: %q / %q", stored.AnalystSessionID, stored.PlannerSessionID)
 	}
 }
 
@@ -345,11 +387,21 @@ func TestAnalyzeRetryAfterFailure(t *testing.T) {
 	}
 	agentPort.setError(domain.RoleTypeRequirementAnalyst, nil)
 
-	if _, err := f.sessions.RetryAnalysis(f.ctx, session.ID.String(), app.RetryPlanningAnalysisRequest{}); err != nil {
+	start, err := f.sessions.RetryAnalysis(
+		f.ctx,
+		session.ID.String(),
+		app.RetryPlanningAnalysisRequest{},
+	)
+	if err != nil {
 		t.Fatalf("显式重试失败: %v", err)
 	}
+	if start.ClaimID == "" {
+		t.Fatal("显式重试必须在同一个事务内取得本轮分析占用")
+	}
+	// 重试已经取得执行权，分析编排用同一个标识确认占用，不能再抢一次新的。
 	if _, err := f.analysis.Analyze(f.ctx, app.RunPlanningAnalysisRequest{
 		PlanningSessionID: session.ID.String(),
+		ClaimID:           start.ClaimID,
 	}); err != nil {
 		t.Fatalf("重试后分析失败: %v", err)
 	}
@@ -366,19 +418,16 @@ func TestAnalyzeRetryAfterFailure(t *testing.T) {
 	}
 }
 
-// TestAnalyzeKeepsSessionAnalyzingWhenRevisionNotPersisted 验证版本写入失败不留半成品。
-func TestAnalyzeKeepsSessionAnalyzingWhenRevisionNotPersisted(t *testing.T) {
+// TestAnalyzeRecordsFailureWhenRevisionNotPersisted 验证版本写入失败不留半成品。
+//
+// 持久化事务失败之后必须留下可解释的失败结论：会话收敛为 failed 并写入失败摘要，
+// 占用被释放，显式重试能够产生新一轮 Revision。把会话留在 analyzing 既不能重试，
+// 也无法解释发生了什么。
+func TestAnalyzeRecordsFailureWhenRevisionNotPersisted(t *testing.T) {
 	t.Parallel()
 	agentPort := newFakeAnalysisAgent()
 	base := newAnalysisFixture(t, analysisFixtureOptions{agent: agentPort})
-	f := &analysisFixture{
-		db:       base.db,
-		ctx:      base.ctx,
-		database: base.database,
-		project:  base.project,
-		sessions: base.sessions,
-		agent:    agentPort,
-	}
+	f := newAnalysisFixtureOver(t, base)
 	analysis, err := app.NewPlanningAnalysisService(app.PlanningAnalysisServiceOptions{
 		Store: failingRevisionStore{Store: base.db},
 		Agent: agentPort,
@@ -396,8 +445,11 @@ func TestAnalyzeKeepsSessionAnalyzingWhenRevisionNotPersisted(t *testing.T) {
 		t.Fatalf("版本写入失败未被报告: %v", err)
 	}
 	stored := f.loadSession(t, session.ID)
-	if stored.Status != domain.PlanningSessionAnalyzing {
-		t.Fatalf("写入失败后状态不应变化，实际 %s", stored.Status)
+	if stored.Status != domain.PlanningSessionFailed {
+		t.Fatalf("写入失败后状态应为 failed，实际 %s", stored.Status)
+	}
+	if !strings.Contains(stored.ErrorSummary, "未能保存") {
+		t.Fatalf("失败摘要没有记录持久化失败: %q", stored.ErrorSummary)
 	}
 	if revisions := f.revisions(t, session.ID); len(revisions) != 0 {
 		t.Fatalf("写入失败仍留下版本: %d", len(revisions))
@@ -406,12 +458,32 @@ func TestAnalyzeKeepsSessionAnalyzingWhenRevisionNotPersisted(t *testing.T) {
 		t.Fatalf("写入失败仍留下角色消息: %d", len(messages))
 	}
 	// 占用必须已释放：再次抢占应当成功。
-	claimID := domain.NewID().String()
-	if err := f.db.ClaimPlanningAnalysis(f.ctx, session.ID, claimID, time.Now().UTC()); err != nil {
-		t.Fatalf("写入失败后占用没有释放: %v", err)
+	assertClaimReleased(t, f, session.ID)
+
+	// 显式重试必须能够恢复：换成正常存储后重跑一轮，产生第一条版本。
+	healthy, err := app.NewPlanningAnalysisService(app.PlanningAnalysisServiceOptions{
+		Store: base.db,
+		Agent: agentPort,
+	})
+	if err != nil {
+		t.Fatalf("构造规划分析服务失败: %v", err)
 	}
-	if err := f.db.ReleasePlanningAnalysis(f.ctx, session.ID, claimID, time.Now().UTC()); err != nil {
-		t.Fatalf("释放占用失败: %v", err)
+	start, err := f.sessions.RetryAnalysis(f.ctx, session.ID.String(), app.RetryPlanningAnalysisRequest{})
+	if err != nil {
+		t.Fatalf("显式重试失败: %v", err)
+	}
+	if _, err := healthy.Analyze(f.ctx, app.RunPlanningAnalysisRequest{
+		PlanningSessionID: session.ID.String(),
+		ClaimID:           start.ClaimID,
+	}); err != nil {
+		t.Fatalf("重试后分析失败: %v", err)
+	}
+	revisions := f.revisions(t, session.ID)
+	if len(revisions) != 1 || revisions[0].RevisionNumber != 1 {
+		t.Fatalf("重试后版本数量或版本号不符: %+v", revisions)
+	}
+	if retried := f.loadSession(t, session.ID); retried.Status != domain.PlanningSessionPreviewReady {
+		t.Fatalf("重试成功后状态应为 preview_ready，实际 %s", retried.Status)
 	}
 }
 

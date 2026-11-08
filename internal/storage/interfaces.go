@@ -207,9 +207,11 @@ type PlanningSessionStore interface {
 	) ([]domain.PlanningRevision, error)
 	// ClaimPlanningAnalysis 以数据库条件更新抢占一轮分析的执行权。
 	//
-	// 抢占条件固定为"会话状态是 analyzing 且当前没有任何占用"：影响行数为 0 说明状态
-	// 不允许或已被其他执行者占用，返回 storage.ErrConflict。占用标识由调用方生成，
-	// 释放时必须提交同一个标识，因此并发抢占只有一方能开始两阶段模型调用。
+	// 抢占条件固定为"会话状态是 analyzing 且当前没有占用，或占用标识就是本次提交的
+	// 标识"：前者是首次取得执行权，后者是同一次执行在重试入口预先占用之后的确认，
+	// 因此重复确认是幂等的。影响行数为 0 说明状态不允许或已被其他执行者占用，返回
+	// storage.ErrConflict。占用标识由调用方生成，释放时必须提交同一个标识，所以并发
+	// 抢占只有一方能开始两阶段模型调用。
 	ClaimPlanningAnalysis(ctx context.Context, id domain.ID, claimID string, at time.Time) error
 	// ReleasePlanningAnalysis 以占用标识为条件释放一轮分析的执行权。
 	//
@@ -217,6 +219,30 @@ type PlanningSessionStore interface {
 	// 结束时间、采纳的方案版本、失败摘要与运行时绑定保持数据库中的值。标识不匹配说明
 	// 占用已不属于本次调用，返回 storage.ErrConflict，调用方不得覆盖别人的结论。
 	ReleasePlanningAnalysis(ctx context.Context, id domain.ID, claimID string, at time.Time) error
+	// ListPlanningAnalysisClaims 返回当前仍持有分析占用的规划会话。
+	//
+	// 它只按"存在占用"筛选：状态条件由调用方再次核对，服务端启动恢复据此判断上一次
+	// 进程是否留下无人推进的分析执行，不用于任何跨进程租约或续租。
+	ListPlanningAnalysisClaims(ctx context.Context) ([]PlanningAnalysisClaim, error)
+	// PlanningAnalysisClaim 返回单个会话当前的分析占用标识，没有占用时返回空字符串。
+	//
+	// 它只用于"在同一个事务里先读出占用、再按该标识释放"的显式终止操作：终止一轮
+	// 运行必须同时清掉它的占用，否则失败会话会带着无人推进的占用无法重试。会话不存在
+	// 时返回 storage.ErrNotFound。
+	PlanningAnalysisClaim(ctx context.Context, id domain.ID) (string, error)
+}
+
+// PlanningAnalysisClaim 是一条仍然有效的分析占用记录。
+//
+// 它是"某个执行者正在推进这一轮分析"的唯一持久化证据：没有它就不存在执行权，因此
+// 服务端启动恢复只处理带占用的会话，不推断"分析可能中断了"。
+type PlanningAnalysisClaim struct {
+	// SessionID 是持有占用的规划会话。
+	SessionID domain.ID
+	// ClaimID 是执行者生成的占用标识，恢复与释放都必须带同一个标识。
+	ClaimID string
+	// ClaimedAt 是占用写入时间。
+	ClaimedAt time.Time
 }
 
 // PlanningSessionRuntimeBinding 是规划会话的运行期绑定。

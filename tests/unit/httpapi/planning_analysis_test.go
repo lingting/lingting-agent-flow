@@ -14,6 +14,7 @@ import (
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/httpapi"
 	"github.com/lingting/agentflow/internal/logging"
+	"github.com/lingting/agentflow/internal/storage"
 	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
@@ -158,10 +159,25 @@ type planningAnalysisAPIFixture struct {
 // newPlanningAnalysisAPIFixture 装配两阶段分析接口。
 func newPlanningAnalysisAPIFixture(t *testing.T) *planningAnalysisAPIFixture {
 	t.Helper()
+	return newPlanningAnalysisAPIFixtureWithStore(t, nil)
+}
+
+// newPlanningAnalysisAPIFixtureWithStore 用给定存储装配两阶段分析接口。
+//
+// store 为空表示使用测试数据库本身；替身只替换"某一步写入失败"，会话服务仍绑定真实
+// 数据库，因此失败之后的读取与重试走的是正式路径。
+func newPlanningAnalysisAPIFixtureWithStore(
+	t *testing.T,
+	store storage.Store,
+) *planningAnalysisAPIFixture {
+	t.Helper()
 	base := newPlanningAPIFixture(t)
 	agentPort := newAPIFakeAgent()
+	if store == nil {
+		store = base.db
+	}
 	analysis, err := app.NewPlanningAnalysisService(app.PlanningAnalysisServiceOptions{
-		Store: base.db,
+		Store: store,
 		Agent: agentPort,
 	})
 	if err != nil {

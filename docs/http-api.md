@@ -294,3 +294,74 @@
 | 项目不存在或已逻辑删除 | 404 | `not_found` |
 | 项目标识已存在 | 409 | `state_conflict` |
 | 项目服务未装配或已停止 | 503 | `internal_error` |
+
+## 15. 规划会话与两阶段分析
+
+规划会话接口挂在 `/api/v1/planning/sessions` 下。规划阶段只产生 `PlanningSession` /
+`PlanningMessage` / `PlanningRevision`，不创建正式 Requirement / Task / Step / Attempt。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/api/v1/planning/sessions` | 创建规划会话（`201`），只接受 `project_id` |
+| `GET` | `/api/v1/planning/sessions?project_id=…` | 按项目列出会话（最近在前） |
+| `GET` | `/api/v1/planning/sessions/{sessionID}` | 会话详情 |
+| `GET` | `/api/v1/planning/sessions/{sessionID}/messages` | 消息列表（按序号升序） |
+| `POST` | `/api/v1/planning/sessions/{sessionID}/messages` | 追加用户消息并把会话推进到 `analyzing`（`201`） |
+| `GET` | `/api/v1/planning/sessions/{sessionID}/revisions` | 方案版本列表（按版本号升序） |
+| `POST` | `/api/v1/planning/sessions/{sessionID}/analysis` | 同步执行一轮两阶段分析 |
+| `POST` | `/api/v1/planning/sessions/{sessionID}/analysis/retry` | 显式重试（可选附带补充消息） |
+| `POST` | `/api/v1/planning/sessions/{sessionID}/abandon` | 放弃规划 |
+| `GET` | `/api/v1/planning/sessions/{sessionID}/runtime` | 只读核验规划运行现场 |
+| `POST` | `/api/v1/planning/sessions/{sessionID}/runtime/prepare` | 准备规划运行环境（复用生产路径） |
+| `POST` | `/api/v1/planning/sessions/{sessionID}/runtime/release` | 释放规划运行环境（复用生产路径） |
+
+请求边界：
+
+- 分析请求体可整体省略，或只携带 `host_id`；重试请求体可携带 `content`（补充消息）与 `host_id`。
+- 不接受角色覆盖、模型覆盖、提示词覆盖、Session 路径、容器标识或命令参数；携带未知字段返回 `400`
+  （`invalid_request`）。角色、模型、容器与会话路径只由服务端按当前配置与记录决定。
+
+分析结果：
+
+```json
+{
+  "session": {"id": "…", "status": "preview_ready", "…": "…"},
+  "revision": {"id": "…", "revision_number": 1, "snapshot_version": 1,
+               "requirement_analysis": {}, "implementation_plan": {}, "created_at": "…"},
+  "messages": [{"sender_type": "requirement_analyst"}, {"sender_type": "planner"}],
+  "requirement_analysis": {"summary": "…", "goals": [], "current_state": [], "scope": [],
+                           "out_of_scope": [], "constraints": [], "risks": [],
+                           "acceptance_criteria": []},
+  "implementation_plan": {"summary": "…", "tasks": [
+    {"id": "task-1", "title": "…", "description": "…", "depends_on": [],
+     "acceptance_criteria": []}]}
+}
+```
+
+- 两个阶段顺序固定：`requirement_analyst` 先执行，`planner` 后执行，两者使用各自独立的稳定 Pi
+  Session。规划师的输入是需求分析师的完整结构化快照，不是摘要。
+- Revision 与两条角色消息、`preview_ready` 状态、本轮分析占用在同一个事务内提交：任何一步失败都整体
+  回滚，不会返回未持久化的 Revision。
+- 只有成功持久化才返回 `200`：持久化失败返回 `500`（`execution_not_persisted`），响应中的说明是脱敏
+  裁剪后的摘要，会话此时已收敛为 `failed` 并记录同一份摘要。
+- 同一会话并发分析返回 `409`（`state_conflict`）：执行权由数据库条件更新给出，而不是接口层的状态判断。
+  不同会话之间互不影响。
+- 分析失败（调用失败、超时、输出不可解析、输出违反领域约束）返回 `500`（状态码按错误类别映射），
+  会话收敛为 `failed`，失败摘要记录阶段并可读；随后可用 `analysis/retry` 显式重试。
+- `analysis/retry` 接受 `failed` 以及"没有执行占用"的 `analyzing` 会话：后者是提交消息之后、抢占执行权
+  之前进程退出的现场。重试与执行权在同一个事务内完成，因此重复的重试请求不会重复追加用户消息，也
+  不会启动第二轮模型调用。已有执行占用的会话返回 `409`。
+- 服务端启动时会把上一次进程中断遗留的"`analyzing` + 仍有占用"会话收敛为 `failed`（摘要说明是进程
+  中断）并释放占用；随后用户通过 `analysis/retry` 继续。只在 `analyzing` 但没有占用的会话不做推断。
+- 未装配规划会话服务返回 `503`；未装配两阶段分析服务时 `analysis` 与 `analysis/retry` 返回 `503`。
+
+错误语义：
+
+| 情形 | 状态码 | `error.code` |
+|---|---|---|
+| 标识非法、消息为空、请求携带未知字段 | 400 | `invalid_request` |
+| 会话或所属项目不存在、已删除 | 404 | `not_found` |
+| 状态不允许分析、已被其他执行占用、重复重试 | 409 | `state_conflict` |
+| 角色调用未产出可用结果、输出非法 | 500 | `execution_failed` |
+| 结果未持久化（含 Revision / 角色消息 / 状态 / 占用任一步失败） | 500 | `execution_not_persisted` |
+| 规划服务未装配或已停止 | 503 | `internal_error` |

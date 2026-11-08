@@ -159,7 +159,8 @@ type ImplementationPlan struct {
 //   - 任务数量必须在 1 到上限之间，标识唯一、标题与描述非空、验收条件非空；
 //   - 依赖必须指向排在自己前面的任务：这条规则同时保证引用有效、无自依赖、无环，
 //     并让任务顺序本身就是可执行顺序；
-//   - 同一条依赖不得重复声明，避免依赖集合的含义随解析结果漂移。
+//   - 同一条依赖不得重复声明，避免依赖集合的含义随解析结果漂移；
+//   - 任务标识与依赖引用都不得带首尾空白：两侧用同一套精确匹配规则，不做裁剪后匹配。
 func (p ImplementationPlan) Validate() error {
 	if err := validatePlanningTextField(
 		"ImplementationPlan",
@@ -212,6 +213,15 @@ func (t ImplementationPlanTask) validate(position int, declared map[string]struc
 	if identifier == "" {
 		return invalidField("ImplementationPlan", field("id"), "任务标识不能为空")
 	}
+	// 标识必须本身就是规范形式：带首尾空白的标识在依赖引用时会被裁剪，从而指向另一个
+	// 标识。这里拒绝不规范写法，标识与依赖因此使用同一套比较规则（精确匹配）。
+	if identifier != t.ID {
+		return invalidField(
+			"ImplementationPlan",
+			field("id"),
+			"任务标识不能包含首尾空白",
+		)
+	}
 	if len(identifier) > MaxImplementationPlanTaskIDLength {
 		return invalidField(
 			"ImplementationPlan",
@@ -258,6 +268,9 @@ func (t ImplementationPlanTask) validate(position int, declared map[string]struc
 //
 // 依赖只能指向排在前面的任务：引用不存在的任务、依赖自己、依赖后面的任务都会让顺序
 // 失去可执行性，因此统一按"依赖必须指向更早的任务"拒绝。
+//
+// 依赖写法必须与任务标识一致：不接受带首尾空白的引用，也不做裁剪后匹配，避免"看起来
+// 指向 A 实际匹配到 B"。
 func (t ImplementationPlanTask) validateDependencies(
 	position int,
 	declared map[string]struct{},
@@ -278,6 +291,13 @@ func (t ImplementationPlanTask) validateDependencies(
 				"ImplementationPlan",
 				field,
 				fmt.Sprintf("第 %d 条依赖不能为空", index+1),
+			)
+		}
+		if trimmed != dependency {
+			return invalidField(
+				"ImplementationPlan",
+				field,
+				fmt.Sprintf("第 %d 条依赖不能包含首尾空白", index+1),
 			)
 		}
 		if _, duplicated := seen[trimmed]; duplicated {
@@ -324,15 +344,21 @@ func (v PlanningValidationResult) Snapshot() (json.RawMessage, error) {
 //
 // 解析规则（与 ParseImplementationPlan 共用同一份实现）：
 //   - 空输出、超过上限的输出直接拒绝；
-//   - 只接受一个完整的 JSON 对象，允许整体被代码块围栏包裹；对象之后的任何内容
-//     （说明文字或第二份 JSON 文档）都拒绝；
-//   - 未知字段一律拒绝，避免把额外结构当成分析结论；
+//   - 只接受一个完整的 JSON 对象，允许整体被一对闭合的代码块围栏包裹；对象之后的任何
+//     内容（说明文字或第二份 JSON 文档）都拒绝，未闭合围栏或多层围栏不做猜测修复；
+//   - 未知字段、重复 Key、必填字段缺失与 null 一律拒绝：这些事实必须在结构化解码之前
+//     判定，落到结构体之后已经无法复原；
 //   - 解析结果还必须通过 Validate 的领域校验。
 //
 // 该函数是纯函数：不读数据库、不启动进程。
 func ParseRequirementAnalysis(text string) (RequirementAnalysis, error) {
 	var analysis RequirementAnalysis
-	if err := decodePlanningDocument(text, "需求分析", &analysis); err != nil {
+	if err := decodePlanningDocument(
+		text,
+		"需求分析",
+		&analysis,
+		requirementAnalysisJSONShape,
+	); err != nil {
 		return RequirementAnalysis{}, err
 	}
 	if err := analysis.Validate(); err != nil {
@@ -355,7 +381,12 @@ func ParseRequirementAnalysisSnapshot(snapshot json.RawMessage) (RequirementAnal
 // 解析后必须通过 ImplementationPlan.Validate 的领域校验。
 func ParseImplementationPlan(text string) (ImplementationPlan, error) {
 	var plan ImplementationPlan
-	if err := decodePlanningDocument(text, "实施方案", &plan); err != nil {
+	if err := decodePlanningDocument(
+		text,
+		"实施方案",
+		&plan,
+		implementationPlanJSONShape,
+	); err != nil {
 		return ImplementationPlan{}, err
 	}
 	if err := plan.Validate(); err != nil {
@@ -369,13 +400,107 @@ func ParseImplementationPlanSnapshot(snapshot json.RawMessage) (ImplementationPl
 	return ParseImplementationPlan(string(snapshot))
 }
 
+// planningJSONKind 是必填字段的 JSON 形状类别。
+type planningJSONKind int
+
+// 规划文档的必填字段只支持三类形状：单个字符串、字符串列表、对象列表。
+const (
+	planningJSONString planningJSONKind = iota
+	planningJSONStringList
+	planningJSONObjectList
+)
+
+// planningJSONField 是一份规划文档中的必填字段。
+type planningJSONField struct {
+	// name 是字段名，必须与结构体标签完全一致。
+	name string
+	// kind 是字段的 JSON 形状。
+	kind planningJSONKind
+	// element 是对象列表的元素形状，只有 planningJSONObjectList 使用。
+	element *planningJSONShape
+}
+
+// planningJSONShape 是一份规划文档的必填字段集合。
+//
+// 形状先于结构体声明存在：字段存在性、null、重复 Key 与文档完整性都在结构化解码之前
+// 判定，因此这些事实不能依赖"解码到 Go map 之后再检查"。
+type planningJSONShape struct {
+	// name 是文档的中文名称，用于错误说明。
+	name string
+	// fields 是全部必填字段，缺一不可。
+	fields []planningJSONField
+}
+
+// field 按名称查找字段定义。
+func (s planningJSONShape) field(name string) (planningJSONField, bool) {
+	for _, candidate := range s.fields {
+		if candidate.name == name {
+			return candidate, true
+		}
+	}
+	return planningJSONField{}, false
+}
+
+// requirementAnalysisJSONShape 描述需求分析文档的八个必填字段。
+var requirementAnalysisJSONShape = planningJSONShape{
+	name: "需求分析",
+	fields: []planningJSONField{
+		{name: "summary", kind: planningJSONString},
+		{name: "goals", kind: planningJSONStringList},
+		{name: "current_state", kind: planningJSONStringList},
+		{name: "scope", kind: planningJSONStringList},
+		{name: "out_of_scope", kind: planningJSONStringList},
+		{name: "constraints", kind: planningJSONStringList},
+		{name: "risks", kind: planningJSONStringList},
+		{name: "acceptance_criteria", kind: planningJSONStringList},
+	},
+}
+
+// implementationPlanTaskJSONShape 描述方案中单个任务草案的五个必填字段。
+//
+// depends_on 同样是必填字段：没有前置依赖时必须显式给出空数组，缺字段与 null 都按
+// 结构错误拒绝，而不是被当成"没有依赖"。
+var implementationPlanTaskJSONShape = planningJSONShape{
+	name: "任务草案",
+	fields: []planningJSONField{
+		{name: "id", kind: planningJSONString},
+		{name: "title", kind: planningJSONString},
+		{name: "description", kind: planningJSONString},
+		{name: "depends_on", kind: planningJSONStringList},
+		{name: "acceptance_criteria", kind: planningJSONStringList},
+	},
+}
+
+// implementationPlanJSONShape 描述实施方案文档的必填字段。
+var implementationPlanJSONShape = planningJSONShape{
+	name: "实施方案",
+	fields: []planningJSONField{
+		{name: "summary", kind: planningJSONString},
+		{
+			name:    "tasks",
+			kind:    planningJSONObjectList,
+			element: &implementationPlanTaskJSONShape,
+		},
+	},
+}
+
 // decodePlanningDocument 把一段角色输出解码为单个规划结构。
 //
-// 解码使用 DisallowUnknownFields：模型多给的字段不会被静默忽略，否则"字段名写错"会
-// 变成"字段为空"，最终以缺字段的形式报错，掩盖真正的原因。
-func decodePlanningDocument(text, kind string, target any) error {
+// 解码分两步，顺序不可交换：
+//   - 先用 JSON Token 校验文档形状：重复 Key、未知字段、缺失字段、null、类型与多余内容
+//     都在这一步拒绝。重复 Key 只能在 Token 层面发现，解到结构体或 map 之后原始信息
+//     已经丢失；
+//   - 再按结构体解码，并保留 DisallowUnknownFields：字段名写错不会被静默忽略成"字段为空"。
+func decodePlanningDocument(
+	text, kind string,
+	target any,
+	shape planningJSONShape,
+) error {
 	document, err := planningDocument(text, kind)
 	if err != nil {
+		return err
+	}
+	if err := validatePlanningJSONDocument(document, shape); err != nil {
 		return err
 	}
 	decoder := json.NewDecoder(strings.NewReader(document))
@@ -383,8 +508,8 @@ func decodePlanningDocument(text, kind string, target any) error {
 	if err := decoder.Decode(target); err != nil {
 		return fmt.Errorf("%w: %s不是合法的结构化 JSON: %w", ErrPlanningOutputUnparseable, kind, err)
 	}
-	// 解码一个完整值之后再读一次：剩余内容无论是说明文字还是第二份 JSON 文档，
-	// 都说明模型没有按协议只输出一份结论。
+	// 解码一个完整值之后再读一次：剩余内容无论是什么，都说明模型没有按协议只输出
+	// 一份结论，因此整份输出不可用。
 	var extra json.RawMessage
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		return fmt.Errorf(
@@ -396,10 +521,150 @@ func decodePlanningDocument(text, kind string, target any) error {
 	return nil
 }
 
+// validatePlanningJSONDocument 校验文档只包含一个形状符合声明的 JSON 对象。
+func validatePlanningJSONDocument(document string, shape planningJSONShape) error {
+	decoder := json.NewDecoder(strings.NewReader(document))
+	if err := validatePlanningJSONObject(decoder, shape, shape.name); err != nil {
+		return err
+	}
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return fmt.Errorf(
+			"%w: %s输出包含多余内容或第二份 JSON 文档",
+			ErrPlanningOutputUnparseable,
+			shape.name,
+		)
+	}
+	return nil
+}
+
+// validatePlanningJSONObject 校验一个对象的必填字段、字段类型与 Key 唯一性。
+//
+// path 是对象在文档中的位置说明，用于嵌套任务对象的错误定位。
+func validatePlanningJSONObject(
+	decoder *json.Decoder,
+	shape planningJSONShape,
+	path string,
+) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return planningJSONSyntaxError(path, err)
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != '{' {
+		return fmt.Errorf("%w: %s必须是一个 JSON 对象", ErrPlanningOutputUnparseable, path)
+	}
+	seen := make(map[string]struct{}, len(shape.fields))
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return planningJSONSyntaxError(path, err)
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return fmt.Errorf("%w: %s包含非法字段名", ErrPlanningOutputUnparseable, path)
+		}
+		field, known := shape.field(key)
+		if !known {
+			return fmt.Errorf("%w: %s包含未知字段 %q", ErrPlanningOutputUnparseable, path, key)
+		}
+		if _, duplicated := seen[key]; duplicated {
+			return fmt.Errorf("%w: %s的字段 %q 重复出现", ErrPlanningOutputUnparseable, path, key)
+		}
+		seen[key] = struct{}{}
+		if err := validatePlanningJSONField(decoder, field, path); err != nil {
+			return err
+		}
+	}
+	if _, err := decoder.Token(); err != nil {
+		return planningJSONSyntaxError(path, err)
+	}
+	for _, field := range shape.fields {
+		if _, present := seen[field.name]; !present {
+			return fmt.Errorf(
+				"%w: %s缺少必填字段 %q",
+				ErrPlanningOutputUnparseable,
+				path,
+				field.name,
+			)
+		}
+	}
+	return nil
+}
+
+// validatePlanningJSONField 校验单个必填字段的形状。
+func validatePlanningJSONField(
+	decoder *json.Decoder,
+	field planningJSONField,
+	path string,
+) error {
+	location := path + " 的字段 " + field.name
+	token, err := decoder.Token()
+	if err != nil {
+		return planningJSONSyntaxError(location, err)
+	}
+	if field.kind == planningJSONString {
+		if token == nil {
+			return fmt.Errorf("%w: %s不能是 null", ErrPlanningOutputUnparseable, location)
+		}
+		if _, ok := token.(string); !ok {
+			return fmt.Errorf("%w: %s必须是字符串", ErrPlanningOutputUnparseable, location)
+		}
+		return nil
+	}
+	if token == nil {
+		return fmt.Errorf(
+			"%w: %s不能是 null（没有内容时使用空数组）",
+			ErrPlanningOutputUnparseable,
+			location,
+		)
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != '[' {
+		return fmt.Errorf("%w: %s必须是数组", ErrPlanningOutputUnparseable, location)
+	}
+	index := 0
+	for decoder.More() {
+		index++
+		position := fmt.Sprintf("%s 的第 %d 项", location, index)
+		if field.kind == planningJSONStringList {
+			if err := validatePlanningJSONString(decoder, position); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := validatePlanningJSONObject(decoder, *field.element, position); err != nil {
+			return err
+		}
+	}
+	if _, err := decoder.Token(); err != nil {
+		return planningJSONSyntaxError(location, err)
+	}
+	return nil
+}
+
+// validatePlanningJSONString 校验数组中的单个字符串项。
+func validatePlanningJSONString(decoder *json.Decoder, position string) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return planningJSONSyntaxError(position, err)
+	}
+	if token == nil {
+		return fmt.Errorf("%w: %s不能是 null", ErrPlanningOutputUnparseable, position)
+	}
+	if _, ok := token.(string); !ok {
+		return fmt.Errorf("%w: %s必须是字符串", ErrPlanningOutputUnparseable, position)
+	}
+	return nil
+}
+
+// planningJSONSyntaxError 把 JSON 语法错误归入"无法解析"类别。
+func planningJSONSyntaxError(location string, err error) error {
+	return fmt.Errorf("%w: %s不是合法的 JSON: %w", ErrPlanningOutputUnparseable, location, err)
+}
+
 // planningDocument 返回待解码的单份 JSON 文档。
 //
 // 它只做三项前置判断：非空、长度受限、形状是 JSON 对象。围栏剥离是唯一的宽容处理，
-// 因为"整体包在代码块里"不改变结论本身。
+// 因为"整体包在代码块里"不改变结论本身；部分围栏或多层围栏不做猜测，直接拒绝。
 func planningDocument(text, kind string) (string, error) {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
@@ -414,7 +679,13 @@ func planningDocument(text, kind string) (string, error) {
 			MaxPlanningOutputBytes,
 		)
 	}
-	document := trimPlanningFence(trimmed)
+	document, err := trimPlanningFence(trimmed, kind)
+	if err != nil {
+		return "", err
+	}
+	if document == "" {
+		return "", fmt.Errorf("%w: %s输出为空", ErrPlanningOutputUnparseable, kind)
+	}
 	if document == "null" {
 		return "", fmt.Errorf("%w: %s输出不能是 null", ErrPlanningOutputUnparseable, kind)
 	}
@@ -426,17 +697,29 @@ func planningDocument(text, kind string) (string, error) {
 
 // trimPlanningFence 剥离整体包裹输出的代码块围栏。
 //
-// 只处理"输出整体被 ``` 围栏包裹"这一种情况：围栏内部必须仍然是完整文档，嵌套围栏
-// 或部分包裹都不做猜测，交给后续解码拒绝。
-func trimPlanningFence(text string) string {
+// 只处理"输出整体被一对 ``` 围栏包裹"这一种情况：围栏必须闭合，围栏内部不得再出现
+// 围栏标记。未闭合、部分包裹与多层文档都不做修复尝试，交给调用方按不可解析拒绝。
+func trimPlanningFence(text, kind string) (string, error) {
 	if !strings.HasPrefix(text, "```") {
-		return text
+		return text, nil
 	}
 	_, body, found := strings.Cut(text, "\n")
 	if !found {
-		return text
+		return "", fmt.Errorf("%w: %s的代码块围栏没有内容", ErrPlanningOutputUnparseable, kind)
 	}
-	return strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(body), "```"))
+	inner := strings.TrimSpace(body)
+	if !strings.HasSuffix(inner, "```") {
+		return "", fmt.Errorf("%w: %s的代码块围栏没有闭合", ErrPlanningOutputUnparseable, kind)
+	}
+	inner = strings.TrimSpace(strings.TrimSuffix(inner, "```"))
+	if strings.Contains(inner, "```") {
+		return "", fmt.Errorf(
+			"%w: %s包含多层或部分代码块围栏",
+			ErrPlanningOutputUnparseable,
+			kind,
+		)
+	}
+	return inner, nil
 }
 
 // validatePlanningTextField 校验必填文本字段。

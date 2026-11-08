@@ -171,3 +171,112 @@ func TestAppendPlanningRevisionPersistsSnapshotVersion(t *testing.T) {
 		t.Fatalf("读回的版本快照版本不一致: %d", revisions[0].SnapshotVersion)
 	}
 }
+
+// TestClaimPlanningAnalysisConfirmsSameClaim 验证同一标识的确认是幂等的。
+//
+// 显式重试入口先把执行权拿到手，分析编排随后用同一个标识确认：确认成功，其他标识
+// 仍然抢不到。
+func TestClaimPlanningAnalysisConfirmsSameClaim(t *testing.T) {
+	t.Parallel()
+	ctx := testContext(t)
+	db := newTestDB(t)
+	session := analyzingPlanningSession(t, db)
+	at := planningBaseTime().Add(2 * time.Minute)
+
+	if err := db.ClaimPlanningAnalysis(ctx, session.ID, "claim-a", at); err != nil {
+		t.Fatalf("首次抢占失败: %v", err)
+	}
+	if err := db.ClaimPlanningAnalysis(ctx, session.ID, "claim-a", at.Add(time.Second)); err != nil {
+		t.Fatalf("同一标识的确认应成功: %v", err)
+	}
+	claim, err := db.PlanningAnalysisClaim(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("读取占用失败: %v", err)
+	}
+	if claim != "claim-a" {
+		t.Fatalf("确认后占用标识不符: %q", claim)
+	}
+	if err := db.ClaimPlanningAnalysis(ctx, session.ID, "claim-b", at); !errors.Is(
+		err,
+		storage.ErrConflict,
+	) {
+		t.Fatalf("其他标识仍必须抢占失败: %v", err)
+	}
+}
+
+// TestPlanningAnalysisClaimReadsCurrentClaim 验证读取单个会话的占用标识。
+func TestPlanningAnalysisClaimReadsCurrentClaim(t *testing.T) {
+	t.Parallel()
+	ctx := testContext(t)
+	db := newTestDB(t)
+	session := analyzingPlanningSession(t, db)
+
+	claim, err := db.PlanningAnalysisClaim(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("读取占用失败: %v", err)
+	}
+	if claim != "" {
+		t.Fatalf("未抢占时应返回空占用标识: %q", claim)
+	}
+	at := planningBaseTime().Add(2 * time.Minute)
+	if err := db.ClaimPlanningAnalysis(ctx, session.ID, "claim-a", at); err != nil {
+		t.Fatalf("抢占失败: %v", err)
+	}
+	claim, err = db.PlanningAnalysisClaim(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("读取占用失败: %v", err)
+	}
+	if claim != "claim-a" {
+		t.Fatalf("占用标识不符: %q", claim)
+	}
+	if _, err := db.PlanningAnalysisClaim(ctx, domain.NewID()); !errors.Is(
+		err,
+		storage.ErrNotFound,
+	) {
+		t.Fatalf("未知会话必须返回不存在: %v", err)
+	}
+}
+
+// TestListPlanningAnalysisClaimsFiltersUnclaimed 验证占用清单只包含仍在运行的会话。
+func TestListPlanningAnalysisClaimsFiltersUnclaimed(t *testing.T) {
+	t.Parallel()
+	ctx := testContext(t)
+	db := newTestDB(t)
+	claimed := analyzingPlanningSession(t, db)
+	unclaimed := analyzingPlanningSession(t, db)
+	at := planningBaseTime().Add(2 * time.Minute)
+	if err := db.ClaimPlanningAnalysis(ctx, claimed.ID, "claim-a", at); err != nil {
+		t.Fatalf("抢占失败: %v", err)
+	}
+
+	claims, err := db.ListPlanningAnalysisClaims(ctx)
+	if err != nil {
+		t.Fatalf("查询占用清单失败: %v", err)
+	}
+	if len(claims) != 1 {
+		t.Fatalf("占用清单数量应为 1，实际 %d", len(claims))
+	}
+	if claims[0].SessionID != claimed.ID || claims[0].ClaimID != "claim-a" {
+		t.Fatalf("占用记录不符: %+v", claims[0])
+	}
+	if claims[0].ClaimedAt.IsZero() {
+		t.Fatal("占用记录必须带占用时间")
+	}
+
+	// 释放之后清单为空：没有执行者的会话不会被误报为遗留占用。
+	if err := db.ReleasePlanningAnalysis(ctx, claimed.ID, "claim-a", at.Add(time.Minute)); err != nil {
+		t.Fatalf("释放占用失败: %v", err)
+	}
+	claims, err = db.ListPlanningAnalysisClaims(ctx)
+	if err != nil {
+		t.Fatalf("查询占用清单失败: %v", err)
+	}
+	if len(claims) != 0 {
+		t.Fatalf("释放后占用清单应为空，实际 %d", len(claims))
+	}
+	if stored, err := db.GetPlanningSession(ctx, unclaimed.ID); err != nil {
+		t.Fatalf("读取规划会话失败: %v", err)
+	} else if stored.Status != domain.PlanningSessionAnalyzing {
+		t.Fatalf("无占用的 analyzing 会话状态不应变化: %s", stored.Status)
+	}
+}

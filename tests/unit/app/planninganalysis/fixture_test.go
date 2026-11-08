@@ -399,3 +399,56 @@ func (t failingRevisionTx) AppendPlanningRevision(
 ) (domain.PlanningRevision, error) {
 	return domain.PlanningRevision{}, fmt.Errorf("模拟方案版本写入失败")
 }
+
+// newAnalysisFixtureOver 复用一个既有现场，只替换分析服务本身。
+//
+// 数据库、会话服务与角色替身都与 base 共用：失败注入只改一处写入，事务边界、回滚与
+// 条件更新仍然由真实 SQLite 执行。
+func newAnalysisFixtureOver(t *testing.T, base *analysisFixture) *analysisFixture {
+	t.Helper()
+	return &analysisFixture{
+		db:       base.db,
+		ctx:      base.ctx,
+		database: base.database,
+		project:  base.project,
+		sessions: base.sessions,
+		analysis: base.analysis,
+		agent:    base.agent,
+	}
+}
+
+// assertClaimReleased 断言会话当前没有分析占用。
+//
+// 它直接读占用表而不是尝试抢占：失败会话不允许抢占，"没有占用"只能用占用记录本身
+// 证明。
+func assertClaimReleased(t *testing.T, f *analysisFixture, sessionID domain.ID) {
+	t.Helper()
+	claims, err := f.db.ListPlanningAnalysisClaims(f.ctx)
+	if err != nil {
+		t.Fatalf("读取规划分析占用失败: %v", err)
+	}
+	for _, claim := range claims {
+		if claim.SessionID == sessionID {
+			t.Fatalf("会话仍持有分析占用: %s", claim.ClaimID)
+		}
+	}
+}
+
+// assertClaimHeld 断言会话仍被指定标识的占用持有。
+func assertClaimHeld(t *testing.T, f *analysisFixture, sessionID domain.ID, claimID string) {
+	t.Helper()
+	claims, err := f.db.ListPlanningAnalysisClaims(f.ctx)
+	if err != nil {
+		t.Fatalf("读取规划分析占用失败: %v", err)
+	}
+	for _, claim := range claims {
+		if claim.SessionID != sessionID {
+			continue
+		}
+		if claim.ClaimID != claimID {
+			t.Fatalf("占用标识不符: 期望 %s，实际 %s", claimID, claim.ClaimID)
+		}
+		return
+	}
+	t.Fatalf("会话没有持有分析占用: %s", sessionID)
+}

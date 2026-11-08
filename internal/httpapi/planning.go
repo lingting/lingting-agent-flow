@@ -348,6 +348,11 @@ func (h *planningHandler) writeError(w http.ResponseWriter, r *http.Request, err
 		h.logger.ErrorContext(r.Context(), "规划接口处理失败", slog.String("error", message))
 		message = "服务内部错误"
 	}
+	if code == CodeExecutionNotPersisted {
+		// 失败事实已经落库到会话的失败摘要；响应只回传同一份脱敏裁剪后的说明，
+		// 不把底层存储细节、凭据或完整提示词交给客户端。
+		message = domain.ClipFeedbackText(message, domain.MaxFeedbackReason)
+	}
 	writeError(w, r, h.logger, status, code, message)
 }
 

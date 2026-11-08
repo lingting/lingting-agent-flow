@@ -258,25 +258,28 @@ func (h *planningHandler) analyze(w http.ResponseWriter, r *http.Request) {
 
 // retryAnalysis 处理 POST /api/v1/planning/sessions/{sessionID}/analysis/retry。
 //
-// 重试是显式动作：先由规划会话服务把 failed 收敛回 analyzing（可选附带补充消息），
-// 再执行一轮完整的两阶段分析。它不接受状态覆盖，也不允许在 analyzing 期间强行插入。
+// 重试是显式动作：先由规划会话服务把会话推进回 analyzing 并在同一个事务内取得本轮
+// 分析占用（可选附带补充消息），再执行一轮完整的两阶段分析。它不接受状态覆盖，也不
+// 允许在已有执行占用时装作可以开始；执行权始终由数据库条件更新给出。
 func (h *planningHandler) retryAnalysis(w http.ResponseWriter, r *http.Request) {
 	sessionID := pathID(r, paramSessionID)
 	var body planningRetryRequest
 	if !decodeOptionalJSONBody(w, r, h.logger, &body) {
 		return
 	}
-	if _, err := h.sessions.RetryAnalysis(
+	start, err := h.sessions.RetryAnalysis(
 		r.Context(),
 		sessionID,
 		app.RetryPlanningAnalysisRequest{Content: body.Content},
-	); err != nil {
+	)
+	if err != nil {
 		h.writeError(w, r, err)
 		return
 	}
 	result, err := h.analysis.Analyze(r.Context(), app.RunPlanningAnalysisRequest{
 		PlanningSessionID: sessionID,
 		HostID:            strings.TrimSpace(body.HostID),
+		ClaimID:           start.ClaimID,
 	})
 	if err != nil {
 		h.writeError(w, r, err)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage"
@@ -17,6 +18,10 @@ type PlanningAnalysisStart struct {
 	Session domain.PlanningSession
 	// Message 是本次追加的用户消息；显式重新运行分析未提交补充消息时为空。
 	Message *domain.PlanningMessage
+	// ClaimID 是显式重试入口已经取得的分析占用标识。
+	//
+	// 普通消息提交不占用执行权：那一轮分析由分析编排在开始时抢占，因此这里为空。
+	ClaimID string
 }
 
 // SubmitPlanningMessageRequest 是提交用户消息的输入。
@@ -125,6 +130,12 @@ func (s *PlanningSessionService) RetryAnalysis(
 			return err
 		}
 		at := s.now()
+		claimID := domain.NewID().String()
+		// 先取得本轮执行权，再追加补充消息：两个并发的重试请求只有一个能推进状态并
+		// 写入消息，另一个因占用冲突整体回滚，不会留下重复的用户消息。
+		if err := beginRetryAnalysis(ctx, tx, &session, claimID, at); err != nil {
+			return err
+		}
 		var message *domain.PlanningMessage
 		if strings.TrimSpace(content) != "" {
 			appended, err := tx.AppendPlanningMessage(ctx, storage.AppendPlanningMessageRequest{
@@ -138,23 +149,63 @@ func (s *PlanningSessionService) RetryAnalysis(
 			}
 			message = &appended
 		}
-		if err := session.RetryAnalysis(at); err != nil {
-			return mapPlanningTransitionFailure(err)
-		}
-		if err := tx.UpdatePlanningSessionIfStatus(
-			ctx,
-			session,
-			[]domain.PlanningSessionStatus{domain.PlanningSessionFailed},
-		); err != nil {
-			return mapPlanningUpdateFailure(err, sessionID)
-		}
-		start = PlanningAnalysisStart{Session: session, Message: message}
+		start = PlanningAnalysisStart{Session: session, Message: message, ClaimID: claimID}
 		return nil
 	})
 	if err != nil {
 		return PlanningAnalysisStart{}, err
 	}
 	return start, nil
+}
+
+// beginRetryAnalysis 在事务内把会话推进到 analyzing 并取得本轮分析占用。
+//
+// 两种入口共用同一套规则：
+//   - failed 会话经领域状态迁移方法回到 analyzing，这是失败唯一的出口；
+//   - 无占用的 analyzing 会话允许重新进入分析：提交消息之后、抢占执行权之前进程退出
+//     就会留下这个现场，显式重试是它唯一的恢复入口。
+//
+// 已有占用的会话一律拒绝：执行权最终由数据库条件更新给出，不靠这里的状态判断。
+func beginRetryAnalysis(
+	ctx context.Context,
+	tx storage.Tx,
+	session *domain.PlanningSession,
+	claimID string,
+	at time.Time,
+) error {
+	previous := session.Status
+	switch previous {
+	case domain.PlanningSessionFailed:
+		if err := session.RetryAnalysis(at); err != nil {
+			return mapPlanningTransitionFailure(err)
+		}
+		if err := tx.UpdatePlanningSessionIfStatus(
+			ctx,
+			*session,
+			[]domain.PlanningSessionStatus{previous},
+		); err != nil {
+			return mapPlanningUpdateFailure(err, session.ID)
+		}
+	case domain.PlanningSessionAnalyzing:
+		// 状态不变，只是重新取得执行权：这里不改写状态字段，也不需要条件更新。
+	default:
+		return fmt.Errorf(
+			"%w: 规划会话处于 %s，只有失败或没有执行占用的 analyzing 会话可以重新运行分析",
+			ErrPlanningSessionStateConflict,
+			previous,
+		)
+	}
+	if err := tx.ClaimPlanningAnalysis(ctx, session.ID, claimID, at); err != nil {
+		if errors.Is(err, storage.ErrConflict) {
+			return fmt.Errorf(
+				"%w: 规划会话 %s 已有一轮分析正在运行",
+				ErrPlanningSessionStateConflict,
+				session.ID,
+			)
+		}
+		return fmt.Errorf("抢占规划分析执行权失败: %w", err)
+	}
+	return nil
 }
 
 // PlanningRoleMessage 是一轮分析产生的角色消息。
@@ -287,6 +338,10 @@ type FailPlanningAnalysisRequest struct {
 //
 // 失败是显式结论而不是自动回退：状态保留为 failed，只有 RetryAnalysis 能让它重新
 // 进入 analyzing。
+//
+// 终止一轮运行必须同时清掉它的分析占用：failed 会话如果带着无人推进的占用，显式重试
+// 永远抢不到执行权。占用标识在同一个事务里读出并按该标识释放，因此不会误清其他会话或
+// 其他执行者刚写入的占用。
 func (s *PlanningSessionService) FailAnalysis(
 	ctx context.Context,
 	sessionIDValue string,
@@ -306,7 +361,12 @@ func (s *PlanningSessionService) FailAnalysis(
 		if err != nil {
 			return err
 		}
-		if err := loaded.Fail(summary, s.now()); err != nil {
+		claimID, err := tx.PlanningAnalysisClaim(ctx, sessionID)
+		if err != nil {
+			return fmt.Errorf("读取规划分析占用失败: %w", err)
+		}
+		at := s.now()
+		if err := loaded.Fail(summary, at); err != nil {
 			return mapPlanningTransitionFailure(err)
 		}
 		if err := tx.UpdatePlanningSessionIfStatus(
@@ -315,6 +375,11 @@ func (s *PlanningSessionService) FailAnalysis(
 			[]domain.PlanningSessionStatus{domain.PlanningSessionAnalyzing},
 		); err != nil {
 			return mapPlanningUpdateFailure(err, sessionID)
+		}
+		if claimID != "" {
+			if err := tx.ReleasePlanningAnalysis(ctx, sessionID, claimID, at); err != nil {
+				return mapPlanningClaimFailure(err, sessionID)
+			}
 		}
 		session = loaded
 		return nil
