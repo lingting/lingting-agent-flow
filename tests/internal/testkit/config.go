@@ -82,6 +82,11 @@ type PiConfig struct {
 	Enabled bool `yaml:"enable"`
 	// Model 是真实调用使用的模型标识，未填写时为 DefaultPiModel。
 	Model string `yaml:"model"`
+	// Provider 是宿主 Pi CLI 使用的 provider 名称，留空时按 model 原样检查。
+	//
+	// Pi 的模型清单按 provider 与模型两列列出，`--model` 使用 provider/model 形式：
+	// 只给模型名而清单里的 provider 不同名时无法被识别，因此模型标识需要 provider 限定。
+	Provider string `yaml:"provider"`
 	// Executable 是 Pi 可执行文件路径，为空时使用 PATH 中的 pi。
 	Executable string `yaml:"executable"`
 }
@@ -343,6 +348,23 @@ func LoadPiConfig(t *testing.T) (PiConfig, bool) {
 		config.Model = DefaultPiModel
 	}
 	return config, true
+}
+
+// ResolvedModel 返回宿主 Pi CLI 使用的完整模型标识。
+//
+// provider 非空时按 Pi 的 `--model provider/model` 形式补全前缀；provider 为空时原样
+// 返回 model，因此旧配置与旧判定行为完全不变。容器内 Pi 的模型来自 tests/config/docker.yml
+// 的 pi 配置（provider 固定，见 ContainerPiConfig），不受这里影响。
+func (c PiConfig) ResolvedModel() string {
+	model := strings.TrimSpace(c.Model)
+	if model == "" {
+		model = DefaultPiModel
+	}
+	provider := strings.TrimSpace(c.Provider)
+	if provider == "" || strings.HasPrefix(model, provider+"/") {
+		return model
+	}
+	return provider + "/" + model
 }
 
 // LoadDockerConfig 读取 tests/config/docker.yml。

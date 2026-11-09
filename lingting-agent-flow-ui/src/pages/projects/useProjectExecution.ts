@@ -55,9 +55,7 @@ export function describeProjectExecutionError(error: unknown): string {
 
 /** 判断错误是否意味着"结果未知"：连接中断或超时都不代表服务端没有执行 */
 function isUnknownOutcome(error: unknown): boolean {
-  return (
-    error instanceof ApiError && (error.kind === "network" || error.kind === "timeout")
-  );
+  return error instanceof ApiError && (error.kind === "network" || error.kind === "timeout");
 }
 
 /**
@@ -117,7 +115,9 @@ export function useProjectExecution(projectID?: string) {
         setAction({
           error: describeProjectExecutionError(cause),
           submitting: false,
-          unknown: isUnknownOutcome(cause) ? "这次操作的结果未知，已重新读取服务端状态。" : undefined,
+          unknown: isUnknownOutcome(cause)
+            ? "这次操作的结果未知，已重新读取服务端状态。"
+            : undefined,
         });
         await load();
       }

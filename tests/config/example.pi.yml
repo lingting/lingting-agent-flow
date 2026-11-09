@@ -15,5 +15,13 @@ pi:
   # 真实调用使用的模型标识，留空时使用默认免费模型 group/free。
   # 每次调用都会显式传入模型，不回退到 Pi CLI 配置中的默认模型。
   model: group/free
+  # 宿主 Pi CLI 的 provider 名称，留空时按 model 原样检查。
+  #
+  # Pi 的模型清单按 provider 与模型两列列出，`--model` 使用 provider/model 形式。
+  # 模型在清单中挂在不含 model 前缀的 provider 下时（例如 provider 为 magpie、
+  # 模型标识为 group/free），必须在这里填写 provider，检查与真实调用才会按
+  # provider/model 组装模型标识。该字段只影响本机 Pi 调用；容器内 Pi 的模型来自
+  # docker.yml 的 pi 配置，与此无关。
+  provider: ""
   # Pi 可执行文件路径，留空时使用 PATH 中的 pi。
   executable: ""

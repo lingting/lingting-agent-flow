@@ -75,7 +75,9 @@ export function ProjectExecutionPanel({ project, onClose }: ProjectExecutionPane
         dataIndex: "requirement_title",
         render: (_value, record) => (
           <Flex gap={0} vertical>
-            <Typography.Text strong>{record.requirement_title || record.requirement_id}</Typography.Text>
+            <Typography.Text strong>
+              {record.requirement_title || record.requirement_id}
+            </Typography.Text>
             <Typography.Text type="secondary">
               {record.requirement_sequence === null
                 ? "历史任务（无需求内顺序）"
@@ -127,7 +129,9 @@ export function ProjectExecutionPanel({ project, onClose }: ProjectExecutionPane
         render: (_value, record) => (
           <Button
             onClick={() =>
-              void navigate(`/requirements?requirement_id=${encodeURIComponent(record.requirement_id)}`)
+              void navigate(
+                `/requirements?requirement_id=${encodeURIComponent(record.requirement_id)}`,
+              )
             }
             text="需求进度"
             type="link"
@@ -141,13 +145,7 @@ export function ProjectExecutionPanel({ project, onClose }: ProjectExecutionPane
   );
 
   return (
-    <Drawer
-      destroyOnHidden
-      open
-      title={`项目执行 · ${project.name}`}
-      width={960}
-      onClose={onClose}
-    >
+    <Drawer destroyOnHidden open title={`项目执行 · ${project.name}`} width={960} onClose={onClose}>
       <Flex gap="middle" vertical>
         {execution.action.error && (
           <Alert
@@ -214,7 +212,9 @@ export function ProjectExecutionPanel({ project, onClose }: ProjectExecutionPane
             )}
 
             <Descriptions bordered column={2} size="small">
-              <Descriptions.Item label="项目进度">{progressSummary(snapshot.counts)}</Descriptions.Item>
+              <Descriptions.Item label="项目进度">
+                {progressSummary(snapshot.counts)}
+              </Descriptions.Item>
               <Descriptions.Item label="任务统计">
                 {describeCounts(snapshot.counts)}
               </Descriptions.Item>

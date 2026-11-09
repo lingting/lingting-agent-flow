@@ -18,6 +18,11 @@
 //
 // 当前阶段的工作流执行仍由 Go 引擎控制，容器内 Pi CLI 是否可用必须通过容器内实际
 // 检查确认；不可用时如实报告为失败而不是跳过。
+//
+// 执行方式：本包的用例固定串行，不使用 t.Parallel。它们共用同一台真实远程 Docker：
+// 环境镜像标签由环境、版本号与构建配置哈希决定，并行运行时后完成的构建会把同一标签
+// 改指到另一个镜像，使先完成用例记录的镜像 ID 失效；此时复用已有构建会失败，任务启动
+// 反复失败并长期停在 queued。串行执行时同一次运行只构建一次，标签与记录始终一致。
 package workflow_remote
 
 import (
@@ -114,7 +119,6 @@ func uniqueSuffix(t *testing.T) string {
 // 该用例只做前置检查，不创建容器：它确认开关、目标配置、模型标识与测试工作空间
 // 都已就绪，使后续真实执行失败时不会被误判为环境缺失。
 func TestRemoteWorkflowPreconditions(t *testing.T) {
-	t.Parallel()
 	target := loadTarget(t)
 	if strings.TrimSpace(target.model) == "" {
 		t.Fatal("真实模型标识不能为空")
@@ -152,7 +156,6 @@ func TestRemoteWorkflowPreconditions(t *testing.T) {
 // 主机密钥校验属于硬性约束：测试不得通过关闭校验来规避失败，因此这里显式声明
 // 该约束，并确认配置中不存在"跳过校验"的开关。
 func TestRemoteWorkflowRequiresHostKeyVerification(t *testing.T) {
-	t.Parallel()
 	loadTarget(t)
 	sshConfig, _ := testkit.LoadSSHConfig(t)
 	if strings.TrimSpace(sshConfig.PrivateKeyPath) == "" {

@@ -53,12 +53,14 @@ func requirePi(t *testing.T) string {
 
 // resolveModel 返回本次真实调用使用的模型标识。
 //
-// 取值来自 tests/config/pi.yml 的 pi.model，未填写时使用默认免费模型；
-// 每次调用都必须显式传入，不允许回退到 Pi CLI 配置中的默认模型。
+// 取值来自 tests/config/pi.yml 的 pi.model，未填写时使用默认免费模型；填写了
+// pi.provider 时按 Pi 的 provider/model 形式补全（模型清单按 provider 与模型两列
+// 列出，缺少 provider 前缀时可能无法被识别）。每次调用都必须显式传入，不允许回退到
+// Pi CLI 配置中的默认模型。
 func resolveModel(t *testing.T) string {
 	t.Helper()
 	config, _ := testkit.LoadPiConfig(t)
-	model := strings.TrimSpace(config.Model)
+	model := strings.TrimSpace(config.ResolvedModel())
 	if model == "" {
 		model = testkit.DefaultPiModel
 	}

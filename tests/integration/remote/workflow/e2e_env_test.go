@@ -205,7 +205,6 @@ func (e *e2eEnv) dial(t *testing.T) {
 // 该用例不创建容器、不调用模型：它把"配置不全导致的跳过"与"配置齐全后的真实失败"
 // 区分开，并记录实际观测到的 Docker 版本与模型标识，便于事后复核。
 func TestRemoteE2EPreconditions(t *testing.T) {
-	t.Parallel()
 	env := newE2EEnv(t)
 	// 预检校验工作空间是否可写，因此这里使用远程机器上真实存在的目录：
 	// 不创建任何测试专属目录，也不修改远端任何内容。

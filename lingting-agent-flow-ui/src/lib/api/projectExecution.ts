@@ -166,9 +166,6 @@ export function fetchProjectTasks(projectID: string, options: ApiRequestOptions 
 }
 
 /** 查询需求进度（只读） */
-export function fetchRequirementProgress(
-  requirementID: string,
-  options: ApiRequestOptions = {},
-) {
+export function fetchRequirementProgress(requirementID: string, options: ApiRequestOptions = {}) {
   return apiRequest<RequirementProgressResponse>(requirementProgressPath(requirementID), options);
 }

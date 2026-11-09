@@ -592,8 +592,26 @@ func (s *TaskScheduler) dispatch(
 	if !ok {
 		return false, nil
 	}
+	// 取得执行权后重新读取任务：候选事实来自本次扫描更早的时刻，而需求聚合删除可能在
+	// 这两步之间完成。删除只写软删除标记、不改变状态，只凭候选里的旧状态无法发现它，
+	// 因此必须在真正领取之前以数据库事实确认任务仍然存在且未删除；否则会为一个已删除
+	// 的任务写领取事件并把启动流程再走一遍。删除流程同样要求先取得执行权，所以持有
+	// 执行权之后的这次读取足以覆盖该窗口。
+	persisted, err := s.store.GetTask(ctx, candidate.Task.ID)
+	if err != nil {
+		s.coordination.Release(grant)
+		if errors.Is(err, storage.ErrNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("读取待领取任务失败: %w", err)
+	}
+	if persisted.Deleted() {
+		s.coordination.Release(grant)
+		return false, nil
+	}
 	// 取得执行权后再次核验领域仲裁：并发场景下"领域允许"与"取得执行权"之间可能有
-	// 状态变化。输入沿用候选加载时的事实，因此准入判定与排序依据保持一致。
+	// 状态变化。输入沿用候选加载时的事实，因此准入判定与排序依据保持一致；任务是否
+	// 已被逻辑删除不在准入输入内，由上面的读取单独判定。
 	input := candidate.input
 	decision := domain.DecideTaskQueueAdmission(input)
 	if !decision.Admitted {

@@ -43,7 +43,9 @@ const PROJECT_EXECUTION_STATUS_META: Record<string, ProjectExecutionStatusMeta> 
 };
 
 /** 读取项目执行状态的展示信息；未知状态原样展示，不猜测语义 */
-export function projectExecutionStatusMeta(status: ProjectExecutionStatus): ProjectExecutionStatusMeta {
+export function projectExecutionStatusMeta(
+  status: ProjectExecutionStatus,
+): ProjectExecutionStatusMeta {
   return (
     PROJECT_EXECUTION_STATUS_META[status] ?? {
       color: "default",
@@ -69,9 +71,7 @@ const REQUIREMENT_PROGRESS_STATUS_META: Record<string, RequirementProgressStatus
 
 /** 读取需求进度状态的展示信息；未知状态原样展示 */
 export function requirementProgressStatusMeta(status: string): RequirementProgressStatusMeta {
-  return (
-    REQUIREMENT_PROGRESS_STATUS_META[status] ?? { color: "default", label: String(status) }
-  );
+  return REQUIREMENT_PROGRESS_STATUS_META[status] ?? { color: "default", label: String(status) };
 }
 
 /**

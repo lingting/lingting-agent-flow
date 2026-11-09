@@ -423,7 +423,6 @@ func (f *m6Fixture) watchConcurrency(
 // 第二个任务被自动领取并真实完成。核验同一项目在途任务始终不超过 1 个（严格串行）、
 // 需求进度为 completed、项目回到空闲，且两个任务都留下步骤、尝试、会话与代码保存记录。
 func TestRemoteM6RequirementSequentialTasks(t *testing.T) {
-	t.Parallel()
 	f := newM6Fixture(t)
 	f.prepareEnvironmentVersion(t)
 	project := f.createProject(t, "m6-sequence-"+f.suffix, "M6 顺序执行项目")
@@ -583,7 +582,6 @@ func assertM6TaskExecutionHistory(t *testing.T, f *m6Fixture, taskID domain.ID) 
 //   - A1 真实失败后 A2 不会自动开始，项目 A 显示阻塞且原因为 task_recovery_required；
 //   - 项目 B 正常完成，不受项目 A 阻塞影响。
 func TestRemoteM6ProjectSerialParallelAndFailureBlocking(t *testing.T) {
-	t.Parallel()
 	f := newM6Fixture(t)
 	f.prepareEnvironmentVersion(t)
 
@@ -710,7 +708,6 @@ func TestRemoteM6ProjectSerialParallelAndFailureBlocking(t *testing.T) {
 // 核验：未收敛时删除返回冲突且没有任何部分软删除；收敛后删除成功；任务状态与最终结论
 // 不被改写；执行历史仍可查询；项目调度不再领取该需求的任务；容器不被自动删除。
 func TestRemoteM6DeleteRequirementWhileRunning(t *testing.T) {
-	t.Parallel()
 	f := newM6Fixture(t)
 	f.prepareEnvironmentVersion(t)
 	project := f.createProject(t, "m6-delete-"+f.suffix, "M6 删除验收项目")

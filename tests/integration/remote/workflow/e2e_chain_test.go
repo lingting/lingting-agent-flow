@@ -452,7 +452,6 @@ func (f *e2eFixture) steps(t *testing.T) []domain.Step {
 // 的计划或代码，但"计划必须落库""状态迁移必须合法""失败必须如实收敛"这些事实
 // 与模型输出无关。
 func TestRemoteE2EFullChain(t *testing.T) {
-	t.Parallel()
 	fixture := newE2EFixture(t)
 	fixture.prepareEnvironmentVersion(t)
 
