@@ -78,6 +78,19 @@ TaskLaunchService.Launch                                    ← M5 增加一次�
   └─ 带项目关联的任务：同项目已有在途任务时拒绝启动（避免绕过项目执行权）
 ```
 
+任务级工作流的**停止 = 执行记录停止 + 任务收敛**（M6 已落地）：
+
+- `stopWithEvent` 写入停止分类后必须把任务收敛为 `recovery_required`（`FailureSummary` +
+  `task.recovery_required` 事件）：只停执行记录会让项目闸门永久认为项目内有任务在执行、执行权不释放、
+  后续任务不领取，需求也无法删除。
+- 收敛目标是 `recovery_required` 而不是 `failed`：`failed` 会让 `CheckWorkflowStart`、
+  `DecideTaskExecutionHandover` 与队列准入拒绝 resume。
+- 启动阶段失败且工作流未接手时，`TaskLaunchService.SettleCancelledLaunch`（调度器路径经
+  `cancellationSettler` 端口）在释放执行权之前按 `domain.DecideCancellationRecovery` 收敛 `cancelling`，
+  避免任务永久停在停止中。
+- `blocked` / `recovery_required` 执行记录按设计保留，仍属于"未结束记录"；判断自动推进是否停止看任务
+  状态，不看执行记录是否存在。
+
 ### 3.2 角色工具策略执行路径（V2-M1-E3 已落地）
 
 ```text
@@ -292,7 +305,7 @@ POST   /api/v1/planning/sessions/{sessionID}/abandon
 GET    /api/v1/projects/{projectID}/requirements              ← M4 已落地
 GET    /api/v1/requirements/{requirementID}                   ← M4 已落地
 GET    /api/v1/requirements/{requirementID}/progress           ← M5 已落地
-DELETE /api/v1/requirements/{requirementID}                    ← M6
+DELETE /api/v1/requirements/{requirementID}                    ← M6 已落地
 
 GET    /api/v1/projects/{projectID}/tasks                      ← M5 已落地
 GET    /api/v1/projects/{projectID}/execution                  ← M5 已落地
@@ -314,6 +327,9 @@ PUT    /api/v1/roles/{roleID}
 - 请求不接受 Session 路径、工作目录、命令行参数、步骤列表或角色覆盖。
 - 项目执行接口不接受请求体：任务状态、执行权、`owner`、`epoch`、任务顺序与执行结果全部由服务端
   依据持久化事实计算，也不提供"提前启动某个后续任务"或"跳过前序任务"的入口（M5 已落地）。
+- 需求删除接口**不隐式取消任务**：存在未收敛任务或执行现场不确定时返回 `409`，停止任务仍走既有
+  `POST /api/v1/tasks/{taskID}/cancel`；删除只做需求与关联 Task 的原子逻辑删除，不物理删除执行历史、
+  不回滚 Git、不处置容器（M6 已落地，规则见 [`WORKFLOW.md`](./WORKFLOW.md) §8）。
 
 ## 6. 前端结构
 
@@ -323,7 +339,8 @@ PUT    /api/v1/roles/{roleID}
   「新增需求」弹窗；未选择 Project 时禁止发送消息；切换 Project 必须丢弃当前会话上下文。
 - 需求页（`/requirements`，M5 已落地）按项目浏览正式需求，展示进度统计（已完成 / 执行中 / 待执行 /
   失败 / 待核验 / 已取消 / 已暂停）、当前与下一个任务、阻塞原因与阻塞任务，以及按需求内顺序排列的
-  任务；任务可深链接到任务页（`/tasks?task_id=`）。只读：不提供调整顺序、提前启动或删除入口。
+  任务；任务可深链接到任务页（`/tasks?task_id=`）。不提供调整顺序或提前启动的入口；停止任务与删除
+  需求（二次确认 + 删除准入原因）由 M6 补齐，删除只做逻辑删除，不回滚 Git、不处置容器。
 - 项目页增加项目执行面板（M5 已落地）：执行状态、进度统计、开始/停止执行、执行权与当前/下一个任务、
   按项目顺序排列的任务列表与阻塞原因；列表顺序由服务端固定，前端不重排。
 - 设置页承载环境管理与角色管理（四角色不可增删，只可改 Prompt / 工具策略 / 模型）。

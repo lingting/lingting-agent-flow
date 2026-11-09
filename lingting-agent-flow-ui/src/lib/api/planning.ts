@@ -419,6 +419,36 @@ export function fetchRequirement(requirementID: string, options: ApiRequestOptio
   return apiRequest<RequirementDetailResponse>(requirementPath(requirementID), options);
 }
 
+/**
+ * 需求逻辑删除的真实结果。
+ *
+ * 三个字段都来自同一个事务：`deleted_task_count` 是本次真正软删除的任务条数，
+ * `deleted_at` 是写进需求与任务记录的同一个时间。接口不会返回"可能已删除"。
+ */
+export type DeleteRequirementResponse = {
+  requirement_id: string;
+  deleted_task_count: number;
+  deleted_at: string;
+};
+
+/**
+ * 逻辑删除正式需求与它的全部关联任务。
+ *
+ * 语义固定：
+ * - 不自动取消任务：执行中的任务必须先经任务取消接口停止，并等真实收敛后再删除；
+ * - 存在执行中任务、`cancelling`、`recovery_required`、结果不确定或并发冲突时返回 `409`；
+ * - 只写 `deleted_at`，Step / Attempt / Session / Event / CodeSave 与容器记录全部保留；
+ * - 不回滚 Git、不处置容器，两者都仍然需要用户自己执行。
+ *
+ * 请求不接受请求体：任务列表、删除时间与级联策略全部由服务端依据持久化事实决定。
+ */
+export function deleteRequirement(requirementID: string, options: ApiRequestOptions = {}) {
+  return apiRequest<DeleteRequirementResponse>(requirementPath(requirementID), {
+    ...options,
+    method: "DELETE",
+  });
+}
+
 /** 按项目查询正式需求列表；服务端排序是确定性的 */
 export function fetchProjectRequirements(projectID: string, options: ApiRequestOptions = {}) {
   return apiRequest<RequirementListResponse>(projectRequirementsPath(projectID), options);

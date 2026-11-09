@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage"
@@ -74,6 +75,48 @@ WHERE id = ?`
 		return wrapError("更新需求", err)
 	}
 	return ensureAffected(result, "需求", requirement.ID)
+}
+
+// DeleteRequirement 逻辑删除需求。
+//
+// 只写入 deleted_at 与 updated_at：需求行、确认快照、关联任务与全部执行历史都保留。
+// 条件同时覆盖"未被删除"，因此并发删除只有一个请求影响 1 行，其余请求拿到冲突，不会被
+// 误判为本次删除成功。
+func (s requirementStore) DeleteRequirement(
+	ctx context.Context,
+	id domain.ID,
+	at time.Time,
+) error {
+	if err := id.Validate(); err != nil {
+		return err
+	}
+	const statement = `
+UPDATE requirements SET deleted_at = ?, updated_at = ?
+WHERE id = ? AND deleted_at IS NULL`
+	result, err := s.q.ExecContext(
+		ctx,
+		statement,
+		toMillis(at),
+		toMillis(at),
+		toIDParam(id),
+	)
+	if err != nil {
+		return wrapError("删除需求", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return wrapError("统计删除需求影响行数", err)
+	}
+	if affected == 0 {
+		return wrapError(
+			"删除需求",
+			errors.Join(
+				storage.ErrConflict,
+				errors.New("需求已被删除或不存在: "+id.String()),
+			),
+		)
+	}
+	return nil
 }
 
 // GetRequirement 读取单个需求。

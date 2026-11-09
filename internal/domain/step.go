@@ -211,6 +211,18 @@ func (s StepStatus) EndsExecution() bool {
 	}
 }
 
+// RequiresManualVerification 判断步骤现场是否属于"不能确认已结束"。
+//
+// 两类状态都需要拒绝按"现场已收敛"处理：
+//   - running / developing / verifying：执行者可能仍持有该步骤；
+//   - recovery_required：上一次执行留下了无法自动判定的结果，必须先人工核验。
+//
+// 需求级删除用它失败关闭：任务状态看起来是终态，但步骤仍在上述状态时不得软删除，
+// 否则删除会把"仍在推进"的现场藏进历史记录里。
+func (s StepStatus) RequiresManualVerification() bool {
+	return s.BeginsExecution() || s == StepStatusRecoveryRequired
+}
+
 // VerificationCommand 是验证阶段需要执行的一条命令。
 //
 // Command 与 Args 分开保存：命令以参数切片形式通过容器执行接口传递，

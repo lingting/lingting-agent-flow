@@ -885,6 +885,7 @@ func (s *TaskWorkflowService) stopWithEvent(
 	if err != nil {
 		return run
 	}
+	taskStatus := s.convergeStoppedTask(ctx, persisted, summary)
 	if payload == nil {
 		payload = map[string]any{}
 	}
@@ -894,9 +895,105 @@ func (s *TaskWorkflowService) stopWithEvent(
 	payload["summary"] = summary
 	payload["completed_steps"] = persisted.CompletedSteps
 	payload["total_steps"] = persisted.TotalSteps
+	if taskStatus != "" {
+		payload["task_status"] = string(taskStatus)
+	}
 	s.appendEvent(ctx, persisted.TaskID, persisted.CurrentStepID, persisted.CurrentAttemptID,
 		eventType, payload)
 	return persisted
+}
+
+// convergeStoppedTask 按停止结论收敛任务状态，返回收敛后的任务状态（未收敛时为空）。
+//
+// 执行记录与任务状态必须同时收敛：只把执行记录写成 blocked / recovery_required 而把任务
+// 留在 developing 之类的中��状态，会让项目级调度一直认为任务仍在执行——后续任务永远不被
+// 领取、项目执行权永远不释放，需求也无法删除；用户看到的任务是"仍在执行"，与真实的
+// "已停止"结论矛盾。
+//
+// 收敛目标固定为 `recovery_required`：它同时满足三个既有约束，`failed` 做不到：
+//   - `TaskStatus.AllowsStepExecution` 接受它，因此"继续这条被阻塞的执行记录"（resume）
+//     仍然是用户的有效恢复路径；把任务写成 `failed` 会让 resume 被拒，等于删掉了一条
+//     既有恢复入口；
+//   - 项目级调度把它识别为阻塞（`task_recovery_required`），后续任务不会被越过，执行权
+//     会释放；
+//   - 需求删除对它失败关闭（需要人工处置），符合"不确定现场不能删除"。
+//
+// 停止原因不在这里推断：执行记录的 `blocked` / `recovery_required` 与 `error_class`
+// 才是"为什么停"的唯一来源，任务只表达"仍在等待人工处置"。
+// 任务已经是目标状态或终态（其他入口已收敛）时不覆盖。
+//
+// 收敛只写任务状态与失败摘要，不删除容器、不重放任何远程操作；写入失败只记录日志，
+// 由启动恢复的收尾停滞入口再次收敛。
+func (s *TaskWorkflowService) convergeStoppedTask(
+	ctx context.Context,
+	run domain.WorkflowRun,
+	summary string,
+) domain.TaskStatus {
+	writeCtx := context.WithoutCancel(ctx)
+	task, err := s.store.GetTask(writeCtx, run.TaskID)
+	if err != nil {
+		s.logger.WarnContext(
+			ctx,
+			"工作流停止后无法读取任务，保留原状态",
+			slog.String("task_id", run.TaskID.String()),
+			slog.String("error", errorSummary(err)),
+		)
+		return ""
+	}
+	target := domain.TaskStatusRecoveryRequired
+	if task.Status == target {
+		return target
+	}
+	if task.Status.IsTerminal() {
+		return ""
+	}
+	converged := *task
+	previous := converged.Status
+	if err := converged.Transition(target, s.now()); err != nil {
+		s.logger.WarnContext(
+			ctx,
+			"工作流停止后无法收敛任务状态",
+			slog.String("task_id", run.TaskID.String()),
+			slog.String("status", string(previous)),
+			slog.String("target", string(target)),
+			slog.String("error", errorSummary(err)),
+		)
+		return ""
+	}
+	failureSummary := strings.TrimSpace(summary)
+	if failureSummary == "" {
+		failureSummary = "工作流以 " + string(run.Status) + " 结论停止，需要人工处置"
+	}
+	converged.FailureSummary = failureSummary
+	if err := s.store.UpdateTaskIfStatus(
+		writeCtx,
+		converged,
+		[]domain.TaskStatus{previous},
+	); err != nil {
+		s.logger.WarnContext(
+			ctx,
+			"工作流停止后写入任务状态失败",
+			slog.String("task_id", run.TaskID.String()),
+			slog.String("error", errorSummary(err)),
+		)
+		return ""
+	}
+	s.appendEvent(writeCtx, run.TaskID, nil, nil, domain.EventTypeTaskRecoveryRequired, map[string]any{
+		"stage":       "workflow_stopped",
+		"run_id":      run.ID.String(),
+		"run_status":  string(run.Status),
+		"error_class": run.ErrorClass,
+		"summary":     strings.TrimSpace(summary),
+		"task_status": string(target),
+	})
+	s.logger.InfoContext(
+		ctx,
+		"工作流停止后已收敛任务状态",
+		slog.String("task_id", run.TaskID.String()),
+		slog.String("status", string(target)),
+		slog.String("run_status", string(run.Status)),
+	)
+	return target
 }
 
 // failRun 把工作流收敛为失败终态。

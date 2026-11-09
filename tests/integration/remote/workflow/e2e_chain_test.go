@@ -38,10 +38,24 @@ type e2eFixture struct {
 	stepFlow      *app.StepWorkflowService
 	workflow      *app.TaskWorkflowService
 	launch        *app.TaskLaunchService
+	// coordination 是所有执行入口共享的同一实例：生产装配只有一个协调器，
+	// 测试必须一致，否则"同一任务不会被两个入口同时推进"无法被验证。
+	coordination *app.TaskExecutionCoordinator
 }
 
 // newE2EFixture 装配真实远程端到端现场。
 func newE2EFixture(t *testing.T) *e2eFixture {
+	t.Helper()
+	fixture := newE2EBase(t)
+	fixture.seedTask(t)
+	return fixture
+}
+
+// newE2EBase 装配真实远程现场的共同部分：数据库、执行节点、容器清理登记与任务链路服务。
+//
+// 它不创建任何需求或任务，供"单任务全链路"与"项目级 M6 验收"两类用例各自播种：
+// 播种差异只体现在业务数据上，服务装配与清理责任完全一致。
+func newE2EBase(t *testing.T) *e2eFixture {
 	t.Helper()
 	env := newE2EEnv(t)
 	db, err := sqlite.Open(env.ctx, sqlite.Options{Path: env.workspace.DatabasePath()})
@@ -59,7 +73,6 @@ func newE2EFixture(t *testing.T) *e2eFixture {
 	// 失败也不会失去回收能力；登记早于后台服务启动，因此它的清理晚于服务停止执行。
 	fixture.trackTaskContainers(t)
 	fixture.assemble(t)
-	fixture.seedTask(t)
 	return fixture
 }
 
@@ -88,8 +101,16 @@ func (f *e2eFixture) trackCreatedContainer(t *testing.T, record domain.Container
 func (f *e2eFixture) resolveTaskContainers(
 	ctx context.Context,
 ) ([]testkit.TrackedContainer, error) {
-	taskID := f.task.ID
-	records, err := f.db.ListContainers(ctx, domain.ContainerFilter{TaskID: &taskID})
+	// 播种单任务的用例按任务过滤；项目级用例没有单任务锚点，按执行节点列出本次节点
+	// 创建的全部任务容器，保证清理责任覆盖每个任务。
+	filter := domain.ContainerFilter{}
+	if f.task.ID == "" {
+		filter.HostID = f.host.ID
+	} else {
+		taskID := f.task.ID
+		filter.TaskID = &taskID
+	}
+	records, err := f.db.ListContainers(ctx, filter)
 	if err != nil {
 		return nil, fmt.Errorf("读取任务容器记录失败: %w", err)
 	}
@@ -217,9 +238,11 @@ func (f *e2eFixture) assemble(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造工作区服务失败: %v", err)
 	}
+	coordination := app.NewTaskExecutionCoordinator()
+	f.coordination = coordination
 	executor, err := app.NewStepExecutor(app.StepExecutorOptions{
 		Store: f.db, Containers: containers, Sessions: sessions,
-		Git: containers, Coordination: app.NewTaskExecutionCoordinator(), Logger: f.logger.Slog(),
+		Git: containers, Coordination: coordination, Logger: f.logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造步骤执行器失败: %v", err)
@@ -240,7 +263,7 @@ func (f *e2eFixture) assemble(t *testing.T) {
 	}
 	stepFlow, err := app.NewStepWorkflowService(app.StepWorkflowOptions{
 		Steps: executor, Validation: validation, Store: f.db, Cycles: f.db,
-		Coordination: app.NewTaskExecutionCoordinator(), Logger: f.logger.Slog(),
+		Coordination: coordination, Logger: f.logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造单步骤闭环失败: %v", err)
@@ -248,7 +271,7 @@ func (f *e2eFixture) assemble(t *testing.T) {
 	workflow, err := app.NewTaskWorkflowService(app.TaskWorkflowOptions{
 		Store: f.db, Steps: stepFlow, Containers: containers,
 		CodeSaver: containers, Sessions: sessions,
-		Coordination: app.NewTaskExecutionCoordinator(), Logger: f.logger.Slog(),
+		Coordination: coordination, Logger: f.logger.Slog(),
 	})
 	if err != nil {
 		t.Fatalf("构造任务级编排器失败: %v", err)
@@ -256,7 +279,7 @@ func (f *e2eFixture) assemble(t *testing.T) {
 	launch, err := app.NewTaskLaunchService(app.TaskLaunchOptions{
 		Store: f.db, Environments: execution, Containers: containers,
 		Planner: workflow, Workspace: initWorkspace, Workflow: workflow,
-		Coordination: app.NewTaskExecutionCoordinator(),
+		Coordination: coordination,
 		Logger:       f.logger.Slog(),
 	})
 	if err != nil {

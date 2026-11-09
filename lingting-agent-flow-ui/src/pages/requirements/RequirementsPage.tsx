@@ -6,8 +6,8 @@
  *   进度来自 `GET /requirements/{id}/progress`；页面不推断完成度，不使用模型总结；
  * - 进度只按已完成任务数量计算，`failed` / `recovery_required` / `cancelled` / `paused`
  *   一律阻止"已完成"结论，并作为阻塞原因展示；
- * - 本页只读：不提供提前启动某个任务或调整任务顺序的入口（顺序由方案确认固定），
- *   也不提供需求删除入口（删除属于后续里程碑）；
+ * - 页面的写操作只有两项：停止该需求下仍在执行的任务（复用任务取消接口），以及删除
+ *   需求（聚合逻辑删除需求与关联任务）。删除不自动取消任务、不回滚 Git、不处置容器；
  * - 任务通过 `?task_id=` 链接到任务页，用户在那里看到真实执行记录。
  */
 import { ReloadOutlined } from "@ant-design/icons";
@@ -32,6 +32,8 @@ import {
   projectTaskStatusMeta,
   requirementProgressStatusMeta,
 } from "@/pages/projects/projectExecution";
+import { RequirementActionsPanel } from "@/pages/requirements/RequirementActionsPanel";
+import { useRequirementActions } from "@/pages/requirements/useRequirementActions";
 import { useRequirementProgress } from "@/pages/requirements/useRequirementProgress";
 
 /** 从地址栏读取初始需求标识：项目执行面板用 `?requirement_id=` 深链接到本页 */
@@ -96,6 +98,23 @@ export function RequirementsPage() {
     },
     [applyDetailProject],
   );
+
+  // 停止与删除动作：失败后重新读取服务端事实；需求被真实删除后清理选择并刷新列表。
+  //
+  // 回调对象每次渲染都是新引用，动作钩子内部只在事件触发时读取，不会因此重建请求状态。
+  const actions = useRequirementActions(selectedID, {
+    reloadFacts: async () => {
+      if (selectedID) await loadDetail(selectedID);
+      await progress.reload();
+    },
+    removed: async (result) => {
+      setRequirements((current) => current.filter((item) => item.id !== result.requirement_id));
+      setSelectedID(undefined);
+      setDetail(undefined);
+      setDetailError(undefined);
+      if (projectID) await loadRequirements(projectID);
+    },
+  });
 
   useEffect(() => {
     if (!projectID) return;
@@ -185,7 +204,8 @@ export function RequirementsPage() {
         description={
           "需求由方案确认生成，进度只按关联任务的真实状态计算：全部任务完成才是已完成，" +
           "存在失败、待核验、取消或暂停的任务时不会被判定为完成，也不会自动领取后续任务。" +
-          "任务顺序在确认方案时固定，本页不提供调整顺序或提前启动后续任务的入口。"
+          "任务顺序在确认方案时固定，本页不提供调整顺序或提前启动后续任务的入口；" +
+          "停止任务复用任务取消接口，删除需求只做逻辑删除，不回滚 Git、不处置容器。"
         }
         showIcon
         title="需求与真实进度"
@@ -225,16 +245,16 @@ export function RequirementsPage() {
       {projects.status === "error" && (
         <Alert description={projects.error} showIcon title="加载项目列表失败" type="error" />
       )}
-      {listError && <Alert description={listError} showIcon title="加载需求列表失败" type="error" />}
+      {listError && (
+        <Alert description={listError} showIcon title="加载需求列表失败" type="error" />
+      )}
 
       <Table<ConfirmedRequirement>
         columns={requirementColumns}
         dataSource={requirements}
         loading={listLoading}
         locale={{
-          emptyText: projectID
-            ? "该项目还没有正式需求：需求在方案确认后生成"
-            : "请先选择项目",
+          emptyText: projectID ? "该项目还没有正式需求：需求在方案确认后生成" : "请先选择项目",
         }}
         onRow={(record) => ({
           onClick: () => setSelectedID(record.id),
@@ -245,7 +265,9 @@ export function RequirementsPage() {
         size="small"
       />
 
-      {detailError && <Alert description={detailError} showIcon title="加载需求详情失败" type="error" />}
+      {detailError && (
+        <Alert description={detailError} showIcon title="加载需求详情失败" type="error" />
+      )}
       {detailLoading && <Typography.Text type="secondary">正在加载需求详情…</Typography.Text>}
 
       {detail && (
@@ -269,6 +291,15 @@ export function RequirementsPage() {
             </Descriptions.Item>
           </Descriptions>
 
+          <RequirementActionsPanel
+            action={actions}
+            onDelete={() => void actions.remove()}
+            onStop={(taskIDs) => void actions.stop(taskIDs)}
+            requirementID={detail.requirement.id}
+            tasks={detail.tasks}
+            title={detail.requirement.title}
+          />
+
           {progress.status === "error" && (
             <Alert
               action={<Button onClick={() => void progress.reload()} size="small" text="重试" />}
@@ -278,9 +309,7 @@ export function RequirementsPage() {
               type="error"
             />
           )}
-          {progress.status === "ready" && (
-            <RequirementProgressPanel progress={progress.progress} />
-          )}
+          {progress.status === "ready" && <RequirementProgressPanel progress={progress.progress} />}
 
           <Table<ConfirmedTask>
             columns={taskColumns}
@@ -330,7 +359,9 @@ function RequirementProgressPanel({ progress }: { progress: RequirementProgressR
         <Typography.Text type="secondary">
           当前任务：{progress.current_task_id ?? "无"}
         </Typography.Text>
-        <Typography.Text type="secondary">下一个任务：{progress.next_task_id ?? "无"}</Typography.Text>
+        <Typography.Text type="secondary">
+          下一个任务：{progress.next_task_id ?? "无"}
+        </Typography.Text>
       </Flex>
     </Flex>
   );

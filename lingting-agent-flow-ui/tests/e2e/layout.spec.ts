@@ -4,8 +4,8 @@ import { expect, test, type Page } from "@playwright/test";
  * 一级路由与对应的导航标签、页面标题。
  *
  * 环境管理已经并入设置中心（`V2-M1-E1`），独立的环境导航入口被移除；需求工作台
- * （`V2-M3-E2`）作为一级入口加入。因此这里共有六个一级路由；设置页正文断言使用与
- * 接口状态无关的固定文案。
+ * （`V2-M3-E2`）与需求页（`V2-M5`）作为一级入口加入。因此这里共有七个一级路由；
+ * 设置页正文断言使用与接口状态无关的固定文案。
  */
 const ROUTES = [
   {
@@ -14,6 +14,7 @@ const ROUTES = [
     text: "AgentFlow 的总览入口，用于汇总需求、任务与执行状态。",
   },
   { path: "/planning", label: "需求工作台", text: "需求工作台" },
+  { path: "/requirements", label: "需求", text: "需求与真实进度" },
   { path: "/tasks", label: "任务", text: "创建任务" },
   { path: "/projects", label: "项目", text: "项目的作用" },
   { path: "/machines", label: "机器", text: "执行机器管理将在后续步骤实现。" },

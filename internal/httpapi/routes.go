@@ -693,13 +693,19 @@ func (rt *router) routes() []apiRoute {
 			allow:            "POST",
 			methodNotAllowed: "该接口只支持 POST 请求",
 		},
-		// 正式需求只读查询：需求详情与项目需求列表。
+		// 正式需求：详情是只读查询，DELETE 是需求与关联任务的聚合逻辑删除。
+		//
+		// 删除不接受请求体，也不自动取消任务：存在执行中任务、结果不确定现场或并发冲突时
+		// 返回 409，用户必须先通过任务取消入口停止任务并等待真实收敛。
 		{
-			pattern:          matchRequirement,
-			methods:          get(rt.requirement.detail),
+			pattern: matchRequirement,
+			methods: []apiRouteMethod{
+				{method: http.MethodGet, handler: rt.requirement.detail},
+				{method: http.MethodDelete, handler: rt.requirement.remove},
+			},
 			guard:            guardFor(requirementService, rt.pathIDGuard(paramRequirementID)),
-			allow:            "GET, HEAD",
-			methodNotAllowed: "该接口只支持 GET 请求",
+			allow:            "GET, HEAD, DELETE",
+			methodNotAllowed: "该接口只支持 GET 与 DELETE 请求",
 		},
 		{
 			pattern:          matchProjectRequirements,

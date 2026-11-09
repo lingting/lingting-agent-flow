@@ -491,6 +491,18 @@ HTTP Handler（POST /api/v1/tasks/{taskID}/execute-workflow → 202 + 真实初�
 | 服务重启发现残留 | `blocked` | `worker_interrupted` / `not_started` |
 
 规则只在 `domain.DecideWorkflowCloseout` 与编排器的停止分类中定义一次，不得在 Handler 或前端复制。
+规则只在 `domain.DecideWorkflowCloseout` 与编排器的停止分类中定义一次，不得在 Handler 或前端复制。
+
+**停止 = 执行记录停止 + 任务收敛。** 写入停止分类之后，编排器必须把任务收敛为 `recovery_required`
+（写入 `FailureSummary` 与 `task.recovery_required` 事件）。只停执行记录而不收敛任务会让项目闸门永久
+认为"项目内已有任务在执行"，执行权不释放、后续任务永不领取，需求也无法删除。
+
+- 收敛目标是 `recovery_required`，不是终态 `failed`：`failed` 会让 `CheckWorkflowStart`、
+  `DecideTaskExecutionHandover` 与队列准入都拒绝 resume，等于删掉既有恢复入口；`recovery_required`
+  同时满足"可 resume""项目显示 `task_recovery_required` 阻塞""需求删除失败关闭"。
+- `blocked` / `recovery_required` 执行记录按设计保留（显式恢复要读它），仍属于"未结束记录"
+  （`GetActiveWorkflowRun` 与部分唯一索引都按这个集合判定）；判断"自动推进是否已停止"要看任务是否已
+  收敛，而不是看执行记录是否不存在。
 
 ### 恢复与取消
 
@@ -509,6 +521,11 @@ HTTP Handler（POST /api/v1/tasks/{taskID}/execute-workflow → 202 + 真实初�
 - **取消现场**：停留在 `cancelling` 的任务按 `domain.DecideCancellationRecovery` 收敛——存在未结束的
   执行记录 → `recovery_required`；没有取消请求记录 → `recovery_required`；已记录取消请求且没有未结束
   执行 → `cancelled`（收敛前先写入 `TaskResultCancelled` 结论）。
+- **启动失败现场**：启动阶段（`preparing` / `planning` / `planned`）失败时，取消请求可能已把任务推进到
+  `cancelling`，而工作流还没有接手——没有执行者会收口它。`TaskLaunchService.SettleCancelledLaunch` 在释放
+  执行权之前按 `domain.DecideCancellationRecovery` 收敛：仍在 `cancelling` 且**没有**活动执行记录才收敛为
+  `cancelled`（否则 `recovery_required`）；有活动记录则不动，责任留给执行者。调度器路径在持有执行权时
+  （`ownsGrant = false`）通过 `cancellationSettler` 端口调用同一收口，不在 `Launch` 内部重复收敛。
 - **不使用尽力而为语义**：任一记录读取、状态迁移或写入失败都必须让启动恢复返回错误，由
   `internal/lifecycle` 逆序清理已启动服务；不得只记日志后继续启动。恢复是幂等的：`UpdateTaskIfStatus`
   返回冲突且数据库状态已等于目标值时视为其他进程已完成同一次收敛，其余冲突仍然报错。

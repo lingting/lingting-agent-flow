@@ -119,11 +119,12 @@
 固定四角色不需要结构变化：`roles.type` 没有取值白名单，新增角色类型可直接写入；"固定身份"由 `domain`
 常量与 `app.RoleService` 保证，不是数据库约束；缺失角色由应用层按固定 ID 补齐，已有角色不被覆盖。
 
-## 4. 后续里程碑需要的结构变化（尚未实现）
+## 4. 后续里程碑需要的结构变化
 
-M5 之后只剩 M6（需求停止与逻辑删除、端到端验收），它不新增表、不新增列：删除只写既有
-`requirements.deleted_at` 与 `tasks.deleted_at`，执行历史（Step / Attempt / Session / Event /
-CodeSave / 容器记录）保持原样。因此当前没有待实现的 Schema 变化。
+M6（需求停止与逻辑删除、端到端验收）**不新增表、不新增列**，已按此结论落地：删除只写既有
+`requirements.deleted_at` 与 `tasks.deleted_at`（与 `updated_at`），执行历史（Step / Attempt /
+Session / Event / CodeSave / 容器记录）保持原样；需求删除事件写在既有 `events` 表里（每个关联 Task
+一条 `requirement.deleted`），不为需求引入独立审计表。因此当前没有待实现的 Schema 变化。
 
 后续若出现新的结构变化，仍按同一规则**追加新的迁移脚本**，不提供旧库升级：已有的开发数据库需要
 用户自行备份后手动重建。
@@ -138,7 +139,9 @@ CodeSave / 容器记录）保持原样。因此当前没有待实现的 Schema �
 - 枚举式字段不设 `CHECK` 取值白名单；未知取值必须能写入并原样读回。
 - 保留非枚举约束：主键、`NOT NULL`、有业务意义的 `UNIQUE`、数值范围、长度、`json_valid`、跨字段组合
   一致性。
-- 逻辑删除优先：`roles`、`execution_hosts`、`tasks`、`projects` 用 `deleted_at`，删除不级联清空历史。
+- 逻辑删除优先：`roles`、`execution_hosts`、`tasks`、`projects`、`requirements` 用 `deleted_at`，删除不
+  级联清空历史。需求级删除由应用层在单个事务内逐个软删除关联 Task，再由条件 UPDATE 软删除需求
+  （`WHERE id = ? AND deleted_at IS NULL`），不使用数据库级联。
 - 连接显式关闭外键检查（`foreign_keys(0)`），业务不得依赖该开关。
 - 每个迁移脚本由 Goose 在单个事务内执行，失败整体回滚；同一数据库只允许一个 Server 进程，迁移只由持有
   进程文件锁的实例执行。

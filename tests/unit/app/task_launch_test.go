@@ -279,6 +279,8 @@ type launchPlanner struct {
 	result app.PlanGenerationResult
 	// err 是返回的错误。
 	err error
+	// onGenerate 在返回结果之前执行，用于构造"计划生成期间任务被取消"这类真实竞争。
+	onGenerate func()
 }
 
 // GeneratePlan 返回受控的计划生成结果。
@@ -289,6 +291,9 @@ func (p *launchPlanner) GeneratePlan(
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.calls++
+	if p.onGenerate != nil {
+		p.onGenerate()
+	}
 	return p.result, p.err
 }
 

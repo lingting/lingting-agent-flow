@@ -203,8 +203,7 @@ func queueStepRejection(steps []Step) (TaskQueueRejection, bool) {
 		}
 	}
 	for _, step := range steps {
-		switch step.Status {
-		case StepStatusRunning, StepStatusDeveloping, StepStatusVerifying:
+		if step.Status.BeginsExecution() {
 			return TaskQueueRejectionStepOccupied, true
 		}
 	}

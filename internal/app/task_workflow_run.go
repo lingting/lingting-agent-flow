@@ -889,12 +889,35 @@ func (s *TaskWorkflowService) writeRecoveredTask(
 	task domain.Task,
 	expected domain.TaskStatus,
 ) (bool, error) {
-	err := s.store.UpdateTaskIfStatus(ctx, task, []domain.TaskStatus{expected})
+	return writeConvergedTask(ctx, s.store, task, expected)
+}
+
+// convergedTaskStore 是写入一次状态收敛结论所需的最小存储能力。
+//
+// 工作流恢复与启动收口都要写同一类结论：以读取到的状态为前置条件推进任务，冲突时
+// 重新读取真实状态。两者共用下面的写入函数，不各自实现一套冲突语义。
+type convergedTaskStore interface {
+	GetTask(ctx context.Context, id domain.ID) (*domain.Task, error)
+	UpdateTaskIfStatus(ctx context.Context, task domain.Task, expected []domain.TaskStatus) error
+}
+
+// writeConvergedTask 以状态为前置条件写入一次收敛结论。
+//
+// 返回 false 表示同一次收敛已由其他入口写入：收敛是幂等操作，竞争结果由数据库状态
+// 决定，因此这种情况不算失败，调用方也不应重复写入事件。写入错误仍然向上返回，否则
+// "收敛结论没有落库"会被当作已完成。
+func writeConvergedTask(
+	ctx context.Context,
+	store convergedTaskStore,
+	task domain.Task,
+	expected domain.TaskStatus,
+) (bool, error) {
+	err := store.UpdateTaskIfStatus(ctx, task, []domain.TaskStatus{expected})
 	if err == nil {
 		return true, nil
 	}
 	if errors.Is(err, storage.ErrConflict) {
-		current, readErr := s.store.GetTask(ctx, task.ID)
+		current, readErr := store.GetTask(ctx, task.ID)
 		if readErr != nil {
 			return false, fmt.Errorf(
 				"%w: 任务状态已被其他操作推进，且重新读取失败: %v",
@@ -907,7 +930,7 @@ func (s *TaskWorkflowService) writeRecoveredTask(
 			return false, nil
 		}
 		return false, fmt.Errorf(
-			"%w: 任务 %s 的状态已被推进到 %s，恢复结论未写入",
+			"%w: 任务 %s 的状态已被推进到 %s，收敛结论未写入",
 			ErrWorkflowConflict,
 			task.ID,
 			current.Status,

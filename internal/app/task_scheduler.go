@@ -53,6 +53,15 @@ type TaskSchedulerLaunchPort interface {
 	Launch(ctx context.Context, request TaskLaunchRequest) (TaskLaunchResult, error)
 }
 
+// cancellationSettler 由启动流程实现：启动失败后按持久化事实收敛取消现场。
+//
+// 调度器把执行权交给启动流程时，启动流程并不拥有执行权；因此"启动失败后仍停在
+// cancelling"的收口责任落在调度器这一侧。它只复用启动流程的收敛入口，不自行实现
+// 取消判定。
+type cancellationSettler interface {
+	SettleCancelledLaunch(ctx context.Context, taskID domain.ID) bool
+}
+
 // TaskSchedulerOptions 是构造任务调度器的输入。
 type TaskSchedulerOptions struct {
 	// Store 是持久化入口，必填。
@@ -700,6 +709,20 @@ func (s *TaskScheduler) settleFailedDispatch(
 	cause error,
 ) {
 	defer s.coordination.Release(grant)
+	// 启动失败可能只是因为用户在启动过程中取消了任务：先按持久化事实收口取消现场。
+	// 已按取消收敛时不能再写失败事件，否则同一个任务的时间线会同时出现"已取消"和
+	// "已失败"两种互相矛盾的结论。
+	if settler, ok := s.launch.(cancellationSettler); ok {
+		if settler.SettleCancelledLaunch(ctx, grant.TaskID()) {
+			s.logger.InfoContext(
+				ctx,
+				"启动失败后已按取消收敛任务",
+				slog.String("task_id", grant.TaskID().String()),
+				slog.String("failure_stage", result.FailureStage),
+			)
+			return
+		}
+	}
 	if s.isServiceStop(cause) {
 		s.logger.InfoContext(
 			ctx,

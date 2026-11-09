@@ -59,9 +59,15 @@ func (s *TaskLaunchService) Launch(
 	// 启动成功时执行权由工作流在结束时释放，失败时立即释放。
 	releaseOwnGrant := ownsGrant
 	defer func() {
-		if releaseOwnGrant {
-			s.coordination.Release(grant)
+		if !releaseOwnGrant {
+			return
 		}
+		// 启动失败且工作流没有接手：此刻执行权仍在本次调用手里，可以确定没有别的执行者
+		// 推进这个任务。任务若已因用户取消停在 cancelling，就没有任何活动执行记录能收口
+		// 它，必须在这里按持久化事实收敛；否则它会永久停在 cancelling，需求无法删除、
+		// 项目也无法重新领取它。收敛必须在释放执行权之前完成。
+		s.SettleCancelledLaunch(context.WithoutCancel(ctx), grant.TaskID())
+		s.coordination.Release(grant)
 	}()
 	request.Grant = grant
 

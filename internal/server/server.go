@@ -1055,11 +1055,16 @@ func (s *Server) planningServices() error {
 		}
 		s.planningSessions = sessions
 	}
-	// 需求确认与查询只依赖存储：确认生成正式需求与任务不接触 SSH、Docker 或 Pi，
-	// 因此容器能力缺失时仍可装配（生成后的任务保持 queued，不会自动开始执行）。
+	// 需求确认、查询与删除只依赖存储与进程内任务执行协调器：确认生成正式需求与任务、
+	// 删除需求与关联任务都不接触 SSH、Docker 或 Pi，因此容器能力缺失时仍可装配
+	// （生成后的任务保持 queued，不会自动开始执行）。
+	//
+	// 协调器必须是 s.coordination 这同一实例：删除需求要先取得全部关联任务的执行权，
+	// 与 TaskLaunch / Scheduler / 步骤执行互斥；各自新建锁表会让互斥失效。
 	if s.requirements == nil {
 		requirements, err := app.NewRequirementService(app.RequirementServiceOptions{
-			Store: s.store,
+			Store:        s.store,
+			Coordination: s.coordination,
 		})
 		if err != nil {
 			return fmt.Errorf("初始化需求服务失败: %w", err)

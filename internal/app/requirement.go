@@ -26,6 +26,11 @@ var (
 	ErrRequirementStateConflict = errors.New("app: 需求确认状态冲突")
 	// ErrRequirementPrerequisite 表示确认所需的前置条件不满足（节点、角色、项目配置）。
 	ErrRequirementPrerequisite = errors.New("app: 需求确认前置条件不满足")
+	// ErrRequirementDeleteUnavailable 表示需求删除能力未装配（缺少任务执行协调器）。
+	//
+	// 删除必须先取得全部关联任务的执行权，否则无法排除"删除与启动并发"的现场；
+	// 协调器缺失时删除失败关闭，不静默跳过并发保护。
+	ErrRequirementDeleteUnavailable = errors.New("app: 需求删除能力不可用")
 )
 
 // RequirementService 是正式需求的业务编排入口。
@@ -33,21 +38,32 @@ var (
 // 职责边界：
 //   - 把用户指定的那一版 PlanningRevision 转换成 1 个正式 Requirement 与 N 个正式 Task；
 //   - 在同一个事务内写需求、任务、任务顺序与会话状态；
-//   - 提供需求详情与项目需求列表的只读查询。
+//   - 提供需求详情与项目需求列表的只读查询；
+//   - 提供需求聚合逻辑删除：需求与其关联任务同一事务软删除，执行历史全部保留。
 //
 // 它不启动任务、不调用 Scheduler / TaskLaunchService / TaskWorkflowService，也不创建
 // Step、Attempt、Session 或容器：生成任务之后任务保持 queued。
 type RequirementService struct {
 	store storage.Store
 	now   func() time.Time
+	// coordination 是与 TaskLaunch / Scheduler / 步骤执行共享的任务执行协调器。
+	//
+	// 删除流程用它取得全部关联任务的执行权，阻止新的执行入口在删除期间推进子任务；
+	// 它必须是 Server 装配的同一实例，各自新建锁表会让互斥失效。
+	coordination *TaskExecutionCoordinator
 }
 
 // RequirementServiceOptions 是构造需求服务的输入。
 type RequirementServiceOptions struct {
-	// Store 是持久化入口；确认流程的原子写入使用它的 WithTx。
+	// Store 是持久化入口；确认与删除流程的原子写入使用它的 WithTx。
 	Store storage.Store
 	// Now 是时间源，默认返回 UTC 当前时间。
 	Now func() time.Time
+	// Coordination 是任务执行协调器，需求删除依赖它取得关联任务的执行权。
+	//
+	// 为空时确认与查询照常工作，只有删除返回 ErrRequirementDeleteUnavailable：
+	// 无法取得执行权的删除不得继续。
+	Coordination *TaskExecutionCoordinator
 }
 
 // NewRequirementService 构造需求服务。
@@ -59,7 +75,11 @@ func NewRequirementService(options RequirementServiceOptions) (*RequirementServi
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
 	}
-	return &RequirementService{store: options.Store, now: now}, nil
+	return &RequirementService{
+		store:        options.Store,
+		now:          now,
+		coordination: options.Coordination,
+	}, nil
 }
 
 // ConfirmRequirementRequest 是确认方案的输入。
@@ -209,12 +229,37 @@ func (s *RequirementService) Get(ctx context.Context, requirementIDValue string)
 	return *requirement, nil
 }
 
+// readActiveRequirement 读取需求并拒绝已逻辑删除的记录。
+//
+// 删除是逻辑删除，行仍在数据库里；读取路径因此必须显式区分"存在但已删除"与"存在且
+// 可用"，否则删除后的需求会继续出现在详情与进度查询里。
+func (s *RequirementService) readActiveRequirement(
+	ctx context.Context,
+	requirementIDValue string,
+) (domain.Requirement, error) {
+	requirement, err := s.Get(ctx, requirementIDValue)
+	if err != nil {
+		return domain.Requirement{}, err
+	}
+	if requirement.Deleted() {
+		return domain.Requirement{}, fmt.Errorf(
+			"%w: 需求 %s 已删除",
+			ErrRequirementNotFound,
+			requirement.ID,
+		)
+	}
+	return requirement, nil
+}
+
 // Detail 读取需求详情与按 requirement_sequence 排列的正式任务。
+//
+// 已逻辑删除的需求按"不存在"处理：删除后的需求不再出现在默认视图里，详情接口也不能
+// 返回一条看起来仍然可执行的需求。
 func (s *RequirementService) Detail(
 	ctx context.Context,
 	requirementIDValue string,
 ) (RequirementDetail, error) {
-	requirement, err := s.Get(ctx, requirementIDValue)
+	requirement, err := s.readActiveRequirement(ctx, requirementIDValue)
 	if err != nil {
 		return RequirementDetail{}, err
 	}
@@ -259,16 +304,9 @@ func (s *RequirementService) Progress(
 	ctx context.Context,
 	requirementIDValue string,
 ) (domain.RequirementProgress, error) {
-	requirement, err := s.Get(ctx, requirementIDValue)
+	requirement, err := s.readActiveRequirement(ctx, requirementIDValue)
 	if err != nil {
 		return domain.RequirementProgress{}, err
-	}
-	if requirement.DeletedAt != nil {
-		return domain.RequirementProgress{}, fmt.Errorf(
-			"%w: 需求 %s 已删除",
-			ErrRequirementNotFound,
-			requirement.ID,
-		)
 	}
 	tasks, err := s.listRequirementTasks(ctx, s.store, requirement.ID)
 	if err != nil {

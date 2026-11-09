@@ -2,6 +2,7 @@ package domain
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -348,4 +349,27 @@ func (r Requirement) Less(other Requirement) bool {
 		return r.CreatedAt.Before(other.CreatedAt)
 	}
 	return r.ID.String() < other.ID.String()
+}
+
+// Deleted 判断需求是否已被逻辑删除。
+func (r Requirement) Deleted() bool {
+	return r.DeletedAt != nil
+}
+
+// MarkDeleted 记录需求的逻辑删除时间。
+//
+// 删除只写 DeletedAt 与 UpdatedAt：需求的业务状态、确认快照、规划来源与确认时间全部
+// 保持不变，Step / Attempt / Session / Event / CodeSave 等执行历史也不会被清理。
+// 重复删除返回状态冲突，调用方必须把它当作"需求已经不在默认视图里"，而不是幂等成功。
+func (r *Requirement) MarkDeleted(at time.Time) error {
+	if r == nil {
+		return invalidField("Requirement", "", "实体为空")
+	}
+	if r.DeletedAt != nil {
+		return fmt.Errorf("%w: 需求已被删除", ErrInvalidState)
+	}
+	now := normalizeTime(at)
+	r.DeletedAt = &now
+	r.UpdatedAt = now
+	return nil
 }

@@ -77,6 +77,12 @@ const (
 	// 它记录"用户把一个失败任务重开为新的执行周期"：包含重开前的状态与重开后的状态。
 	// 重试是用户的显式决定，因此必须留下可追溯的审计记录，不能只改一行状态。
 	EventTypeTaskRetried EventType = "task.retried"
+	// 需求逻辑删除事件。
+	//
+	// 事件是任务时间线，没有独立的需求时间线，因此需求删除会写进它每一个关联任务的
+	// 时间线，并在内容里带上 `requirement_id`。它只记录"这条任务随需求一起被软删除"，
+	// 不改写任务的业务状态、最终结论，也不删除任何执行历史。
+	EventTypeRequirementDeleted EventType = "requirement.deleted"
 )
 
 // knownEventTypes 是当前受支持的事件类型集合。
@@ -121,6 +127,7 @@ var knownEventTypes = []EventType{
 	EventTypeCodeSaveRecoveryRequired,
 	EventTypeTaskClaimed,
 	EventTypeTaskRetried,
+	EventTypeRequirementDeleted,
 }
 
 // Validate 校验事件类型是否受支持。

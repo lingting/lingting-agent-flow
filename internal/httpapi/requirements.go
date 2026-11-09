@@ -105,6 +105,19 @@ type RequirementListResponse struct {
 	Total   int                   `json:"total"`
 }
 
+// DeleteRequirementResponse 是一次需求逻辑删除的真实结果。
+//
+// 三项都来自同一个事务：`deleted_task_count` 是本次真正软删除的任务条数，
+// `deleted_at` 是写进需求与任务记录的同一个时间。接口不返回"可能已删除"。
+type DeleteRequirementResponse struct {
+	// RequirementID 是被删除的需求标识。
+	RequirementID string `json:"requirement_id"`
+	// DeletedTaskCount 是随需求一起被软删除的关联任务数量。
+	DeletedTaskCount int `json:"deleted_task_count"`
+	// DeletedAt 是删除时间。
+	DeletedAt time.Time `json:"deleted_at"`
+}
+
 // confirmRequirementRequest 是确认方案的请求体。
 //
 // 只接受两个标识与一个可选执行节点：需求标识、任务列表、任务顺序、任务配置、项目仓库
@@ -191,10 +204,29 @@ func (h *requirementHandler) listByProject(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+// remove 处理 DELETE /api/v1/requirements/{requirementID}。
+//
+// 它调用生产 RequirementService.Delete：需求与关联任务在同一事务内软删除，执行历史
+// 全部保留。接口不自动取消任务：存在执行中任务、结果不确定现场或并发冲突时返回 409，
+// 前端必须先让用户显式停止任务并等待真实收敛。请求不接受请求体——任务列表、删除时间与
+// 级联策略都由服务端依据持久化事实决定。
+func (h *requirementHandler) remove(w http.ResponseWriter, r *http.Request) {
+	result, err := h.service.Delete(r.Context(), pathID(r, paramRequirementID))
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, r, h.logger, http.StatusOK, DeleteRequirementResponse{
+		RequirementID:    result.Requirement.ID.String(),
+		DeletedTaskCount: result.DeletedTaskCount,
+		DeletedAt:        result.DeletedAt,
+	})
+}
+
 // writeError 把需求相关错误映射为统一错误响应。
 //
 // 映射依据 errors.Is 判定的错误类别，不解析错误文本：参数与方案非法 400、目标不存在
-// 404、状态冲突 409、前置条件不满足 412、其余为持久化失败 500。
+// 404、状态冲突 409、前置条件不满足 412、删除能力未装配 503、其余为持久化失败 500。
 func (h *requirementHandler) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status := http.StatusInternalServerError
 	code := CodeInternal
@@ -219,6 +251,10 @@ func (h *requirementHandler) writeError(w http.ResponseWriter, r *http.Request, 
 		errors.Is(err, domain.ErrValidationPrerequisite):
 		status = http.StatusPreconditionFailed
 		code = CodePreconditionFailed
+	case errors.Is(err, app.ErrRequirementDeleteUnavailable):
+		// 删除依赖缺失时失败关闭：既不能伪装成成功，也不能降级成 409 让用户重试。
+		status = http.StatusServiceUnavailable
+		code = CodeInternal
 	case errors.Is(err, storage.ErrInvalidData):
 		// 存储层拒绝写入不是参数问题：它是持久化失败，必须如实返回 500。
 		status = http.StatusInternalServerError

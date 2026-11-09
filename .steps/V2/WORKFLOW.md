@@ -80,6 +80,11 @@ active ──发送消息──> analyzing ──方案生成并落 Revision─�
 - `executing`：有任务仍在执行，或已有任务完成但未全部完成；
 - `planned`：其余情况。
 
+进度投影只读 Task 的真实状态，因此**执行记录的停止必须落在任务状态上**：工作流以 `blocked` /
+`recovery_required` 停止后，任务会被收敛为 `recovery_required`（不是 `failed`，以保住 resume 入口）。
+未收敛的任务会让需求与项目一直停在 `executing`，并让需求删除返回 409；`blocked` / `recovery_required`
+执行记录本身按设计保留，不代表任务还在自动推进。
+
 ### 4.3 项目执行状态（只读投影）
 
 - `idle`：没有关联 Task 在执行，也没有持有项目执行权
@@ -219,21 +224,48 @@ status  = completed | blocked | executing | planned
 
 ## 8. 需求删除流程
 
+**停止与删除是两个显式动作，DELETE 不隐式取消任务**（M6 定稿，替代早期"删除时先发起取消"的写法）：
+
 ```text
-用户请求删除需求
-  → 若存在执行中的 Task：先按既有规则发起取消（不直接删除）
-  → 等待 Task 真实收敛（cancelling → cancelled / 或已终态）
-  → 再次校验：存在 running / cancelling / recovery_required / 结果不确定 → 拒绝（409）
-  → 逻辑删除 Requirement（deleted_at）与关联 Task（deleted_at）
+① 用户显式停止任务（复用既有 POST /api/v1/tasks/{taskID}/cancel，只作用于该需求下的 Task）
+  → cancelling
+  → 既有执行者确认真实收敛 → cancelled / failed / 其他允许删除的终态
+  → 未收敛（cancelling / recovery_required / 结果不确定）期间不允许删除
+
+② 用户显式删除需求（DELETE /api/v1/requirements/{requirementID}）
+  → 事务外读取需求与全部未删除关联 Task，按任务标识升序取得全部任务的进程内执行权
+     （与 Scheduler / TaskLaunch / 步骤执行同一个 TaskExecutionCoordinator）
+  → 任一任务已被占用 → 409，释放已取得的执行权，不自动重试
+  → 单事务内：重新读取需求与 Task → 核验任务集合未变化 → 核验状态与执行现场
+     （活动 WorkflowRun、仍被占用的步骤、recovery_required 步骤、结果不明的代码保存副作用）
+  → 逐个条件软删除 Task → 条件软删除 Requirement → 追加 requirement.deleted 事件
+  → 提交后释放全部执行权；任一步失败整体回滚
   → 保留 Step / Attempt / Session / Event / CodeSave / 容器记录
 ```
 
+需求级删除的状态白名单（**仅用于需求聚合删除，不放宽单任务删除接口**）：
+
+| 状态 | 需求级删除 |
+|---|---|
+| `queued` | 允许（尚未启动，无需为了删除先被取消） |
+| `completed` / `failed` / `cancelled` | 允许 |
+| `preparing` / `planning` / `planned` / `developing` / `verifying` / `saving` / `retrying` / `cancelling` | 拒绝（409） |
+| `paused` / `recovery_required` | 拒绝（409），需人工处置 |
+| 数据库中的其他未知状态 | 拒绝（409），未知即不安全 |
+
 硬性要求：
 
-- 运行中任务**不能**被直接删除；不确定状态不能被伪装成已停止。
-- 删除只写 `deleted_at`，不物理删除任何执行历史，不级联清理 Session 归档与代码保存记录。
+- 运行中任务**不能**被直接删除；不确定状态不能被伪装为已停止。
+- 删除只写 `deleted_at`（与必要的 `updated_at`），不物理删除任何执行历史，不级联清理 Session 归档与
+  代码保存记录；Task 原状态、最终结论与取消记录不被改写。
+- 已结束任务与尚未启动的 `queued` 任务一并软删除（[`PRODUCT-SCOPE.md`](./PRODUCT-SCOPE.md) §7 第 1 条）。
 - 删除不代表 Git 已回滚；不实现自动 Reset / Revert / 强制覆盖。
 - 已 `detach` 的容器不被自动启动、停止、删除或重新接管。
+- 已 `detach` 的容器不被自动启动、停止、删除或重新接管。
+- 执行记录停止必须同时收敛任务状态：`blocked` / `recovery_required` 停止后任务收敛为
+  `recovery_required`（保住 resume），任务不收敛则项目闸门不释放执行权、后续任务不领取、需求不可删。
+- 未收敛的现场不得删除需求：`cancelling`、`recovery_required`、活动执行记录（含 `blocked`）与结果不明的
+  代码保存副作用一律 409；启动阶段失败时由启动失败收口先收敛 `cancelling`，不得把任务永久留在停止中。
 
 ## 9. 端到端场景映射
 
@@ -249,6 +281,7 @@ status  = completed | blocked | executing | planned
 
 1. ~~项目级"开始执行"是自动连续领取还是每个任务人工确认~~ **已定稿（M5）**：自动连续领取，
    失败 / 待恢复 / 取消即停；不需要逐任务确认，也不提供"跳过前序任务"的入口。
-2. 需求删除时，已结束 Task 是随需求一起逻辑删除，还是保留可见（见
-   [`PRODUCT-SCOPE.md`](./PRODUCT-SCOPE.md) §7）。
+2. ~~需求删除时，已结束 Task 是随需求一起逻辑删除，还是保留可见~~ **已定稿（M6）**：
+   已结束与尚未启动的 Task 一并逻辑删除，历史记录保留并可按任务继续查询；单任务删除接口的状态集合
+   不变（见 §8）。
 3. 同一需求内是否允许用户显式调整已生成任务的执行顺序。默认倾向：不允许，顺序由方案确认时固定。

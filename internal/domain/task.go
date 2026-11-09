@@ -581,6 +581,41 @@ func (t Task) Deleted() bool {
 	return t.DeletedAt != nil
 }
 
+// RequirementDeletionTaskStatuses 返回需求聚合删除允许的任务状态集合。
+//
+// 这是**需求级删除专用规则**，不适用于单任务删除接口：单任务删除仍只允许
+// TaskStatus.IsFinished 的集合（completed / failed / cancelled）。
+// 需求级删除必须一并收起尚未启动的 queued 任务，否则"前序任务失败阻塞后续任务"的现场
+// 只能靠人工把未执行的任务伪装成已停止才能删除整个需求。
+//
+// 返回值每次新建：调用方只读使用，不得把它当作可变全局状态。
+func RequirementDeletionTaskStatuses() []TaskStatus {
+	return []TaskStatus{
+		TaskStatusQueued,
+		TaskStatusCompleted,
+		TaskStatusFailed,
+		TaskStatusCancelled,
+	}
+}
+
+// AllowsRequirementDeletion 判断任务能否随所属需求一并逻辑删除。
+//
+// 判定是白名单式的失败关闭：`preparing` / `planning` / `planned` / `developing` /
+// `verifying` / `saving` / `retrying` / `cancelling` / `paused` / `recovery_required`
+// 以及数据库中出现的任何未知状态一律拒绝。未知状态可能意味着有执行者仍持有现场，
+// 不能因为"不认识"就当成安全状态。
+func (t Task) AllowsRequirementDeletion() bool {
+	if t.DeletedAt != nil {
+		return false
+	}
+	for _, status := range RequirementDeletionTaskStatuses() {
+		if t.Status == status {
+			return true
+		}
+	}
+	return false
+}
+
 // Finish 写入任务最终结论。
 //
 // 只有完成必要业务判断后才可以调用：结论与状态必须同时由工作流引擎给出。

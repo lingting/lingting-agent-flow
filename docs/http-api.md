@@ -376,6 +376,7 @@
 | `POST` | `/api/v1/planning/sessions/{sessionID}/confirm` | 确认指定 Revision 并生成正式实体（`201`） |
 | `GET` | `/api/v1/requirements/{requirementID}` | 正式需求详情与按 `requirement_sequence` 排列的任务 |
 | `GET` | `/api/v1/projects/{projectID}/requirements` | 项目正式需求列表（排序确定性） |
+| `DELETE` | `/api/v1/requirements/{requirementID}` | 需求与关联任务的聚合逻辑删除（`200`） |
 
 请求边界：
 
@@ -416,11 +417,61 @@
 | 情形 | 状态码 | `error.code` |
 |---|---|---|
 | 请求体非法、未知字段、`revision_id` 缺失、方案结构不合法 | 400 | `invalid_request` |
-| 会话、项目或 Revision 不存在，或 Revision 不属于该会话 | 404 | `not_found` |
+| 会话、项目、Revision 或需求不存在；Revision 不属于该会话；需求已逻辑删除 | 404 | `not_found` |
 | 会话状态不是 `preview_ready`、并发确认、重复确认 | 409 | `state_conflict` |
 | 项目已逻辑删除、缺少可用执行节点、任务角色不可用 | 412 | `precondition_failed` |
 | 事务或存储失败 | 500 | `internal_error` / `execution_not_persisted` |
 | 需求服务未装配或已停止 | 503 | `internal_error` |
+
+### 16.1 需求逻辑删除
+
+```
+DELETE /api/v1/requirements/{requirementID}
+```
+
+语义固定：
+
+- 请求不接受请求体：任务列表、删除时间、级联策略与"是否顺带取消任务"都由服务端依据持久化事实决定，
+  客户端无法指定，携带未知字段也没有作用。
+- **DELETE 不隐式取消任务**。存在执行中的任务时返回 `409`，用户必须先通过
+  `POST /api/v1/tasks/{taskID}/cancel` 停止任务，等执行者把任务真实推进到 `cancelled`（或其他允许删除的
+  终态）后再删除。`cancelling`、`paused`、`recovery_required` 与任何未知状态同样返回 `409`。
+- 需求聚合删除同时收起尚未启动的 `queued` 任务：不能要求用户把"因前序任务失败而阻塞"的未执行任务
+  伪装成已停止才能删除整个需求。
+- 允许随需求删除的任务状态只有 `queued` / `completed` / `failed` / `cancelled`；**单任务删除接口**
+  （`DELETE /api/v1/tasks/{taskID}`）的状态集合不因此放宽，仍只允许 `completed` / `failed` / `cancelled`。
+- 事务内还会核验执行现场：任务仍有活动 WorkflowRun、步骤停在 `running` / `developing` / `verifying` /
+  `recovery_required`、或代码保存存在结果不明的外部副作用时一律 `409`；读取失败按"无法确认"拒绝。
+  以 `blocked` / `recovery_required` 停止的执行记录按设计保留（仍可显式恢复），因此仍属于"未结束记录"，
+  同样视为未收敛：停止必须同时把任务收敛到允许删除的状态，只有收敛后的任务才可能被删除
+  （收敛规则见 `docs/architecture.md`「停止分类」）。
+- 删除先取得全部关联任务的进程内执行权（与启动、调度、步骤执行同一协调器），因此删除期间新的执行入口
+  无法推进子任务；执行权在事务结束后释放，失败路径同样释放。
+- 只写 `requirements.deleted_at` / `tasks.deleted_at`（与 `updated_at`）：任务原状态、最终结论、取消记录与
+  需求确认快照都不被改写；Step / Attempt / Session / Event / CodeSave 与容器记录全部保留。
+- 不为需求删除新增独立的审计表：需求删除会写进它每一个关联任务的时间线（事件类型
+  `requirement.deleted`，内容带 `requirement_id`），且与软删除在同一个事务内。
+- 删除不回滚 Git，也不删除、停止或 detach 容器；两者仍走各自的显式入口。
+
+响应（`200`）：
+
+```json
+{"requirement_id": "…", "deleted_task_count": 3, "deleted_at": "…"}
+```
+
+- 三个字段都来自同一个事务：`deleted_task_count` 是本次真正软删除的任务条数，`deleted_at` 是写进需求与
+  任务记录的同一个时间。接口不返回"可能已删除"。
+- 删除成功后该需求的详情与进度查询按"不存在"处理（`404`），默认需求列表与项目任务视图也不再包含
+  它及其任务。
+
+错误语义（在同一张表之外补充删除专用情形）：
+
+| 情形 | 状态码 | `error.code` |
+|---|---|---|
+| 需求不存在，或已经逻辑删除（含重复删除） | 404 | `not_found` |
+| 存在未收敛任务、执行现场不确定、并发冲突 | 409 | `state_conflict` |
+| 需求删除能力未装配（缺少任务执行协调器） | 503 | `internal_error` |
+| 事务、SQL 或事件写入失败 | 500 | `internal_error` / `execution_not_persisted` |
 
 ## 17. 项目执行与进度
 

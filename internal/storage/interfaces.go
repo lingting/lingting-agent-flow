@@ -108,6 +108,15 @@ type RequirementStore interface {
 	UpdateRequirement(ctx context.Context, requirement domain.Requirement) error
 	GetRequirement(ctx context.Context, id domain.ID) (*domain.Requirement, error)
 	ListRequirements(ctx context.Context, filter RequirementFilter) ([]domain.Requirement, error)
+	// DeleteRequirement 逻辑删除需求：只写 deleted_at 与 updated_at。
+	//
+	// 它是条件写入而不是"先读取再整行更新"：只有未被删除的记录会被命中，影响行数为 0
+	// 说明需求已经被删除（并发删除或重复删除），按 storage.ErrConflict 返回。条件保证
+	// 并发删除只有一个成功，调用方不得据此假定删除已完成。
+	//
+	// 删除需求不触碰任务、步骤、尝试、会话、事件与代码保存记录：关联任务的软删除由
+	// 应用层在同一个事务内逐个执行，历史记录一律保留。
+	DeleteRequirement(ctx context.Context, id domain.ID, at time.Time) error
 }
 
 // ProjectFilter 约束项目查询条件，零值表示不限制。
