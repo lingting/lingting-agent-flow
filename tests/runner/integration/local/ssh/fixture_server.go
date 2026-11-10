@@ -1,4 +1,9 @@
-package sshclient_test
+// 本文件是 tests/integration/local/ssh/fake_server_test.go 的迁移结果：进程内真实 SSH/SFTP
+// 服务端。
+//
+// 它只用于测试：真实握手、真实认证、真实主机密钥校验与真实 SFTP 传输，
+// 但不依赖任何外部服务或网络下载。
+package ssh
 
 import (
 	"crypto/ed25519"
@@ -11,13 +16,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"testing"
 	"time"
 
-	"github.com/lingting/agentflow/tests/internal/testkit"
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
+
+	"github.com/lingting/agentflow/internal/testrunner"
 )
 
 // testUser 是测试 SSH 服务的登录用户名。
@@ -35,11 +40,8 @@ type testServerOptions struct {
 }
 
 // testServer 是本地测试用 SSH/SFTP 服务端。
-//
-// 它只用于测试：真实握手、真实认证、真实主机密钥校验与真实 SFTP 传输，
-// 但不依赖任何外部服务或网络下载。
 type testServer struct {
-	t        *testing.T
+	t        *testrunner.Context
 	listener net.Listener
 	hostKey  ssh.Signer
 	config   *ssh.ServerConfig
@@ -59,13 +61,13 @@ type testServer struct {
 }
 
 // newTestServer 启动一个本地测试 SSH 服务。
-func newTestServer(t *testing.T) *testServer {
+func newTestServer(t *testrunner.Context) *testServer {
 	t.Helper()
 	return newTestServerWithOptions(t, testServerOptions{})
 }
 
 // newTestServerWithOptions 按指定选项启动一个本地测试 SSH 服务。
-func newTestServerWithOptions(t *testing.T, options testServerOptions) *testServer {
+func newTestServerWithOptions(t *testrunner.Context, options testServerOptions) *testServer {
 	t.Helper()
 	server := &testServer{t: t, done: make(chan struct{}), options: options}
 	server.hostKey = generateHostKey(t)
@@ -102,7 +104,7 @@ func newTestServerWithOptions(t *testing.T, options testServerOptions) *testServ
 }
 
 // generateHostKey 生成一次性主机密钥。
-func generateHostKey(t *testing.T) ssh.Signer {
+func generateHostKey(t *testrunner.Context) ssh.Signer {
 	t.Helper()
 	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -392,9 +394,9 @@ func (s *testServer) close() {
 }
 
 // writeKnownHosts 把测试服务的主机密钥写入 known_hosts 文件。
-func writeKnownHosts(t *testing.T, host string, port int, key ssh.PublicKey) string {
+func writeKnownHosts(t *testrunner.Context, host string, port int, key ssh.PublicKey) string {
 	t.Helper()
-	path := filepath.Join(testkit.Dir(t), "known_hosts")
+	path := filepath.Join(caseWorkspace(t).Dir("known-hosts"), "known_hosts")
 	address := net.JoinHostPort(host, strconv.Itoa(port))
 	line := knownhosts.Line([]string{knownhosts.Normalize(address)}, key) + "\n"
 	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
@@ -404,7 +406,7 @@ func writeKnownHosts(t *testing.T, host string, port int, key ssh.PublicKey) str
 }
 
 // generateEd25519KeyPair 生成测试用 Ed25519 密钥对。
-func generateEd25519KeyPair(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
+func generateEd25519KeyPair(t *testrunner.Context) (ed25519.PublicKey, ed25519.PrivateKey) {
 	t.Helper()
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -420,7 +422,7 @@ type plainAddress struct {
 }
 
 // startPlainTCPServer 启动一个返回固定内容的普通 TCP 服务。
-func startPlainTCPServer(t *testing.T, banner string) (plainAddress, func()) {
+func startPlainTCPServer(t *testrunner.Context, banner string) (plainAddress, func()) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -462,9 +464,5 @@ func startPlainTCPServer(t *testing.T, banner string) (plainAddress, func()) {
 // 远程节点按 Linux 语义处理，因此这里始终给出 POSIX 绝对路径；
 // 该路径与测试 SFTP 服务的根目录映射一致，使工作空间操作可以真实落盘。
 func testRemoteHome() string {
-	slashed := filepath.ToSlash(os.TempDir())
-	if !strings.HasPrefix(slashed, "/") {
-		return "/" + slashed
-	}
-	return slashed
+	return toRemotePath(os.TempDir())
 }

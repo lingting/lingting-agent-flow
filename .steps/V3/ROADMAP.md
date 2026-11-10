@@ -110,7 +110,7 @@ R2–R7 只改代码、用例资产与本目录内的阶段文档；`Makefile`�
 | R3 | 已完成 | 并发调度、容量与互斥、取消与进程树终止、迟到结果防护 | [R3](R3/README.md) |
 | R4 | 已完成 | 试点：真实服务进程的启动、就绪、取消与零残留 | [R4](R4/README.md) |
 | R4.5 | 已完成 | 试点：`local/scheduler` 41 条集成用例迁移，验证 Case API 与迁移成本 | [R4.5](R4.5/README.md) |
-| R5 | 待执行 | 迁移 18 个包 / 328 个集成与 E2E 用例，覆盖对账可执行 | [R5](R5/README.md) |
+| R5 | 执行中 | 迁移 18 个包 / 328 个集成与 E2E 用例，覆盖对账可执行 | [R5](R5/README.md) |
 | R6 | 待执行 | 前端适配器：Vitest 13 + Playwright 24，一文件一 Case | [R6](R6/README.md) |
 | R7 | 待执行 | TestMain 与 `testkit` 最终核验收口，删除迁移遗留 | [R7](R7/README.md) |
 | R8 | 待执行 | Makefile / CI / 脚本收敛，非测试门禁保持可用 | [R8](R8/README.md) |

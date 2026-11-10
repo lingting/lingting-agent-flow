@@ -1,4 +1,7 @@
-package sshclient_test
+// 本文件是 tests/integration/local/ssh/transfer_test.go 中 10 个用例的迁移结果。
+//
+// 改造点：函数头改成 func run*、删除 t.Parallel()、目录取用例工作空间；断言保持原样。
+package ssh
 
 import (
 	"context"
@@ -7,38 +10,28 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/sshclient"
-	"github.com/lingting/agentflow/tests/internal/testkit"
+	"github.com/lingting/agentflow/internal/testrunner"
 )
 
-// newAuthenticatedClient 启动测试服务并建立一条已认证连接。
-func newAuthenticatedClient(t *testing.T) (*testServer, sshclient.Client) {
-	t.Helper()
-	server := newTestServer(t)
-	host, port := server.endpoint()
-	store := newStore(t, writeKnownHosts(t, host, port, server.hostKey.PublicKey()))
-	dialer := newDialer(t, store)
-	config := privateKeyAuth(t)
-	result, err := dialer.Dial(testContext(t), sshclient.Endpoint{
-		Host: host, Port: port, Username: testUser,
-	}, config)
-	if err != nil {
-		t.Fatalf("建立测试连接失败: %v", err)
-	}
-	t.Cleanup(func() {
-		if closeErr := result.Client.Close(); closeErr != nil {
-			t.Errorf("关闭测试连接失败: %v", closeErr)
-		}
-	})
-	return server, result.Client
-}
+// 登记传输类 10 条用例，顺序与源文件一致。
+var (
+	_ = register("run-success", runRunSuccess)
+	_ = register("run-non-zero-exit", runRunNonZeroExit)
+	_ = register("run-timeout", runRunTimeout)
+	_ = register("run-cancel", runRunCancel)
+	_ = register("shell-quote", runShellQuote)
+	_ = register("normalize-remote-path", runNormalizeRemotePath)
+	_ = register("sftp-upload-and-download", runSFTPUploadAndDownload)
+	_ = register("sftp-upload-refuses-overwrite", runSFTPUploadRefusesOverwrite)
+	_ = register("sftp-mkdir-stat-read-dir-rename-remove", runSFTPMkdirStatReadDirRenameRemove)
+	_ = register("sftp-download-refuses-overwrite", runSFTPDownloadRefusesOverwrite)
+)
 
-// TestRunSuccess 验证命令成功时分别返回标准输出与标准错误。
-func TestRunSuccess(t *testing.T) {
-	t.Parallel()
+// 原 TestRunSuccess 验证命令成功时分别返回标准输出与标准错误。
+func runRunSuccess(t *testrunner.Context) {
 	_, client := newAuthenticatedClient(t)
 	result, err := client.Run(testContext(t), "stream", sshclient.RunOptions{})
 	if err != nil {
@@ -58,9 +51,8 @@ func TestRunSuccess(t *testing.T) {
 	}
 }
 
-// TestRunNonZeroExit 验证非零退出码不被误报为成功。
-func TestRunNonZeroExit(t *testing.T) {
-	t.Parallel()
+// 原 TestRunNonZeroExit 验证非零退出码不被误报为成功。
+func runRunNonZeroExit(t *testrunner.Context) {
 	_, client := newAuthenticatedClient(t)
 	result, err := client.Run(testContext(t), "fail", sshclient.RunOptions{})
 	if err != nil {
@@ -80,9 +72,8 @@ func TestRunNonZeroExit(t *testing.T) {
 	}
 }
 
-// TestRunTimeout 验证超时会中断远程命令并返回错误。
-func TestRunTimeout(t *testing.T) {
-	t.Parallel()
+// 原 TestRunTimeout 验证超时会中断远程命令并返回错误。
+func runRunTimeout(t *testrunner.Context) {
 	_, client := newAuthenticatedClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
@@ -99,9 +90,8 @@ func TestRunTimeout(t *testing.T) {
 	}
 }
 
-// TestRunCancel 验证取消会中断远程命令。
-func TestRunCancel(t *testing.T) {
-	t.Parallel()
+// 原 TestRunCancel 验证取消会中断远程命令。
+func runRunCancel(t *testrunner.Context) {
 	_, client := newAuthenticatedClient(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -117,9 +107,8 @@ func TestRunCancel(t *testing.T) {
 	}
 }
 
-// TestShellQuote 验证参数转义不会改变命令语义。
-func TestShellQuote(t *testing.T) {
-	t.Parallel()
+// 原 TestShellQuote 验证参数转义不会改变命令语义。
+func runShellQuote(t *testrunner.Context) {
 	cases := map[string]string{
 		"simple":        "simple",
 		"with space":    "'with space'",
@@ -135,9 +124,8 @@ func TestShellQuote(t *testing.T) {
 	}
 }
 
-// TestNormalizeRemotePath 验证远程路径规范化与目录穿越防护。
-func TestNormalizeRemotePath(t *testing.T) {
-	t.Parallel()
+// 原 TestNormalizeRemotePath 验证远程路径规范化与目录穿越防护。
+func runNormalizeRemotePath(t *testrunner.Context) {
 	valid := map[string]string{
 		"/srv/agentflow":      "/srv/agentflow",
 		"/srv/agentflow/":     "/srv/agentflow",
@@ -167,12 +155,11 @@ func TestNormalizeRemotePath(t *testing.T) {
 	}
 }
 
-// TestSFTPUploadAndDownload 验证上传下载往返后内容一致。
-func TestSFTPUploadAndDownload(t *testing.T) {
-	t.Parallel()
+// 原 TestSFTPUploadAndDownload 验证上传下载往返后内容一致。
+func runSFTPUploadAndDownload(t *testrunner.Context) {
 	_, client := newAuthenticatedClient(t)
 	transfer := openTransfer(t, client)
-	dir := testkit.Dir(t)
+	dir := caseWorkspace(t).Dir("files")
 	localSource := filepath.Join(dir, "source.txt")
 	content := "agentflow sftp 内容\n第二行\n"
 	if err := os.WriteFile(localSource, []byte(content), 0o600); err != nil {
@@ -207,12 +194,11 @@ func TestSFTPUploadAndDownload(t *testing.T) {
 	}
 }
 
-// TestSFTPUploadRefusesOverwrite 验证未声明覆盖时不会覆盖已有目标。
-func TestSFTPUploadRefusesOverwrite(t *testing.T) {
-	t.Parallel()
+// 原 TestSFTPUploadRefusesOverwrite 验证未声明覆盖时不会覆盖已有目标。
+func runSFTPUploadRefusesOverwrite(t *testrunner.Context) {
 	_, client := newAuthenticatedClient(t)
 	transfer := openTransfer(t, client)
-	dir := testkit.Dir(t)
+	dir := caseWorkspace(t).Dir("files")
 	source := filepath.Join(dir, "source.txt")
 	if err := os.WriteFile(source, []byte("new"), 0o600); err != nil {
 		t.Fatalf("写入本机测试文件失败: %v", err)
@@ -234,9 +220,8 @@ func TestSFTPUploadRefusesOverwrite(t *testing.T) {
 	}
 }
 
-// TestSFTPMkdirStatReadDirRenameRemove 验证目录与文件管理操作。
-func TestSFTPMkdirStatReadDirRenameRemove(t *testing.T) {
-	t.Parallel()
+// 原 TestSFTPMkdirStatReadDirRenameRemove 验证目录与文件管理操作。
+func runSFTPMkdirStatReadDirRenameRemove(t *testrunner.Context) {
 	_, client := newAuthenticatedClient(t)
 	transfer := openTransfer(t, client)
 	dir := path.Join(tempRemoteDir(t), "agentflow-dir")
@@ -250,7 +235,7 @@ func TestSFTPMkdirStatReadDirRenameRemove(t *testing.T) {
 	if !info.IsDir {
 		t.Fatalf("目标应为目录: %+v", info)
 	}
-	localSource := filepath.Join(testkit.Dir(t), "file.txt")
+	localSource := filepath.Join(caseWorkspace(t).Dir("files"), "file.txt")
 	if err := os.WriteFile(localSource, []byte("x"), 0o600); err != nil {
 		t.Fatalf("写入本机测试文件失败: %v", err)
 	}
@@ -280,12 +265,11 @@ func TestSFTPMkdirStatReadDirRenameRemove(t *testing.T) {
 	}
 }
 
-// TestSFTPDownloadRefusesOverwrite 验证未声明覆盖时不会覆盖本机文件。
-func TestSFTPDownloadRefusesOverwrite(t *testing.T) {
-	t.Parallel()
+// 原 TestSFTPDownloadRefusesOverwrite 验证未声明覆盖时不会覆盖本机文件。
+func runSFTPDownloadRefusesOverwrite(t *testrunner.Context) {
 	_, client := newAuthenticatedClient(t)
 	transfer := openTransfer(t, client)
-	dir := testkit.Dir(t)
+	dir := caseWorkspace(t).Dir("files")
 	source := filepath.Join(dir, "source.txt")
 	if err := os.WriteFile(source, []byte("content"), 0o600); err != nil {
 		t.Fatalf("写入本机测试文件失败: %v", err)
@@ -311,44 +295,4 @@ func TestSFTPDownloadRefusesOverwrite(t *testing.T) {
 	if string(data) != "existing" {
 		t.Fatalf("本机文件不应被覆盖，实际: %q", string(data))
 	}
-}
-
-// openTransfer 打开一条 SFTP 通道并在测试结束时关闭。
-func openTransfer(t *testing.T, client sshclient.Client) sshclient.FileTransfer {
-	t.Helper()
-	transfer, err := client.SFTP()
-	if err != nil {
-		t.Fatalf("打开 SFTP 通道失败: %v", err)
-	}
-	t.Cleanup(func() {
-		if closeErr := transfer.Close(); closeErr != nil {
-			t.Errorf("关闭 SFTP 通道失败: %v", closeErr)
-		}
-	})
-	return transfer
-}
-
-// tempRemoteDir 生成一个临时远程目录路径。
-func tempRemoteDir(t *testing.T) string {
-	t.Helper()
-	return toRemotePath(testkit.Dir(t))
-}
-
-// tempRemotePath 生成一个临时远程文件路径。
-func tempRemotePath(t *testing.T) string {
-	t.Helper()
-	return path.Join(tempRemoteDir(t), "remote.txt")
-}
-
-// toRemotePath 把本机临时目录转换为测试 SFTP 服务可识别的远程路径。
-//
-// 测试服务运行在本机，因此把本机绝对路径转写为 /<绝对路径> 形式：
-// pkg/sftp 在 Windows 上会把它还原为同样的本机路径，从而让测试覆盖真实的
-// SFTP 协议交互，而不引入与平台相关的分支逻辑。
-func toRemotePath(localPath string) string {
-	slashed := filepath.ToSlash(localPath)
-	if strings.HasPrefix(slashed, "/") {
-		return slashed
-	}
-	return "/" + slashed
 }

@@ -8,7 +8,9 @@ package testrunner
 
 import (
 	"fmt"
+	"reflect"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -34,6 +36,12 @@ type Case struct {
 	// 它是串行作用域与包级串行声明的输入：非空时串行作用域取该包，R2 冻结的
 	// SerialPackageReason 按它判定整包串行；为空时串行作用域退化为 Group。
 	Package string
+	// LegacyName 是来源 go test 里对应的测试函数名（例如 TestSchedulerDispatchesInQueueOrder）。
+	//
+	// 覆盖对账（--audit-coverage）用它和 Package 一起定位 R0 冻结清单里的条目。留空时由
+	// Register 从用例主体的函数名推导：迁移写法冻结为主体命名为 func run<原函数名去掉 Test
+	// 前缀>，因此推导结果与源文件一致；推导失败则保持为空，对账会把它报成无法解释的条目。
+	LegacyName string
 	// Parallel 表示调度器允许该用例与其他用例并行。
 	//
 	// false 表示该用例在串行作用域内独占执行（对齐 go test 里未标记 t.Parallel 的用例）；
@@ -47,6 +55,39 @@ type Case struct {
 
 // caseIDPattern 约束用例 ID 的字符集：ID 同时是产物目录名的一部分。
 var caseIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9/_-]*$`)
+
+// legacyNamePattern 约束来源 go test 函数名：只接受 Test 开头的标识符。
+var legacyNamePattern = regexp.MustCompile(`^Test[A-Za-z0-9_]+$`)
+
+// legacyRunPrefix 与 legacyTestPrefix 是迁移写法的命名约定：用例主体写成
+// func run<原函数名去掉 Test 前缀>，Register 据此把 Case 与冻结清单里的条目对上。
+const (
+	legacyRunPrefix  = "run"
+	legacyTestPrefix = "Test"
+)
+
+// legacyNameOf 从用例主体的函数名推导来源 go test 函数名。
+//
+// 只识别冻结写法（func runXxx）；闭包、方法与不符合约定的命名都返回空，由对账报出来，
+// 不做任何猜测。
+func legacyNameOf(run func(c *Context)) string {
+	if run == nil {
+		return ""
+	}
+	function := runtime.FuncForPC(reflect.ValueOf(run).Pointer())
+	if function == nil {
+		return ""
+	}
+	name := function.Name()
+	if index := strings.LastIndexByte(name, '.'); index >= 0 {
+		name = name[index+1:]
+	}
+	suffix := strings.TrimPrefix(name, legacyRunPrefix)
+	if suffix == name || suffix == "" {
+		return ""
+	}
+	return legacyTestPrefix + suffix
+}
 
 // Validate 校验用例声明是否完整，不执行用例主体。
 func (c Case) Validate() error {
@@ -73,6 +114,9 @@ func (c Case) Validate() error {
 	}
 	if strings.ContainsAny(c.Package, " \t\r\n") {
 		return fmt.Errorf("用例 %q 的 Package %q 不能包含空白字符", c.ID, c.Package)
+	}
+	if c.LegacyName != "" && !legacyNamePattern.MatchString(c.LegacyName) {
+		return fmt.Errorf("用例 %q 的 LegacyName %q 不是 go test 测试函数名", c.ID, c.LegacyName)
 	}
 	seen := make(map[string]struct{}, len(c.Resources))
 	for _, decl := range c.Resources {
@@ -108,6 +152,9 @@ var (
 func Register(c Case) Case {
 	if c.Group == "" {
 		c.Group = groupOf(c.ID)
+	}
+	if c.LegacyName == "" {
+		c.LegacyName = legacyNameOf(c.Run)
 	}
 	registryMu.Lock()
 	defer registryMu.Unlock()

@@ -38,6 +38,26 @@ func run(args []string) int {
 	grace := flags.Duration("grace", testrunner.DefaultWorkerGrace, "超时或取消后等待 worker 自行收尾的宽限时间")
 	parallel := flags.Int("parallel", testrunner.DefaultParallel, "同时在跑的 worker 上限")
 	realTests := flags.String("real-tests", testrunner.RealTestsAuto, "真实依赖授权：auto/on/off")
+	auditCoverage := flags.Bool(
+		"audit-coverage",
+		false,
+		"覆盖对账：以 R0 冻结清单为分母核对注册表后退出，不执行用例",
+	)
+	auditManifest := flags.String(
+		"audit-manifest",
+		testrunner.DefaultLegacyManifestPath,
+		"覆盖对账用：R0 冻结清单路径",
+	)
+	auditStages := flags.String(
+		"audit-stage",
+		testrunner.DefaultAuditStage,
+		"覆盖对账用：负责的阶段，多个阶段以逗号分隔",
+	)
+	auditJSON := flags.String(
+		"audit-json",
+		"",
+		"覆盖对账用：把 JSON 结果写到该路径（留空只输出文本摘要）",
+	)
 	execCase := flags.String("exec-case", "", "worker 内部参数：执行单个用例")
 	resultFile := flags.String("result-file", "", "worker 内部参数：结果文件路径")
 	handleFile := flags.String("handles", "", "worker 内部参数：资源句柄文件")
@@ -91,6 +111,13 @@ func run(args []string) int {
 	if *list {
 		printCases(cases)
 		return testrunner.ExitOK
+	}
+	if *auditCoverage {
+		return runAuditCoverage(cases, auditArgs{
+			manifestPath: *auditManifest,
+			stages:       *auditStages,
+			jsonPath:     *auditJSON,
+		})
 	}
 	decision, err := testrunner.DecideRealTests(
 		*realTests,
@@ -223,6 +250,63 @@ func describeResources(decls []testrunner.ResourceDecl) string {
 		values = append(values, value)
 	}
 	return strings.Join(values, ",")
+}
+
+// auditArgs 是覆盖对账模式的启动参数，与命令行参数一一对应。
+type auditArgs struct {
+	manifestPath string
+	stages       string
+	jsonPath     string
+}
+
+// runAuditCoverage 执行覆盖对账：只读清单与注册表，不执行任何用例。
+//
+// 退出码按 R5 §4.1：全部覆盖或有理由的 dropped 为 0；缺失、未解释的多余条目与结构性问题
+// 为 1；用法错误为 2。
+func runAuditCoverage(cases []testrunner.Case, args auditArgs) int {
+	stages, err := parseAuditStages(args.stages)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+		return exitUsage
+	}
+	report, err := testrunner.AuditCoverage(cases, testrunner.CoverageOptions{
+		ManifestPath: args.manifestPath,
+		Stages:       stages,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+		return testrunner.ExitFailure
+	}
+	if args.jsonPath != "" {
+		if err := testrunner.WriteCoverageReport(args.jsonPath, report); err != nil {
+			fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+			return testrunner.ExitFailure
+		}
+	}
+	fmt.Print(report.Summary())
+	if args.jsonPath != "" {
+		fmt.Printf("对账结果：%s\n", args.jsonPath)
+	}
+	if report.Failed() {
+		return testrunner.ExitFailure
+	}
+	return testrunner.ExitOK
+}
+
+// parseAuditStages 解析逗号分隔的阶段列表，忽略空项。
+func parseAuditStages(raw string) ([]string, error) {
+	stages := make([]string, 0, 2)
+	for _, field := range strings.Split(raw, ",") {
+		stage := strings.TrimSpace(field)
+		if stage == "" {
+			continue
+		}
+		stages = append(stages, stage)
+	}
+	if len(stages) == 0 {
+		return nil, fmt.Errorf("--audit-stage 至少要给出一个阶段")
+	}
+	return stages, nil
 }
 
 // runHold 是资源自检用的常驻子进程入口：一直等到被父进程终止。

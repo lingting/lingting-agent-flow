@@ -6,7 +6,12 @@ package registry
 
 import (
 	_ "github.com/lingting/agentflow/tests/runner/concurrencycheck"
+	_ "github.com/lingting/agentflow/tests/runner/integration/local/codesaver"
 	_ "github.com/lingting/agentflow/tests/runner/integration/local/scheduler"
+	_ "github.com/lingting/agentflow/tests/runner/integration/local/source"
+	_ "github.com/lingting/agentflow/tests/runner/integration/local/ssh"
+	_ "github.com/lingting/agentflow/tests/runner/integration/local/validation"
+	_ "github.com/lingting/agentflow/tests/runner/legacy"
 	_ "github.com/lingting/agentflow/tests/runner/pilot"
 	_ "github.com/lingting/agentflow/tests/runner/resourcecheck"
 	_ "github.com/lingting/agentflow/tests/runner/selfcheck"
