@@ -1,31 +1,43 @@
-package cli_test
+// 本文件是 tests/e2e/cli/host_test.go 中 19 个用例的迁移结果。
+//
+// 除两个帮助类用例外，其余用例都会打开数据库，因此声明一份用例独占的 sqlite-db。用例里
+// 的"SSH 服务"都是用例自建的本机 TCP 服务，不需要真实主机；源用例里重复出现的"申请端口后
+// 立即关闭"改由 fixture_server.go 的 startUnreachableAddress 提供，断言保持不变。
+package cli
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/pem"
-	"errors"
 	"fmt"
-	"net"
-	"os"
 	"path/filepath"
 	"strings"
-	"testing"
-	"time"
 
-	"github.com/lingting/agentflow/tests/internal/testkit"
-	"golang.org/x/crypto/ssh"
+	"github.com/lingting/agentflow/internal/testrunner"
 )
 
-// hostConfig 生成一份指向临时数据库与工作区的执行节点测试配置。
-func hostConfig(t *testing.T) string {
-	t.Helper()
-	return workspaceConfig(t)
-}
+// 登记本包 19 条用例，顺序与源文件一致。
+var (
+	_ = register("host-help", runHostHelp)
+	_ = register("host-add-requires-flags", runHostAddRequiresFlags, databaseDecl()...)
+	_ = register("host-lifecycle", runHostLifecycle, databaseDecl()...)
+	_ = register("host-add-rejects-invalid-input", runHostAddRejectsInvalidInput, databaseDecl()...)
+	_ = register("host-set-default-rejects-unknown-id", runHostSetDefaultRejectsUnknownID, databaseDecl()...)
+	_ = register("host-probe-detects-ssh", runHostProbeDetectsSSH, databaseDecl()...)
+	_ = register("host-probe-not-ssh", runHostProbeNotSSH, databaseDecl()...)
+	_ = register("host-probe-unreachable", runHostProbeUnreachable, databaseDecl()...)
+	_ = register("host-add-with-private-key-auth", runHostAddWithPrivateKeyAuth, databaseDecl()...)
+	_ = register("host-add-rejects-private-key-without-key", runHostAddRejectsPrivateKeyWithoutKey, databaseDecl()...)
+	_ = register("host-add-rejects-unknown-auth-method", runHostAddRejectsUnknownAuthMethod, databaseDecl()...)
+	_ = register("host-update-changes-auth-method", runHostUpdateChangesAuthMethod, databaseDecl()...)
+	_ = register("host-test-fails-without-private-key-in-non-interactive", runHostTestFailsWithoutPrivateKeyInNonInteractive, databaseDecl()...)
+	_ = register("host-test-reports-unreachable", runHostTestReportsUnreachable, databaseDecl()...)
+	_ = register("host-transfer-requires-remote-absolute-path", runHostTransferRequiresRemoteAbsolutePath, databaseDecl()...)
+	_ = register("host-trust-requires-verified-fingerprint", runHostTrustRequiresVerifiedFingerprint, databaseDecl()...)
+	_ = register("host-workspace-requires-private-key", runHostWorkspaceRequiresPrivateKey, databaseDecl()...)
+	_ = register("host-download-accepts-max-bytes-flag", runHostDownloadAcceptsMaxBytesFlag)
+	_ = register("host-trust-records-verified-fingerprint", runHostTrustRecordsVerifiedFingerprint, databaseDecl()...)
+)
 
-// TestHostHelp 校验 host 命令组暴露全部子命令。
-func TestHostHelp(t *testing.T) {
-	t.Parallel()
+// 原 TestHostHelp 校验 host 命令组暴露全部子命令。
+func runHostHelp(t *testrunner.Context) {
 	code, stdout, stderr := run(t, "host", "--help")
 	if code != 0 {
 		t.Fatalf("host --help 应成功，实际退出码 %d，错误: %s", code, stderr)
@@ -40,10 +52,9 @@ func TestHostHelp(t *testing.T) {
 	}
 }
 
-// TestHostAddRequiresFlags 校验新增节点要求显式指定主机与用户名。
-func TestHostAddRequiresFlags(t *testing.T) {
-	t.Parallel()
-	configPath := hostConfig(t)
+// 原 TestHostAddRequiresFlags 校验新增节点要求显式指定主机与用户名。
+func runHostAddRequiresFlags(t *testrunner.Context) {
+	configPath := workspaceConfig(t)
 	code, _, stderr := run(t, "host", "add", "--config", configPath)
 	if code == 0 {
 		t.Fatal("缺少必需参数时应返回非零退出码")
@@ -55,10 +66,9 @@ func TestHostAddRequiresFlags(t *testing.T) {
 	}
 }
 
-// TestHostLifecycle 校验新增、列出、查看、设默认与删除的完整流程。
-func TestHostLifecycle(t *testing.T) {
-	t.Parallel()
-	configPath := hostConfig(t)
+// 原 TestHostLifecycle 校验新增、列出、查看、设默认与删除的完整流程。
+func runHostLifecycle(t *testrunner.Context) {
+	configPath := workspaceConfig(t)
 	code, stdout, stderr := run(
 		t,
 		"host", "add",
@@ -124,10 +134,9 @@ func TestHostLifecycle(t *testing.T) {
 	}
 }
 
-// TestHostAddRejectsInvalidInput 校验非法参数不会写入数据库。
-func TestHostAddRejectsInvalidInput(t *testing.T) {
-	t.Parallel()
-	configPath := hostConfig(t)
+// 原 TestHostAddRejectsInvalidInput 校验非法参数不会写入数据库。
+func runHostAddRejectsInvalidInput(t *testrunner.Context) {
+	configPath := workspaceConfig(t)
 	key := writeTestPrivateKey(t)
 	cases := map[string][]string{
 		"端口超出范围":   {"--host", "10.0.0.11", "--user", "deploy", "--port", "70000", "--key", key},
@@ -149,10 +158,9 @@ func TestHostAddRejectsInvalidInput(t *testing.T) {
 	}
 }
 
-// TestHostSetDefaultRejectsUnknownID 校验设置默认节点时节点不存在。
-func TestHostSetDefaultRejectsUnknownID(t *testing.T) {
-	t.Parallel()
-	configPath := hostConfig(t)
+// 原 TestHostSetDefaultRejectsUnknownID 校验设置默认节点时节点不存在。
+func runHostSetDefaultRejectsUnknownID(t *testrunner.Context) {
+	configPath := workspaceConfig(t)
 	code, _, stderr := run(t, "host", "set-default", "missing", "--config", configPath)
 	if code == 0 {
 		t.Fatal("不存在的节点应返回非零退出码")
@@ -162,44 +170,9 @@ func TestHostSetDefaultRejectsUnknownID(t *testing.T) {
 	}
 }
 
-// startProbeServer 启动一个返回固定协议标识的本地 TCP 服务。
-func startProbeServer(t *testing.T, banner string) (string, int) {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("启动测试服务失败: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = listener.Close()
-	})
-	go func() {
-		for {
-			conn, acceptErr := listener.Accept()
-			if acceptErr != nil {
-				return
-			}
-			go func(conn net.Conn) {
-				defer func() {
-					_ = conn.Close()
-				}()
-				if _, err := conn.Write([]byte(banner)); err != nil {
-					return
-				}
-				<-time.After(200 * time.Millisecond)
-			}(conn)
-		}
-	}()
-	address, ok := listener.Addr().(*net.TCPAddr)
-	if !ok {
-		t.Fatalf("监听地址类型不符: %T", listener.Addr())
-	}
-	return address.IP.String(), address.Port
-}
-
-// TestHostProbeDetectsSSH 校验探测成功时明确说明尚未认证。
-func TestHostProbeDetectsSSH(t *testing.T) {
-	t.Parallel()
-	configPath := hostConfig(t)
+// 原 TestHostProbeDetectsSSH 校验探测成功时明确说明尚未认证。
+func runHostProbeDetectsSSH(t *testrunner.Context) {
+	configPath := workspaceConfig(t)
 	host, port := startProbeServer(t, "SSH-2.0-OpenSSH_9.6\r\n")
 	addArgs := []string{
 		"host", "add",
@@ -227,10 +200,9 @@ func TestHostProbeDetectsSSH(t *testing.T) {
 	}
 }
 
-// TestHostProbeNotSSH 校验非 SSH 服务返回非零退出码与明确说明。
-func TestHostProbeNotSSH(t *testing.T) {
-	t.Parallel()
-	configPath := hostConfig(t)
+// 原 TestHostProbeNotSSH 校验非 SSH 服务返回非零退出码与明确说明。
+func runHostProbeNotSSH(t *testrunner.Context) {
+	configPath := workspaceConfig(t)
 	host, port := startProbeServer(t, "HTTP/1.1 400 Bad Request\r\n\r\n")
 	addArgs := []string{
 		"host", "add",
@@ -256,27 +228,15 @@ func TestHostProbeNotSSH(t *testing.T) {
 	}
 }
 
-// TestHostProbeUnreachable 校验不可达地址的探测结果。
-func TestHostProbeUnreachable(t *testing.T) {
-	t.Parallel()
-	configPath := hostConfig(t)
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("启动测试监听失败: %v", err)
-	}
-	address, ok := listener.Addr().(*net.TCPAddr)
-	if !ok {
-		t.Fatalf("监听地址类型不符: %T", listener.Addr())
-	}
-	port := address.Port
-	if closeErr := listener.Close(); closeErr != nil {
-		t.Fatalf("关闭测试监听失败: %v", closeErr)
-	}
+// 原 TestHostProbeUnreachable 校验不可达地址的探测结果。
+func runHostProbeUnreachable(t *testrunner.Context) {
+	configPath := workspaceConfig(t)
+	host, port := startUnreachableAddress(t)
 	addArgs := []string{
 		"host", "add",
 		"--config", configPath,
 		"--id", "node-down",
-		"--host", address.IP.String(),
+		"--host", host,
 		"--port", fmt.Sprint(port),
 		"--user", "deploy",
 		"--key", writeTestPrivateKey(t),
@@ -293,10 +253,9 @@ func TestHostProbeUnreachable(t *testing.T) {
 	}
 }
 
-// TestHostAddWithPrivateKeyAuth 校验私钥认证参数被保存。
-func TestHostAddWithPrivateKeyAuth(t *testing.T) {
-	t.Parallel()
-	configPath := hostConfig(t)
+// 原 TestHostAddWithPrivateKeyAuth 校验私钥认证参数被保存。
+func runHostAddWithPrivateKeyAuth(t *testrunner.Context) {
+	configPath := workspaceConfig(t)
 	code, stdout, stderr := run(
 		t,
 		"host", "add",
@@ -324,10 +283,9 @@ func TestHostAddWithPrivateKeyAuth(t *testing.T) {
 	}
 }
 
-// TestHostAddRejectsPrivateKeyWithoutKey 校验私钥认证必须给出私钥路径。
-func TestHostAddRejectsPrivateKeyWithoutKey(t *testing.T) {
-	t.Parallel()
-	configPath := hostConfig(t)
+// 原 TestHostAddRejectsPrivateKeyWithoutKey 校验私钥认证必须给出私钥路径。
+func runHostAddRejectsPrivateKeyWithoutKey(t *testrunner.Context) {
+	configPath := workspaceConfig(t)
 	code, _, stderr := run(
 		t,
 		"host", "add",
@@ -344,10 +302,9 @@ func TestHostAddRejectsPrivateKeyWithoutKey(t *testing.T) {
 	}
 }
 
-// TestHostAddRejectsUnknownAuthMethod 校验未知认证方式被拒绝。
-func TestHostAddRejectsUnknownAuthMethod(t *testing.T) {
-	t.Parallel()
-	configPath := hostConfig(t)
+// 原 TestHostAddRejectsUnknownAuthMethod 校验未知认证方式被拒绝。
+func runHostAddRejectsUnknownAuthMethod(t *testrunner.Context) {
+	configPath := workspaceConfig(t)
 	code, _, stderr := run(
 		t,
 		"host", "add",
@@ -364,10 +321,9 @@ func TestHostAddRejectsUnknownAuthMethod(t *testing.T) {
 	}
 }
 
-// TestHostUpdateChangesAuthMethod 校验更新命令可以修改连接参数与私钥路径。
-func TestHostUpdateChangesAuthMethod(t *testing.T) {
-	t.Parallel()
-	configPath := hostConfig(t)
+// 原 TestHostUpdateChangesAuthMethod 校验更新命令可以修改连接参数与私钥路径。
+func runHostUpdateChangesAuthMethod(t *testrunner.Context) {
+	configPath := workspaceConfig(t)
 	if code, _, stderr := run(
 		t,
 		"host", "add",
@@ -405,11 +361,10 @@ func TestHostUpdateChangesAuthMethod(t *testing.T) {
 	}
 }
 
-// TestHostTestFailsWithoutPrivateKeyInNonInteractive 校验私钥不可用时立即失败。
-func TestHostTestFailsWithoutPrivateKeyInNonInteractive(t *testing.T) {
-	t.Parallel()
-	configPath := hostConfig(t)
-	missingKey := filepath.Join(testkit.Dir(t), "missing_id_ed25519")
+// 原 TestHostTestFailsWithoutPrivateKeyInNonInteractive 校验私钥不可用时立即失败。
+func runHostTestFailsWithoutPrivateKeyInNonInteractive(t *testrunner.Context) {
+	configPath := workspaceConfig(t)
+	missingKey := filepath.Join(t.WorkspaceDir(), "missing_id_ed25519")
 	if code, _, stderr := run(
 		t,
 		"host", "add",
@@ -434,28 +389,16 @@ func TestHostTestFailsWithoutPrivateKeyInNonInteractive(t *testing.T) {
 	}
 }
 
-// TestHostTestReportsUnreachable 校验连接测试报告 TCP 不可达。
-func TestHostTestReportsUnreachable(t *testing.T) {
-	t.Parallel()
-	configPath := hostConfig(t)
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("启动测试监听失败: %v", err)
-	}
-	address, ok := listener.Addr().(*net.TCPAddr)
-	if !ok {
-		t.Fatalf("监听地址类型不符: %T", listener.Addr())
-	}
-	port := address.Port
-	if closeErr := listener.Close(); closeErr != nil {
-		t.Fatalf("关闭测试监听失败: %v", closeErr)
-	}
+// 原 TestHostTestReportsUnreachable 校验连接测试报告 TCP 不可达。
+func runHostTestReportsUnreachable(t *testrunner.Context) {
+	configPath := workspaceConfig(t)
+	host, port := startUnreachableAddress(t)
 	if code, _, stderr := run(
 		t,
 		"host", "add",
 		"--config", configPath,
 		"--id", "node-down-ssh",
-		"--host", address.IP.String(),
+		"--host", host,
 		"--port", fmt.Sprint(port),
 		"--user", "deploy",
 		"--auth", "private_key",
@@ -475,10 +418,9 @@ func TestHostTestReportsUnreachable(t *testing.T) {
 	}
 }
 
-// TestHostTransferRequiresRemoteAbsolutePath 校验远程路径必须是绝对路径。
-func TestHostTransferRequiresRemoteAbsolutePath(t *testing.T) {
-	t.Parallel()
-	configPath := hostConfig(t)
+// 原 TestHostTransferRequiresRemoteAbsolutePath 校验远程路径必须是绝对路径。
+func runHostTransferRequiresRemoteAbsolutePath(t *testrunner.Context) {
+	configPath := workspaceConfig(t)
 	if code, _, stderr := run(
 		t,
 		"host", "add",
@@ -506,28 +448,9 @@ func TestHostTransferRequiresRemoteAbsolutePath(t *testing.T) {
 	}
 }
 
-// writeTestPrivateKey 生成一个测试用未加密私钥并返回其路径。
-func writeTestPrivateKey(t *testing.T) string {
-	t.Helper()
-	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("生成测试密钥失败: %v", err)
-	}
-	block, err := ssh.MarshalPrivateKey(privateKey, "agentflow-test")
-	if err != nil {
-		t.Fatalf("编码测试私钥失败: %v", err)
-	}
-	path := filepath.Join(testkit.Dir(t), "id_test")
-	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
-		t.Fatalf("写入测试私钥失败: %v", err)
-	}
-	return path
-}
-
-// TestHostTrustRequiresVerifiedFingerprint 校验非交互环境不会自动信任未知主机密钥。
-func TestHostTrustRequiresVerifiedFingerprint(t *testing.T) {
-	t.Parallel()
-	configPath := hostConfig(t)
+// 原 TestHostTrustRequiresVerifiedFingerprint 校验非交互环境不会自动信任未知主机密钥。
+func runHostTrustRequiresVerifiedFingerprint(t *testrunner.Context) {
+	configPath := workspaceConfig(t)
 	host, port := startSSHHandshakeServer(t)
 	if code, _, stderr := run(
 		t,
@@ -565,11 +488,10 @@ func TestHostTrustRequiresVerifiedFingerprint(t *testing.T) {
 	}
 }
 
-// TestHostWorkspaceRequiresPrivateKey 校验私钥不可用时工作空间解析立即失败。
-func TestHostWorkspaceRequiresPrivateKey(t *testing.T) {
-	t.Parallel()
-	configPath := hostConfig(t)
-	missingKey := filepath.Join(testkit.Dir(t), "missing_id_ed25519")
+// 原 TestHostWorkspaceRequiresPrivateKey 校验私钥不可用时工作空间解析立即失败。
+func runHostWorkspaceRequiresPrivateKey(t *testrunner.Context) {
+	configPath := workspaceConfig(t)
+	missingKey := filepath.Join(t.WorkspaceDir(), "missing_id_ed25519")
 	if code, _, stderr := run(
 		t,
 		"host", "add",
@@ -591,9 +513,8 @@ func TestHostWorkspaceRequiresPrivateKey(t *testing.T) {
 	}
 }
 
-// TestHostDownloadAcceptsMaxBytesFlag 校验下载命令暴露大小上限参数。
-func TestHostDownloadAcceptsMaxBytesFlag(t *testing.T) {
-	t.Parallel()
+// 原 TestHostDownloadAcceptsMaxBytesFlag 校验下载命令暴露大小上限参数。
+func runHostDownloadAcceptsMaxBytesFlag(t *testrunner.Context) {
 	code, stdout, stderr := run(t, "host", "transfer", "download", "--help")
 	if code != 0 {
 		t.Fatalf("download --help 应成功，实际退出码 %d，错误: %s", code, stderr)
@@ -603,63 +524,9 @@ func TestHostDownloadAcceptsMaxBytesFlag(t *testing.T) {
 	}
 }
 
-// startSSHHandshakeServer 启动一个只完成 SSH 握手的最小服务端。
-//
-// 它用于验证主机密钥探测与信任流程：服务端提供真实的主机密钥，但不接受任何
-// 身份认证，因此客户端只会取得主机密钥指纹而不会建立已认证连接。
-func startSSHHandshakeServer(t *testing.T) (string, int) {
-	t.Helper()
-	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("生成主机密钥失败: %v", err)
-	}
-	signer, err := ssh.NewSignerFromKey(privateKey)
-	if err != nil {
-		t.Fatalf("构造主机密钥签名器失败: %v", err)
-	}
-	config := &ssh.ServerConfig{
-		PasswordCallback: func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error) {
-			return nil, errors.New("拒绝认证")
-		},
-	}
-	config.AddHostKey(signer)
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("启动测试 SSH 服务失败: %v", err)
-	}
-	t.Cleanup(func() {
-		if closeErr := listener.Close(); closeErr != nil {
-			t.Logf("关闭测试 SSH 监听失败: %v", closeErr)
-		}
-	})
-	go func() {
-		for {
-			conn, acceptErr := listener.Accept()
-			if acceptErr != nil {
-				return
-			}
-			go func(conn net.Conn) {
-				defer func() {
-					_ = conn.Close()
-				}()
-				_, _, _, handshakeErr := ssh.NewServerConn(conn, config)
-				if handshakeErr != nil {
-					return
-				}
-			}(conn)
-		}
-	}()
-	address, ok := listener.Addr().(*net.TCPAddr)
-	if !ok {
-		t.Fatalf("监听地址类型不符: %T", listener.Addr())
-	}
-	return address.IP.String(), address.Port
-}
-
-// TestHostTrustRecordsVerifiedFingerprint 校验核验指纹后可以记录指纹。
-func TestHostTrustRecordsVerifiedFingerprint(t *testing.T) {
-	t.Parallel()
-	configPath := hostConfig(t)
+// 原 TestHostTrustRecordsVerifiedFingerprint 校验核验指纹后可以记录指纹。
+func runHostTrustRecordsVerifiedFingerprint(t *testrunner.Context) {
+	configPath := workspaceConfig(t)
 	host, port := startSSHHandshakeServer(t)
 	if code, _, stderr := run(
 		t,
@@ -712,20 +579,4 @@ func TestHostTrustRecordsVerifiedFingerprint(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("重复记录指纹应幂等成功，实际退出码 %d，stderr: %s", code, stderr)
 	}
-}
-
-// extractFingerprint 从输出中提取 SHA-256 指纹。
-func extractFingerprint(t *testing.T, output string) string {
-	t.Helper()
-	const prefix = "SHA256:"
-	index := strings.Index(output, prefix)
-	if index < 0 {
-		t.Fatalf("输出中找不到指纹: %s", output)
-	}
-	rest := output[index:]
-	end := strings.IndexAny(rest, " \r\n\t")
-	if end < 0 {
-		return rest
-	}
-	return rest[:end]
 }

@@ -1,8 +1,8 @@
 # V3 R5：集成与 E2E 用例迁移
 
-**状态：** 执行中。§4.1 `--audit-coverage` 已落地；批次 B1 已迁移 4/5 包（`local/source`、
-`local/validation`、`local/codesaver`、`local/ssh`），覆盖 92 / 328、dropped 3，运行与对照结果见
-§5.2。`e2e/cli`（64 条）尚未迁移，B1 未收口；B2/B3 未开始。
+**状态：** 执行中。§4.1 `--audit-coverage` 已落地；批次 B1 已收口：`e2e/cli` 64 条、`local/source` 6 条、
+`local/validation` 11 条、`local/codesaver` 12 条、`local/ssh` 22 条全部迁移，覆盖 156 / 328、dropped 3，
+运行与对照结果见 §5.2。B2/B3 未开始。
 **上游文档：** [路线总规划](../ROADMAP.md)、[R4.5 试点](../R4.5/README.md)。
 **范围：** 迁移 `tests/integration/**` 与 `tests/e2e/cli` 的 328 个用例（R4.5 已覆盖其中的 41 个），
 并让覆盖对账可执行。不迁移 `tests/unit`（路径 C）、不做前端（R6）、不改 `Makefile` / CI / `docs/`。
@@ -109,7 +109,7 @@
 | 批次 | 覆盖 | 首次通过 | 跳过（原因） | 与 `go test` 差异 | 结论 |
 |---|---|---|---|---|---|
 | P | 41 / 41 | R4.5 已记录 | 0 | 无差异 | 完成 |
-| B1 | 51 / 116（source 6、validation 11、codesaver 12、ssh 22；`e2e/cli` 64 未迁移） | 51 / 51 通过（4 个包各自连续三次或合并复跑） | 0 | 无差异（见 §5.2） | 进行中 |
+| B1 | 116 / 116（`e2e/cli` 64、source 6、validation 11、codesaver 12、ssh 22） | 64 / 64 与 51 / 51 通过（各自连续三次，删除旧入口后合并复跑） | 0 | 1 条断言语义偏差 + 2 条表驱动子测试计数差异（见 §5.2） | 完成 |
 | B2 | 0 / 123 | 待填 | 待填 | 待填 | 未开始 |
 | B3 | 0 / 48 | 待填 | 待填 | 待填 | 未开始 |
 
@@ -123,31 +123,31 @@
 | 分母 | R0 冻结清单 `.steps/V3/R0/legacy-cases.manifest.json`（默认路径，可由 `--audit-manifest` 覆盖） |
 | 匹配键 | `Case.Package`（来源包路径）+ `Case.LegacyName`（来源测试函数名） |
 | `LegacyName` 来源 | 由 `Register` 从用例主体函数名推导（`func run<原函数名去掉 Test 前缀>`），也可显式声明 |
-| dropped | `testrunner.DeclareDropped(清单ID, 理由)`，当前只有 `tests/runner/legacy` 登记了 2 条本机 Pi 用例 |
+| dropped | `testrunner.DeclareDropped(清单ID, 理由)`，`tests/runner/legacy` 登记 3 条（2 条本机 Pi + 1 条依赖已移除的 `check` 子命令） |
 | 输出 | 文本摘要（逐包 `覆盖/范围`、缺失、dropped、多余、问题）+ 可选 JSON（`agentflow-test-coverage/1`） |
 | 退出码 | 0 全部覆盖或有理由的 dropped；1 缺失 / 未解释的多余 / 结构性问题；2 用法错误 |
-| 当前结论 | 范围 R5 共 328 条：覆盖 92、dropped 3、缺失 233、多余 0，退出码 1（迁移未完成） |
+| 当前结论 | 范围 R5 共 328 条：覆盖 156、dropped 3、缺失 169、多余 0，退出码 1（B2/B3 未迁移） |
 
 `dropped` 目前 3 条，都由 commit 9515a72「移除本机pi测试」造成，没有可迁移的等价断言：
 `tests/integration/pi` 的 2 条（`TestRealPiCheck`、`TestRealPiModelRecognition`）与
 `tests/e2e/cli` 的 `TestAgentCheckUnknownExecutable`（`agent check` 只在 Pi 不可用时才有意义）。
-其余 233 条仍待迁移，因此对账当前必然非零退出。
+其余 169 条属于 B2/B3，因此对账当前仍非零退出。
 
 **B1 已迁移并通过对照的包**
 
 | 包 | 分组 | 用例 | 资源声明 | 迁移要点 |
 |---|---|---:|---|---|
+| `e2e/cli` | `e2e-cli` | 64 | 40 条声明 1 份 `sqlite-db`，其余不声明 | 进程内执行 cobra 命令树；配置里的数据库路径只从注入句柄读取、工作区落在用例工作空间内；SSH 探测与主机密钥握手用用例自建的本机临时端口，不声明端口资源 |
 | `local/source` | `integration-local-source` | 6 | 无 | 执行替身映射容器命令到用例工作空间；缺 git 时 `Skip` |
 | `local/validation` | `integration-local-validation` | 11 | 每条 1 份 `sqlite-db` | 进程内真实 SSH 服务端；临时端口由 OS 分配，不声明端口资源 |
 | `local/codesaver` | `integration-local-codesaver` | 12 | 无 | 真实 Git 工作仓库 + bare 仓库；每套仓库用独立子目录 |
 | `local/ssh` | `integration-local-ssh` | 22 | 无 | 进程内真实 SSH/SFTP 服务端；`known_hosts` 与私钥落在用例工作空间 |
 
-`e2e/cli` 尚未迁移（64 条待迁移 + 1 条 dropped），B1 因此未收口。已迁移的 4 个包按 §4.3 删除了
-旧 `_test.go` 与 `TestMain`，不再保留双轨。
+B1 的 5 个包按 §4.3 删除了旧 `_test.go` 与 `TestMain`，`tests/e2e` 目录随后整体移除，不再保留双轨。
 
 ### 5.2 运行与对照记录（授权：B1 范围）
 
-授权按 §7 的 B1 执行：只跑 `integration/local/{codesaver,source,ssh,validation}` 的新集合，
+授权按 §7 的 B1 执行：先跑 `e2e/cli` 与 `integration/local/{codesaver,source,ssh,validation}` 的新集合，
 每个子范围允许一次 `go test` 对照；未跑 B2/B3、unit 与前端。
 
 | 项 | 结果 |
@@ -156,10 +156,15 @@
 | `go test` 对照（同 3 包） | 31 通过；与 29 条 Case 的差异 2 条，全部来自 `validate-fails-when-api-incompatible` 的表驱动子测试（D6：按 Case 登记，仍是 1 条 Case 内的 2 个顺序块） |
 | 新执行器（ssh） | 22 通过 / 0 跳过；零残留 `not-applicable`（本包不分配资源） |
 | `go test` 对照（ssh） | 22 通过，逐条一致，无差异 |
+| 新执行器（`e2e/cli`，旧入口仍在） | 64 通过 / 0 跳过；峰值 8 / 上限 8；零残留 `passed` |
+| `go test` 对照（同范围） | 63 通过 + 1 失败：`TestAgentHelp` 要求 `agent --help` 含 `check`，而该子命令已由 commit e36ecff 移除，源用例在迁移前就已失效；按确认迁移时只保留 `run` 断言，差异登记于本节 |
+| 删除旧入口后的合并复跑（`e2e/cli` 64 条） | 连续三次：每次 64 通过 / 0 跳过；峰值 8 / 上限 8；零残留 `passed` |
 | 删除旧入口后的合并复跑（4 包 51 条） | 51 通过 / 0 跳过；零残留 `passed` |
 | 静态检查 | `go vet ./...` 与 `gofmt -l cmd internal tests` 无新增问题 |
 
-结论：4 个包的迁移与 `go test` 一致，删除旧入口后仍全部通过；`e2e/cli` 迁移完成后 B1 才能收口。
+结论：B1 的 5 个包（116 条）与 `go test` 一致，删除旧入口后仍全部通过，B1 就此收口。唯一断言语义差异是
+`TestAgentHelp` 里依赖已移除 `check` 子命令的那一项，已按确认改为只断言 `run`；`validate-fails-when-api-incompatible`
+的 2 条表驱动子测试差异沿用 D6（按 Case 登记，子测试名写入日志）。
 ---
 
 ## 6. 阶段内需要冻结的决策

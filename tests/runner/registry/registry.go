@@ -6,6 +6,7 @@ package registry
 
 import (
 	_ "github.com/lingting/agentflow/tests/runner/concurrencycheck"
+	_ "github.com/lingting/agentflow/tests/runner/e2e/cli"
 	_ "github.com/lingting/agentflow/tests/runner/integration/local/codesaver"
 	_ "github.com/lingting/agentflow/tests/runner/integration/local/scheduler"
 	_ "github.com/lingting/agentflow/tests/runner/integration/local/source"

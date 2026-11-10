@@ -1,13 +1,31 @@
-package cli_test
+// 本文件是 tests/e2e/cli/docker_test.go 中 10 个用例的迁移结果。
+//
+// 除三个帮助类用例外，其余用例都把配置交给会读取执行节点记录的命令，因此声明一份
+// 用例独占的 sqlite-db；这些命令都在参数或节点校验阶段失败，不接触真实 Docker 或远程机器。
+package cli
 
 import (
 	"strings"
-	"testing"
+
+	"github.com/lingting/agentflow/internal/testrunner"
 )
 
-// TestDockerHelp 校验 docker 命令组暴露全部子命令。
-func TestDockerHelp(t *testing.T) {
-	t.Parallel()
+// 登记本包 10 条用例，顺序与源文件一致。
+var (
+	_ = register("docker-help", runDockerHelp)
+	_ = register("docker-env-help", runDockerEnvHelp)
+	_ = register("docker-container-help", runDockerContainerHelp)
+	_ = register("docker-env-requires-machine", runDockerEnvRequiresMachine, databaseDecl()...)
+	_ = register("docker-env-list-without-versions", runDockerEnvListWithoutVersions, databaseDecl()...)
+	_ = register("docker-container-delete-requires-confirmation", runDockerContainerDeleteRequiresConfirmation, databaseDecl()...)
+	_ = register("docker-container-detach-requires-confirmation", runDockerContainerDetachRequiresConfirmation, databaseDecl()...)
+	_ = register("docker-container-lifecycle-rejects-success", runDockerContainerLifecycleRejectsSuccess, databaseDecl()...)
+	_ = register("docker-container-restart-requires-disposition", runDockerContainerRestartRequiresDisposition, databaseDecl()...)
+	_ = register("docker-container-create-rejects-base-environment", runDockerContainerCreateRejectsBaseEnvironment, databaseDecl()...)
+)
+
+// 原 TestDockerHelp 校验 docker 命令组暴露全部子命令。
+func runDockerHelp(t *testrunner.Context) {
 	code, stdout, stderr := run(t, "docker", "--help")
 	if code != 0 {
 		t.Fatalf("docker --help 应成功，实际退出码 %d，错误: %s", code, stderr)
@@ -19,9 +37,8 @@ func TestDockerHelp(t *testing.T) {
 	}
 }
 
-// TestDockerEnvHelp 校验 docker env 命令组暴露全部子命令。
-func TestDockerEnvHelp(t *testing.T) {
-	t.Parallel()
+// 原 TestDockerEnvHelp 校验 docker env 命令组暴露全部子命令。
+func runDockerEnvHelp(t *testrunner.Context) {
 	code, stdout, stderr := run(t, "docker", "env", "--help")
 	if code != 0 {
 		t.Fatalf("docker env --help 应成功，实际退出码 %d，错误: %s", code, stderr)
@@ -33,9 +50,8 @@ func TestDockerEnvHelp(t *testing.T) {
 	}
 }
 
-// TestDockerContainerHelp 校验 docker container 命令组暴露全部子命令。
-func TestDockerContainerHelp(t *testing.T) {
-	t.Parallel()
+// 原 TestDockerContainerHelp 校验 docker container 命令组暴露全部子命令。
+func runDockerContainerHelp(t *testrunner.Context) {
 	code, stdout, stderr := run(t, "docker", "container", "--help")
 	if code != 0 {
 		t.Fatalf("docker container --help 应成功，实际退出码 %d，错误: %s", code, stderr)
@@ -50,10 +66,9 @@ func TestDockerContainerHelp(t *testing.T) {
 	}
 }
 
-// TestDockerEnvRequiresMachine 校验环境命令要求显式指定节点。
-func TestDockerEnvRequiresMachine(t *testing.T) {
-	t.Parallel()
-	configPath := hostConfig(t)
+// 原 TestDockerEnvRequiresMachine 校验环境命令要求显式指定节点。
+func runDockerEnvRequiresMachine(t *testrunner.Context) {
+	configPath := workspaceConfig(t)
 	code, _, stderr := run(t, "docker", "env", "list", "--config", configPath)
 	if code == 0 {
 		t.Fatal("缺少 --machine 时应返回非零退出码")
@@ -63,10 +78,9 @@ func TestDockerEnvRequiresMachine(t *testing.T) {
 	}
 }
 
-// TestDockerEnvListWithoutVersions 校验无环境版本时的提示。
-func TestDockerEnvListWithoutVersions(t *testing.T) {
-	t.Parallel()
-	configPath := hostConfig(t)
+// 原 TestDockerEnvListWithoutVersions 校验无环境版本时的提示。
+func runDockerEnvListWithoutVersions(t *testrunner.Context) {
+	configPath := workspaceConfig(t)
 	code, stdout, stderr := run(
 		t,
 		"docker", "env", "list",
@@ -81,10 +95,9 @@ func TestDockerEnvListWithoutVersions(t *testing.T) {
 	}
 }
 
-// TestDockerContainerDeleteRequiresConfirmation 校验删除需要显式确认。
-func TestDockerContainerDeleteRequiresConfirmation(t *testing.T) {
-	t.Parallel()
-	configPath := hostConfig(t)
+// 原 TestDockerContainerDeleteRequiresConfirmation 校验删除需要显式确认。
+func runDockerContainerDeleteRequiresConfirmation(t *testrunner.Context) {
+	configPath := workspaceConfig(t)
 	code, _, stderr := run(
 		t,
 		"docker", "container", "delete", "container-1",
@@ -98,10 +111,9 @@ func TestDockerContainerDeleteRequiresConfirmation(t *testing.T) {
 	}
 }
 
-// TestDockerContainerDetachRequiresConfirmation 校验脱离管理需要显式确认。
-func TestDockerContainerDetachRequiresConfirmation(t *testing.T) {
-	t.Parallel()
-	configPath := hostConfig(t)
+// 原 TestDockerContainerDetachRequiresConfirmation 校验脱离管理需要显式确认。
+func runDockerContainerDetachRequiresConfirmation(t *testrunner.Context) {
+	configPath := workspaceConfig(t)
 	code, _, stderr := run(
 		t,
 		"docker", "container", "detach", "container-1",
@@ -115,10 +127,9 @@ func TestDockerContainerDetachRequiresConfirmation(t *testing.T) {
 	}
 }
 
-// TestDockerContainerLifecycleRejectsSuccess 校验不得把命令成功当作任务成功。
-func TestDockerContainerLifecycleRejectsSuccess(t *testing.T) {
-	t.Parallel()
-	configPath := hostConfig(t)
+// 原 TestDockerContainerLifecycleRejectsSuccess 校验不得把命令成功当作任务成功。
+func runDockerContainerLifecycleRejectsSuccess(t *testrunner.Context) {
+	configPath := workspaceConfig(t)
 	code, _, stderr := run(
 		t,
 		"docker", "container", "lifecycle", "container-1",
@@ -133,10 +144,9 @@ func TestDockerContainerLifecycleRejectsSuccess(t *testing.T) {
 	}
 }
 
-// TestDockerContainerRestartRequiresDisposition 校验重新开始必须显式处置旧容器。
-func TestDockerContainerRestartRequiresDisposition(t *testing.T) {
-	t.Parallel()
-	configPath := hostConfig(t)
+// 原 TestDockerContainerRestartRequiresDisposition 校验重新开始必须显式处置旧容器。
+func runDockerContainerRestartRequiresDisposition(t *testrunner.Context) {
+	configPath := workspaceConfig(t)
 	code, _, stderr := run(
 		t,
 		"docker", "container", "restart",
@@ -151,10 +161,9 @@ func TestDockerContainerRestartRequiresDisposition(t *testing.T) {
 	}
 }
 
-// TestDockerContainerCreateRejectsBaseEnvironment 校验任务容器必须使用语言环境。
-func TestDockerContainerCreateRejectsBaseEnvironment(t *testing.T) {
-	t.Parallel()
-	configPath := hostConfig(t)
+// 原 TestDockerContainerCreateRejectsBaseEnvironment 校验任务容器必须使用语言环境。
+func runDockerContainerCreateRejectsBaseEnvironment(t *testrunner.Context) {
+	configPath := workspaceConfig(t)
 	code, _, stderr := run(
 		t,
 		"docker", "container", "create",

@@ -1,16 +1,30 @@
-// 代码保存相关 CLI 的端到端测试。
+// 本文件是 tests/e2e/cli/code_test.go 中 9 个用例的迁移结果。
 //
-// 这些用例只验证命令注册、参数校验、状态输出与只读命令行为，不连接远程机器。
-package cli_test
+// 代码保存相关 CLI 的端到端测试：这些用例只验证命令注册、参数校验、状态输出与只读命令
+// 行为，不连接远程机器。
+package cli
 
 import (
 	"strings"
-	"testing"
+
+	"github.com/lingting/agentflow/internal/testrunner"
 )
 
-// TestCodeCommandHelp 校验 code 命令组与其子命令都已注册。
-func TestCodeCommandHelp(t *testing.T) {
-	t.Parallel()
+// 登记本包 9 条用例，顺序与源文件一致。
+var (
+	_ = register("code-command-help", runCodeCommandHelp)
+	_ = register("code-init-requires-task", runCodeInitRequiresTask)
+	_ = register("code-init-requires-step-and-attempt", runCodeInitRequiresStepAndAttempt)
+	_ = register("code-init-help-explains-boundaries", runCodeInitHelpExplainsBoundaries)
+	_ = register("code-save-requires-task", runCodeSaveRequiresTask)
+	_ = register("code-save-requires-container", runCodeSaveRequiresContainer)
+	_ = register("code-merge-requires-confirmation", runCodeMergeRequiresConfirmation)
+	_ = register("code-status-requires-task", runCodeStatusRequiresTask)
+	_ = register("code-status-empty-task", runCodeStatusEmptyTask, databaseDecl()...)
+)
+
+// 原 TestCodeCommandHelp 校验 code 命令组与其子命令都已注册。
+func runCodeCommandHelp(t *testrunner.Context) {
 	code, stdout, stderr := run(t, "code", "--help")
 	if code != 0 {
 		t.Fatalf("code --help 应成功退出，实际 %d，错误: %s", code, stderr)
@@ -25,9 +39,8 @@ func TestCodeCommandHelp(t *testing.T) {
 	}
 }
 
-// TestCodeInitRequiresTask 校验代码初始化缺少 --task 时被拒绝。
-func TestCodeInitRequiresTask(t *testing.T) {
-	t.Parallel()
+// 原 TestCodeInitRequiresTask 校验代码初始化缺少 --task 时被拒绝。
+func runCodeInitRequiresTask(t *testrunner.Context) {
 	code, _, stderr := run(t, "code", "init")
 	if code == 0 {
 		t.Fatal("缺少 --task 时不应成功")
@@ -37,9 +50,8 @@ func TestCodeInitRequiresTask(t *testing.T) {
 	}
 }
 
-// TestCodeInitRequiresStepAndAttempt 校验代码初始化必须给出步骤与尝试。
-func TestCodeInitRequiresStepAndAttempt(t *testing.T) {
-	t.Parallel()
+// 原 TestCodeInitRequiresStepAndAttempt 校验代码初始化必须给出步骤与尝试。
+func runCodeInitRequiresStepAndAttempt(t *testrunner.Context) {
 	for _, args := range [][]string{
 		{"code", "init", "--task", "task-1"},
 		{"code", "init", "--task", "task-1", "--step", "step-1"},
@@ -54,9 +66,8 @@ func TestCodeInitRequiresStepAndAttempt(t *testing.T) {
 	}
 }
 
-// TestCodeInitHelpExplainsBoundaries 校验帮助文本说明幂等与非覆盖规则。
-func TestCodeInitHelpExplainsBoundaries(t *testing.T) {
-	t.Parallel()
+// 原 TestCodeInitHelpExplainsBoundaries 校验帮助文本说明幂等与非覆盖规则。
+func runCodeInitHelpExplainsBoundaries(t *testrunner.Context) {
 	code, stdout, stderr := run(t, "code", "init", "--help")
 	if code != 0 {
 		t.Fatalf("code init --help 应成功退出，实际 %d，错误: %s", code, stderr)
@@ -68,9 +79,8 @@ func TestCodeInitHelpExplainsBoundaries(t *testing.T) {
 	}
 }
 
-// TestCodeSaveRequiresTask 校验缺少 --task 时命令被拒绝。
-func TestCodeSaveRequiresTask(t *testing.T) {
-	t.Parallel()
+// 原 TestCodeSaveRequiresTask 校验缺少 --task 时命令被拒绝。
+func runCodeSaveRequiresTask(t *testrunner.Context) {
 	code, _, stderr := run(t, "code", "save", "container-1")
 	if code == 0 {
 		t.Fatal("缺少 --task 时不应成功")
@@ -80,18 +90,16 @@ func TestCodeSaveRequiresTask(t *testing.T) {
 	}
 }
 
-// TestCodeSaveRequiresContainer 校验缺少容器参数时命令被拒绝。
-func TestCodeSaveRequiresContainer(t *testing.T) {
-	t.Parallel()
+// 原 TestCodeSaveRequiresContainer 校验缺少容器参数时命令被拒绝。
+func runCodeSaveRequiresContainer(t *testrunner.Context) {
 	code, _, _ := run(t, "code", "save", "--task", "task-1")
 	if code == 0 {
 		t.Fatal("缺少容器参数时不应成功")
 	}
 }
 
-// TestCodeMergeRequiresConfirmation 校验非交互执行时合并需要显式确认。
-func TestCodeMergeRequiresConfirmation(t *testing.T) {
-	t.Parallel()
+// 原 TestCodeMergeRequiresConfirmation 校验非交互执行时合并需要显式确认。
+func runCodeMergeRequiresConfirmation(t *testrunner.Context) {
 	code, _, stderr := run(t, "code", "merge", "--task", "task-1", "container-1")
 	if code == 0 {
 		t.Fatal("缺少 --yes 时不应执行合并")
@@ -101,9 +109,8 @@ func TestCodeMergeRequiresConfirmation(t *testing.T) {
 	}
 }
 
-// TestCodeStatusRequiresTask 校验缺少 --task 时状态命令被拒绝。
-func TestCodeStatusRequiresTask(t *testing.T) {
-	t.Parallel()
+// 原 TestCodeStatusRequiresTask 校验缺少 --task 时状态命令被拒绝。
+func runCodeStatusRequiresTask(t *testrunner.Context) {
 	code, _, stderr := run(t, "code", "status")
 	if code == 0 {
 		t.Fatal("缺少 --task 时不应成功")
@@ -113,9 +120,8 @@ func TestCodeStatusRequiresTask(t *testing.T) {
 	}
 }
 
-// TestCodeStatusEmptyTask 校验没有任何记录时输出明确提示。
-func TestCodeStatusEmptyTask(t *testing.T) {
-	t.Parallel()
+// 原 TestCodeStatusEmptyTask 校验没有任何记录时输出明确提示。
+func runCodeStatusEmptyTask(t *testrunner.Context) {
 	configPath := workspaceConfig(t)
 	code, stdout, stderr := run(t, "code", "status", "--config", configPath, "--task", "task-1")
 	if code != 0 {

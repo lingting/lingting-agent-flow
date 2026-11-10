@@ -1,109 +1,30 @@
-package cli_test
+// 本文件是 tests/e2e/cli/project_test.go 中 6 个用例的迁移结果。
+//
+// 这些用例都会打开数据库，因此声明一份用例独占的 sqlite-db：预置数据与随后执行的 CLI
+// 命令操作同一份库，库文件随资源释放一起删除。
+package cli
 
 import (
-	"context"
 	"strings"
-	"testing"
-	"time"
 
-	"github.com/lingting/agentflow/internal/domain"
-	"github.com/lingting/agentflow/internal/storage/sqlite"
-	"github.com/lingting/agentflow/tests/internal/testkit"
+	"github.com/lingting/agentflow/internal/testrunner"
 )
 
-// projectTestConfig 生成一份可用于项目命令的配置文件。
-//
-// 数据库与工作区都落在同一个测试工作空间内；这里显式接收 Workspace，避免多次调用
-// testkit.Dir 得到不同目录（每个用例的数据库与配置必须指向同一处）。配置只包含当前
-// 正式 Schema 中的字段：角色不在配置里，由 seedProjectPrerequisites 显式写入测试数据库。
-func projectTestConfig(t *testing.T, ws *testkit.Workspace) string {
-	t.Helper()
-	content := `
-app:
-  name: agentflow
-  log_level: error
-storage:
-  database_path: ` + ws.DatabasePath() + `
-workspace:
-  worktree_root: ` + ws.Path("worktrees") + `
-scheduler:
-  max_concurrent_tasks: 1
-  max_retries_per_step: 0
-`
-	return writeConfig(t, content)
-}
+// 登记本包 6 条用例，顺序与源文件一致。
+var (
+	_ = register("project-lifecycle", runProjectLifecycle, databaseDecl()...)
+	_ = register("project-add-rejects-invalid-input", runProjectAddRejectsInvalidInput, databaseDecl()...)
+	_ = register("project-add-rejects-duplicate-id", runProjectAddRejectsDuplicateID, databaseDecl()...)
+	_ = register("task-create-uses-project-defaults", runTaskCreateUsesProjectDefaults, databaseDecl()...)
+	_ = register("task-create-requires-project", runTaskCreateRequiresProject, databaseDecl()...)
+	_ = register("task-create-rejects-unknown-project", runTaskCreateRejectsUnknownProject, databaseDecl()...)
+)
 
-// seedProjectPrerequisites 在测试数据库中写入执行节点与角色，返回节点标识。
-//
-// 任务创建会校验节点与角色是否真实存在，因此项目相关的建任务用例都要先落这些记录。
-func seedProjectPrerequisites(t *testing.T, ws *testkit.Workspace) string {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	t.Cleanup(cancel)
-	db, err := sqlite.Open(ctx, sqlite.Options{Path: ws.DatabasePath()})
-	if err != nil {
-		t.Fatalf("打开数据库失败: %v", err)
-	}
-	t.Cleanup(func() {
-		if closeErr := db.Close(); closeErr != nil {
-			t.Errorf("关闭数据库失败: %v", closeErr)
-		}
-	})
-	now := time.Now().UTC()
-	host, err := domain.NewExecutionHost(
-		"", "测试节点", "127.0.0.1", 0, "deploy", "", now,
-		domain.WithPrivateKey(testPrivateKeyPath(t)),
-	)
-	if err != nil {
-		t.Fatalf("构造执行节点失败: %v", err)
-	}
-	if err := db.CreateExecutionHost(ctx, host); err != nil {
-		t.Fatalf("写入执行节点失败: %v", err)
-	}
-	for _, seed := range []struct {
-		id       string
-		roleType domain.RoleType
-	}{
-		{"planner", domain.RoleTypePlanner},
-		{"developer", domain.RoleTypeDeveloper},
-	} {
-		role, err := domain.NewRole(
-			seed.id,
-			seed.roleType,
-			"provider/model-id",
-			"角色提示词",
-			domain.DefaultToolsPolicy(seed.roleType),
-			now,
-		)
-		if err != nil {
-			t.Fatalf("构造角色失败: %v", err)
-		}
-		role.ID = domain.ID(seed.id)
-		if err := db.CreateRole(ctx, role); err != nil {
-			t.Fatalf("写入角色失败: %v", err)
-		}
-	}
-	return host.ID.String()
-}
-
-// projectAddArgs 返回一份完整的 project add 参数（不含 --config）。
-func projectAddArgs(projectID, name string) []string {
-	return []string{
-		"project", "add",
-		"--id", projectID,
-		"--name", name,
-		"--repo", "ssh://git.example.com/team/repo",
-		"--base", "main",
-		"--environment", "go",
-	}
-}
-
-// TestProjectLifecycle 校验项目命令组的完整生命周期。
+// 原 TestProjectLifecycle 校验项目命令组的完整生命周期。
 //
 // 项目是任务的必填关联对象，因此"能否用 CLI 登记一个项目"直接决定 CLI 能否创建任务。
-func TestProjectLifecycle(t *testing.T) {
-	t.Parallel()
-	ws := testkit.New(t)
+func runProjectLifecycle(t *testrunner.Context) {
+	ws := caseWorkspace(t)
 	configPath := projectTestConfig(t, ws)
 
 	args := append(projectAddArgs("demo-service", "示例服务"),
@@ -177,10 +98,9 @@ func TestProjectLifecycle(t *testing.T) {
 	}
 }
 
-// TestProjectAddRejectsInvalidInput 校验非法输入在写入前被拒绝。
-func TestProjectAddRejectsInvalidInput(t *testing.T) {
-	t.Parallel()
-	ws := testkit.New(t)
+// 原 TestProjectAddRejectsInvalidInput 校验非法输入在写入前被拒绝。
+func runProjectAddRejectsInvalidInput(t *testrunner.Context) {
+	ws := caseWorkspace(t)
 	configPath := projectTestConfig(t, ws)
 	cases := map[string][]string{
 		"标识非法": {
@@ -217,10 +137,9 @@ func TestProjectAddRejectsInvalidInput(t *testing.T) {
 	}
 }
 
-// TestProjectAddRejectsDuplicateID 校验重复标识失败并给出可读原因。
-func TestProjectAddRejectsDuplicateID(t *testing.T) {
-	t.Parallel()
-	ws := testkit.New(t)
+// 原 TestProjectAddRejectsDuplicateID 校验重复标识失败并给出可读原因。
+func runProjectAddRejectsDuplicateID(t *testrunner.Context) {
+	ws := caseWorkspace(t)
 	configPath := projectTestConfig(t, ws)
 	args := append(projectAddArgs("demo-service", "示例服务"), "--config", configPath)
 	if code, _, stderr := run(t, args...); code != 0 {
@@ -235,12 +154,11 @@ func TestProjectAddRejectsDuplicateID(t *testing.T) {
 	}
 }
 
-// TestTaskCreateUsesProjectDefaults 校验建任务时未给出的执行配置从项目继承。
-func TestTaskCreateUsesProjectDefaults(t *testing.T) {
-	t.Parallel()
-	ws := testkit.New(t)
+// 原 TestTaskCreateUsesProjectDefaults 校验建任务时未给出的执行配置从项目继承。
+func runTaskCreateUsesProjectDefaults(t *testrunner.Context) {
+	ws := caseWorkspace(t)
 	configPath := projectTestConfig(t, ws)
-	hostID := seedProjectPrerequisites(t, ws)
+	hostID := seedProjectPrerequisites(t)
 
 	code, _, stderr := run(
 		t,
@@ -275,12 +193,11 @@ func TestTaskCreateUsesProjectDefaults(t *testing.T) {
 	}
 }
 
-// TestTaskCreateRequiresProject 校验缺少项目标识时建任务失败。
-func TestTaskCreateRequiresProject(t *testing.T) {
-	t.Parallel()
-	ws := testkit.New(t)
+// 原 TestTaskCreateRequiresProject 校验缺少项目标识时建任务失败。
+func runTaskCreateRequiresProject(t *testrunner.Context) {
+	ws := caseWorkspace(t)
 	configPath := projectTestConfig(t, ws)
-	hostID := seedProjectPrerequisites(t, ws)
+	hostID := seedProjectPrerequisites(t)
 
 	code, _, stderr := run(
 		t,
@@ -302,12 +219,11 @@ func TestTaskCreateRequiresProject(t *testing.T) {
 	}
 }
 
-// TestTaskCreateRejectsUnknownProject 校验项目不存在时建任务失败。
-func TestTaskCreateRejectsUnknownProject(t *testing.T) {
-	t.Parallel()
-	ws := testkit.New(t)
+// 原 TestTaskCreateRejectsUnknownProject 校验项目不存在时建任务失败。
+func runTaskCreateRejectsUnknownProject(t *testrunner.Context) {
+	ws := caseWorkspace(t)
 	configPath := projectTestConfig(t, ws)
-	hostID := seedProjectPrerequisites(t, ws)
+	hostID := seedProjectPrerequisites(t)
 
 	code, _, stderr := run(
 		t,
