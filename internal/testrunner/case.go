@@ -2,8 +2,8 @@
 //
 // 编排进程负责选择用例、按作用域分配资源、启动 worker 并把结果汇总成统一报告；每个 Case
 // 都在独立 worker 子进程中执行（同一二进制以 --exec-case 启动），因此 panic、os.Exit 与
-// 包级全局状态都只影响该 Case。R1 只冻结进程模型与接口形态：并发调度、真实依赖资源分配与
-// 零残留核验分别在 R2/R3/R7 补齐。
+// 包级全局状态都只影响该 Case。并发只由 scheduler.go 的调度器决定（R3），资源分配与
+// 零残留核验由 R2 落地；用例无法通过代码自行扩大并发。
 package testrunner
 
 import (
@@ -26,7 +26,15 @@ type Case struct {
 	Group string
 	// Timeout 是该用例的执行上限，零值使用运行级默认超时。
 	Timeout time.Duration
-	// Parallel 表示调度器允许该用例与其他用例并行；R1 串行执行，字段只为接口冻结。
+	// Package 是该用例所属的 Go 测试包目录（例如 tests/integration/local/scheduler）。
+	//
+	// 它是串行作用域与包级串行声明的输入：非空时串行作用域取该包，R2 冻结的
+	// SerialPackageReason 按它判定整包串行；为空时串行作用域退化为 Group。
+	Package string
+	// Parallel 表示调度器允许该用例与其他用例并行。
+	//
+	// false 表示该用例在串行作用域内独占执行（对齐 go test 里未标记 t.Parallel 的用例）；
+	// 并发最终由调度器决定，用例无法自行扩大或缩小。
 	Parallel bool
 	// Resources 是用例需要的资源声明，由编排进程分配后以句柄形式注入 worker。
 	Resources []ResourceDecl
@@ -59,6 +67,9 @@ func (c Case) Validate() error {
 	}
 	if c.Timeout < 0 {
 		return fmt.Errorf("用例 %q 的 Timeout 不能为负", c.ID)
+	}
+	if strings.ContainsAny(c.Package, " \t\r\n") {
+		return fmt.Errorf("用例 %q 的 Package %q 不能包含空白字符", c.ID, c.Package)
 	}
 	seen := make(map[string]struct{}, len(c.Resources))
 	for _, decl := range c.Resources {

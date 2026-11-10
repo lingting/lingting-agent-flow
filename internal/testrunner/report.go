@@ -28,8 +28,12 @@ type Report struct {
 	DefaultTimeoutMS int64             `json:"default_timeout_ms"`
 	RealTests        RealTestsDecision `json:"real_tests"`
 	Totals           Totals            `json:"totals"`
-	Cases            []CaseResult      `json:"cases"`
-	Resources        []ResourceResult  `json:"resources"`
+	// Concurrency 是整次运行的并发观测（V3 R3 §4.6）。
+	Concurrency ConcurrencyReport `json:"concurrency"`
+	// Cancellation 是运行级取消结论；未取消时 cancelled 为 false。
+	Cancellation CancellationRecord `json:"cancellation"`
+	Cases        []CaseResult       `json:"cases"`
+	Resources    []ResourceResult   `json:"resources"`
 	// BuildArtifacts 记录按内容指纹缓存的构建产物；R2 冻结契约，真实构建在 R5 落地。
 	BuildArtifacts []BuildArtifact `json:"build_artifacts"`
 	// Residual 是运行级零残留终检结论。
@@ -83,7 +87,40 @@ type Totals struct {
 	Errors   int `json:"errors"`
 }
 
-// ResidualCheck 记录运行级零残留终检的结论。
+// ConcurrencyReport 是整次运行的并发观测：上限、峰值、排队与 worker 启动次数。
+//
+// 判断并发是否真的发生不能只看耗时：parallel_limit 是调度器的硬上限，max_in_flight 是
+// 实际观测到的峰值，queued_ms_total 与 queued_ms_max 用来说明用例为什么等待。
+type ConcurrencyReport struct {
+	// ParallelLimit 是同时在飞的 worker 上限（--parallel）。
+	ParallelLimit int `json:"parallel_limit"`
+	// MaxInFlight 是本次运行观测到的最大在飞用例数。
+	MaxInFlight int `json:"max_in_flight"`
+	// WorkerLaunches 是本次运行启动的 worker 进程数。
+	WorkerLaunches int `json:"worker_launches"`
+	// QueuedTotalMS 是全部用例排队时长之和。
+	QueuedTotalMS int64 `json:"queued_ms_total"`
+	// QueuedMaxMS 是单条用例的最长排队时长。
+	QueuedMaxMS int64 `json:"queued_ms_max"`
+}
+
+// CancellationRecord 是运行级取消结论。
+//
+// 取消不新增第七种用例状态：被中断的用例记 error 并注明「运行被取消」，从未派发的用例
+// 同样记 error 并注明未派发执行；取消原因记在这里。
+type CancellationRecord struct {
+	// Cancelled 报告本次运行是否被取消。
+	Cancelled bool `json:"cancelled"`
+	// Reason 是取消原因（中断信号或自检注入来源）。
+	Reason string `json:"reason,omitempty"`
+	// At 是编排进程确认取消的时刻。
+	At time.Time `json:"at,omitempty"`
+	// CancelledCases 是被中断的在跑用例数。
+	CancelledCases int `json:"cancelled_cases"`
+	// UndispatchedCases 是取消后从未派发的用例数。
+	UndispatchedCases int `json:"undispatched_cases"`
+}
+
 // ResidualCheck 记录运行级零残留终检的结论。
 type ResidualCheck struct {
 	// Status 取 passed / failed / not-applicable；正常运行结束后不得为 not-run。
@@ -160,6 +197,24 @@ func (r Report) Summary() string {
 		r.Totals.Timeouts,
 		r.Totals.Errors,
 	)
+	fmt.Fprintf(
+		&builder,
+		"并发：上限 %d / 峰值 %d / 排队合计 %dms（最长 %dms）/ worker 启动 %d\n",
+		r.Concurrency.ParallelLimit,
+		r.Concurrency.MaxInFlight,
+		r.Concurrency.QueuedTotalMS,
+		r.Concurrency.QueuedMaxMS,
+		r.Concurrency.WorkerLaunches,
+	)
+	if r.Cancellation.Cancelled {
+		fmt.Fprintf(
+			&builder,
+			"取消：%s（在跑 %d / 未派发 %d）\n",
+			r.Cancellation.Reason,
+			r.Cancellation.CancelledCases,
+			r.Cancellation.UndispatchedCases,
+		)
+	}
 	fmt.Fprintf(&builder, "零残留：%s", r.Residual.Status)
 	if r.Residual.Reason != "" {
 		fmt.Fprintf(&builder, "（%s）", r.Residual.Reason)

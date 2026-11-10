@@ -64,13 +64,17 @@ func missingProviderError(resourceType string) error {
 	}
 }
 
-// FaultInjection 是只用于自检零残留核验的故障注入：让指定类型的释放与自证必定失败。
+// FaultInjection 是只用于自检的故障注入，正常运行全部保持零值。
 //
-// 它只能由 --selfcheck-fail-release 打开，正常运行不会使用；注入生效时资源结论与
+// 注入只能由 --selfcheck-* 参数打开；注入生效时资源结论、用例警告、取消原因与
 // residual_check 的原因都会写明注入来源，避免被当成真实缺陷。
 type FaultInjection struct {
 	// FailReleaseType 是要注入释放失败的类型，空值表示不注入。
 	FailReleaseType string
+	// CancelOnCase 让调度器在派发该用例后立即取消整次运行，空值表示不注入。
+	CancelOnCase string
+	// LateResult 让编排进程为已定型的 timeout / error 用例写出伪造的迟到结果文件。
+	LateResult bool
 }
 
 // applyFaultInjection 包装指定类型的提供者，使它的释放与自证必定失败。

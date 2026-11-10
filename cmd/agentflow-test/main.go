@@ -5,7 +5,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"net"
@@ -36,7 +35,8 @@ func run(args []string) int {
 	list := flags.Bool("list", false, "列出已注册用例后退出")
 	artifactDir := flags.String("artifact-dir", ".test-artifacts", "产物根目录")
 	timeout := flags.Duration("timeout", testrunner.DefaultCaseTimeout, "用例默认执行上限")
-	grace := flags.Duration("grace", testrunner.DefaultWorkerGrace, "超时后等待 worker 自行收尾的宽限时间")
+	grace := flags.Duration("grace", testrunner.DefaultWorkerGrace, "超时或取消后等待 worker 自行收尾的宽限时间")
+	parallel := flags.Int("parallel", testrunner.DefaultParallel, "同时在跑的 worker 上限")
 	realTests := flags.String("real-tests", testrunner.RealTestsAuto, "真实依赖授权：auto/on/off")
 	execCase := flags.String("exec-case", "", "worker 内部参数：执行单个用例")
 	resultFile := flags.String("result-file", "", "worker 内部参数：结果文件路径")
@@ -49,6 +49,16 @@ func run(args []string) int {
 		"selfcheck-fail-release",
 		"",
 		"仅自检用：让该资源类型的释放与自证必定失败，用于验证零残留终检",
+	)
+	cancelOn := flags.String(
+		"selfcheck-cancel-on",
+		"",
+		"仅自检用：派发该用例后立即取消整次运行，用于验证取消路径",
+	)
+	lateResult := flags.Bool(
+		"selfcheck-late-result",
+		false,
+		"仅自检用：为已定型的 timeout / error 用例写出伪造的迟到结果文件",
 	)
 	if err := flags.Parse(args); err != nil {
 		return exitUsage
@@ -82,14 +92,25 @@ func run(args []string) int {
 		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
 		return exitUsage
 	}
-	report, err := testrunner.Run(context.Background(), testrunner.RunOptions{
+	if *parallel < 1 {
+		fmt.Fprintf(os.Stderr, "错误: --parallel 必须大于等于 1，当前为 %d\n", *parallel)
+		return exitUsage
+	}
+	cancelCtx, stopSignals := testrunner.SignalContext()
+	defer stopSignals()
+	report, err := testrunner.Run(cancelCtx, testrunner.RunOptions{
 		Cases:          cases,
 		Selectors:      flags.Args(),
 		DefaultTimeout: *timeout,
 		Grace:          *grace,
+		Parallel:       *parallel,
 		ArtifactRoot:   *artifactDir,
 		RealTests:      decision,
-		FaultInjection: testrunner.FaultInjection{FailReleaseType: *failRelease},
+		FaultInjection: testrunner.FaultInjection{
+			FailReleaseType: *failRelease,
+			CancelOnCase:    *cancelOn,
+			LateResult:      *lateResult,
+		},
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "错误: %v\n", err)

@@ -33,7 +33,8 @@ var resourceProfiles = []ResourceProfile{
 	{
 		Type:         ResourceSQLiteDB,
 		DefaultScope: ScopeCaseExclusive,
-		Note:         "每个用例一个数据库文件，文件之间没有共享状态",
+		Capacity:     4,
+		Note:         "每个用例一个数据库文件，文件之间没有共享状态；建库与连接在高并发下会超时，容量按 4 收紧",
 	},
 	{
 		Type:         ResourceLocalHTTPServer,

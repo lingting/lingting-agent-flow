@@ -31,6 +31,10 @@ func ExitCodeFor(status string) int {
 
 // Timings 记录 worker 的关键时间点，用于观测 worker 启动开销。
 type Timings struct {
+	// QueueEnterAt 是用例进入调度队列的时刻，由编排进程填写。
+	QueueEnterAt time.Time `json:"queue_enter_at,omitempty"`
+	// DispatchAt 是调度器决定派发（或判定无法派发）的时刻，由编排进程填写。
+	DispatchAt time.Time `json:"dispatch_at,omitempty"`
 	// WorkerSpawnAt 是编排进程启动 worker 的时刻。
 	WorkerSpawnAt time.Time `json:"worker_spawn_at,omitempty"`
 	// WorkerEntryAt 是 worker 进程进入执行入口的时刻。

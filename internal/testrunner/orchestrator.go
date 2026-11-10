@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,13 +21,15 @@ type RunOptions struct {
 	Selectors      []string
 	DefaultTimeout time.Duration
 	Grace          time.Duration
-	ArtifactRoot   string
-	RunID          string
-	RealTests      RealTestsDecision
-	Providers      *Providers
+	// Parallel 是同时在飞的 worker 上限；零值取 DefaultParallel。
+	Parallel     int
+	ArtifactRoot string
+	RunID        string
+	RealTests    RealTestsDecision
+	Providers    *Providers
 	// ProviderOptions 在 Providers 为空时用于构造默认提供者集合；Root 与 RunID 由编排进程补全。
 	ProviderOptions ProviderOptions
-	// FaultInjection 只用于自检零残留核验本身，正常运行保持零值。
+	// FaultInjection 只用于自检，正常运行保持零值。
 	FaultInjection FaultInjection
 	Executable     string
 	Output         io.Writer
@@ -46,6 +49,14 @@ func Run(ctx context.Context, opts RunOptions) (Report, error) {
 	selected := Select(cases, selectors)
 	if len(selected) == 0 {
 		return Report{}, fmt.Errorf("选择条件 %q 没有命中任何用例", strings.Join(opts.Selectors, ","))
+	}
+	cancelOn := strings.TrimSpace(opts.FaultInjection.CancelOnCase)
+	if cancelOn != "" && !selectedContains(selected, cancelOn) {
+		return Report{}, fmt.Errorf("自检取消注入的目标用例 %q 不在本次选择内", cancelOn)
+	}
+	parallel := opts.Parallel
+	if parallel <= 0 {
+		parallel = DefaultParallel
 	}
 	defaultTimeout := opts.DefaultTimeout
 	if defaultTimeout <= 0 {
@@ -111,37 +122,32 @@ func Run(ctx context.Context, opts RunOptions) (Report, error) {
 		Selection:        selectorStrings(selectors),
 		DefaultTimeoutMS: defaultTimeout.Milliseconds(),
 		RealTests:        opts.RealTests,
-		Cases:            make([]CaseResult, 0, len(selected)),
 	}
-	for index, c := range selected {
-		result := runCase(ctx, runCaseOptions{
-			Case:           c,
-			Layout:         layout,
-			Providers:      providers,
-			Shared:         shared,
-			Executable:     executable,
-			DefaultTimeout: defaultTimeout,
-			Grace:          grace,
-			RunID:          runID,
-			RealTests:      opts.RealTests,
-		})
-		report.Cases = append(report.Cases, result)
+	scheduled := runSchedule(ctx, runCaseOptions{
+		Layout:         layout,
+		Providers:      providers,
+		Shared:         shared,
+		Executable:     executable,
+		DefaultTimeout: defaultTimeout,
+		Grace:          grace,
+		RunID:          runID,
+		RealTests:      opts.RealTests,
+	}, selected, parallel, cancelOn, output)
+	report.Cases = scheduled.Cases
+	report.Concurrency = scheduled.Concurrency
+	report.Cancellation = scheduled.Cancellation
+	for _, result := range report.Cases {
 		if caseAllocated(result) {
 			residual.markAllocated()
 		}
-		fmt.Fprintf(
-			output,
-			"[%d/%d] %-7s %s (%dms)\n",
-			index+1,
-			len(selected),
-			strings.ToUpper(result.Status),
-			result.ID,
-			result.DurationMS,
-		)
 	}
-	report.Resources = shared.releaseAll(ctx, providers)
+	// 用例结论在这里已经定型：之后写出的结果文件只能留痕，不能改写结论。
+	detectLateResults(report.Cases, opts.FaultInjection.LateResult)
+	// 取消后仍要释放资源并执行终检：清理阶段使用与取消解耦的上下文。
+	cleanupCtx := context.WithoutCancel(ctx)
+	report.Resources = shared.releaseAll(cleanupCtx, providers)
 	report.BuildArtifacts = []BuildArtifact{}
-	report.Residual = residual.finalize(ctx, providers)
+	report.Residual = residual.finalize(cleanupCtx, providers)
 	report.Totals = summarize(report.Cases)
 	report.FinishedAt = time.Now()
 	report.DurationMS = durationMS(startedAt, report.FinishedAt)
@@ -164,11 +170,15 @@ type runCaseOptions struct {
 	Grace          time.Duration
 	RunID          string
 	RealTests      RealTestsDecision
+	// OnWorkerSpawn 在 worker 真正启动后回调，用于观测启动次数与触发取消自检。
+	OnWorkerSpawn func(caseID string)
 }
 
 // runCase 分配资源、启动 worker 并汇总单条用例结论。
 func runCase(ctx context.Context, opts runCaseOptions) CaseResult {
 	c := opts.Case
+	// 释放与自证不能被取消中断：取消路径同样必须先回收已分配的资源，再写报告。
+	cleanupCtx := context.WithoutCancel(ctx)
 	paths := opts.Layout.CaseArtifactPaths(c.ID)
 	result := CaseResult{ID: c.ID, Group: c.Group, Status: StatusError, Artifacts: paths}
 	if err := opts.Layout.CreateCaseDir(paths); err != nil {
@@ -178,8 +188,14 @@ func runCase(ctx context.Context, opts runCaseOptions) CaseResult {
 	handles, resources, err := acquireCaseResources(ctx, opts)
 	result.Resources = resources
 	if err != nil {
+		if ctx.Err() != nil {
+			// 取消发生在分配资源期间：结论统一按取消口径记录，具体失败原因留在日志里。
+			result.Message = caseCancelledMessage
+			releaseExclusive(cleanupCtx, opts.Providers, handles, result.Resources)
+			return result
+		}
 		result.Message = err.Error()
-		releaseExclusive(ctx, opts.Providers, handles, result.Resources)
+		releaseExclusive(cleanupCtx, opts.Providers, handles, result.Resources)
 		return result
 	}
 	timeout := c.Timeout
@@ -192,17 +208,18 @@ func runCase(ctx context.Context, opts runCaseOptions) CaseResult {
 		file := HandleFile{RunID: opts.RunID, CaseID: c.ID, Handles: handles}
 		if err := WriteHandleFile(handlePath, file); err != nil {
 			result.Message = err.Error()
-			releaseExclusive(ctx, opts.Providers, handles, result.Resources)
+			releaseExclusive(cleanupCtx, opts.Providers, handles, result.Resources)
 			return result
 		}
 	}
-	observation, err := runWorkerProcess(workerInvocation{
+	observation, err := runWorkerProcess(ctx, workerInvocation{
 		Executable:      opts.Executable,
 		Case:            c,
 		Timeout:         timeout,
 		Grace:           opts.Grace,
 		HandlePath:      handlePath,
 		ResultPath:      paths.Result,
+		OnSpawn:         spawnObserver(opts.OnWorkerSpawn, c.ID),
 		ArtifactDir:     paths.ArtifactDir,
 		LogPaths:        paths,
 		RealTests:       opts.RealTests.Allowed,
@@ -213,8 +230,16 @@ func runCase(ctx context.Context, opts runCaseOptions) CaseResult {
 	} else {
 		applyObservation(&result, observation)
 	}
-	releaseExclusive(ctx, opts.Providers, handles, result.Resources)
+	releaseExclusive(cleanupCtx, opts.Providers, handles, result.Resources)
 	return result
+}
+
+// spawnObserver 把用例的 worker 启动事件转成回调；没有回调时返回 nil，不产生额外开销。
+func spawnObserver(observer func(caseID string), caseID string) func() {
+	if observer == nil {
+		return nil
+	}
+	return func() { observer(caseID) }
 }
 
 // applyObservation 把 worker 观测结果写入用例结论；没有可信结果时如实标为异常。
@@ -226,6 +251,10 @@ func applyObservation(result *CaseResult, observation workerObservation) {
 	}
 	result.Timings.WorkerSpawnAt = observation.SpawnAt
 	switch {
+	case observation.Cancelled:
+		// 取消不伪造结论：被中断的用例一律记 error 并注明运行被取消（R3 D2）。
+		result.Status = StatusError
+		result.Message = caseCancelledMessage
 	case observation.TimedOut:
 		result.Status = StatusTimeout
 		result.Message = "用例超过执行上限，编排进程已终止 worker 进程树"
@@ -340,7 +369,11 @@ type sharedEntry struct {
 }
 
 // sharedResources 持有整次运行共享的资源，运行结束时统一释放。
+//
+// 并发下可能有多个用例同时声明同一份共享资源：获取过程整体串行化（R3 D4），
+// 同一声明只会分配一次，不会产生两份句柄。
 type sharedResources struct {
+	mu      sync.Mutex
 	entries map[string]*sharedEntry
 	order   []string
 }
@@ -355,7 +388,9 @@ func (s *sharedResources) acquire(
 	providers *Providers,
 	decl ResourceDecl,
 ) (Handle, ResourceResult, error) {
-	key := decl.Type + "|" + decl.Name
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := sharedResourceKey(decl)
 	if entry, ok := s.entries[key]; ok {
 		return entry.handle, entry.result, nil
 	}
@@ -383,6 +418,8 @@ func (s *sharedResources) acquire(
 //
 // 逆序释放是共享资源之间的依赖要求：后分配的资源依赖先分配的连接或服务，必须先撤销。
 func (s *sharedResources) releaseAll(ctx context.Context, providers *Providers) []ResourceResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	results := make([]ResourceResult, 0, len(s.order))
 	for index := len(s.order) - 1; index >= 0; index-- {
 		entry := s.entries[s.order[index]]
@@ -441,4 +478,14 @@ func exitCodeForReport(report Report) int {
 		return ExitFailure
 	}
 	return ExitOK
+}
+
+// selectedContains 报告选择结果里是否包含该用例 ID。
+func selectedContains(cases []Case, id string) bool {
+	for _, c := range cases {
+		if c.ID == id {
+			return true
+		}
+	}
+	return false
 }

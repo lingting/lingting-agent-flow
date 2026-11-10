@@ -61,6 +61,11 @@ R2 已落地并冻结：16 类资源的 payload / Spec 契约、13 类提供者�
 `Verify` 与 `Snapshot`、资源级自证与运行级基线比对终检、容量 / 独占键 / 包级串行三类调度输入，以及
 `tests/runner/resourcecheck` 的 8 条本机资源自检用例。远程提供者本阶段只做编译与静态检查，未在真实
 Pi / SSH / 远程 Docker 上运行；`node-worker` / `frontend-dev-server` / `browser` 仍由 R6 补齐。
+R3 已落地并冻结：`internal/testrunner/scheduler.go` 是唯一并发决策者（`--parallel` 默认 8、容量、独占键、
+`Case.Package` 串行作用域与包级串行），`cancel.go` 给出「停止派发 → 宽限 → 终止进程树 → 释放资源 →
+零残留终检」的取消时序，`late.go` 让已定型结论不被迟到结果文件改写；报告新增 `concurrency` 与
+`cancellation`，用例 `timings` 新增 `queue_enter_at` / `dispatch_at`。9 个调度场景由
+`tests/runner/concurrencycheck` 覆盖（`sqlite-db` 容量在 R3 收紧为 4）。
 
 ---
 
@@ -102,7 +107,7 @@ R2–R7 只改代码、用例资产与本目录内的阶段文档；`Makefile`�
 | R0 | 已完成 | 用例与资源盘点、四项 P0 决策冻结 | [R0](R0/README.md) |
 | R1 | 已完成 | 进程模型与 Case / Resource / Report 接口、可运行骨架 | [R1](R1/README.md) |
 | R2 | 已完成 | 资源契约与提供者、共享/独享落位、零残留两级核验 | [R2](R2/README.md) |
-| R3 | 待执行 | 并发调度、容量与互斥、取消与进程树终止 | [R3](R3/README.md) |
+| R3 | 已完成 | 并发调度、容量与互斥、取消与进程树终止、迟到结果防护 | [R3](R3/README.md) |
 | R4 | 待执行 | 试点：真实服务进程的启动、就绪、取消与零残留 | [R4](R4/README.md) |
 | R4.5 | 待执行 | Go 集成测试单子目录试点，验证 Case API 与迁移成本 | [R4.5](R4.5/README.md) |
 | R5 | 待执行 | 迁移 18 个包 / 328 个集成与 E2E 用例，覆盖对账可执行 | [R5](R5/README.md) |
@@ -186,6 +191,8 @@ R2 ──> R3 ──> R4 ──> R4.5 ──> R5 ──> R7 ──> R9
 | `tests/unit` 仍依赖 `go test` | 路径 C 的既定结果；报告层聚合，不改写断言 | R0 |
 | `t.Parallel()` 语义降级 | 1744 处统一映射为调度器属性；6 个 `sync.Once` 文件逐个人工判定 | R5 |
 | Windows 进程树终止不可靠 | `taskkill /T /F` + 回收失败判 error，不用「已杀」冒充通过 | R1/R3 |
+| 取消只能通过终止 worker 进程树生效 | worker 与编排进程之间不新增取消 IPC；宽限期后强制终止，回收失败判 error | R3 |
+| 包级串行 / 独占键声明误配 | 声明只来自用例与 R2 冻结表，冲突表现为排队而非静默并行；R4.5 / R5 逐包复核 | R3/R5 |
 | 前端冷启动开销 | R6 先测基线，再由用户确认可接受阈值后才批量迁移 | R6 |
 | 共享 dev server 的写污染 | 写入必须可命名空间化，否则改独享后端 | R6 |
 | 镜像构建属写入语义 | 构建产物走独立缓存通道，不与 `Destructive + Shared` 混用 | R2 |
