@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -19,6 +21,9 @@ type fatalSignal struct {
 func (f fatalSignal) Error() string {
 	return "用例被提前终止"
 }
+
+// testrunnerPackagePrefix 是本包全部函数的名称前缀，失败定位会跳过这些栈帧。
+const testrunnerPackagePrefix = "github.com/lingting/agentflow/internal/testrunner."
 
 // Context 是 Case 的执行上下文，是 testing.T 能力的最小替代集合。
 //
@@ -38,6 +43,10 @@ type Context struct {
 	skipReason string
 	warnings   []string
 	tempSeq    int
+	// cleanups 是用例结束时要执行的清理函数，按注册顺序保存、按相反顺序执行。
+	cleanups []func()
+	// helpers 是通过 Helper 标记的辅助函数名，失败定位会跳过这些函数。
+	helpers map[string]struct{}
 }
 
 // newContext 构造 worker 内的执行上下文；worker 是唯一调用方。
@@ -104,7 +113,16 @@ func (c *Context) Warnf(format string, args ...any) {
 
 // Errorf 记录一次失败，用例可以继续执行后续断言。
 func (c *Context) Errorf(format string, args ...any) {
-	message := fmt.Sprintf(format, args...)
+	c.recordFailure(fmt.Sprintf(format, args...))
+}
+
+// recordFailure 追加一条失败，并在 worker 的标准错误里给出调用位置。
+//
+// 调用位置跳过 Helper 标记的辅助函数与 testrunner 自身，因此定位指向真正的断言行。
+func (c *Context) recordFailure(message string) {
+	if site := c.callSite(); site != "" {
+		message = site + ": " + message
+	}
 	c.mu.Lock()
 	c.failures = append(c.failures, message)
 	c.mu.Unlock()
@@ -117,12 +135,23 @@ func (c *Context) Fatalf(format string, args ...any) {
 	panic(fatalSignal{})
 }
 
+// Fatal 记录失败并立即结束用例主体，等价于 testing.T.Fatal。
+func (c *Context) Fatal(args ...any) {
+	c.Errorf("%s", fmt.Sprint(args...))
+	panic(fatalSignal{})
+}
+
 // Skipf 记录跳过原因并立即结束用例主体，等价于 testing.T.Skipf。
 func (c *Context) Skipf(format string, args ...any) {
 	c.mu.Lock()
 	c.skipReason = fmt.Sprintf(format, args...)
 	c.mu.Unlock()
 	panic(fatalSignal{skip: true})
+}
+
+// Skip 记录跳过原因并立即结束用例主体，等价于 testing.T.Skip。
+func (c *Context) Skip(args ...any) {
+	c.Skipf("%s", fmt.Sprint(args...))
 }
 
 // Failed 报告用例是否已经记录过失败。
@@ -185,4 +214,93 @@ func (c *Context) Context() context.Context {
 func (c *Context) Deadline() time.Time {
 	deadline, _ := c.ctx.Deadline()
 	return deadline
+}
+
+// Helper 把调用它的函数标记为辅助函数，等价于 testing.T.Helper。
+//
+// 失败定位会跳过这些函数，指向真正做断言的位置；辅助函数自己调用 Helper 是唯一的
+// 声明方式，用例侧不需要额外的登记。
+func (c *Context) Helper() {
+	pc, _, _, ok := runtime.Caller(1)
+	if !ok {
+		return
+	}
+	function := runtime.FuncForPC(pc)
+	if function == nil {
+		return
+	}
+	c.mu.Lock()
+	if c.helpers == nil {
+		c.helpers = make(map[string]struct{})
+	}
+	c.helpers[function.Name()] = struct{}{}
+	c.mu.Unlock()
+}
+
+// Cleanup 注册用例结束时执行的清理函数，等价于 testing.T.Cleanup。
+//
+// 清理按注册顺序的相反顺序执行；用例以失败、跳过或 panic 结束时同样执行。清理函数
+// 记录失败会把用例判为失败，清理函数 panic 只记为该清理失败，不影响其余清理。
+func (c *Context) Cleanup(fn func()) {
+	if fn == nil {
+		return
+	}
+	c.mu.Lock()
+	c.cleanups = append(c.cleanups, fn)
+	c.mu.Unlock()
+}
+
+// runCleanups 按后进先出执行已注册的清理函数；worker 在用例主体结束后调用。
+func (c *Context) runCleanups() {
+	for {
+		c.mu.Lock()
+		remaining := len(c.cleanups)
+		if remaining == 0 {
+			c.mu.Unlock()
+			return
+		}
+		fn := c.cleanups[remaining-1]
+		c.cleanups = c.cleanups[:remaining-1]
+		c.mu.Unlock()
+		c.runCleanup(fn)
+	}
+}
+
+// runCleanup 执行单个清理函数，把 panic 转成一次失败而不外抛。
+func (c *Context) runCleanup(fn func()) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			c.Errorf("清理函数 panic: %v", recovered)
+		}
+	}()
+	fn()
+}
+
+// callSite 返回第一条不属于辅助函数、也不属于 testrunner 自身的调用位置。
+func (c *Context) callSite() string {
+	c.mu.Lock()
+	helpers := make(map[string]struct{}, len(c.helpers))
+	for name := range c.helpers {
+		helpers[name] = struct{}{}
+	}
+	c.mu.Unlock()
+	pcs := make([]uintptr, 24)
+	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
+	for {
+		frame, more := frames.Next()
+		if frame.Function != "" && !helperFrame(frame.Function, helpers) {
+			return fmt.Sprintf("%s:%d", frame.File, frame.Line)
+		}
+		if !more {
+			return ""
+		}
+	}
+}
+
+// helperFrame 判断一个栈帧是否应当从失败定位里跳过。
+func helperFrame(name string, helpers map[string]struct{}) bool {
+	if _, ok := helpers[name]; ok {
+		return true
+	}
+	return strings.HasPrefix(name, testrunnerPackagePrefix)
 }

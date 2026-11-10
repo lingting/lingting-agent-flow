@@ -1,15 +1,11 @@
-// 多任务资源隔离集成测试。
+// 多任务资源隔离：迁移自 tests/integration/local/scheduler/isolation_test.go。
 //
-// 用例使用真实 SQLite 与正式迁移，断言的对象是数据库里真实留下的任务、容器、
-// 工作区初始化记录、Attempt 与 Session，而不是方法的返回值。
-//
-// 覆盖的核心约束：
-//   - 两个任务各自持有独立的容器登记记录，互不引用；
-//   - 任务 A 的容器不能被任务 B 当作自己的执行容器（跨任务串扰）；
-//   - 任务 A 的工作区初始化记录不能作为任务 B 的就绪证据；
-//   - Session 的文件路径按任务 / 步骤 / 尝试 / 会话 / 调用分层，不互相覆盖；
-//   - 归档任务 A 不会移动或删除任务 B 的文件。
-package scheduler_test
+// 用例使用真实 SQLite 与正式迁移，断言的对象是数据库里真实留下的任务、容器、工作区
+// 初始化记录、Attempt 与 Session，而不是方法的返回值。覆盖的约束：两个任务各自持有独立
+// 的容器登记记录；任务 A 的容器不能被任务 B 当作自己的执行容器；任务 A 的工作区初始化
+// 记录不能作为任务 B 的就绪证据；Session 路径按任务 / 步骤 / 尝试 / 会话 / 调用分层；
+// 归档任务 A 不会移动或删除任务 B 的文件。
+package scheduler
 
 import (
 	"context"
@@ -18,13 +14,13 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/agent/pi"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
+	"github.com/lingting/agentflow/internal/testrunner"
 	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
@@ -44,13 +40,12 @@ type isolationFixture struct {
 }
 
 // newIsolationFixture 在工作空间中创建数据库与一个已通过预检的执行节点。
-func newIsolationFixture(t *testing.T) *isolationFixture {
+func newIsolationFixture(t *testrunner.Context) *isolationFixture {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
-	t.Cleanup(cancel)
-	workspace := testkit.New(t)
+	ctx := t.Context()
+	workspace := testkit.NewAt(t, t.WorkspaceDir())
 	workspace.Report()
-	path := filepath.Join(workspace.Root(), "agentflow.db")
+	path := databasePath(t)
 	db, err := sqlite.Open(ctx, sqlite.Options{Path: path})
 	if err != nil {
 		t.Fatalf("打开数据库失败: %s: %v", path, err)
@@ -69,7 +64,7 @@ func newIsolationFixture(t *testing.T) *isolationFixture {
 		"deploy",
 		"/srv/agentflow",
 		now,
-		domain.WithPrivateKey(testkit.PrivateKeyPath(t)),
+		domain.WithPrivateKey(testkit.PrivateKeyIn(t, workspace.Dir("keys"))),
 	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
@@ -99,7 +94,7 @@ func newIsolationFixture(t *testing.T) *isolationFixture {
 // openSecondConnection 在同一个数据库文件上再打开一条独立连接。
 //
 // 并发安全必须来自数据库的条件写入：只有独立连接上的竞争才能证明它真的生效。
-func (f *isolationFixture) openSecondConnection(t *testing.T) *sqlite.DB {
+func (f *isolationFixture) openSecondConnection(t *testrunner.Context) *sqlite.DB {
 	t.Helper()
 	other, err := sqlite.Open(f.ctx, sqlite.Options{Path: f.path})
 	if err != nil {
@@ -114,7 +109,7 @@ func (f *isolationFixture) openSecondConnection(t *testing.T) *sqlite.DB {
 }
 
 // task 写入一个 queued 任务并返回它。
-func (f *isolationFixture) task(t *testing.T, label string) domain.Task {
+func (f *isolationFixture) task(t *testrunner.Context, label string) domain.Task {
 	t.Helper()
 	requirement, err := domain.NewRequirement(
 		"隔离需求 "+label,
@@ -154,7 +149,7 @@ func (f *isolationFixture) task(t *testing.T, label string) domain.Task {
 
 // container 写入一条属于该任务的容器记录并把引用写回任务。
 func (f *isolationFixture) container(
-	t *testing.T,
+	t *testrunner.Context,
 	task domain.Task,
 	label string,
 ) (domain.Container, domain.Task) {
@@ -190,12 +185,11 @@ func (f *isolationFixture) container(
 	return container, updated
 }
 
-// TestTwoTasksUseIndependentContainers 验证两个任务各自持有独立的容器记录。
+// 原 TestTwoTasksUseIndependentContainers 验证两个任务各自持有独立的容器记录。
 //
 // 断言的是数据库事实：两条任务记录的 container_id 不同，两条容器记录的 task_id
 // 分别指向各自任务，且不存在任何交叉引用。
-func TestTwoTasksUseIndependentContainers(t *testing.T) {
-	t.Parallel()
+func runTwoTasksUseIndependentContainers(t *testrunner.Context) {
 	fixture := newIsolationFixture(t)
 	taskA := fixture.task(t, "A")
 	taskB := fixture.task(t, "B")
@@ -253,12 +247,11 @@ func TestTwoTasksUseIndependentContainers(t *testing.T) {
 	}
 }
 
-// TestTaskContainerCannotBeReusedByAnotherTask 验证跨任务复用容器被拒绝。
+// 原 TestTaskContainerCannotBeReusedByAnotherTask 验证跨任务复用容器被拒绝。
 //
 // 现场：任务 B 的容器引用被改成任务 A 的容器。此时归属校验必须拒绝，因为容器
 // 记录登记的是任务 A。这条断言直接对应"两个不同 Task 不得关联同一容器"。
-func TestTaskContainerCannotBeReusedByAnotherTask(t *testing.T) {
-	t.Parallel()
+func runTaskContainerCannotBeReusedByAnotherTask(t *testrunner.Context) {
 	fixture := newIsolationFixture(t)
 	taskA := fixture.task(t, "A")
 	containerA, _ := fixture.container(t, taskA, "alpha")
@@ -277,9 +270,8 @@ func TestTaskContainerCannotBeReusedByAnotherTask(t *testing.T) {
 	}
 }
 
-// TestWorkspaceInitRecordsDoNotCrossTasks 验证工作区初始化记录不跨任务生效。
-func TestWorkspaceInitRecordsDoNotCrossTasks(t *testing.T) {
-	t.Parallel()
+// 原 TestWorkspaceInitRecordsDoNotCrossTasks 验证工作区初始化记录不跨任务生效。
+func runWorkspaceInitRecordsDoNotCrossTasks(t *testrunner.Context) {
 	fixture := newIsolationFixture(t)
 	taskA := fixture.task(t, "A")
 	containerA, taskA := fixture.container(t, taskA, "alpha")
@@ -347,13 +339,12 @@ func TestWorkspaceInitRecordsDoNotCrossTasks(t *testing.T) {
 	_ = taskB
 }
 
-// TestConcurrentSessionPathsDoNotCollide 验证并发创建 Session 不会覆盖彼此。
+// 原 TestConcurrentSessionPathsDoNotCollide 验证并发创建 Session 不会覆盖彼此。
 //
 // 每个任务的 Session 路径按任务 / 步骤 / 尝试 / 会话 / 调用分层，因此即使两个
 // 任务在同一毫秒创建同名会话，路径也必须不同。
-func TestConcurrentSessionPathsDoNotCollide(t *testing.T) {
-	t.Parallel()
-	workspace := testkit.New(t)
+func runConcurrentSessionPathsDoNotCollide(t *testrunner.Context) {
+	workspace := testkit.NewAt(t, t.WorkspaceDir())
 	workspace.Report()
 	root := workspace.SessionRoot()
 	type outcome struct {
@@ -403,12 +394,11 @@ func TestConcurrentSessionPathsDoNotCollide(t *testing.T) {
 	}
 }
 
-// TestArchivingOneTaskKeepsAnotherTaskFiles 验证归档一个任务不影响另一个任务。
+// 原 TestArchivingOneTaskKeepsAnotherTaskFiles 验证归档一个任务不影响另一个任务。
 //
 // 归档只在任务自己的 Session 目录内写入，因此另一任务的原始文件必须逐字节不变。
-func TestArchivingOneTaskKeepsAnotherTaskFiles(t *testing.T) {
-	t.Parallel()
-	workspace := testkit.New(t)
+func runArchivingOneTaskKeepsAnotherTaskFiles(t *testrunner.Context) {
+	workspace := testkit.NewAt(t, t.WorkspaceDir())
 	workspace.Report()
 	root := workspace.SessionRoot()
 
@@ -460,12 +450,11 @@ func TestArchivingOneTaskKeepsAnotherTaskFiles(t *testing.T) {
 	}
 }
 
-// TestSessionScopeRejectsInconsistentOwnership 验证不一致的会话归属被持久化拒绝。
+// 原 TestSessionScopeRejectsInconsistentOwnership 验证不一致的会话归属被持久化拒绝。
 //
 // 会话声明的步骤必须与尝试所属步骤一致：否则一次 Agent 调用会被记录在错误的
 // 步骤下，事后无法区分"哪个步骤产生了这段输出"。
-func TestSessionScopeRejectsInconsistentOwnership(t *testing.T) {
-	t.Parallel()
+func runSessionScopeRejectsInconsistentOwnership(t *testrunner.Context) {
 	fixture := newIsolationFixture(t)
 	task := fixture.task(t, "A")
 	stepA := fixture.step(t, task, 1, "步骤一")
@@ -495,7 +484,7 @@ func TestSessionScopeRejectsInconsistentOwnership(t *testing.T) {
 
 // step 写入一个计划步骤。
 func (f *isolationFixture) step(
-	t *testing.T,
+	t *testrunner.Context,
 	task domain.Task,
 	sequence int,
 	title string,
@@ -525,7 +514,7 @@ func (f *isolationFixture) step(
 
 // attempt 为步骤创建一个执行尝试。
 func (f *isolationFixture) attempt(
-	t *testing.T,
+	t *testrunner.Context,
 	task domain.Task,
 	step domain.Step,
 ) domain.Attempt {
@@ -542,7 +531,7 @@ func (f *isolationFixture) attempt(
 }
 
 // role 返回（必要时写入）一个开发角色。
-func (f *isolationFixture) role(t *testing.T) domain.Role {
+func (f *isolationFixture) role(t *testrunner.Context) domain.Role {
 	t.Helper()
 	if role, err := f.db.GetRole(f.ctx, "developer"); err == nil {
 		return *role

@@ -1,35 +1,35 @@
-// 多任务并发与执行权验收测试。
+// 多任务并发与执行权验收：迁移自
+// tests/integration/local/scheduler/concurrency_acceptance_test.go。
 //
-// 本文件覆盖同一服务端进程内的并发场景：并发扫描不超额分派、启动失败只释放自己的
-// 执行权、数据库读取失败不伪造空队列、取消与任务推进并发、失败重试与调度竞争。
+// 覆盖同一服务端进程内的并发场景：并发扫描不超额分派、启动失败只释放自己的执行权、
+// 数据库读取失败不伪造空队列、取消与任务推进并发、失败重试与调度竞争。
 //
 // 用例使用真实 SQLite、正式迁移、真实 app.TaskExecutionCoordinator / app.TaskScheduler /
 // app.TaskRetryService / app.TaskService，只把统一启动端口（容器准备 / 计划生成 /
-// 工作流启动）替换为受控替身。所有断言都读取进程内执行权登记与数据库里真实留下的
-// 任务记录、执行记录与事件，而不是方法的返回值。
+// 工作流启动）替换为受控替身。所有断言都读取进程内执行权登记与数据库里真实留下的任务
+// 记录、执行记录与事件，而不是方法的返回值。
 //
-// 时序构造使用显式屏障与受控端口，不依赖 time.Sleep 猜测竞态窗口；唯一的轮询
-// 等待沿用既有 waitFor（等待后台分派收敛），不用于判定竞态是否发生。
-package scheduler_test
+// 时序构造使用显式屏障与受控端口，不依赖 time.Sleep 猜测竞态窗口；唯一的轮询等待沿用
+// 既有 waitFor（等待后台分派收敛），不用于判定竞态是否发生。
+package scheduler
 
 import (
 	"context"
 	"errors"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage"
+	"github.com/lingting/agentflow/internal/testrunner"
 )
 
-// TestSchedulerDoesNotExceedLimitUnderConcurrentScans 验证并发扫描不超额分派。
+// 原 TestSchedulerDoesNotExceedLimitUnderConcurrentScans 验证并发扫描不超额分派。
 //
 // 同一调度器的多次并发 Scan 会同时读到"还有空名额"：本进程在途分派必须计入占用，
 // 否则并发扫描会把总分派数推过上限。
-func TestSchedulerDoesNotExceedLimitUnderConcurrentScans(t *testing.T) {
-	t.Parallel()
+func runSchedulerDoesNotExceedLimitUnderConcurrentScans(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	base := fixture.now.Add(-time.Hour)
 	const tasks = 6
@@ -147,7 +147,7 @@ func (b *scanBarrier) ListTasks(
 }
 
 // waitArrived 等待第一次名额统计读取完成。
-func (b *scanBarrier) waitArrived(t *testing.T) {
+func (b *scanBarrier) waitArrived(t *testrunner.Context) {
 	t.Helper()
 	select {
 	case <-b.arrived:
@@ -161,12 +161,11 @@ func (b *scanBarrier) release() {
 	close(b.gate)
 }
 
-// TestSchedulerReadFailureDoesNotFakeEmptyQueue 验证读取失败不被当成空队列。
+// 原 TestSchedulerReadFailureDoesNotFakeEmptyQueue 验证读取失败不被当成空队列。
 //
 // 候选读取失败时调度器必须返回错误：把读取失败当成"没有候选"会让运维误以为
 // 队列已空，而实际是数据库不可用。
-func TestSchedulerReadFailureDoesNotFakeEmptyQueue(t *testing.T) {
-	t.Parallel()
+func runSchedulerReadFailureDoesNotFakeEmptyQueue(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	task := fixture.queuedTask(t, domain.PriorityNormal, fixture.now.Add(-time.Hour))
 	recorder := &dispatchRecorder{workflowStarted: true}
@@ -214,12 +213,11 @@ func (s *failingTaskListStore) ListTasks(
 	return nil, errors.New("数据库读取失败")
 }
 
-// TestSchedulerLaunchFailureReleasesOnlyOwnExecution 验证启动失败只释放自己的执行权。
+// 原 TestSchedulerLaunchFailureReleasesOnlyOwnExecution 验证启动失败只释放自己的执行权。
 //
 // 现场：两个任务同时进入启动阶段，其中一个失败。失败任务释放自己的执行权，另一个
 // 任务的执行权必须原样保留——释放他人的执行权会让并发任务失去所有权。
-func TestSchedulerLaunchFailureReleasesOnlyOwnExecution(t *testing.T) {
-	t.Parallel()
+func runSchedulerLaunchFailureReleasesOnlyOwnExecution(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	base := fixture.now.Add(-time.Hour)
 	failing := fixture.queuedTask(t, domain.PriorityHigh, base)
@@ -253,12 +251,11 @@ func TestSchedulerLaunchFailureReleasesOnlyOwnExecution(t *testing.T) {
 	}
 }
 
-// TestCancelAndAdvanceRaceKeepsCancelIntent 验证取消与任务推进并发时取消意图不丢失。
+// 原 TestCancelAndAdvanceRaceKeepsCancelIntent 验证取消与任务推进并发时取消意图不丢失。
 //
 // 现场：任务已被推进到 planned，同时用户请求取消。无论两者谁先落库，最终都必须
 // 满足"取消意图已记录"且任务进入 cancelling，不允许取消意图被并发写入抹掉。
-func TestCancelAndAdvanceRaceKeepsCancelIntent(t *testing.T) {
-	t.Parallel()
+func runCancelAndAdvanceRaceKeepsCancelIntent(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	task := fixture.queuedTask(t, domain.PriorityNormal, fixture.now.Add(-time.Hour))
 	fixture.moveTaskTo(t, task.ID, domain.TaskStatusPlanned)
@@ -284,12 +281,11 @@ func TestCancelAndAdvanceRaceKeepsCancelIntent(t *testing.T) {
 	}
 }
 
-// TestRetryRacesWithSchedulerForSameTask 验证重试与调度器竞争同一任务只产生一个周期。
+// 原 TestRetryRacesWithSchedulerForSameTask 验证重试与调度器竞争同一任务只产生一个周期。
 //
 // 现场：失败任务同时收到"用户显式重试"与"调度器扫描"。调度器只领取 queued，因此
 // 它不得领取失败任务；重试成功后任务进入新周期，调度器也不得再重复分派。
-func TestRetryRacesWithSchedulerForSameTask(t *testing.T) {
-	t.Parallel()
+func runRetryRacesWithSchedulerForSameTask(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	task := fixture.queuedTask(t, domain.PriorityNormal, fixture.now.Add(-time.Hour))
 	fixture.moveTaskTo(t, task.ID, domain.TaskStatusPlanned)

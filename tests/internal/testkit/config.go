@@ -13,7 +13,6 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
-	"testing"
 
 	"gopkg.in/yaml.v3"
 )
@@ -264,7 +263,7 @@ func ContainerPiSettingsFile(config ContainerPiConfig) []byte {
 // ConfigDir 返回测试配置目录的绝对路径。
 //
 // 该目录不存在是正常情况（仓库只提交示例文件），调用方按"缺少配置"处理。
-func ConfigDir(t *testing.T) string {
+func ConfigDir(t Tester) string {
 	t.Helper()
 	dir, err := configDirPath()
 	if err != nil {
@@ -274,13 +273,13 @@ func ConfigDir(t *testing.T) string {
 }
 
 // ConfigPath 返回指定配置文件在测试配置目录中的绝对路径。
-func ConfigPath(t *testing.T, name string) string {
+func ConfigPath(t Tester, name string) string {
 	t.Helper()
 	return filepath.Join(ConfigDir(t), name)
 }
 
 // ConfigHint 返回"复制示例文件"的使用提示，供跳过原因与失败信息引用。
-func ConfigHint(t *testing.T, name string) string {
+func ConfigHint(t Tester, name string) string {
 	t.Helper()
 	return fmt.Sprintf(
 		"请把 %s 复制为 %s 后填写内容",
@@ -293,7 +292,7 @@ func ConfigHint(t *testing.T, name string) string {
 //
 // missing 列出缺失的配置项名称；提示中包含配置文件与示例文件的绝对路径，
 // 便于区分"没有配置"与"配置写错"。
-func SkipReason(t *testing.T, name string, missing []string) string {
+func SkipReason(t Tester, name string, missing []string) string {
 	t.Helper()
 	return fmt.Sprintf(
 		"WARN [SKIP] 缺少测试配置 %s 中的 %s；%s",
@@ -307,7 +306,7 @@ func SkipReason(t *testing.T, name string, missing []string) string {
 //
 // 真实外部依赖的测试统一由配置文件中的 enable 开关显式开启，缺失配置文件同样
 // 视为未启用；提示中同时给出配置文件与示例文件的绝对路径。
-func EnableReason(t *testing.T, name, field string) string {
+func EnableReason(t Tester, name, field string) string {
 	t.Helper()
 	return fmt.Sprintf(
 		"WARN [SKIP] 测试未启用：%s 不存在或未把 %s 设为 true；%s",
@@ -321,7 +320,7 @@ func EnableReason(t *testing.T, name, field string) string {
 //
 // 文件不存在时返回零值配置与 false；文件存在但内容非法时让测试失败，
 // 避免配置错误被当成"缺少环境"跳过。
-func LoadSSHConfig(t *testing.T) (SSHConfig, bool) {
+func LoadSSHConfig(t Tester) (SSHConfig, bool) {
 	t.Helper()
 	var document sshDocument
 	if !loadDocument(t, SSHConfigFile, &document) {
@@ -335,7 +334,7 @@ func LoadSSHConfig(t *testing.T) (SSHConfig, bool) {
 }
 
 // LoadPiConfig 读取 tests/config/pi.yml。
-func LoadPiConfig(t *testing.T) (PiConfig, bool) {
+func LoadPiConfig(t Tester) (PiConfig, bool) {
 	t.Helper()
 	var document piDocument
 	if !loadDocument(t, PiConfigFile, &document) {
@@ -366,7 +365,7 @@ func (c PiConfig) ResolvedModel() string {
 }
 
 // LoadDockerConfig 读取 tests/config/docker.yml。
-func LoadDockerConfig(t *testing.T) (DockerConfig, bool) {
+func LoadDockerConfig(t Tester) (DockerConfig, bool) {
 	t.Helper()
 	var document dockerDocument
 	if !loadDocument(t, DockerConfigFile, &document) {
@@ -376,7 +375,7 @@ func LoadDockerConfig(t *testing.T) (DockerConfig, bool) {
 }
 
 // LoadGitConfig 读取 tests/config/git.yml。
-func LoadGitConfig(t *testing.T) (GitConfig, bool) {
+func LoadGitConfig(t Tester) (GitConfig, bool) {
 	t.Helper()
 	var document gitDocument
 	if !loadDocument(t, GitConfigFile, &document) {
@@ -471,7 +470,7 @@ func (c GitConfig) CredentialMissing() []string {
 //
 // 解析使用严格模式：未知字段与多余文档都会被拒绝，避免拼写错误被静默忽略；
 // 解析成功后统一展开 ${NAME} 占位符。
-func loadDocument(t *testing.T, name string, target any) bool {
+func loadDocument(t Tester, name string, target any) bool {
 	t.Helper()
 	exists, err := decodeDocument(ConfigPath(t, name), target)
 	if err != nil {
@@ -555,7 +554,7 @@ func expandValue(value reflect.Value) {
 	}
 }
 
-func repoRoot(t *testing.T) string {
+func repoRoot(t Tester) string {
 	t.Helper()
 	root, err := repoRootPath()
 	if err != nil {

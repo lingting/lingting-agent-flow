@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"errors"
 	"strings"
-	"testing"
 
 	"github.com/lingting/agentflow/internal/storage"
 )
@@ -24,7 +23,7 @@ const (
 )
 
 // MustExec 执行一条不期望失败的语句，失败时立即终止测试。
-func MustExec(t *testing.T, db *sql.DB, query string, args ...any) {
+func MustExec(t Tester, db *sql.DB, query string, args ...any) {
 	t.Helper()
 	if _, err := db.Exec(query, args...); err != nil {
 		t.Fatalf("执行语句失败: %s: %v", query, err)
@@ -35,7 +34,7 @@ func MustExec(t *testing.T, db *sql.DB, query string, args ...any) {
 //
 // 语句必须被数据库拒绝，否则测试立即失败；返回的错误可以直接用
 // errors.Is(err, storage.ErrForeignKey) 等方式判断类别。
-func ExecConstraint(t *testing.T, db *sql.DB, query string, args ...any) error {
+func ExecConstraint(t Tester, db *sql.DB, query string, args ...any) error {
 	t.Helper()
 	_, err := db.Exec(query, args...)
 	if err == nil {

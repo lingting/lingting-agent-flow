@@ -1,19 +1,17 @@
-// 调度器集成测试。
+// 调度器用例与现场：迁移自 tests/integration/local/scheduler/scheduler_test.go。
 //
 // 用例使用真实 SQLite、正式 Schema、真实 app.TaskExecutionCoordinator 与真实
 // app.TaskScheduler，只把统一启动端口（容器准备 / 计划生成 / 工作流启动）替换为受控替身：
 // 候选筛选、领域准入与排序、进程内执行权取得、名额统计与释放全部走生产代码，因此断言的是
 // 数据库里真实留下的任务记录、事件与协调器登记，而不是方法的返回值。
-package scheduler_test
+package scheduler
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/app"
@@ -21,6 +19,7 @@ import (
 	"github.com/lingting/agentflow/internal/logging"
 	"github.com/lingting/agentflow/internal/storage"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
+	"github.com/lingting/agentflow/internal/testrunner"
 	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
@@ -36,16 +35,15 @@ type schedulerFixture struct {
 }
 
 // newSchedulerFixture 在工作空间中创建数据库与执行协调器。
-func newSchedulerFixture(t *testing.T) *schedulerFixture {
+func newSchedulerFixture(t *testrunner.Context) *schedulerFixture {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	t.Cleanup(cancel)
-	workspace := testkit.New(t)
+	ctx := t.Context()
+	workspace := testkit.NewAt(t, t.WorkspaceDir())
 	logger, err := testkit.Logger(logging.LevelError)
 	if err != nil {
 		t.Fatalf("构造日志器失败: %v", err)
 	}
-	path := filepath.Join(workspace.Root(), "agentflow.db")
+	path := databasePath(t)
 	db, err := sqlite.Open(ctx, sqlite.Options{Path: path})
 	if err != nil {
 		t.Fatalf("打开数据库失败: %s: %v", path, err)
@@ -72,7 +70,7 @@ func newSchedulerFixture(t *testing.T) *schedulerFixture {
 // 优先级决定调度顺序，创建时间与任务标识提供稳定次序；用例通过显式时间构造
 // "同优先级先到先服务"的真实现场。
 func (f *schedulerFixture) queuedTask(
-	t *testing.T,
+	t *testrunner.Context,
 	priority domain.Priority,
 	createdAt time.Time,
 ) domain.Task {
@@ -120,7 +118,7 @@ func (f *schedulerFixture) queuedTask(
 }
 
 // task 读取任务的最新记录。
-func (f *schedulerFixture) task(t *testing.T, id domain.ID) domain.Task {
+func (f *schedulerFixture) task(t *testrunner.Context, id domain.ID) domain.Task {
 	t.Helper()
 	task, err := f.db.GetTask(f.ctx, id)
 	if err != nil {
@@ -207,7 +205,7 @@ func (r *dispatchRecorder) launchedCount() int {
 
 // newScheduler 构造并启动一个真实调度器。
 func (f *schedulerFixture) newScheduler(
-	t *testing.T,
+	t *testrunner.Context,
 	limit int,
 	launch app.TaskSchedulerLaunchPort,
 ) *app.TaskScheduler {
@@ -241,7 +239,7 @@ func (f *schedulerFixture) newScheduler(
 }
 
 // waitFor 在超时前轮询条件，用于等待后台分派收敛。
-func waitFor(t *testing.T, timeout time.Duration, condition func() bool, message string) {
+func waitFor(t *testrunner.Context, timeout time.Duration, condition func() bool, message string) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -253,9 +251,8 @@ func waitFor(t *testing.T, timeout time.Duration, condition func() bool, message
 	t.Fatalf("等待超时: %s", message)
 }
 
-// TestSchedulerDispatchesInQueueOrder 验证候选按优先级、创建时间与任务标识排序。
-func TestSchedulerDispatchesInQueueOrder(t *testing.T) {
-	t.Parallel()
+// 原 TestSchedulerDispatchesInQueueOrder 验证候选按优先级、创建时间与任务标识排序。
+func runSchedulerDispatchesInQueueOrder(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	base := fixture.now.Add(-time.Hour)
 	// 先创建低优先级任务，再创建高优先级任务：领取顺序必须由优先级决定，
@@ -283,7 +280,7 @@ func TestSchedulerDispatchesInQueueOrder(t *testing.T) {
 }
 
 // claimOrder 返回给定任务按领取事件先后排列的顺序。
-func (f *schedulerFixture) claimOrder(t *testing.T, taskIDs []domain.ID) []domain.ID {
+func (f *schedulerFixture) claimOrder(t *testrunner.Context, taskIDs []domain.ID) []domain.ID {
 	t.Helper()
 	type entry struct {
 		id     int64
@@ -317,9 +314,8 @@ func (f *schedulerFixture) claimOrder(t *testing.T, taskIDs []domain.ID) []domai
 	return order
 }
 
-// TestSchedulerRespectsConcurrencyLimit 验证并发上限生效。
-func TestSchedulerRespectsConcurrencyLimit(t *testing.T) {
-	t.Parallel()
+// 原 TestSchedulerRespectsConcurrencyLimit 验证并发上限生效。
+func runSchedulerRespectsConcurrencyLimit(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	base := fixture.now.Add(-time.Hour)
 	tasks := make([]domain.Task, 0, 4)
@@ -370,12 +366,11 @@ func TestSchedulerRespectsConcurrencyLimit(t *testing.T) {
 	}, "在途分派应收敛")
 }
 
-// TestSchedulerResumesAfterDispatchCompletes 验证名额释放后继续处理队列。
+// 原 TestSchedulerResumesAfterDispatchCompletes 验证名额释放后继续处理队列。
 //
 // 名额由"仍在推进的执行"与调度器自己的在途分派共同占用：替身声明本次启动没有建立
 // 工作流时，调度器在启动结束后释放执行权，下一次扫描应继续分派下一个候选。
-func TestSchedulerResumesAfterDispatchCompletes(t *testing.T) {
-	t.Parallel()
+func runSchedulerResumesAfterDispatchCompletes(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	base := fixture.now.Add(-time.Hour)
 	first := fixture.queuedTask(t, domain.PriorityHigh, base)
@@ -405,9 +400,8 @@ func TestSchedulerResumesAfterDispatchCompletes(t *testing.T) {
 	_ = second
 }
 
-// TestSchedulerReleasesExecutionOnLaunchFailure 验证启动失败释放自己的执行权。
-func TestSchedulerReleasesExecutionOnLaunchFailure(t *testing.T) {
-	t.Parallel()
+// 原 TestSchedulerReleasesExecutionOnLaunchFailure 验证启动失败释放自己的执行权。
+func runSchedulerReleasesExecutionOnLaunchFailure(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	base := fixture.now.Add(-time.Hour)
 	task := fixture.queuedTask(t, domain.PriorityNormal, base)
@@ -446,9 +440,8 @@ func TestSchedulerReleasesExecutionOnLaunchFailure(t *testing.T) {
 	}
 }
 
-// TestSchedulerStopsWithoutDispatching 验证服务停止后不再分派新任务。
-func TestSchedulerStopsWithoutDispatching(t *testing.T) {
-	t.Parallel()
+// 原 TestSchedulerStopsWithoutDispatching 验证服务停止后不再分派新任务。
+func runSchedulerStopsWithoutDispatching(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	base := fixture.now.Add(-time.Hour)
 	task := fixture.queuedTask(t, domain.PriorityNormal, base)
@@ -496,9 +489,8 @@ func TestSchedulerStopsWithoutDispatching(t *testing.T) {
 	_ = second
 }
 
-// TestSchedulerSkipsFailedAndPausedTasks 验证非 queued 任务不会被自动领取。
-func TestSchedulerSkipsFailedAndPausedTasks(t *testing.T) {
-	t.Parallel()
+// 原 TestSchedulerSkipsFailedAndPausedTasks 验证非 queued 任务不会被自动领取。
+func runSchedulerSkipsFailedAndPausedTasks(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	base := fixture.now.Add(-time.Hour)
 	queued := fixture.queuedTask(t, domain.PriorityNormal, base)
@@ -551,9 +543,8 @@ func TestSchedulerSkipsFailedAndPausedTasks(t *testing.T) {
 	}
 }
 
-// TestSchedulerClaimEventIsTraceable 验证调度领取留下可追溯事件。
-func TestSchedulerClaimEventIsTraceable(t *testing.T) {
-	t.Parallel()
+// 原 TestSchedulerClaimEventIsTraceable 验证调度领取留下可追溯事件。
+func runSchedulerClaimEventIsTraceable(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	base := fixture.now.Add(-time.Hour)
 	task := fixture.queuedTask(t, domain.PriorityNormal, base)
@@ -577,9 +568,8 @@ func TestSchedulerClaimEventIsTraceable(t *testing.T) {
 	}
 }
 
-// TestSchedulerCountsExistingActiveTasks 验证已有活跃执行占用名额。
-func TestSchedulerCountsExistingActiveTasks(t *testing.T) {
-	t.Parallel()
+// 原 TestSchedulerCountsExistingActiveTasks 验证已有活跃执行占用名额。
+func runSchedulerCountsExistingActiveTasks(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	base := fixture.now.Add(-time.Hour)
 	active := fixture.queuedTask(t, domain.PriorityHigh, base)
@@ -608,9 +598,8 @@ func TestSchedulerCountsExistingActiveTasks(t *testing.T) {
 	}
 }
 
-// TestSchedulerSkipsTaskWithActiveWorkflowRun 验证存在未结束执行记录时不重复领取。
-func TestSchedulerSkipsTaskWithActiveWorkflowRun(t *testing.T) {
-	t.Parallel()
+// 原 TestSchedulerSkipsTaskWithActiveWorkflowRun 验证存在未结束执行记录时不重复领取。
+func runSchedulerSkipsTaskWithActiveWorkflowRun(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	base := fixture.now.Add(-time.Hour)
 	task := fixture.queuedTask(t, domain.PriorityNormal, base)
@@ -657,9 +646,8 @@ func TestSchedulerSkipsTaskWithActiveWorkflowRun(t *testing.T) {
 	}
 }
 
-// TestSchedulerRequiresPositiveLimit 验证并发上限必须为正。
-func TestSchedulerRequiresPositiveLimit(t *testing.T) {
-	t.Parallel()
+// 原 TestSchedulerRequiresPositiveLimit 验证并发上限必须为正。
+func runSchedulerRequiresPositiveLimit(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	_, err := app.NewTaskScheduler(app.TaskSchedulerOptions{
 		Store:              fixture.db,
@@ -672,9 +660,8 @@ func TestSchedulerRequiresPositiveLimit(t *testing.T) {
 	}
 }
 
-// TestSchedulerStatusReportsLimit 验证状态快照报告真实上限。
-func TestSchedulerStatusReportsLimit(t *testing.T) {
-	t.Parallel()
+// 原 TestSchedulerStatusReportsLimit 验证状态快照报告真实上限。
+func runSchedulerStatusReportsLimit(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	scheduler := fixture.newScheduler(t, 3, &dispatchRecorder{})
 	status := scheduler.Status()
@@ -690,7 +677,7 @@ func TestSchedulerStatusReportsLimit(t *testing.T) {
 }
 
 // moveToFailed 把任务推进到 failed 终局。
-func (f *schedulerFixture) moveToFailed(t *testing.T, taskID domain.ID) {
+func (f *schedulerFixture) moveToFailed(t *testrunner.Context, taskID domain.ID) {
 	t.Helper()
 	task, err := f.db.GetTask(f.ctx, taskID)
 	if err != nil {
@@ -710,7 +697,7 @@ func (f *schedulerFixture) moveToFailed(t *testing.T, taskID domain.ID) {
 
 // writeActiveRun 写入一条 running 的执行记录。
 func (f *schedulerFixture) writeActiveRun(
-	t *testing.T,
+	t *testrunner.Context,
 	task domain.Task,
 	steps []domain.Step,
 ) domain.WorkflowRun {

@@ -15,7 +15,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"testing"
 )
 
 // KnownHostsSources 返回参与主机密钥校验的只读 known_hosts 快照文件列表。
@@ -29,7 +28,7 @@ import (
 // 返回的是快照路径：真实文件不会被读取第二次，也不会被任何代码写入。
 // 不存在的来源直接跳过（用户从未连接过任何主机是正常情况）；显式配置但文件不可读
 // 时视为配置错误并让测试失败，避免"配置了文件却仍然报主机密钥未知"的误判。
-func KnownHostsSources(t *testing.T) []string {
+func KnownHostsSources(t Tester) []string {
 	t.Helper()
 	sources, explicit, err := resolveKnownHostsSources()
 	if err != nil {
@@ -74,7 +73,7 @@ func snapshotKnownHosts(baseDir string, sources []string) ([]string, error) {
 // knownHostsSourcePaths 解析参与校验的 known_hosts 来源路径。
 //
 // explicit 表示这些路径来自配置而不是本机 OpenSSH 的默认位置。
-func knownHostsSourcePaths(t *testing.T) (paths []string, explicit bool) {
+func knownHostsSourcePaths(t Tester) (paths []string, explicit bool) {
 	t.Helper()
 	paths, explicit, err := resolveKnownHostsSources()
 	if err != nil {
@@ -158,7 +157,7 @@ func copyKnownHostsFile(source, target string) error {
 // DescribeKnownHosts 返回 known_hosts 来源的可读说明，用于失败提示与日志。
 //
 // 它列出的是真实来源文件与是否存在，便于区分"配置写错"与"代码问题"。
-func DescribeKnownHosts(t *testing.T) string {
+func DescribeKnownHosts(t Tester) string {
 	t.Helper()
 	sources, _ := knownHostsSourcePaths(t)
 	if len(sources) == 0 {
@@ -170,7 +169,7 @@ func DescribeKnownHosts(t *testing.T) string {
 // HostKeyHint 生成主机密钥未知时的排查提示。
 //
 // 它明确列出当前使用的 known_hosts 来源，避免用户误以为程序读不到自己的配置。
-func HostKeyHint(t *testing.T, storePath string) string {
+func HostKeyHint(t Tester, storePath string) string {
 	t.Helper()
 	return fmt.Sprintf(
 		"已读取的 known_hosts: %s\n"+

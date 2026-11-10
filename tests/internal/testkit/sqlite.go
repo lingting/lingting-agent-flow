@@ -3,7 +3,6 @@ package testkit
 import (
 	"database/sql"
 	"fmt"
-	"testing"
 
 	_ "modernc.org/sqlite" // 注册纯 Go 的 SQLite 驱动
 )
@@ -15,7 +14,7 @@ import (
 //
 // 业务 Schema 不声明外键，产品连接显式关闭外键检查，测试连接保持同一设置，
 // 避免测试与运行时行为不一致。
-func OpenSQLite(t *testing.T, path string) *sql.DB {
+func OpenSQLite(t Tester, path string) *sql.DB {
 	t.Helper()
 	dsn := "file:" + path +
 		"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(0)"
@@ -43,7 +42,7 @@ func (w *Workspace) SQLitePath() string {
 }
 
 // MustSQLite 在工作空间中打开一个全新的数据库连接，并在测试结束时关闭。
-func (w *Workspace) MustSQLite(t *testing.T) *sql.DB {
+func (w *Workspace) MustSQLite(t Tester) *sql.DB {
 	t.Helper()
 	return OpenSQLite(t, w.DatabasePath())
 }

@@ -113,36 +113,27 @@ func runCaseBody(
 		result.Timings.CaseEndAt = time.Now()
 		result.DurationMS = durationMS(startAt, result.Timings.CaseEndAt)
 	}()
+	// 清理在结论定型之前执行：清理失败必须能把用例改判为失败。
 	defer func() {
 		recovered := recover()
-		if recovered == nil {
-			skipped, reason := cctx.Skipped()
-			switch {
-			case skipped:
-				result.Status = StatusSkipped
-				result.SkipReason = reason
-			case cctx.Failed():
-				result.Status = StatusFailed
-				result.Message = strings.Join(cctx.Failures(), "\n")
-			default:
-				result.Status = StatusPassed
-			}
+		cctx.runCleanups()
+		if _, fatal := recovered.(fatalSignal); recovered != nil && !fatal {
+			result.Status = StatusPanic
+			result.Message = fmt.Sprintf("用例 panic: %v", recovered)
+			result.StackTrace = string(debug.Stack())
 			return
 		}
-		if signal, ok := recovered.(fatalSignal); ok {
-			if signal.skip {
-				_, reason := cctx.Skipped()
-				result.Status = StatusSkipped
-				result.SkipReason = reason
-				return
-			}
+		skipped, reason := cctx.Skipped()
+		switch {
+		case cctx.Failed():
 			result.Status = StatusFailed
 			result.Message = strings.Join(cctx.Failures(), "\n")
-			return
+		case skipped:
+			result.Status = StatusSkipped
+			result.SkipReason = reason
+		default:
+			result.Status = StatusPassed
 		}
-		result.Status = StatusPanic
-		result.Message = fmt.Sprintf("用例 panic: %v", recovered)
-		result.StackTrace = string(debug.Stack())
 	}()
 	c.Run(cctx)
 	return result

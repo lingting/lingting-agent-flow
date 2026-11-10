@@ -1,20 +1,19 @@
-// 任务显式重试的集成测试。
+// 任务显式重试：迁移自 tests/integration/local/scheduler/retry_test.go。
 //
-// 用例使用真实 SQLite、正式迁移、真实 app.TaskRetryService，
-// 只把统一启动端口替换为受控替身。断言对象是数据库里真实留下的任务状态、事件与
-// 历史执行记录。
-package scheduler_test
+// 用例使用真实 SQLite、正式迁移、真实 app.TaskRetryService，只把统一启动端口替换为受控
+// 替身。断言对象是数据库里真实留下的任务状态、事件与历史执行记录。
+package scheduler
 
 import (
 	"context"
 	"errors"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage"
+	"github.com/lingting/agentflow/internal/testrunner"
 )
 
 // retryRecorder 是显式重试用例的统一启动替身。
@@ -77,7 +76,7 @@ func (r *retryRecorder) grant(index int) app.TaskExecutionGrant {
 
 // newRetryService 构造一个真实的重试服务。
 func (f *schedulerFixture) newRetryService(
-	t *testing.T,
+	t *testrunner.Context,
 	launch app.TaskRetryLaunchPort,
 ) *app.TaskRetryService {
 	t.Helper()
@@ -94,9 +93,8 @@ func (f *schedulerFixture) newRetryService(
 	return service
 }
 
-// TestRetryFailedTaskStartsNewCycle 验证失败任务经显式重试进入新的执行周期。
-func TestRetryFailedTaskStartsNewCycle(t *testing.T) {
-	t.Parallel()
+// 原 TestRetryFailedTaskStartsNewCycle 验证失败任务经显式重试进入新的执行周期。
+func runRetryFailedTaskStartsNewCycle(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	task := fixture.queuedTask(t, domain.PriorityNormal, fixture.now)
 	fixture.moveTaskTo(t, task.ID, domain.TaskStatusPlanned)
@@ -151,9 +149,8 @@ func TestRetryFailedTaskStartsNewCycle(t *testing.T) {
 	}
 }
 
-// TestRetryRejectsNonFailedTask 验证非失败状态不能重试。
-func TestRetryRejectsNonFailedTask(t *testing.T) {
-	t.Parallel()
+// 原 TestRetryRejectsNonFailedTask 验证非失败状态不能重试。
+func runRetryRejectsNonFailedTask(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	task := fixture.queuedTask(t, domain.PriorityNormal, fixture.now)
 	fixture.moveTaskTo(t, task.ID, domain.TaskStatusPlanned)
@@ -175,9 +172,8 @@ func TestRetryRejectsNonFailedTask(t *testing.T) {
 	}
 }
 
-// TestRetryRejectsPendingSideEffect 验证未决外部副作用阻止重试。
-func TestRetryRejectsPendingSideEffect(t *testing.T) {
-	t.Parallel()
+// 原 TestRetryRejectsPendingSideEffect 验证未决外部副作用阻止重试。
+func runRetryRejectsPendingSideEffect(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	task := fixture.queuedTask(t, domain.PriorityNormal, fixture.now)
 	fixture.moveTaskTo(t, task.ID, domain.TaskStatusPlanned)
@@ -218,9 +214,8 @@ func TestRetryRejectsPendingSideEffect(t *testing.T) {
 	}
 }
 
-// TestRetryRejectsRecoveryResidue 验证结果不确定的步骤阻止重试。
-func TestRetryRejectsRecoveryResidue(t *testing.T) {
-	t.Parallel()
+// 原 TestRetryRejectsRecoveryResidue 验证结果不确定的步骤阻止重试。
+func runRetryRejectsRecoveryResidue(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	task := fixture.queuedTask(t, domain.PriorityNormal, fixture.now)
 	fixture.moveTaskTo(t, task.ID, domain.TaskStatusPlanned)
@@ -250,12 +245,11 @@ func TestRetryRejectsRecoveryResidue(t *testing.T) {
 	}
 }
 
-// TestRetryReleasesExecutionOnLaunchFailure 验证启动失败后执行权被释放。
+// 原 TestRetryReleasesExecutionOnLaunchFailure 验证启动失败后执行权被释放。
 //
 // 失败必须释放本次取得的执行权，使同一任务可以再次被显式重试；任务停在 preparing
 // 说明它确实进入了新周期。
-func TestRetryReleasesExecutionOnLaunchFailure(t *testing.T) {
-	t.Parallel()
+func runRetryReleasesExecutionOnLaunchFailure(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	task := fixture.queuedTask(t, domain.PriorityNormal, fixture.now)
 	fixture.moveTaskTo(t, task.ID, domain.TaskStatusPlanned)
@@ -276,9 +270,8 @@ func TestRetryReleasesExecutionOnLaunchFailure(t *testing.T) {
 	}
 }
 
-// TestRetryConcurrentOnlyOneWins 验证并发重试只有一个成功。
-func TestRetryConcurrentOnlyOneWins(t *testing.T) {
-	t.Parallel()
+// 原 TestRetryConcurrentOnlyOneWins 验证并发重试只有一个成功。
+func runRetryConcurrentOnlyOneWins(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	task := fixture.queuedTask(t, domain.PriorityNormal, fixture.now)
 	fixture.moveTaskTo(t, task.ID, domain.TaskStatusPlanned)
@@ -318,9 +311,8 @@ func TestRetryConcurrentOnlyOneWins(t *testing.T) {
 	}
 }
 
-// TestRetryEligibilityIsReadOnly 验证资格查询不写任何状态。
-func TestRetryEligibilityIsReadOnly(t *testing.T) {
-	t.Parallel()
+// 原 TestRetryEligibilityIsReadOnly 验证资格查询不写任何状态。
+func runRetryEligibilityIsReadOnly(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	task := fixture.queuedTask(t, domain.PriorityNormal, fixture.now)
 	fixture.moveTaskTo(t, task.ID, domain.TaskStatusPlanned)
@@ -345,9 +337,8 @@ func TestRetryEligibilityIsReadOnly(t *testing.T) {
 	}
 }
 
-// TestRetryKeepsHistoricalRecords 验证重试不覆盖历史执行记录。
-func TestRetryKeepsHistoricalRecords(t *testing.T) {
-	t.Parallel()
+// 原 TestRetryKeepsHistoricalRecords 验证重试不覆盖历史执行记录。
+func runRetryKeepsHistoricalRecords(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	task := fixture.queuedTask(t, domain.PriorityNormal, fixture.now)
 	fixture.moveTaskTo(t, task.ID, domain.TaskStatusPlanned)
@@ -400,9 +391,8 @@ func (s *failingRetryStore) UpdateTaskIfStatus(
 	return errors.New("数据库写入失败")
 }
 
-// TestRetryDoesNotFakeSuccessOnDatabaseError 验证写入失败时不伪造成功。
-func TestRetryDoesNotFakeSuccessOnDatabaseError(t *testing.T) {
-	t.Parallel()
+// 原 TestRetryDoesNotFakeSuccessOnDatabaseError 验证写入失败时不伪造成功。
+func runRetryDoesNotFakeSuccessOnDatabaseError(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	task := fixture.queuedTask(t, domain.PriorityNormal, fixture.now)
 	fixture.moveTaskTo(t, task.ID, domain.TaskStatusPlanned)

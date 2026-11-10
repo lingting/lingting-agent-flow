@@ -2,7 +2,6 @@ package testkit
 
 import (
 	"context"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
@@ -31,7 +30,7 @@ const (
 // 返回值是写入后的领域对象，调用方可以直接把 ID 传给建任务请求。写入失败即测试
 // 失败：任务必须关联项目，缺少项目时后续步骤没有意义。
 func CreateProject(
-	t *testing.T,
+	t Tester,
 	store storage.Store,
 	projectID string,
 	at time.Time,

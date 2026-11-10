@@ -1,24 +1,24 @@
-package scheduler_test
+// 需求聚合删除与调度领取之间的不变量：迁移自
+// tests/integration/local/scheduler/requirement_delete_test.go。
+//
+// 断言依据数据库事实与协调器登记：调度器的候选筛选、进程内执行权与名额统计全部走生产
+// 代码，只有统一启动端口是受控替身，因此用例可以直接观察"任务是否被领取"。
+package scheduler
 
 import (
 	"context"
 	"errors"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
+	"github.com/lingting/agentflow/internal/testrunner"
 )
 
-// 本文件验证需求聚合删除与调度领取之间的不变量。
-//
-// 断言依据数据库事实与协调器登记：调度器的候选筛选、进程内执行权与名额统计全部走生产
-// 代码，只有统一启动端口是受控替身，因此用例可以直接观察"任务是否被领取"。
-
 // newRequirementService 构造与调度器共用同一个执行协调器的需求服务。
-func (f *schedulerFixture) newRequirementService(t *testing.T) *app.RequirementService {
+func (f *schedulerFixture) newRequirementService(t *testrunner.Context) *app.RequirementService {
 	t.Helper()
 	service, err := app.NewRequirementService(app.RequirementServiceOptions{
 		Coordination: f.coordinator,
@@ -30,9 +30,8 @@ func (f *schedulerFixture) newRequirementService(t *testing.T) *app.RequirementS
 	return service
 }
 
-// TestSchedulerSkipsTasksOfDeletedRequirement 校验已删除需求的任务不会被领取。
-func TestSchedulerSkipsTasksOfDeletedRequirement(t *testing.T) {
-	t.Parallel()
+// 原 TestSchedulerSkipsTasksOfDeletedRequirement 校验已删除需求的任务不会被领取。
+func runSchedulerSkipsTasksOfDeletedRequirement(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	base := fixture.now.Add(-time.Hour)
 	deleted := fixture.queuedTask(t, domain.PriorityHigh, base)
@@ -65,9 +64,8 @@ func TestSchedulerSkipsTasksOfDeletedRequirement(t *testing.T) {
 	}
 }
 
-// TestDeleteRejectsWhileSchedulerDispatchInFlight 校验在途分派期间删除失败关闭。
-func TestDeleteRejectsWhileSchedulerDispatchInFlight(t *testing.T) {
-	t.Parallel()
+// 原 TestDeleteRejectsWhileSchedulerDispatchInFlight 校验在途分派期间删除失败关闭。
+func runDeleteRejectsWhileSchedulerDispatchInFlight(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	task := fixture.queuedTask(t, domain.PriorityNormal, fixture.now.Add(-time.Hour))
 	service := fixture.newRequirementService(t)
@@ -180,9 +178,8 @@ func (r *deleteAwareRecorder) deletedClaims() []domain.ID {
 	return append([]domain.ID(nil), r.claimedDeleted...)
 }
 
-// TestConcurrentDeleteAndSchedulerScanKeepFacts 校验并发删除与调度扫描后现场一致。
-func TestConcurrentDeleteAndSchedulerScanKeepFacts(t *testing.T) {
-	t.Parallel()
+// 原 TestConcurrentDeleteAndSchedulerScanKeepFacts 校验并发删除与调度扫描后现场一致。
+func runConcurrentDeleteAndSchedulerScanKeepFacts(t *testrunner.Context) {
 	fixture := newSchedulerFixture(t)
 	service := fixture.newRequirementService(t)
 	recorder := &deleteAwareRecorder{db: fixture.db}

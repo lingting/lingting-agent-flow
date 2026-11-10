@@ -1,15 +1,14 @@
-// P3-M5 资源隔离与回收验收测试。
+// P3-M5 资源隔离与回收验收：迁移自
+// tests/integration/local/scheduler/resource_acceptance_test.go。
 //
-// 本文件补齐 P3-M5 §5 的验收场景：并发初始化 / 代码获取 / Session 归档不跨任务
-// 串扰、回收任务 A 不影响任务 B、归属不匹配时所有入口拒绝、unknown 与孤儿现场保留
-// 诊断证据、共享缓存卷不随单任务回收删除、回收部分失败后剩余现场仍可识别、
-// 以及"数据库 fencing 不等于远程已停止"这一边界。
+// 覆盖并发初始化 / 代码获取 / Session 归档不跨任务串扰、回收任务 A 不影响任务 B、归属
+// 不匹配时所有入口拒绝、unknown 与孤儿现场保留诊断证据、共享缓存卷不随单任务回收删除、
+// 回收部分失败后剩余现场仍可识别，以及"数据库 fencing 不等于远程已停止"这一边界。
 //
-// 用例使用真实 SQLite 与正式迁移，断言对象是数据库里真实留下的容器记录、工作区
-// 初始化记录、Attempt、Session 与事件，而不是方法的返回值。远程观测由受控端口
-// 提供，因此本文件验证的是"隔离与回收规则 + 持久化路径"，**不代表**真实远程
-// Docker 已验收（真实远程证据见 tests/integration/remote/）。
-package scheduler_test
+// 用例使用真实 SQLite 与正式迁移，断言对象是数据库里真实留下的容器记录、工作区初始化
+// 记录、Attempt、Session 与事件，而不是方法的返回值。远程观测由受控端口提供，因此本文件
+// 验证的是"隔离与回收规则 + 持久化路径"，不代表真实远程 Docker 已验收。
+package scheduler
 
 import (
 	"context"
@@ -17,7 +16,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/agent/pi"
@@ -25,6 +23,7 @@ import (
 	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage"
+	"github.com/lingting/agentflow/internal/testrunner"
 	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
@@ -117,7 +116,7 @@ func recoveredRunning(container domain.Container) app.ContainerDetail {
 
 // newRecoveryService 装配一个使用受控观测端口的容器残留收敛服务。
 func (f *isolationFixture) newRecoveryService(
-	t *testing.T,
+	t *testrunner.Context,
 	port app.ContainerRecoveryContainerPort,
 ) *app.ContainerRecoveryService {
 	t.Helper()
@@ -133,7 +132,7 @@ func (f *isolationFixture) newRecoveryService(
 }
 
 // reloadContainer 读取数据库中的容器记录。
-func (f *isolationFixture) reloadContainer(t *testing.T, id domain.ID) domain.Container {
+func (f *isolationFixture) reloadContainer(t *testrunner.Context, id domain.ID) domain.Container {
 	t.Helper()
 	container, err := f.db.GetContainer(f.ctx, id)
 	if err != nil {
@@ -143,7 +142,7 @@ func (f *isolationFixture) reloadContainer(t *testing.T, id domain.ID) domain.Co
 }
 
 // markUnknownContainer 把容器记录推进为状态不明。
-func (f *isolationFixture) markUnknownContainer(t *testing.T, container domain.Container) domain.Container {
+func (f *isolationFixture) markUnknownContainer(t *testrunner.Context, container domain.Container) domain.Container {
 	t.Helper()
 	updated := container
 	if err := updated.MarkUnknown("远程状态无法确认", f.now); err != nil {
@@ -155,12 +154,11 @@ func (f *isolationFixture) markUnknownContainer(t *testing.T, container domain.C
 	return updated
 }
 
-// TestRecoveringOneTaskKeepsAnotherTaskRecords 验证回收任务 A 不改变任务 B 的任何记录。
+// 原 TestRecoveringOneTaskKeepsAnotherTaskRecords 验证回收任务 A 不改变任务 B 的任何记录。
 //
 // 断言覆盖两类事实：任务 A 的容器被真实收敛；任务 B 的容器记录、任务引用与
 // 工作区初始化记录逐字段不变。
-func TestRecoveringOneTaskKeepsAnotherTaskRecords(t *testing.T) {
-	t.Parallel()
+func runRecoveringOneTaskKeepsAnotherTaskRecords(t *testrunner.Context) {
 	fixture := newIsolationFixture(t)
 	taskA := fixture.task(t, "A")
 	containerA, taskA := fixture.container(t, taskA, "alpha")
@@ -211,12 +209,11 @@ func TestRecoveringOneTaskKeepsAnotherTaskRecords(t *testing.T) {
 	_ = taskA
 }
 
-// TestConcurrentContainerRecoveryKeepsOwnership 验证并发收敛不会互相覆盖结论。
+// 原 TestConcurrentContainerRecoveryKeepsOwnership 验证并发收敛不会互相覆盖结论。
 //
 // 两个任务各有一个 unknown 容器，两个收敛服务（独立连接）同时运行。每个容器都必须
 // 被自己的观测结论收敛，且归属与任务引用不得互相串改。
-func TestConcurrentContainerRecoveryKeepsOwnership(t *testing.T) {
-	t.Parallel()
+func runConcurrentContainerRecoveryKeepsOwnership(t *testrunner.Context) {
 	fixture := newIsolationFixture(t)
 	taskA := fixture.task(t, "A")
 	containerA, _ := fixture.container(t, taskA, "alpha")
@@ -277,12 +274,11 @@ func TestConcurrentContainerRecoveryKeepsOwnership(t *testing.T) {
 	}
 }
 
-// TestOwnershipMismatchBlocksAllDestructivePaths 验证归属不匹配时所有处置入口都拒绝。
+// 原 TestOwnershipMismatchBlocksAllDestructivePaths 验证归属不匹配时所有处置入口都拒绝。
 //
 // 现场：任务 A 的容器引用被改成任务 B 的容器。归属校验必须拒绝把它当作 A 的执行
 // 容器；同时容器收敛不得因该现场删除或脱离任何容器。
-func TestOwnershipMismatchBlocksAllDestructivePaths(t *testing.T) {
-	t.Parallel()
+func runOwnershipMismatchBlocksAllDestructivePaths(t *testrunner.Context) {
 	fixture := newIsolationFixture(t)
 	taskA := fixture.task(t, "A")
 	containerA, _ := fixture.container(t, taskA, "alpha")
@@ -339,12 +335,11 @@ func TestOwnershipMismatchBlocksAllDestructivePaths(t *testing.T) {
 	_ = taskB
 }
 
-// TestOrphanContainerKeepsDiagnosticEvidence 验证孤儿容器保留可诊断证据。
+// 原 TestOrphanContainerKeepsDiagnosticEvidence 验证孤儿容器保留可诊断证据。
 //
 // 孤儿容器（登记了任务关联但任务不再引用它）必须：可被发现、不被删除、不被重新
 // 关联，并留下带任务标识与容器标识的可追溯事件。
-func TestOrphanContainerKeepsDiagnosticEvidence(t *testing.T) {
-	t.Parallel()
+func runOrphanContainerKeepsDiagnosticEvidence(t *testrunner.Context) {
 	fixture := newIsolationFixture(t)
 	task := fixture.task(t, "A")
 	orphan, _ := fixture.container(t, task, "orphan")
@@ -440,12 +435,11 @@ func containsText(haystack, needle string) bool {
 	return false
 }
 
-// TestUnknownContainerKeepsEvidenceWhenUnreachable 验证远程不可达时保留 unknown 与证据。
+// 原 TestUnknownContainerKeepsEvidenceWhenUnreachable 验证远程不可达时保留 unknown 与证据。
 //
 // 节点离线是正常运行状态：既不能删除容器，也不能把记录改写为确定状态，更必须留下
 // "需要人工核验"的可追溯结论。
-func TestUnknownContainerKeepsEvidenceWhenUnreachable(t *testing.T) {
-	t.Parallel()
+func runUnknownContainerKeepsEvidenceWhenUnreachable(t *testrunner.Context) {
 	fixture := newIsolationFixture(t)
 	task := fixture.task(t, "A")
 	container, _ := fixture.container(t, task, "alpha")
@@ -494,12 +488,11 @@ func TestUnknownContainerKeepsEvidenceWhenUnreachable(t *testing.T) {
 	}
 }
 
-// TestReclaimPartialFailureKeepsRemainingScene 验证回收部分失败后剩余现场仍可识别。
+// 原 TestReclaimPartialFailureKeepsRemainingScene 验证回收部分失败后剩余现场仍可识别。
 //
 // 现场：两个任务的容器都要被删除，第一个成功、第二个失败。失败方的记录必须保持
 // 未被删除，后续核验仍能识别它，而不是把整批当成"全部清理完成"。
-func TestReclaimPartialFailureKeepsRemainingScene(t *testing.T) {
-	t.Parallel()
+func runReclaimPartialFailureKeepsRemainingScene(t *testrunner.Context) {
 	fixture := newIsolationFixture(t)
 	taskA := fixture.task(t, "A")
 	containerA, _ := fixture.container(t, taskA, "alpha")
@@ -574,13 +567,12 @@ func TestReclaimPartialFailureKeepsRemainingScene(t *testing.T) {
 	}
 }
 
-// TestConcurrentWorkspaceInitDoesNotCrossTasks 验证并发工作区初始化不跨任务串扰。
+// 原 TestConcurrentWorkspaceInitDoesNotCrossTasks 验证并发工作区初始化不跨任务串扰。
 //
 // 两个任务各自写入工作区初始化记录：每一条记录都必须只属于自己任务的容器，
 // 不得出现"任务 A 的记录指向任务 B 的容器"这类串扰。
-func TestConcurrentWorkspaceInitDoesNotCrossTasks(t *testing.T) {
-	t.Parallel()
-	workspace := testkit.New(t)
+func runConcurrentWorkspaceInitDoesNotCrossTasks(t *testrunner.Context) {
+	workspace := testkit.NewAt(t, t.WorkspaceDir())
 	workspace.Report()
 	root := workspace.Root()
 

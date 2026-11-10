@@ -26,7 +26,10 @@ type Case struct {
 	Group string
 	// Timeout 是该用例的执行上限，零值使用运行级默认超时。
 	Timeout time.Duration
-	// Package 是该用例所属的 Go 测试包目录（例如 tests/integration/local/scheduler）。
+	// Package 是用例来源的 Go 测试包路径（例如 tests/integration/local/scheduler）。
+	//
+	// 迁移后的用例文件不在该目录下，但这里沿用来源包路径：R2 冻结的包级串行表与 R0
+	// 清单都按来源路径组织，迁移时不必改判定口径。
 	//
 	// 它是串行作用域与包级串行声明的输入：非空时串行作用域取该包，R2 冻结的
 	// SerialPackageReason 按它判定整包串行；为空时串行作用域退化为 Group。

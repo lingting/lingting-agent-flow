@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"testing"
 )
 
 // baseDirName 是统一存放测试根目录的目录名。
@@ -30,7 +29,7 @@ var (
 //
 // 根目录位于 os.TempDir()/lingting-agent-flow-tests 之下，名称随机且唯一，
 // 首次创建时把绝对路径输出到标准输出，便于事后定位测试产物。
-func RunRoot(t *testing.T) string {
+func RunRoot(t Tester) string {
 	t.Helper()
 	root := runRootInternal()
 	if rootErr != nil {
@@ -53,7 +52,7 @@ func runRootInternal() string {
 // Dir 在运行根目录下创建一个唯一的子目录并返回其绝对路径。
 //
 // 它替代 t.TempDir()：返回的目录不会被自动删除。
-func Dir(t *testing.T) string {
+func Dir(t Tester) string {
 	t.Helper()
 	root := RunRoot(t)
 	path, err := os.MkdirTemp(root, "case-")

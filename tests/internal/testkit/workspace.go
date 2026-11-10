@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"testing"
 )
 
 // Workspace 是一个测试用例独占的工作空间。
@@ -12,14 +11,23 @@ import (
 // 所有测试产物（数据库、Session、日志、生成文件）都应当放在工作空间内，
 // 测试结束时工作空间保留在磁盘上，只有通过 Cleanup 注册的运行时资源会被关闭。
 type Workspace struct {
-	t    *testing.T
+	t    Tester
 	root string
 }
 
 // New 在当前测试运行根目录下创建一个用例级工作空间。
-func New(t *testing.T) *Workspace {
+func New(t Tester) *Workspace {
 	t.Helper()
-	return &Workspace{t: t, root: Dir(t)}
+	return NewAt(t, Dir(t))
+}
+
+// NewAt 以给定目录作为用例工作空间根创建 Workspace。
+//
+// 统一测试执行器的用例工作空间由编排进程下发，用例侧不许再走运行根目录：
+// 根目录是 go test 进程内的全局状态，worker 里没有它，也不该有。
+func NewAt(t Tester, root string) *Workspace {
+	t.Helper()
+	return &Workspace{t: t, root: root}
 }
 
 // Root 返回工作空间的绝对路径。

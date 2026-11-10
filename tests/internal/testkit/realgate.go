@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"testing"
 )
 
 // 真实测试的 CI 授权门禁使用的环境变量名。
@@ -29,7 +28,7 @@ const (
 // 调用位置必须在读取真实测试配置、建立外部连接与执行任何外部命令之前：未授权时
 // 用例不得触碰真实设备。本机开发环境（没有 GITHUB_ACTIONS 标记）不受影响，仍由
 // tests/config/*.yml 的 enable 开关决定是否执行；CI 中缺少授权信息一律按关闭处理。
-func RequireRealTests(t *testing.T, suite string) {
+func RequireRealTests(t Tester, suite string) {
 	t.Helper()
 	allowed, reason := RealTestsGateDecision(
 		os.Getenv(CIMarkerEnv),

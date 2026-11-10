@@ -18,7 +18,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/docker"
@@ -125,7 +124,7 @@ func (r *ContainerRun) Label() string {
 // 调用时机固定：在容器创建之前（名称已确定）或取得 Docker ID 之后的第一时间。
 // 返回的指针可以在创建成功后补写 DockerID。
 func (r *ContainerRun) Track(
-	t *testing.T,
+	t Tester,
 	runtime ContainerRuntime,
 	target TrackedContainer,
 ) *TrackedContainer {
@@ -162,7 +161,7 @@ func (r *ContainerRun) register(entry *containerEntry) {
 //
 // 基线用于区分"本次运行创建"与"运行前就存在的历史残留"，也用于确认原有非测试
 // 容器没有被删除。快照失败必须让测试失败：没有基线就无法证明零残留。
-func (r *ContainerRun) captureBaseline(t *testing.T, runtime ContainerRuntime) {
+func (r *ContainerRun) captureBaseline(t Tester, runtime ContainerRuntime) {
 	t.Helper()
 	r.mu.Lock()
 	if r.baselineDone {
