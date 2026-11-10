@@ -45,3 +45,24 @@ func killProcessTree(pid int) error {
 		strings.TrimSpace(string(output)),
 	)
 }
+
+// processAlive 报告指定进程号是否仍然存在。
+//
+// Windows 没有可靠的 signal 0 语义，这里用 tasklist 按 PID 过滤：只有输出里出现该 PID 列
+// 才认为进程仍在。查询失败时返回错误，由调用方判为"无法确认"而不是"已退出"。
+func processAlive(pid int) (bool, error) {
+	if pid <= 0 {
+		return false, nil
+	}
+	command := exec.Command("tasklist", "/FI", "PID eq "+strconv.Itoa(pid), "/NH", "/FO", "CSV")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf(
+			"查询进程 %d 失败: %w（tasklist 输出：%s）",
+			pid,
+			err,
+			strings.TrimSpace(string(output)),
+		)
+	}
+	return strings.Contains(string(output), `,"`+strconv.Itoa(pid)+`",`), nil
+}

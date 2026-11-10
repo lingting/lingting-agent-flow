@@ -87,3 +87,8 @@ func (l RunLayout) CreateCaseDir(paths ArtifactPaths) error {
 	}
 	return nil
 }
+
+// ResourcesDir 返回本次运行的资源工作根目录，供进程内与本地资源使用。
+func (l RunLayout) ResourcesDir() string {
+	return filepath.Join(l.RunDir, "resources")
+}

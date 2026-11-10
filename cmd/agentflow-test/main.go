@@ -8,7 +8,11 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
+	"os/signal"
+	"sort"
 	"strings"
 	"time"
 
@@ -39,8 +43,21 @@ func run(args []string) int {
 	handleFile := flags.String("handles", "", "worker 内部参数：资源句柄文件")
 	realTestsGrant := flags.String("real-tests-grant", "", "worker 内部参数：allowed/denied")
 	realTestsReason := flags.String("real-tests-reason", "", "worker 内部参数：授权结论原因")
+	hold := flags.Bool("hold", false, "worker 内部参数：常驻子进程模式（资源自检使用）")
+	serve := flags.String("serve", "", "worker 内部参数：自检用 HTTP 服务监听地址（资源提供者填写 {port}）")
+	failRelease := flags.String(
+		"selfcheck-fail-release",
+		"",
+		"仅自检用：让该资源类型的释放与自证必定失败，用于验证零残留终检",
+	)
 	if err := flags.Parse(args); err != nil {
 		return exitUsage
+	}
+	if *hold {
+		return runHold()
+	}
+	if *serve != "" {
+		return runSelfCheckService(*serve)
 	}
 	if *execCase != "" {
 		return runWorker(*execCase, *resultFile, *artifactDir, *handleFile, *timeout, *realTestsGrant, *realTestsReason)
@@ -72,6 +89,7 @@ func run(args []string) int {
 		Grace:          *grace,
 		ArtifactRoot:   *artifactDir,
 		RealTests:      decision,
+		FaultInjection: testrunner.FaultInjection{FailReleaseType: *failRelease},
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
@@ -146,14 +164,61 @@ func printCases(cases []testrunner.Case) {
 	}
 }
 
-// describeResources 把资源声明压成 "name:type:scope" 列表。
+// describeResources 把资源声明压成 "name:type:scope[spec]" 列表。
 func describeResources(decls []testrunner.ResourceDecl) string {
 	if len(decls) == 0 {
 		return "-"
 	}
 	values := make([]string, 0, len(decls))
 	for _, decl := range decls {
-		values = append(values, decl.Name+":"+decl.Type+":"+decl.Scope)
+		value := decl.Name + ":" + decl.Type + ":" + decl.Scope
+		if len(decl.Spec) > 0 {
+			keys := make([]string, 0, len(decl.Spec))
+			for key := range decl.Spec {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			pairs := make([]string, 0, len(keys))
+			for _, key := range keys {
+				pairs = append(pairs, key+"="+decl.Spec[key])
+			}
+			value += "[" + strings.Join(pairs, ";") + "]"
+		}
+		values = append(values, value)
 	}
 	return strings.Join(values, ",")
+}
+
+// runHold 是资源自检用的常驻子进程入口：一直等到被父进程终止。
+//
+// 它只被 child-process 的默认实例使用；收到 SIGINT 时正常退出，taskkill / SIGKILL 直接结束
+// 进程，两种情况都不会留下子进程。
+func runHold() int {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt)
+	<-signals
+	return testrunner.ExitOK
+}
+
+// runSelfCheckService 是资源自检用的 HTTP 服务入口：监听给定地址并一直提供服务。
+//
+// 它只被 service-process 的默认自检实例使用（编排进程以 127.0.0.1:{port} 启动），不作为
+// 人工日常命令；监听失败如实返回非零退出码。
+func runSelfCheckService(address string) int {
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "错误: 自检服务无法监听 %s: %v\n", address, err)
+		return testrunner.ExitFailure
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		writer.WriteHeader(http.StatusOK)
+		_, _ = writer.Write([]byte("agentflow-test-selfcheck\n"))
+	})}
+	fmt.Printf("自检服务监听 %s\n", listener.Addr().String())
+	if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+		fmt.Fprintf(os.Stderr, "错误: 自检服务异常结束: %v\n", err)
+		return testrunner.ExitFailure
+	}
+	return testrunner.ExitOK
 }

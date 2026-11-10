@@ -42,6 +42,7 @@ type Timings struct {
 }
 
 // ResourceResult 是一条资源声明在用例中的分配与释放结论。
+// ResourceResult 是一条资源声明在用例中的分配、释放与自证结论。
 type ResourceResult struct {
 	Name         string `json:"name"`
 	Type         string `json:"type"`
@@ -50,6 +51,15 @@ type ResourceResult struct {
 	Acquired     bool   `json:"acquired"`
 	Released     bool   `json:"released"`
 	ReleaseError string `json:"release_error,omitempty"`
+	// Verified 表示提供者在释放后自证资源确实消失。
+	Verified bool `json:"verified"`
+	// VerifyError 是自证失败或无法确认的说明；它与 release_error 各自独立。
+	VerifyError string `json:"verify_error,omitempty"`
+}
+
+// Failed 报告该资源是否让整次运行失败。
+func (r ResourceResult) Failed() bool {
+	return r.ReleaseError != "" || r.VerifyError != ""
 }
 
 // ArtifactPaths 是一条用例的全部产物位置，缺失时该字段为空。

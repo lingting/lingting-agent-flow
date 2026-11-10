@@ -24,6 +24,10 @@ type RunOptions struct {
 	RunID          string
 	RealTests      RealTestsDecision
 	Providers      *Providers
+	// ProviderOptions 在 Providers 为空时用于构造默认提供者集合；Root 与 RunID 由编排进程补全。
+	ProviderOptions ProviderOptions
+	// FaultInjection 只用于自检零残留核验本身，正常运行保持零值。
+	FaultInjection FaultInjection
 	Executable     string
 	Output         io.Writer
 }
@@ -51,13 +55,6 @@ func Run(ctx context.Context, opts RunOptions) (Report, error) {
 	if grace <= 0 {
 		grace = DefaultWorkerGrace
 	}
-	providers := opts.Providers
-	if providers == nil {
-		providers, err = DefaultProviders()
-		if err != nil {
-			return Report{}, err
-		}
-	}
 	executable := opts.Executable
 	if executable == "" {
 		executable, err = os.Executable()
@@ -78,6 +75,26 @@ func Run(ctx context.Context, opts RunOptions) (Report, error) {
 	}
 	if err := layout.CreateRunDir(); err != nil {
 		return Report{}, err
+	}
+	providers := opts.Providers
+	if providers == nil {
+		providerOptions := opts.ProviderOptions
+		providerOptions.Root = layout.ResourcesDir()
+		providerOptions.RunID = runID
+		if providerOptions.SelfExecutable == "" {
+			providerOptions.SelfExecutable = executable
+		}
+		providers, err = DefaultProviders(providerOptions)
+		if err != nil {
+			return Report{}, err
+		}
+	}
+	if err := providers.applyFaultInjection(opts.FaultInjection); err != nil {
+		return Report{}, err
+	}
+	residual := newResidualVerifier(ctx, providers)
+	if injected := strings.TrimSpace(opts.FaultInjection.FailReleaseType); injected != "" {
+		residual.addInjection("自检故障注入 --selfcheck-fail-release=" + injected)
 	}
 	output := opts.Output
 	if output == nil {
@@ -109,6 +126,9 @@ func Run(ctx context.Context, opts RunOptions) (Report, error) {
 			RealTests:      opts.RealTests,
 		})
 		report.Cases = append(report.Cases, result)
+		if caseAllocated(result) {
+			residual.markAllocated()
+		}
 		fmt.Fprintf(
 			output,
 			"[%d/%d] %-7s %s (%dms)\n",
@@ -120,10 +140,8 @@ func Run(ctx context.Context, opts RunOptions) (Report, error) {
 		)
 	}
 	report.Resources = shared.releaseAll(ctx, providers)
-	report.Residual = ResidualCheck{
-		Status: ResidualNotRun,
-		Reason: "R1 只记录资源释放结论；逐资源自证与运行级终检由 R2/R7 提供",
-	}
+	report.BuildArtifacts = []BuildArtifact{}
+	report.Residual = residual.finalize(ctx, providers)
 	report.Totals = summarize(report.Cases)
 	report.FinishedAt = time.Now()
 	report.DurationMS = durationMS(startedAt, report.FinishedAt)
@@ -272,7 +290,17 @@ func acquireCaseResources(
 	return handles, results, nil
 }
 
-// releaseExclusive 释放用例独享资源，并把释放结论写回资源结果。
+// caseAllocated 报告该用例是否成功分配过资源。
+func caseAllocated(result CaseResult) bool {
+	for _, resource := range result.Resources {
+		if resource.Acquired {
+			return true
+		}
+	}
+	return false
+}
+
+// releaseExclusive 释放用例独享资源并自证消失，把结论写回资源结果。
 func releaseExclusive(
 	ctx context.Context,
 	providers *Providers,
@@ -298,6 +326,10 @@ func releaseExclusive(
 			continue
 		}
 		results[index].Released = true
+		verifyResourceRelease(ctx, providers, &results[index], handle)
+		if repeatErr := provider.Release(ctx, handle); repeatErr != nil {
+			results[index].ReleaseError = fmt.Sprintf("重复释放失败: %v", repeatErr)
+		}
 	}
 }
 
@@ -347,11 +379,13 @@ func (s *sharedResources) acquire(
 	return handle, result, nil
 }
 
-// releaseAll 按分配顺序释放全部共享资源。
+// releaseAll 按分配顺序的逆序释放全部共享资源，并逐条自证消失。
+//
+// 逆序释放是共享资源之间的依赖要求：后分配的资源依赖先分配的连接或服务，必须先撤销。
 func (s *sharedResources) releaseAll(ctx context.Context, providers *Providers) []ResourceResult {
 	results := make([]ResourceResult, 0, len(s.order))
-	for _, key := range s.order {
-		entry := s.entries[key]
+	for index := len(s.order) - 1; index >= 0; index-- {
+		entry := s.entries[s.order[index]]
 		result := entry.result
 		provider, err := providers.ProviderFor(result.Type)
 		if err != nil {
@@ -365,6 +399,10 @@ func (s *sharedResources) releaseAll(ctx context.Context, providers *Providers) 
 			continue
 		}
 		result.Released = true
+		verifyResourceRelease(ctx, providers, &result, entry.handle)
+		if repeatErr := provider.Release(ctx, entry.handle); repeatErr != nil {
+			result.ReleaseError = fmt.Sprintf("重复释放失败: %v", repeatErr)
+		}
 		results = append(results, result)
 	}
 	return results
@@ -379,7 +417,7 @@ func selectorStrings(selectors []Selector) []string {
 	return values
 }
 
-// exitCodeForReport 汇总用例结论与资源释放结论得到运行退出码。
+// exitCodeForReport 汇总用例结论、资源释放与自证结论以及零残留终检得到运行退出码。
 func exitCodeForReport(report Report) int {
 	if len(report.Cases) == 0 {
 		return ExitFailure
@@ -389,15 +427,18 @@ func exitCodeForReport(report Report) int {
 			return ExitFailure
 		}
 		for _, resource := range result.Resources {
-			if resource.ReleaseError != "" {
+			if resource.Failed() {
 				return ExitFailure
 			}
 		}
 	}
 	for _, resource := range report.Resources {
-		if resource.ReleaseError != "" {
+		if resource.Failed() {
 			return ExitFailure
 		}
+	}
+	if report.Residual.Failed() {
+		return ExitFailure
 	}
 	return ExitOK
 }

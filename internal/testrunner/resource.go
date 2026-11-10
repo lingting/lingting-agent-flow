@@ -74,6 +74,7 @@ func ResourceTypes() []string {
 }
 
 // ResourceDecl 是一条资源声明：它只描述需求，实际句柄由编排进程的 Provider 分配。
+// ResourceDecl 是一条资源声明：它只描述需求，实际句柄由编排进程的 Provider 分配。
 type ResourceDecl struct {
 	// Name 是用例内唯一的声明名，句柄按它回填。
 	Name string
@@ -81,9 +82,13 @@ type ResourceDecl struct {
 	Type string
 	// Scope 是 run-shared 或 case-exclusive。
 	Scope string
+	// Spec 是该类型的创建参数，键名由冻结的 payload 契约给出（V3 R2 §5）。
+	//
+	// 契约外的键在声明阶段失败；必填键缺失在分配阶段失败，不会静默回退成默认实例。
+	Spec map[string]string
 }
 
-// Validate 校验资源声明是否落在冻结词汇表内。
+// Validate 校验资源声明是否落在冻结词汇表与 payload 契约内。
 func (d ResourceDecl) Validate() error {
 	if strings.TrimSpace(d.Name) == "" {
 		return fmt.Errorf("资源声明缺少名称")
@@ -95,6 +100,13 @@ func (d ResourceDecl) Validate() error {
 	case ScopeRunShared, ScopeCaseExclusive:
 	default:
 		return fmt.Errorf("资源 %q 的作用域 %q 不合法", d.Name, d.Scope)
+	}
+	contract, err := ResourceContractFor(d.Type)
+	if err != nil {
+		return fmt.Errorf("资源 %q 的契约无效: %w", d.Name, err)
+	}
+	if err := contract.validateSpecKeys(d); err != nil {
+		return err
 	}
 	return nil
 }
@@ -186,6 +198,13 @@ func VerifyHandles(c Case, handles []Handle) ([]string, error) {
 				decl.Scope,
 			)
 		}
+		contract, err := ResourceContractFor(decl.Type)
+		if err != nil {
+			return nil, err
+		}
+		if err := contract.validateHandle(c.ID, handle); err != nil {
+			return nil, err
+		}
 		delete(byName, decl.Name)
 	}
 	warnings := make([]string, 0, len(byName))
@@ -196,15 +215,28 @@ func VerifyHandles(c Case, handles []Handle) ([]string, error) {
 	return warnings, nil
 }
 
-// Provider 为一种资源类型实现分配与释放。
+// Provider 为一种资源类型实现分配、释放与自证。
 //
-// R1 只内置 local-port；其余类型在 R2 起按冻结词汇表逐个实现，未注册的类型在分配阶段
-// 直接失败，不会退化成空句柄。
+// R1 只内置 local-port；R2 起按冻结词汇表逐个实现本机与远程提供者，未注册的类型在
+// 分配阶段直接失败，不会退化成空句柄。四个方法都必须如实反映观测结果：无法确认时
+// 返回错误，不得用"已释放"冒充成功。
 type Provider interface {
 	// Acquire 分配一份资源并返回可序列化的句柄。
 	Acquire(ctx context.Context, decl ResourceDecl) (Handle, error)
 	// Release 释放句柄对应的资源，必须可重复调用。
 	Release(ctx context.Context, handle Handle) error
+	// Verify 在释放后自证资源确实消失；无法确认时返回错误。
+	Verify(ctx context.Context, handle Handle) error
+	// Snapshot 返回提供者当前仍持有的资源（含外部观测到的残留），供运行级终检比对。
+	Snapshot(ctx context.Context) ([]LiveResource, error)
+}
+
+// LiveResource 是一条仍然存活、需要被零残留核验收敛的资源记录。
+type LiveResource struct {
+	// Handle 是资源的句柄形态；外部观测到的残留可以只填 Name 与 Type。
+	Handle Handle
+	// Detail 是观测方式与关键输出摘要，写入报告便于人工复核。
+	Detail string
 }
 
 // Providers 是资源类型到提供者的映射，由编排进程持有。
@@ -236,16 +268,17 @@ func (p *Providers) Register(resourceType string, provider Provider) error {
 func (p *Providers) ProviderFor(resourceType string) (Provider, error) {
 	provider, ok := p.byType[resourceType]
 	if !ok {
-		return nil, fmt.Errorf("资源类型 %q 尚未提供 R1 分配实现（R2 补齐）", resourceType)
+		return nil, missingProviderError(resourceType)
 	}
 	return provider, nil
 }
 
-// DefaultProviders 返回 R1 内置的提供者集合：目前只有 local-port。
-func DefaultProviders() (*Providers, error) {
-	providers := NewProviders()
-	if err := providers.Register(ResourceLocalPort, NewLocalPortProvider()); err != nil {
-		return nil, err
+// registeredTypes 返回已登记提供者的资源类型，按名称排序。
+func (p *Providers) registeredTypes() []string {
+	types := make([]string, 0, len(p.byType))
+	for resourceType := range p.byType {
+		types = append(types, resourceType)
 	}
-	return providers, nil
+	sort.Strings(types)
+	return types
 }
