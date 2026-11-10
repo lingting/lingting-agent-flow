@@ -7,7 +7,7 @@
 #
 # 参数:
 #   --check [--declared-groups LIST]  核验分组完整性。LIST 是普通 CI 实际并行执行的分组
-#                                    （逗号分隔，例如 unit,local,e2e）。
+#                                    （逗号分隔，例如 unit,e2e）。
 #   --list normal|real                打印指定类型的分组名，每行一个。
 #   --packages GROUP                  打印该分组的 go test 包模式，每行一个。
 #   --make-target GROUP               打印该分组的 Makefile 入口目标。
@@ -31,7 +31,7 @@
 set -euo pipefail
 
 usage() {
-    echo "用法: go-test-groups.sh --check [--declared-groups unit,local,e2e]"
+    echo "用法: go-test-groups.sh --check [--declared-groups unit,e2e]"
     echo "      go-test-groups.sh --list normal|real"
     echo "      go-test-groups.sh --packages GROUP"
     echo "      go-test-groups.sh --make-target GROUP"
@@ -40,7 +40,7 @@ usage() {
 
 # normal_groups 是普通 CI 并行执行的分组（不需要真实外部设备）。
 normal_groups() {
-    printf '%s\n' unit local e2e
+    printf '%s\n' unit e2e
 }
 
 # real_groups 是只在真实测试授权通过后执行的分组。
@@ -57,7 +57,7 @@ all_groups() {
 # group_kind 返回分组类型（normal / real），未知分组返回非零。
 group_kind() {
     case "$1" in
-        unit | local | e2e) printf 'normal\n' ;;
+        unit | e2e) printf 'normal\n' ;;
         ssh | remote) printf 'real\n' ;;
         *) return 1 ;;
     esac
@@ -67,7 +67,6 @@ group_kind() {
 group_patterns() {
     case "$1" in
         unit) printf './tests/unit/...\n' ;;
-        local) printf './tests/integration/local/...\n' ;;
         e2e) printf './tests/e2e/...\n' ;;
         ssh) printf './tests/integration/ssh/...\n' ;;
         remote) printf './tests/integration/remote/...\n' ;;
@@ -79,7 +78,6 @@ group_patterns() {
 group_make_target() {
     case "$1" in
         unit) printf 'test-unit\n' ;;
-        local) printf 'test-local\n' ;;
         e2e) printf 'test-e2e\n' ;;
         *) return 1 ;;
     esac

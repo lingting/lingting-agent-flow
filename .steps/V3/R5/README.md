@@ -3,8 +3,10 @@
 **状态：** 执行中。§4.1 `--audit-coverage` 已落地；批次 B1、B2 已收口。B1：`e2e/cli` 64 条、
 `local/source` 6 条、`local/validation` 11 条、`local/codesaver` 12 条、`local/ssh` 22 条。B2：
 `local/environment` 7 条、`local/execenv` 28 条、`local/session` 7 条、`local/workflow` 49 条，
-另有 workflow 中 32 条依赖本机真实 Git 的用例按确认移除并登记 dropped。当前覆盖 247 / 328、
-dropped 35、缺失 46（全部属于未开始的 B3），运行与对照结果见 §5.2。
+另有 workflow 中 32 条依赖本机真实 Git 的用例按确认移除并登记 dropped。测试清理批次又整包移除了
+`tests/integration/local/fetcher` 的 14 条本机 Git 假容器用例，并移除了 5 条宿主侧 Pi 单测，两者
+同样登记 dropped。当前覆盖 247 / 328、dropped 49、缺失 32（全部属于未开始的 B3），运行与对照结果
+见 §5.2。
 **上游文档：** [路线总规划](../ROADMAP.md)、[R4.5 试点](../R4.5/README.md)。
 **范围：** 迁移 `tests/integration/**` 与 `tests/e2e/cli` 的 328 个用例（R4.5 已覆盖其中的 41 个），
 并让覆盖对账可执行。不迁移 `tests/unit`（路径 C）、不做前端（R6）、不改 `Makefile` / CI / `docs/`。
@@ -125,15 +127,19 @@ dropped 35、缺失 46（全部属于未开始的 B3），运行与对照结果�
 | 分母 | R0 冻结清单 `.steps/V3/R0/legacy-cases.manifest.json`（默认路径，可由 `--audit-manifest` 覆盖） |
 | 匹配键 | `Case.Package`（来源包路径）+ `Case.LegacyName`（来源测试函数名） |
 | `LegacyName` 来源 | 由 `Register` 从用例主体函数名推导（`func run<原函数名去掉 Test 前缀>`），也可显式声明 |
-| dropped | `testrunner.DeclareDropped(清单ID, 理由)`，`tests/runner/legacy` 登记 3 条（2 条本机 Pi + 1 条依赖已移除的 `check` 子命令） |
+| dropped | `testrunner.DeclareDropped(清单ID, 理由)`，`tests/runner/legacy` 登记 49 条（3 条本机 Pi 与已移除的 `check` 子命令、32 条 workflow 本机 Git、14 条本机 Git `fetcher`），另登记 5 条 `keep-go-test` 范围的宿主侧 Pi 单测（不在 R5 对账范围内） |
 | 输出 | 文本摘要（逐包 `覆盖/范围`、缺失、dropped、多余、问题）+ 可选 JSON（`agentflow-test-coverage/1`） |
 | 退出码 | 0 全部覆盖或有理由的 dropped；1 缺失 / 未解释的多余 / 结构性问题；2 用法错误 |
-| 当前结论 | 范围 R5 共 328 条：覆盖 247、dropped 35、缺失 46、多余 0，退出码 1（缺失全部属于未开始的 B3） |
+| 当前结论 | 范围 R5 共 328 条：覆盖 247、dropped 49、缺失 32、多余 0，退出码 1（缺失全部属于未开始的 B3） |
 
-`dropped` 目前 35 条：3 条由 commit 9515a72「移除本机pi测试」造成（`tests/integration/pi` 的
+`dropped` 目前 49 条：3 条由 commit 9515a72「移除本机pi测试」造成（`tests/integration/pi` 的
 `TestRealPiCheck`、`TestRealPiModelRecognition` 与 `tests/e2e/cli` 的 `TestAgentCheckUnknownExecutable`），
-32 条是 B2 中 workflow 依赖本机真实 Git 的用例（理由见 §5.2、D8）。其余 46 条属于未开始的 B3，
-因此对账当前仍非零退出。
+32 条是 B2 中 workflow 依赖本机真实 Git 的用例（理由见 §5.2、D8），14 条是测试清理批次整包移除的
+`tests/integration/local/fetcher`：这些用例把容器命令映射到宿主机目录并用本机 Git 执行 clone，不能
+证明远程容器内 Git 与文件系统行为，Git 获取的验收改由远程容器用例承担。同批次另有 5 条
+`keep-go-test` 范围的宿主侧 Pi 单测一并登记（`tests/unit/agent/pi/session_path_test.go` 的 4 条与
+`tests/unit/testkit/pi_config_test.go` 的 1 条），它们不在 R5 对账范围内。其余 32 条属于未开始的
+B3，因此对账当前仍非零退出。
 
 **B1 已迁移并通过对照的包**
 

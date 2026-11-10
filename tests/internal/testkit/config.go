@@ -347,23 +347,6 @@ func LoadPiConfig(t Tester) (PiConfig, bool) {
 	return config, true
 }
 
-// ResolvedModel 返回宿主 Pi CLI 使用的完整模型标识。
-//
-// provider 非空时按 Pi 的 `--model provider/model` 形式补全前缀；provider 为空时原样
-// 返回 model，因此旧配置与旧判定行为完全不变。容器内 Pi 的模型来自 tests/config/docker.yml
-// 的 pi 配置（provider 固定，见 ContainerPiConfig），不受这里影响。
-func (c PiConfig) ResolvedModel() string {
-	model := strings.TrimSpace(c.Model)
-	if model == "" {
-		model = DefaultPiModel
-	}
-	provider := strings.TrimSpace(c.Provider)
-	if provider == "" || strings.HasPrefix(model, provider+"/") {
-		return model
-	}
-	return provider + "/" + model
-}
-
 // LoadDockerConfig 读取 tests/config/docker.yml。
 func LoadDockerConfig(t Tester) (DockerConfig, bool) {
 	t.Helper()

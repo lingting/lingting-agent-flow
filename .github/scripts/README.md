@@ -24,7 +24,7 @@
 | --- | --- | --- | --- | --- | --- |
 | `check-go-static.sh` | `ci.yml` / `go-static` | `gofmt -l` 门禁、`go vet ./...`、`go build ./...` | 无 | 未格式化文件清单与失败注解 | 0 通过；1 格式 / 静态检查 / 编译失败；2 参数错误 |
 | `go-test-groups.sh` | `ci.yml` / `go-inventory`、`run-go-group-tests.sh`、`run-real-tests.sh` | Go 测试分组清单的唯一来源（分组类型、Makefile 入口、包模式）与分组覆盖核验 | `--check [--declared-groups LIST]`、`--list normal\|real`、`--packages GROUP`、`--make-target GROUP`、`--describe` | 分组表格、`coverage` / `package_total` / `groups_markdown` 与 `GITHUB_STEP_SUMMARY` | 0 查询成功或核验通过；1 分组遗漏 / 重复 / 与工作流或 Makefile 不一致；2 参数错误 |
-| `run-go-group-tests.sh` | `ci.yml` / `go-unit`、`go-local`、`go-e2e` | 执行一个普通测试分组（分组、Makefile 入口与包模式全部来自 `go-test-groups.sh`），拒绝真实测试分组 | `--group NAME`（必填）、`--artifact-dir DIR`（必填）、`--parallel N`（默认 4） | `DIR/<group>-output.log`、`DIR/<group>-summary.txt` 与 `GITHUB_STEP_SUMMARY`（耗时、包数量、用例结论） | 0 通过；1 测试失败或分组不是普通分组；2 参数错误 |
+| `run-go-group-tests.sh` | `ci.yml` / `go-unit`、`go-e2e` | 执行一个普通测试分组（分组、Makefile 入口与包模式全部来自 `go-test-groups.sh`），拒绝真实测试分组 | `--group NAME`（必填）、`--artifact-dir DIR`（必填）、`--parallel N`（默认 4） | `DIR/<group>-output.log`、`DIR/<group>-summary.txt` 与 `GITHUB_STEP_SUMMARY`（耗时、包数量、用例结论） | 0 通过；1 测试失败或分组不是普通分组；2 参数错误 |
 | `summarize-test-skips.sh` | `ci.yml` / 各 Go 测试组 | 汇总 `test.log` 中的 `WARN [SKIP]`，只做展示 | `--base DIR`、`--title TEXT` | `GITHUB_STEP_SUMMARY` 与标准输出 | 0 汇总完成；2 参数错误 |
 | `run-go-race-tests.sh` | `ci.yml` / `go-race` | `make test-race` + 任务级工作流编排的 `-race` 检测，并行度显式传入 | `--artifact-dir DIR`（必填）、`--parallel N`（默认 4） | `DIR/race-output.log` | 0 通过；非零沿用失败命令的退出码；2 参数错误 |
 | `collect-test-artifacts.sh` | `ci.yml` / 各 Go 测试组与 `real-tests` | 把白名单测试产物（控制台输出、`test.log`、`latest-run.txt`）收敛到暂存目录，供 `upload-artifact` 上传 | `--source-dir DIR`、`--job NAME`（必填）、`--staging-dir DIR`（可选） | `staging-dir` / `artifact-name` / `file-count` 与 `GITHUB_STEP_SUMMARY` | 0 收集完成（含无可收集文件）；1 暂存失败；2 参数错误 |
@@ -49,7 +49,7 @@
 ```bash
 bash -n .github/scripts/*.sh                  # 全部 Shell 脚本语法检查
 bash .github/scripts/check-go-static.sh       # 与 go-static Job 等价
-bash .github/scripts/go-test-groups.sh --check --declared-groups unit,local,e2e   # 分组覆盖核验
+bash .github/scripts/go-test-groups.sh --check --declared-groups unit,e2e   # 分组覆盖核验
 bash .github/scripts/run-go-group-tests.sh --group unit --artifact-dir .test-artifacts/unit --parallel 4
 bash .github/scripts/resolve-release-version.sh --require-tag   # 需要 REF_TYPE/REF_NAME/COMMIT_SHA
 ```
@@ -60,19 +60,19 @@ bash .github/scripts/resolve-release-version.sh --require-tag   # 需要 REF_TYP
 
 ## Go 测试分组与 CI 编排
 
-普通 CI 的 Go 测试按职责拆成三个互不依赖的 Job，每个 Job 独享一台 Runner 并行执行。
+普通 CI 的 Go 测试按职责拆成两个互不依赖的 Job，每个 Job 独享一台 Runner 并行执行。
 分组归属、包模式与 Makefile 入口只定义在 `go-test-groups.sh`，工作流里只出现分组名：
 
 | 分组 | 类型 | 包模式 | 本地等价入口 | CI Job |
 | --- | --- | --- | --- | --- |
 | `unit` | 普通 CI | `./tests/unit/...` | `make test-unit` | `go-unit` |
-| `local` | 普通 CI | `./tests/integration/local/...` | `make test-local` | `go-local` |
 | `e2e` | 普通 CI | `./tests/e2e/...` | `make test-e2e` | `go-e2e` |
 | `ssh` | 真实外部依赖 | `./tests/integration/ssh/...` | 无（需要真实主机） | `real-tests`（授权后） |
 | `remote` | 真实外部依赖 | `./tests/integration/remote/...` | 无（需要真实远程 Docker） | `real-tests`（授权后） |
 
-`tests/integration/local/` 下的 SSH、Docker、Agent 用例都是本机进程内模拟，属于普通 CI 的
-`local` 分组；只有 `tests/integration/{ssh,remote/...}` 需要真实外部设备。
+本机进程内模拟的用例组（原 `tests/integration/local/`）已随测试清理移除：用本机目录与本机 Git 模拟
+容器的集成测试不能作为产品运行环境的验收依据，Git 获取与 Pi 的验收改由远程容器用例承担。普通 CI 因此
+只有 `unit` 与 `e2e` 两个 Go 分组，只有 `tests/integration/{ssh,remote/...}` 需要真实外部设备。
 
 分组覆盖由 `go-test-groups.sh --check` 机械核验，`go-inventory` Job 在跑测试之前执行它：
 
@@ -85,7 +85,7 @@ bash .github/scripts/resolve-release-version.sh --require-tag   # 需要 REF_TYP
 
 并行与资源上限：
 
-- 三个普通分组 Job 之间没有 `needs` 依赖，由 GitHub Actions 并行调度；它们都依赖
+- 两个普通分组 Job 之间没有 `needs` 依赖，由 GitHub Actions 并行调度；它们都依赖
   `go-inventory`，分组核验失败时测试 Job 直接跳过而不是跑一半；
 - 每个分组 Job 独享一台 4 vCPU Runner，`go test` 只用 `-p 4` / `-parallel 4`，不在同一台
   机器上叠加多个高并发测试进程；

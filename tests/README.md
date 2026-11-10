@@ -14,7 +14,6 @@ tests/
 │   └── testkit/        # 统一测试入口（testkit.Main）、日志落盘、工作空间、known_hosts 快照与测试数据构造
 ├── unit/               # 快速单元测试，不依赖真实 Pi、SSH 或网络
 │   ├── agent/          # Agent 事件、结果类型与容器内 Pi Runner（使用替身）
-│   │   └── pi/         # Session 目录与归档路径构造
 │   ├── app/            # 应用服务层
 │   ├── cigate/         # 真实测试授权判定（只读、fail closed）
 │   ├── container/      # 容器状态、生命周期策略与 Docker 命令参数构造
@@ -27,19 +26,8 @@ tests/
 │   ├── server/         # 服务端进程锁与启动守卫（真实 SQLite 与真实文件锁）
 │   ├── source/         # Git Clone 代码来源（容器执行替身）
 │   ├── store/          # SQLite 仓储与数据库约束
-│   └── testkit/        # 测试辅助逻辑：文件缺失探针分类、Pi 模型标识组成
+│   └── testkit/        # 测试辅助逻辑：文件缺失探针分类
 ├── integration/
-│   ├── local/          # 本机集成测试，不依赖外部服务
-│   │   ├── codesaver/  # 真实 Git 提交、推送与合并（本机 bare 仓库）
-│   │   ├── environment/# 环境版本文件写入与清单读写（真实文件系统）
-│   │   ├── execenv/    # 执行环境准备与容器状态（真实 SQLite）
-│   │   ├── fetcher/    # 任务级工作区初始化的真实 Git 代码获取
-│   │   ├── scheduler/  # 项目级调度：准入、排序、领取、名额、租约、并发竞争与需求删除竞争
-│   │   ├── session/    # Session 提取与持久化边界（真实文件系统）
-│   │   ├── source/     # 容器内 Git Clone 与任务分支（真实 Git）
-│   │   ├── ssh/        # 本地模拟 SSH/SFTP 服务端
-│   │   ├── validation/ # 验证执行与检查结论（真实 SQLite）
-│   │   └── workflow/   # 应用层编排、取消与收尾一致性（真实 SQLite）
 │   ├── remote/
 │   │   ├── agent/      # 需要真实远程容器与容器内真实 Pi CLI
 │   │   ├── codesaver/  # 需要真实远程容器与容器内 Git
@@ -59,9 +47,6 @@ tests/
 ```bash
 # 快速单元测试（日常反馈，不访问真实模型与远程网络）
 go test -count=1 -v -p 8 -parallel 8 ./tests/unit/...
-
-# 本机集成测试
-go test -count=1 -v -p 8 -parallel 8 ./tests/integration/local/...
 
 # 本机 Git 代码保存集成测试
 go test -count=1 -v ./tests/integration/local/codesaver/...
@@ -121,7 +106,6 @@ SQLite 初始化与连接建立对并发量敏感，在高核数机器上用默�
 | `go-static` | `gofmt -l cmd internal tests` 无输出、`go vet ./...`、`go build ./...` | `make fmt-check`、`make vet`、`make build` |
 | `go-inventory` | Go 测试包清单与分组核验：`go list` 得到的真实测试包必须恰好被分组清单覆盖一次（遗漏、重复归属、分组未被任何 Job 执行都会失败） | `bash .github/scripts/go-test-groups.sh --check --declared-groups unit,local,e2e` |
 | `go-unit` | `./tests/unit/...`（不需要任何外部设备） | `make test-unit` |
-| `go-local` | `./tests/integration/local/...`（本机 SQLite / 进程 / 本机 bare 仓库 / 进程内模拟 SSH 服务端） | `make test-local` |
 | `go-e2e` | `./tests/e2e/...`（CLI 完整用户操作路径，不需要 pnpm 与前端依赖） | `make test-e2e` |
 | `go-race` | `make test-race` 的全部范围 + 业务并发写入 + 调度与任务级工作流编排 | `make test-race`，再执行下文两条补充命令 |
 | `ui-test` | 前端单元（`--maxWorkers 4`）、Playwright E2E（`--workers=4`）、格式、lint、类型检查、生产构建 | `cd lingting-agent-flow-ui && pnpm test:all:safe` |
@@ -130,7 +114,7 @@ SQLite 初始化与连接建立对并发量敏感，在高核数机器上用默�
 | `ci-summary` | 其余全部 Job 都成功才通过；分组核验失败算失败，授权判断失败算失败，真实测试未授权跳过不算失败但也不计为通过 | 无（仅 CI） |
 
 这些 Job 的执行逻辑都在 `.github/scripts/` 下，工作流只负责触发、依赖与参数传递：脚本内部
-调用的正是本地入口（`make test-unit`、`make test-local`、`make test-e2e`、`make test-race`、
+调用的正是本地入口（`make test-unit`、`make test-e2e`、`make test-race`、
 `pnpm test:all:safe`、`go run ./cmd/agentflow-ci ...`、`make release-dist`），CI 与本地命令
 因此不会各跑一套。分组归属、包模式与 Makefile 入口只定义在
 `.github/scripts/go-test-groups.sh`，工作流与执行脚本都不重复列举测试包。
@@ -204,7 +188,7 @@ go test -race -count=1 -p 4 -parallel 4 ./tests/integration/local/scheduler/
 本机开发环境没有 `GITHUB_ACTIONS` 标记，**不经过第 1 层**：`tests/internal/testkit` 的
 `RealTestsGateDecision` 直接按"本机运行环境不使用 CI 授权门禁"放行，是否执行只由 `tests/config`
 决定。因此本机把 `tests/config` 里的开关设为 true 后，`make test`（`go test ./tests/...`）会真实连接
-测试设备；`make test-unit` / `make test-race` / `make test-local` 不包含真实测试分组。测试代码不读取
+测试设备；`make test-unit` / `make test-race` 不包含真实测试分组。测试代码不读取
 `AGENTFLOW_REAL_TESTS` 本身，只读取上面两个门禁变量。
 
 `AGENTFLOW_REAL_TESTS` 的取值（CI 内）：
@@ -264,9 +248,8 @@ tests/integration/remote/planning/    # remote 分组：真实规划运行时（
 tests/integration/remote/workflow/    # remote 分组：真实远程端到端工作流
 ```
 
-以下本机模拟测试**不属于**真实测试，继续在普通 CI 的 `go-local` 分组中执行：
-`tests/integration/local/ssh/`、使用本机 SQLite 的调度与工作流测试、使用容器执行替身
-的 Agent 测试，以及使用本机 bare 仓库的代码保存测试。
+原先在本机模拟层执行的用例（`tests/integration/local/`）已随测试清理移除：它们用本机目录、本机 Git
+与容器执行替身模拟容器，不能作为远程容器真实运行环境的验收依据，因此普通 CI 不再保留该分组。
 
 #### 跳过规则
 
@@ -316,7 +299,7 @@ GITHUB_ACTIONS=true go test -count=1 -v ./tests/integration/ssh/... ./tests/inte
 
 | Job | 产物 | 触发条件 | 保留 |
 |---|---|---|---|
-| `go-unit` / `go-local` / `go-e2e` | 该分组的控制台输出、各测试包 `test.log`、`latest-run.txt` | 仅失败 | 7 天 |
+| `go-unit` / `go-e2e` | 该分组的控制台输出、各测试包 `test.log`、`latest-run.txt` | 仅失败 | 7 天 |
 | `go-race` | 竞态检测控制台输出、各测试包 `test.log`、`latest-run.txt` | 仅失败 | 7 天 |
 | `ui-test` | Vitest 输出、Playwright HTML 报告、失败截图与 trace、完整控制台日志 | 仅失败 | 7 天 |
 | `real-tests` | 真实测试控制台输出、各测试包 `test.log`、`latest-run.txt` | 仅失败 | 7 天 |
@@ -748,14 +731,11 @@ Docker 或模型：
 | `tests/unit/store/` | `task_workspace_initializations` 的写入、按任务/容器查询、同任务同容器只允许一条未结束记录（部分唯一索引）、中断记录查询、未知枚举值原样读回、成功必须带 commit、记录不存在语义 |
 | `tests/unit/httpapi/` | 启动接口的工作区阶段与错误映射：`uncertain` → 409、前置条件缺失 → 412、未落库 → `execution_not_persisted` |
 | `tests/integration/local/workflow/` | 真实 SQLite 上的阶段顺序、结果不确定时停在 workspace 阶段、重启后记录仍有效、中断记录收敛为 `uncertain` 且不重放 |
-| `tests/integration/local/fetcher/` | 真实 Git：任务级初始化复用同一套 `source.Fetcher`（`AttemptID` 为空、任务分支正确、工作区落在容器内目录）、重复初始化不覆盖已有改动、目标目录非空时失败且不删除内容 |
 
 工作区用例的关键约束：
 
 - 任务级初始化不携带 `attempt_id`：用例显式断言传给 `FetchSourceWith` 的 `AttemptID` 为空，
   防止后续实现为了复用尝试级代码而伪造归属。
-- 集成用例的容器替身同时是代码获取端口，内部直接调用 `source.NewGitFetcher`，因此断言的是
-  "走的是同一条实现"，而不是"另写了一套 Git 命令"。
 - 重启通过"关闭连接 → 同一路径重新打开"模拟，只断言数据库里的持久化事实。
 - 收敛用例的容器替身在被调用时直接失败，用来证明恢复路径不访问容器、不重放代码获取。
 

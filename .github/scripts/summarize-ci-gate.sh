@@ -13,7 +13,6 @@
 #   GO_INVENTORY_COVERAGE / GO_INVENTORY_PACKAGES  分组核验结论与测试包总数
 #   GO_GROUPS_SUMMARY                              go-inventory 输出的分组清单表格（Markdown）
 #   GO_UNIT_RESULT / GO_UNIT_STEP                  go-unit 的 Job 结论与测试步骤结论
-#   GO_LOCAL_RESULT / GO_LOCAL_STEP                go-local 的 Job 结论与测试步骤结论
 #   GO_E2E_RESULT / GO_E2E_PREPARE / GO_E2E_STEP   go-e2e 的 Job、环境准备与测试步骤结论
 #   GO_RACE_RESULT / GO_RACE_STEP
 #   UI_TEST_RESULT / UI_TEST_PREPARE / UI_TEST_STEP
@@ -83,7 +82,6 @@ for row in \
     "go-static|${GO_STATIC_RESULT:-}|${GO_STATIC_STEP:-}|-" \
     "go-inventory|${GO_INVENTORY_RESULT:-}|${GO_INVENTORY_STEP:-}|-" \
     "go-unit|${GO_UNIT_RESULT:-}|${GO_UNIT_STEP:-}|-" \
-    "go-local|${GO_LOCAL_RESULT:-}|${GO_LOCAL_STEP:-}|-" \
     "go-e2e|${GO_E2E_RESULT:-}|${GO_E2E_STEP:-}|${GO_E2E_PREPARE:-}" \
     "go-race|${GO_RACE_RESULT:-}|${GO_RACE_STEP:-}|-" \
     "ui-test|${UI_TEST_RESULT:-}|${UI_TEST_STEP:-}|${UI_TEST_PREPARE:-}"; do

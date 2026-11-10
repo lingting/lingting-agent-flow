@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# 用途: 执行一个普通 Go 测试分组（unit / local / e2e）。分组归属、Makefile 入口与包模式
+# 用途: 执行一个普通 Go 测试分组（unit / e2e）。分组归属、Makefile 入口与包模式
 #       全部来自 go-test-groups.sh，本脚本不重复定义测试范围；真实外部依赖分组在这里被
 #       明确拒绝，避免普通 CI 无意执行真实设备测试。
 #
 # 参数:
-#   --group NAME        必填。普通分组名（unit / local / e2e），由 go-test-groups.sh 定义。
+#   --group NAME        必填。普通分组名（unit / e2e），由 go-test-groups.sh 定义。
 #   --artifact-dir DIR  必填。测试产物目录；同时作为 TMPDIR，使 testkit 生成的随机工作空间
 #                       与 test.log 落在可上传的位置。
 #   --parallel N        可选，默认 4。作为 Makefile 的 PARALLEL（go test 的 -p / -parallel）。
