@@ -104,6 +104,7 @@
 | 前端约束、Web 交付、请求分发、单文件构建 | [docs/frontend.md](docs/frontend.md) |
 | Docker 版本基线、命令清单、容器管理 | [docs/docker-compatibility.md](docs/docker-compatibility.md) |
 | 发布流程、制品与来源证明 | [docs/release.md](docs/release.md) |
+| 运行手册：启动前提、停止语义、结果不明处置、备份恢复、故障排查 | [docs/runbook.md](docs/runbook.md) |
 | 第三方组件替换自研实现的评估结论 | [docs/component-evaluations/](docs/component-evaluations/) |
 | 项目当前阶段与里程碑 | [README.md](README.md)、[.steps/](.steps) |
 

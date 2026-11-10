@@ -24,15 +24,18 @@ tests/
 │   ├── execenv/        # 执行环境规格、工作区与生命周期策略
 │   ├── httpapi/        # HTTP API 处理器：用户操作路径、错误结构与 API 路径边界
 │   ├── image/          # 构建上下文哈希、Dockerfile 校验与语言模板
+│   ├── lifecycle/      # 后台服务生命周期：启动顺序、逆序停止、故障传播与停止超时
+│   ├── server/         # 服务端进程锁与启动守卫（真实 SQLite 与真实文件锁）
 │   ├── source/         # Git Clone 代码来源（容器执行替身）
-│   └── store/          # SQLite 仓储与数据库约束
+│   ├── store/          # SQLite 仓储与数据库约束
+│   └── testkit/        # 测试辅助逻辑：文件缺失探针分类、宿主 Pi 模型标识组成
 ├── integration/
 │   ├── local/          # 本机集成测试，不依赖外部服务
 │   │   ├── codesaver/  # 真实 Git 提交、推送与合并（本机 bare 仓库）
 │   │   ├── environment/# 环境版本文件写入与清单读写（真实文件系统）
 │   │   ├── execenv/    # 执行环境准备与容器状态（真实 SQLite）
 │   │   ├── fetcher/    # 任务级工作区初始化的真实 Git 代码获取
-│   │   ├── scheduler/  # 项目级调度：准入、排序、领取、名额、租约与并发竞争
+│   │   ├── scheduler/  # 项目级调度：准入、排序、领取、名额、租约、并发竞争与需求删除竞争
 │   │   ├── session/    # Session 提取与持久化边界（真实文件系统）
 │   │   ├── source/     # 容器内 Git Clone 与任务分支（真实 Git）
 │   │   ├── ssh/        # 本地模拟 SSH/SFTP 服务端
@@ -491,6 +494,7 @@ Engine），远程预检与真实容器流程由 `tests/integration/remote/docke
 |---|---|---|
 | `pi.enable` | 是否执行需要真实 Pi CLI 的测试 | `false` |
 | `pi.model` | 真实 Pi 测试使用的模型 | `group/free` |
+| `pi.provider` | 宿主 Pi CLI 的 provider 名称，留空时按 `pi.model` 原样检查 | 空 |
 | `pi.executable` | Pi 可执行文件路径 | PATH 中的 `pi` |
 
 `pi.enable` 未设为 `true` 或本机 PATH 中没有 `pi` 时，真实 Pi 用例输出 `WARN [SKIP]` 并
@@ -498,8 +502,9 @@ Engine），远程预检与真实容器流程由 `tests/integration/remote/docke
 生命周期用例位于 `tests/unit/app/`，验证「启动失败不残留 running」「停止服务取消在途调用
 并收敛」等约束，同样不依赖本机 Pi。
 
-默认模型 `group/free` 是特意选定的非标准标识，避免测试意外消耗付费额度。每次真实
-调用都显式传入模型，不会回退到 Pi CLI 配置中的默认模型。
+默认模型 `group/free` 是特意选定的、不会意外消耗付费额度的标识。它挂在哪个 provider 下由 `pi.provider`
+指定：填写后调用标识组装为 `provider/model`（例如 `magpie/group/free`），留空时按 `pi.model` 原样使用。
+每次真实调用都显式传入模型，不会回退到 Pi CLI 配置中的默认模型。
 
 ### 真实 SSH
 
@@ -573,6 +578,9 @@ go test -count=1 -v ./tests/integration/remote/docker/...
   Docker。
 - 测试结束不得删除测试工作空间与产物；真实远程测试的远程测试目录同样保留（只回收测试
   容器，不删除共享镜像、缓存卷与非测试容器）。
+- 共用同一台真实设备的测试包必须保持包内串行（不使用 `t.Parallel()`），并在包注释写明原因：
+  这些用例共用远程 Docker 与环境镜像标签，并行构建会把同一标签改指到不同镜像，使先完成用例记录的
+  镜像 ID 失效。无共享状态的普通测试仍需支持并发。
 
 ## 远程执行测试分层
 
@@ -594,7 +602,7 @@ go test -count=1 -v ./tests/integration/remote/docker/...
 | `tests/unit/domain/` | 代码保存记录的终态与"必须转人工核验"语义 | 无（纯函数） |
 | `tests/unit/store/` | `code_saves` 写入与更新、状态字段约束（成功必须带 SHA）、未请求合并不能记录合并结果、按任务查询、并发写入独立、恢复字段读写（基线/落盘状态/恢复结论）、历史记录（新列为 NULL）可读且不被误判、未知恢复状态原样读回、**核验结论条件写入（读取后结论被改写返回 `ErrConflict` 且不覆盖）、核验只写 `recovery_status` 不覆盖提交/推送状态、记录不存在返回 `ErrNotFound`** | 无 |
 | `tests/integration/local/codesaver/` | 真实 Git 提交、任务分支真实 Push 到 bare 仓库、默认不合并、显式合并后基础分支包含任务提交、推送失败不误报成功、合并冲突保留现场、无变更不制造空提交、并发仓库隔离、提交成功但记录写入失败后可核验、远程不一致与不可达时的核验结论 | 本机 `git` |
-| `tests/integration/remote/codesaver/` | 真实远程容器内提交、推送与合并，远程任务分支与基础分支 commit 核验 | tests/config/ssh.yml 指定的 SSH 目标、真实 Docker 与容器内 Git |
+| `tests/integration/remote/codesaver/` | 真实远程容器内提交、推送与合并，远程任务分支与基础分支 commit 核验；**真实副作用结果不明（推送成功但记录写回失败）时需求删除失败关闭，且不回滚远端 Git、不清理容器** | tests/config/ssh.yml 指定的 SSH 目标、真实 Docker 与容器内 Git |
 
 本机 Git 缺失时，`tests/integration/local/codesaver/` 的用例输出 `WARN [SKIP]` 并跳过，
 `tests/unit/domain/` 与 `tests/unit/store/` 的用例仍然执行。
@@ -644,8 +652,11 @@ docker build -t agentflow-test-agent:1.0.0 -f tests/integration/remote/agent/Doc
 | `ssh.enable` 及 `ssh.*` | SSH 目标，见「真实 SSH」 | 是 |
 | `docker.pi.*` | 可选的容器内 Pi 模型接入覆盖 | 否 |
 
-真实模型标识来自 `tests/config/pi.yml` 的 `pi.model`，默认 `group/free`；该配置在本目录
-只提供模型标识，是否执行本机真实 Pi 测试由同一文件的 `pi.enable` 控制。
+真实模型标识来自 `tests/config/pi.yml` 的 `pi.model`，默认 `group/free`。本机 Pi 的模型清单按 provider 与
+模型两列列出，`--model` 使用 `provider/model` 形式：模型挂在不含模型前缀的 provider 下时（例如 provider 为
+`magpie`、模型标识为 `group/free`），必须同时填写 `pi.provider`，本机检查与真实调用才会组装成
+`magpie/group/free`；`pi.provider` 留空时按 `pi.model` 原样使用。容器内 Pi 的模型来自 `docker.yml` 的
+`pi.*`（provider 固定），不受 `pi.provider` 影响。是否执行本机真实 Pi 测试由同一文件的 `pi.enable` 控制。
 
 ```bash
 # 先在 docker.yml 与 ssh.yml 中启用，并准备好测试镜像
@@ -687,6 +698,27 @@ go test -count=1 -v ./tests/integration/remote/planning/...
 容器的 Session 提取与恢复由生产代码退回 `docker exec` 加宿主机重定向；本目录的用例覆盖
 该路径。测试包结束时按真实 `docker ps -a` 与命名卷核验零残留，只清理本次测试创建并核验过
 所有权的容器与卷。
+
+## 需求聚合删除测试分层
+
+需求与它的全部任务在同一事务内软删除，任一任务不满足条件就整体拒绝；删除不回滚 Git、不清理容器、
+不删除执行历史。覆盖分成四层：
+
+| 目录 | 内容 | 外部依赖 |
+|---|---|---|
+| `tests/unit/domain/` | 需求与任务删除的状态白名单、未知状态失败关闭、删除事件类型 | 无（纯函数） |
+| `tests/unit/store/` | 条件软删除（影响行数为 0 时拒绝迟到写入）、事务回滚不留半成品、并发删除只有一个成功、执行历史保留、未知状态原样读回 | 无 |
+| `tests/unit/app/` | 事务外取权 + 事务内复读核验；活动执行记录、未收敛步骤、结果不明的代码保存副作用一律拒绝；代码保存各形态的删除矩阵（见下文）；任务取消并发、多任务取权中途失败、事务中途取消、服务停止释放执行权 | 无（真实 SQLite + 真实协调器） |
+| `tests/unit/httpapi/` | 409 语义、真实删除结果返回、持久化与事件写入失败的错误映射 | 无 |
+| `tests/integration/local/scheduler/` | 已删除需求的任务不被调度领取、在途分派期间删除失败关闭、删除与调度扫描并发后删除状态一致且不残留执行权 | 无（真实 SQLite + 真实调度器，启动端口用受控替身） |
+| `tests/integration/remote/codesaver/` | 真实副作用结果不明时删除失败关闭，且远端 Git 不回滚、容器不被清理 | 真实 SSH 与远程 Docker |
+
+代码保存形态的删除矩阵（`tests/unit/app/requirement_delete_code_save_test.go`）：从未开始、提交与推送已完成、
+推送仍 `pending` 未核验、已核验但无法判定（`unverifiable`）、记录写入未确认（`persist_status=unconfirmed`）、
+推送 `unknown`、推送 `conflict`、合并待确认——全部拒绝删除；只有核验结论为"确认未发生"
+（`confirmed_not_applied`）时才允许删除。被拒绝时需求与任务都不得写入 `deleted_at`，代码保存记录也不得被改写。
+
+"结果不明时失败关闭"由应用层用例与真实环境用例共同守住：把结果不明当作"没有副作用"的改动会让两层同时失败。
 
 ## 开发—验证闭环测试分层
 

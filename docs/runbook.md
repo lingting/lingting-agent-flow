@@ -228,6 +228,22 @@ sqlite3 /restore/data/agentflow.db \
 | Docker 状态不明 | `ContainerObservedIndeterminate` | 按 6.3 处置；不要删除容器或重建现场 |
 | 需求删除返回 409 | 响应说明具体原因 | 按 5.3 逐项处理；不要在冲突未解决时反复重试删除 |
 | 代码保存结果不明 | 记录 `code_save_indeterminate` / `code_save_unconfirmed` | 按 6.2 核验后处置；禁止直接重试或删除 |
+| 任务长期停在 `queued`，反复出现 `任务启动流程未成功 stage=container` | `debug` 日志出现 `已有构建不可复用…镜像 ID 与记录不一致` | 镜像标签被改指，见 8.1；用新版本号重建 |
+
+### 8.1 环境镜像标签与记录不一致
+
+同一环境版本的镜像标签由「环境 + 版本号 + 构建配置哈希」决定。同一台 Docker 主机上**不要并行构建同一个
+环境版本**：后完成的构建会把同一标签改指到另一个镜像，先前的记录随之失效。
+
+- 现场表现：任务反复启动失败并长期停在 `queued`；`debug` 日志出现
+  `已有构建不可复用，重新构建 version=vNNNN`，错误为 `镜像 ID 与记录不一致: 记录 sha256:…，实际 sha256:…`。
+- 该回退路径不可用：版本已经是 `succeeded` 时会被领域状态机拒绝，用户看到的是
+  `当前状态不允许该操作: EnvironmentVersion 已成功构建，不能重新标记为构建中`，真正原因只出现在 debug
+  日志里。该限制在发布核验中登记为已知风险，产品代码不做自动重建。
+- 处置：先用只读命令核对标签实际内容（`docker image inspect <image_ref>`）；确认镜像确实被改指后，让构建
+  配置发生变化（例如固定父镜像摘要或调整 Dockerfile），再用 `agentflow docker env edit` 保存、用
+  `agentflow docker env build` 构建。构建配置完全不变时会复用既有版本，不会产生新版本号。
+- 禁止：手工改数据库里的 `image_id`、删除或重指镜像标签、用旧备份回填 `environment_versions`。
 
 ## 9. 日志与证据收集
 

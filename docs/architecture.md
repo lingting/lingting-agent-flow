@@ -807,6 +807,10 @@ TaskScheduler.Scan（唯一的分派循环）
   领取，不重放远程操作，也不影响其他项目。
 - **项目内串行**：自动分派由闸门保证"只有队首任务可领取"；显式启动入口（用户直接开始某个任务或
   既有重试入口）在 `TaskLaunchService.Launch` 内补一次只读核验，同项目存在其他在途任务时拒绝启动。
+- **领取前复核**：候选事实来自本次扫描更早时刻的读取，而需求聚合删除只写 `deleted_at`、不改任务状态，
+  因此仅凭候选里的旧状态无法发现任务已被删除。`TaskScheduler.dispatch` 在取得任务执行权后以数据库事实
+  复读任务：任务不存在或已逻辑删除时释放执行权并跳过，不写 `TaskClaimed` 事件、不进入启动流程。
+  删除流程同样要求先取得执行权，所以持权后的这次读取足以覆盖该窗口。
 - **停止语义**：先落库停止意图，再调用既有 `TaskService.CancelTask`；当前任务真实收敛后才释放执行权。
   不确定现场保留真实状态，不伪造 `paused` / `cancelled`。
 - **进度口径**：`domain.DecideRequirementProgress` / `DecideProjectExecution` 是唯一实现；

@@ -30,6 +30,7 @@ AgentFlow 是一个本地优先的 AI 编码工作流编排器，使用 Go 实�
 | [docs/frontend.md](docs/frontend.md) | 前端工程约束、Web 交付与请求分发 |
 | [docs/docker-compatibility.md](docs/docker-compatibility.md) | Docker 版本基线、命令清单与容器管理约束 |
 | [docs/release.md](docs/release.md) | 发布流程、制品与来源证明；[docs/release/](docs/release/) 下是随附说明 |
+| [docs/runbook.md](docs/runbook.md) | 运行手册：启动前提、停止语义、结果不明处置、备份恢复与故障排查 |
 
 代码风格、硬性红线与数据库约束见根目录 [AGENTS.md](AGENTS.md)。
 

@@ -93,7 +93,9 @@ bash .github/scripts/resolve-release-version.sh --require-tag   # 需要 REF_TYP
 - `go-race` 同样显式传入 `--parallel 4`（`-race` 下 SQLite 迁移与连接建立对并发量敏感，
   不能用机器核数兜底）；`make test-race` 的并行度跟随 `PARALLEL`；
 - 真实测试保持单 Job，并且包之间固定 `-p 1` 串行：所有真实套件共用同一台远程机器与同一个
-  Docker Engine，并发执行时各套件会在"零残留核验"里把对方刚创建的一次性容器当成未登记残留。
+  Docker Engine，并发执行时各套件会在"零残留核验"里把对方刚创建的一次性容器当成未登记残留；
+- 共用同一台设备的真实测试包同样在包内串行（不使用 `t.Parallel()`）：并行构建会把同一环境镜像
+  标签改指到不同镜像，使先完成用例的"复用已有构建"核验失败、任务启动反复失败。
 
 缓存策略（集中在 `ci.yml` 的 `actions/setup-go` 步骤，不额外引入缓存系统）：
 
