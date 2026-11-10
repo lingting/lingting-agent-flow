@@ -11,7 +11,7 @@ AgentFlow 是一个本地优先的 AI 编码工作流编排器，使用 Go 实�
 接口形态与命令行都会继续变化，任何提前写出的使用步骤都会很快失效。
 
 已完成的进展与后续计划以 [`.steps/`](.steps) 为准，尤其是
-[`.steps/V2/ROADMAP.md`](.steps/V2/ROADMAP.md)（里程碑状态）与
+[`.steps/V2-final.md`](.steps/V2-final.md)（V2 最终状态）与
 [`.steps/V1-final.md`](.steps/V1-final.md)（V1 最终状态）。
 
 ## 文档索引
@@ -39,15 +39,8 @@ AgentFlow 是一个本地优先的 AI 编码工作流编排器，使用 Go 实�
 | 路径 | 内容 |
 |---|---|
 | [.steps/V1-final.md](.steps/V1-final.md) | V1 最终产品状态与遗留事项 |
-| [.steps/V2/README.md](.steps/V2/README.md) | V2 文档体系入口与各文档职责 |
-| [.steps/V2/ROADMAP.md](.steps/V2/ROADMAP.md) | V2 里程碑状态与依赖顺序 |
-| [.steps/V2/PRODUCT-SCOPE.md](.steps/V2/PRODUCT-SCOPE.md) | V2 做什么、不做什么 |
-| [.steps/V2/ARCHITECTURE.md](.steps/V2/ARCHITECTURE.md) | V2 分层、服务职责与接口结构 |
-| [.steps/V2/DATA-MODEL.md](.steps/V2/DATA-MODEL.md) | 当前最终 Schema 结构与后续里程碑需要的结构变化 |
-| [.steps/V2/WORKFLOW.md](.steps/V2/WORKFLOW.md) | V2 需求规划、确认、调度、进度与删除流程 |
-| [.steps/V2/ROLE-DESIGN.md](.steps/V2/ROLE-DESIGN.md) | V2 角色设计与工具限制 |
-| [.steps/V2/ENVIRONMENT-MANAGEMENT.md](.steps/V2/ENVIRONMENT-MANAGEMENT.md) | V2 环境管理 |
-| [.steps/V2/milestones/](.steps/V2/milestones/) | M0–M6 各里程碑的交付范围与退出条件 |
+| [.steps/V2-final.md](.steps/V2-final.md) | V2 最终产品状态与遗留事项 |
+| [.steps/V3/](.steps/V3/) | V3 阶段文档（统一测试执行器重构审阅） |
 
 ## 许可证
 许可证将在首次公开发布前确定。
