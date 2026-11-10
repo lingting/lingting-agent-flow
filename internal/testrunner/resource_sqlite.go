@@ -38,7 +38,7 @@ func (p *SQLiteProvider) Acquire(ctx context.Context, decl ResourceDecl) (Handle
 	if err != nil {
 		return Handle{}, err
 	}
-	dir := filepath.Join(p.root, "sqlite-db")
+	dir := resourceShardDir(p.root, ResourceSQLiteDB, decl.Name)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return Handle{}, fmt.Errorf("创建资源 %q 的目录失败: %w", decl.Name, err)
 	}

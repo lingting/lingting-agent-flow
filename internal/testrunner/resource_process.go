@@ -28,24 +28,66 @@ const HoldFlag = "--hold"
 // managedProcess 是一条由资源管理器托管的子进程。
 //
 // 进程以独立进程组启动，终止时按进程树回收；Wait 结果通过 done 通道发布，避免在
-// 多个资源之间共享状态。
+// 多个资源之间共享状态。logPath 是子进程 stdout/stderr 的输出文件，空表示输出被丢弃。
 type managedProcess struct {
 	cmd     *exec.Cmd
 	name    string
+	logPath string
 	done    chan struct{}
 	waitErr error
 }
 
+// processLaunch 是托管子进程的一次启动参数。
+type processLaunch struct {
+	// name 是资源声明名，只用于错误信息。
+	name string
+	// executable 是已解析的可执行文件绝对路径。
+	executable string
+	// args 是命令行参数。
+	args []string
+	// dir 是子进程的工作目录，空表示沿用编排进程的工作目录。
+	dir string
+	// logPath 是子进程 stdout/stderr 的输出文件，空表示丢弃输出。
+	logPath string
+}
+
 // startManagedProcess 启动子进程并确认它没有在启动窗口内立即退出。
-func startManagedProcess(name, executable string, args []string) (*managedProcess, error) {
-	cmd := exec.Command(executable, args...)
-	cmd.SysProcAttr = processGroupAttr()
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("启动资源 %q 的子进程失败: %w", name, err)
+func startManagedProcess(launch processLaunch) (*managedProcess, error) {
+	var logFile *os.File
+	if launch.logPath != "" {
+		if err := os.MkdirAll(filepath.Dir(launch.logPath), 0o750); err != nil {
+			return nil, fmt.Errorf("创建资源 %q 的输出目录失败: %w", launch.name, err)
+		}
+		file, err := os.Create(launch.logPath)
+		if err != nil {
+			return nil, fmt.Errorf("创建资源 %q 的输出文件失败: %w", launch.name, err)
+		}
+		logFile = file
 	}
-	process := &managedProcess{cmd: cmd, name: name, done: make(chan struct{})}
+	cmd := exec.Command(launch.executable, launch.args...)
+	cmd.SysProcAttr = managedProcessGroupAttr()
+	cmd.Dir = launch.dir
+	if logFile != nil {
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+	}
+	if err := cmd.Start(); err != nil {
+		if logFile != nil {
+			_ = logFile.Close()
+		}
+		return nil, fmt.Errorf("启动资源 %q 的子进程失败: %w", launch.name, err)
+	}
+	process := &managedProcess{
+		cmd:     cmd,
+		name:    launch.name,
+		logPath: launch.logPath,
+		done:    make(chan struct{}),
+	}
 	go func() {
 		process.waitErr = cmd.Wait()
+		if logFile != nil {
+			_ = logFile.Close()
+		}
 		close(process.done)
 	}()
 	select {
@@ -54,7 +96,15 @@ func startManagedProcess(name, executable string, args []string) (*managedProces
 		if err == nil {
 			err = fmt.Errorf("进程在启动后立即以退出码 0 结束")
 		}
-		return nil, fmt.Errorf("资源 %q 的子进程未能常驻: %w", name, err)
+		if launch.logPath != "" {
+			return nil, fmt.Errorf(
+				"资源 %q 的子进程未能常驻: %w（输出见 %s）",
+				launch.name,
+				err,
+				launch.logPath,
+			)
+		}
+		return nil, fmt.Errorf("资源 %q 的子进程未能常驻: %w", launch.name, err)
 	case <-time.After(processStartupWindow):
 	}
 	return process, nil
@@ -93,6 +143,14 @@ func (p *managedProcess) stop(ctx context.Context) error {
 	}
 }
 
+// ProcessAlive 报告指定进程号是否仍然存在。
+//
+// 用例侧用它确认被管理进程在停止后真的消失，而不是只相信 Wait 的返回值；查询失败返回错误，
+// 调用方必须按"无法确认"处理，不得当作已退出。
+func ProcessAlive(pid int) (bool, error) {
+	return processAlive(pid)
+}
+
 // ChildProcessProvider 启动并托管一个随用例生命周期存活的子进程。
 //
 // 声明不给出 command 时使用编排进程自身以 “--hold“ 启动的常驻子进程：自检组因此不需要
@@ -107,6 +165,7 @@ type ChildProcessProvider struct {
 type childProcessEntry struct {
 	handle  Handle
 	process *managedProcess
+	logPath string
 }
 
 // NewChildProcessProvider 创建一个子进程提供者。
@@ -138,7 +197,17 @@ func (p *ChildProcessProvider) Acquire(ctx context.Context, decl ResourceDecl) (
 	if err != nil {
 		return Handle{}, fmt.Errorf("分配资源 %q 失败: %w", decl.Name, err)
 	}
-	process, err := startManagedProcess(decl.Name, executable, args)
+	logPath, err := processLogPath(ctx, decl)
+	if err != nil {
+		return Handle{}, fmt.Errorf("分配资源 %q 失败: %w", decl.Name, err)
+	}
+	process, err := startManagedProcess(processLaunch{
+		name:       decl.Name,
+		executable: executable,
+		args:       args,
+		dir:        caseWorkspaceOf(ctx),
+		logPath:    logPath,
+	})
 	if err != nil {
 		return Handle{}, err
 	}
@@ -151,7 +220,7 @@ func (p *ChildProcessProvider) Acquire(ctx context.Context, decl ResourceDecl) (
 		return Handle{}, err
 	}
 	p.mu.Lock()
-	p.procs[process.pid()] = &childProcessEntry{handle: handle, process: process}
+	p.procs[process.pid()] = &childProcessEntry{handle: handle, process: process, logPath: logPath}
 	p.mu.Unlock()
 	return handle, nil
 }
@@ -183,6 +252,21 @@ func (p *ChildProcessProvider) Verify(ctx context.Context, handle Handle) error 
 		return fmt.Errorf("子进程 %d 在释放后仍然存活", pid)
 	}
 	return nil
+}
+
+// ProcessLogPath 返回该子进程的输出文件路径；记录已释放或缺失时返回空字符串。
+func (p *ChildProcessProvider) ProcessLogPath(handle Handle) string {
+	pid, err := strconv.Atoi(strings.TrimSpace(handle.PayloadValue("pid")))
+	if err != nil {
+		return ""
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	entry := p.procs[pid]
+	if entry == nil {
+		return ""
+	}
+	return entry.logPath
 }
 
 // Snapshot 返回仍在运行的子进程。
@@ -236,6 +320,7 @@ type ServiceProcessProvider struct {
 type serviceProcessEntry struct {
 	handle  Handle
 	process *managedProcess
+	logPath string
 }
 
 // NewServiceProcessProvider 创建一个服务进程提供者。
@@ -269,7 +354,17 @@ func (p *ServiceProcessProvider) Acquire(ctx context.Context, decl ResourceDecl)
 	}
 	readyURL := fmt.Sprintf("http://127.0.0.1:%d%s", port, readyPath(decl))
 	readyTimeout := specDuration(decl, "ready_timeout_ms", 30*time.Second)
-	process, err := startManagedProcess(decl.Name, binary, args)
+	logPath, err := processLogPath(ctx, decl)
+	if err != nil {
+		return Handle{}, fmt.Errorf("分配资源 %q 失败: %w", decl.Name, err)
+	}
+	process, err := startManagedProcess(processLaunch{
+		name:       decl.Name,
+		executable: binary,
+		args:       args,
+		dir:        caseWorkspaceOf(ctx),
+		logPath:    logPath,
+	})
 	if err != nil {
 		return Handle{}, err
 	}
@@ -290,7 +385,7 @@ func (p *ServiceProcessProvider) Acquire(ctx context.Context, decl ResourceDecl)
 		return Handle{}, err
 	}
 	p.mu.Lock()
-	p.services[process.pid()] = &serviceProcessEntry{handle: handle, process: process}
+	p.services[process.pid()] = &serviceProcessEntry{handle: handle, process: process, logPath: logPath}
 	p.mu.Unlock()
 	return handle, nil
 }
@@ -423,6 +518,38 @@ func (p *ServiceProcessProvider) holds(rawPID string) bool {
 	defer p.mu.Unlock()
 	_, ok := p.services[pid]
 	return ok
+}
+
+// ProcessLogPath 返回该服务进程的输出文件路径；记录已释放或缺失时返回空字符串。
+func (p *ServiceProcessProvider) ProcessLogPath(handle Handle) string {
+	pid, err := strconv.Atoi(strings.TrimSpace(handle.PayloadValue("pid")))
+	if err != nil {
+		return ""
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	entry := p.services[pid]
+	if entry == nil {
+		return ""
+	}
+	return entry.logPath
+}
+
+// processLogPath 返回托管子进程的输出文件路径：写在用例工作空间的 process 目录下。
+//
+// 没有用例工作空间时返回空字符串（输出丢弃）：不回退到仓库目录或临时目录根，避免把不受
+// 管理的文件留在产物之外。
+func processLogPath(ctx context.Context, decl ResourceDecl) (string, error) {
+	workspace := caseWorkspaceOf(ctx)
+	if workspace == "" {
+		return "", nil
+	}
+	token, err := randomToken(4)
+	if err != nil {
+		return "", err
+	}
+	name := safeName(decl.Type) + "-" + safeName(decl.Name) + "-" + token + ".log"
+	return filepath.Join(workspace, "process", name), nil
 }
 
 // resolveExecutable 解析可执行文件路径：含路径分隔符时必须是已存在的文件，否则查 PATH。

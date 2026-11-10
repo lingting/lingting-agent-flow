@@ -66,7 +66,7 @@ func (p *LocalSSHServerProvider) Acquire(ctx context.Context, decl ResourceDecl)
 	if err != nil {
 		return Handle{}, err
 	}
-	keyDir := filepath.Join(p.root, "local-ssh-server", safeName(decl.Name)+"-"+token)
+	keyDir := resourceShardDir(p.root, ResourceLocalSSHServer, decl.Name) + "-" + token
 	if err := os.MkdirAll(keyDir, 0o750); err != nil {
 		return Handle{}, fmt.Errorf("创建资源 %q 的目录失败: %w", decl.Name, err)
 	}

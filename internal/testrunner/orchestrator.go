@@ -90,7 +90,7 @@ func Run(ctx context.Context, opts RunOptions) (Report, error) {
 	providers := opts.Providers
 	if providers == nil {
 		providerOptions := opts.ProviderOptions
-		providerOptions.Root = layout.ResourcesDir()
+		providerOptions.Root = layout.WorkspaceRoot()
 		providerOptions.RunID = runID
 		if providerOptions.SelfExecutable == "" {
 			providerOptions.SelfExecutable = executable
@@ -185,7 +185,13 @@ func runCase(ctx context.Context, opts runCaseOptions) CaseResult {
 		result.Message = err.Error()
 		return result
 	}
-	handles, resources, err := acquireCaseResources(ctx, opts)
+	// 用例工作空间在分配资源之前就建好：服务的子进程要在这里落配置、数据库与输出。
+	workspaceDir, err := opts.Layout.CreateCaseWorkspace(c.ID)
+	if err != nil {
+		result.Message = err.Error()
+		return result
+	}
+	handles, resources, err := acquireCaseResources(withCaseWorkspace(ctx, workspaceDir), opts)
 	result.Resources = resources
 	if err != nil {
 		if ctx.Err() != nil {
@@ -221,6 +227,7 @@ func runCase(ctx context.Context, opts runCaseOptions) CaseResult {
 		ResultPath:      paths.Result,
 		OnSpawn:         spawnObserver(opts.OnWorkerSpawn, c.ID),
 		ArtifactDir:     paths.ArtifactDir,
+		WorkspaceDir:    workspaceDir,
 		LogPaths:        paths,
 		RealTests:       opts.RealTests.Allowed,
 		RealTestsReason: opts.RealTests.Reason,
@@ -308,15 +315,31 @@ func acquireCaseResources(
 			return handles, results, fmt.Errorf("分配资源 %q 失败: %w", decl.Name, err)
 		}
 		handles = append(handles, handle)
-		results = append(results, ResourceResult{
-			Name:        decl.Name,
-			Type:        decl.Type,
-			Scope:       decl.Scope,
-			Fingerprint: handle.Fingerprint,
-			Acquired:    true,
-		})
+		results = append(results, newResourceResult(provider, decl, handle))
 	}
 	return handles, results, nil
+}
+
+// newResourceResult 记录一次成功分配的结论；提供者若写下了子进程输出，路径一并写入报告。
+func newResourceResult(provider Provider, decl ResourceDecl, handle Handle) ResourceResult {
+	result := ResourceResult{
+		Name:        decl.Name,
+		Type:        decl.Type,
+		Scope:       decl.Scope,
+		Fingerprint: handle.Fingerprint,
+		Acquired:    true,
+	}
+	if reporter, ok := provider.(ProcessLogReporter); ok {
+		result.LogPath = reporter.ProcessLogPath(handle)
+	}
+	if len(handle.Payload) > 0 {
+		payload := make(map[string]string, len(handle.Payload))
+		for key, value := range handle.Payload {
+			payload[key] = value
+		}
+		result.Payload = payload
+	}
+	return result
 }
 
 // caseAllocated 报告该用例是否成功分配过资源。
@@ -402,13 +425,7 @@ func (s *sharedResources) acquire(
 	if err != nil {
 		return Handle{}, ResourceResult{}, fmt.Errorf("分配共享资源 %q 失败: %w", decl.Name, err)
 	}
-	result := ResourceResult{
-		Name:        decl.Name,
-		Type:        decl.Type,
-		Scope:       decl.Scope,
-		Fingerprint: handle.Fingerprint,
-		Acquired:    true,
-	}
+	result := newResourceResult(provider, decl, handle)
 	s.entries[key] = &sharedEntry{handle: handle, result: result}
 	s.order = append(s.order, key)
 	return handle, result, nil

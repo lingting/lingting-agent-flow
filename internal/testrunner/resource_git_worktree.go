@@ -52,7 +52,7 @@ func (p *GitWorktreeProvider) Acquire(ctx context.Context, decl ResourceDecl) (H
 	if err != nil {
 		return Handle{}, err
 	}
-	base := filepath.Join(p.root, "git-worktree")
+	base := resourceShardDir(p.root, ResourceGitWorktree, decl.Name)
 	if err := os.MkdirAll(base, 0o750); err != nil {
 		return Handle{}, fmt.Errorf("创建资源 %q 的目录失败: %w", decl.Name, err)
 	}

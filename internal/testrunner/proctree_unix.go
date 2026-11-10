@@ -13,6 +13,25 @@ func processGroupAttr() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{Setpgid: true}
 }
 
+// managedProcessGroupAttr 让托管子进程成为独立进程组，与 worker 的处理保持一致。
+//
+// 独立进程组是中断投递的前提：只有组首进程才能按 -pid 收到信号，其它用例的进程不会
+// 被同一次投递连带终止。
+func managedProcessGroupAttr() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{Setpgid: true}
+}
+
+// InterruptProcess 向托管进程所在的进程组投递 SIGINT，用于请求优雅停止。
+func InterruptProcess(pid int) error {
+	if pid <= 0 {
+		return fmt.Errorf("投递中断信号失败: 进程号 %d 不合法", pid)
+	}
+	if err := syscall.Kill(-pid, syscall.SIGINT); err != nil {
+		return fmt.Errorf("向进程组 %d 投递 SIGINT 失败: %w", pid, err)
+	}
+	return nil
+}
+
 // killProcessTree 终止 worker 进程组，覆盖用例启动的所有子进程。
 func killProcessTree(pid int) error {
 	if pid <= 0 {

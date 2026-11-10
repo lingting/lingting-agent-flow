@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -280,4 +281,40 @@ func (p *Providers) registeredTypes() []string {
 	}
 	sort.Strings(types)
 	return types
+}
+
+// ProcessLogReporter 由会把子进程输出写入文件、并能给出文件路径的提供者实现。
+//
+// 输出落盘是证据的一部分：用例结束后（尤其是失败与取消）必须能读回被管理子进程的输出，
+// 不能只留在编排进程的终端上。
+type ProcessLogReporter interface {
+	// ProcessLogPath 返回该句柄对应子进程的输出文件路径；没有记录时返回空字符串。
+	ProcessLogPath(handle Handle) string
+}
+
+// caseWorkspaceKey 是编排进程传给提供者的用例工作空间目录的上下文键。
+type caseWorkspaceKey struct{}
+
+// withCaseWorkspace 把当前用例的工作空间目录放进资源分配上下文。
+//
+// 分配上下文本来就随用例走（取消由它传播），把用例工作目录挂在同一处，提供者就能在不修改
+// 资源契约的前提下决定子进程的工作目录与输出位置。
+func withCaseWorkspace(ctx context.Context, dir string) context.Context {
+	return context.WithValue(ctx, caseWorkspaceKey{}, dir)
+}
+
+// caseWorkspaceOf 返回资源分配上下文里的用例工作空间目录，未设置时为空字符串。
+//
+// 没有工作空间时提供者按"未配置"处理：不回退到仓库目录或用户目录，避免把文件写到产物之外。
+func caseWorkspaceOf(ctx context.Context) string {
+	dir, _ := ctx.Value(caseWorkspaceKey{}).(string)
+	return dir
+}
+
+// resourceShardDir 返回某个资源在运行工作空间内的存放目录（V3 R4 §5 D6）。
+//
+// 需要独立目录的提供者把资源文件放在 <root>/shard_<资源类型>_<声明名> 下：目录名同时表达
+// 类型与声明名，多个资源不会互相覆盖，也不必为每种类型再建一层中间目录。
+func resourceShardDir(root, resourceType, resourceID string) string {
+	return filepath.Join(root, "shard_"+resourceType+"_"+safeName(resourceID))
 }

@@ -59,6 +59,10 @@ type ResourceResult struct {
 	Verified bool `json:"verified"`
 	// VerifyError 是自证失败或无法确认的说明；它与 release_error 各自独立。
 	VerifyError string `json:"verify_error,omitempty"`
+	// LogPath 是提供者记录的进程输出文件；只有会启动子进程的资源类型会填。
+	LogPath string `json:"log_path,omitempty"`
+	// Payload 是分配到的句柄内容（例如 service-process 的 pid 与 base_url），供报告直接定位现场。
+	Payload map[string]string `json:"payload,omitempty"`
 }
 
 // Failed 报告该资源是否让整次运行失败。

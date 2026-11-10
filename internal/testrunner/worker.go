@@ -20,6 +20,7 @@ type WorkerRequest struct {
 	ResultPath      string
 	ArtifactDir     string
 	HandlePath      string
+	WorkspaceDir    string
 	Timeout         time.Duration
 	RealTests       bool
 	RealTestsReason string
@@ -105,7 +106,7 @@ func runCaseBody(
 	startAt := time.Now()
 	startedAt <- startAt
 	result = CaseResult{ID: c.ID, Group: c.Group, Timings: Timings{WorkerEntryAt: entryAt}}
-	cctx := newContext(ctx, c, req.ArtifactDir, handles, req.RealTests, req.RealTestsReason)
+	cctx := newContext(ctx, c, req, handles)
 	defer func() {
 		result.Warnings = append(result.Warnings, cctx.Warnings()...)
 		result.Timings.CaseStartAt = startAt

@@ -21,6 +21,7 @@ type workerInvocation struct {
 	HandlePath      string
 	ResultPath      string
 	ArtifactDir     string
+	WorkspaceDir    string
 	LogPaths        ArtifactPaths
 	RealTests       bool
 	RealTestsReason string
@@ -68,6 +69,9 @@ func runWorkerProcess(ctx context.Context, inv workerInvocation) (workerObservat
 	}
 	if inv.HandlePath != "" {
 		arguments = append(arguments, "--handles", inv.HandlePath)
+	}
+	if inv.WorkspaceDir != "" {
+		arguments = append(arguments, "--workspace", inv.WorkspaceDir)
 	}
 	command := exec.Command(inv.Executable, arguments...)
 	command.Stdout = stdout

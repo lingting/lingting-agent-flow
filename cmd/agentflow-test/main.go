@@ -41,6 +41,7 @@ func run(args []string) int {
 	execCase := flags.String("exec-case", "", "worker 内部参数：执行单个用例")
 	resultFile := flags.String("result-file", "", "worker 内部参数：结果文件路径")
 	handleFile := flags.String("handles", "", "worker 内部参数：资源句柄文件")
+	workspaceDir := flags.String("workspace", "", "worker 内部参数：用例工作空间目录")
 	realTestsGrant := flags.String("real-tests-grant", "", "worker 内部参数：allowed/denied")
 	realTestsReason := flags.String("real-tests-reason", "", "worker 内部参数：授权结论原因")
 	hold := flags.Bool("hold", false, "worker 内部参数：常驻子进程模式（资源自检使用）")
@@ -70,7 +71,16 @@ func run(args []string) int {
 		return runSelfCheckService(*serve)
 	}
 	if *execCase != "" {
-		return runWorker(*execCase, *resultFile, *artifactDir, *handleFile, *timeout, *realTestsGrant, *realTestsReason)
+		return runWorker(workerArgs{
+			caseID:       *execCase,
+			resultPath:   *resultFile,
+			artifactDir:  *artifactDir,
+			handlePath:   *handleFile,
+			workspaceDir: *workspaceDir,
+			timeout:      *timeout,
+			grant:        *realTestsGrant,
+			reason:       *realTestsReason,
+		})
 	}
 
 	cases, err := testrunner.Cases()
@@ -119,33 +129,38 @@ func run(args []string) int {
 	return report.ExitCode
 }
 
+// workerArgs 是 worker 模式的启动参数，与命令行参数一一对应。
+type workerArgs struct {
+	caseID       string
+	resultPath   string
+	artifactDir  string
+	handlePath   string
+	workspaceDir string
+	timeout      time.Duration
+	grant        string
+	reason       string
+}
+
 // runWorker 以 worker 模式执行单个用例，退出码由用例结论决定。
-func runWorker(
-	caseID string,
-	resultPath string,
-	artifactDir string,
-	handlePath string,
-	timeout time.Duration,
-	grant string,
-	reason string,
-) int {
-	if resultPath == "" {
+func runWorker(args workerArgs) int {
+	if args.resultPath == "" {
 		fmt.Fprintln(os.Stderr, "错误: worker 模式缺少 --result-file")
 		return exitUsage
 	}
-	allowed, err := parseGrant(grant)
+	allowed, err := parseGrant(args.grant)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
 		return exitUsage
 	}
 	result, err := testrunner.ExecuteWorker(testrunner.WorkerRequest{
-		CaseID:          caseID,
-		ResultPath:      resultPath,
-		ArtifactDir:     artifactDir,
-		HandlePath:      handlePath,
-		Timeout:         timeout,
+		CaseID:          args.caseID,
+		ResultPath:      args.resultPath,
+		ArtifactDir:     args.artifactDir,
+		HandlePath:      args.handlePath,
+		WorkspaceDir:    args.workspaceDir,
+		Timeout:         args.timeout,
 		RealTests:       allowed,
-		RealTestsReason: reason,
+		RealTestsReason: args.reason,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "错误: %v\n", err)

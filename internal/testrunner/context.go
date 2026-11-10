@@ -27,6 +27,7 @@ func (f fatalSignal) Error() string {
 type Context struct {
 	caseID          string
 	artifactDir     string
+	workspaceDir    string
 	realTests       bool
 	realTestsReason string
 	ctx             context.Context
@@ -40,23 +41,17 @@ type Context struct {
 }
 
 // newContext 构造 worker 内的执行上下文；worker 是唯一调用方。
-func newContext(
-	ctx context.Context,
-	c Case,
-	artifactDir string,
-	handles []Handle,
-	realTests bool,
-	realTestsReason string,
-) *Context {
+func newContext(ctx context.Context, c Case, req WorkerRequest, handles []Handle) *Context {
 	byName := make(map[string]Handle, len(handles))
 	for _, handle := range handles {
 		byName[handle.Name] = handle
 	}
 	return &Context{
 		caseID:          c.ID,
-		artifactDir:     artifactDir,
-		realTests:       realTests,
-		realTestsReason: realTestsReason,
+		artifactDir:     req.ArtifactDir,
+		workspaceDir:    req.WorkspaceDir,
+		realTests:       req.RealTests,
+		realTestsReason: req.RealTestsReason,
 		ctx:             ctx,
 		handles:         byName,
 	}
@@ -70,6 +65,14 @@ func (c *Context) Name() string {
 // ArtifactDir 返回该用例的独占产物目录，目录已存在。
 func (c *Context) ArtifactDir() string {
 	return c.artifactDir
+}
+
+// WorkspaceDir 返回该用例的工作空间目录，目录已由编排进程创建。
+//
+// 工作空间是被测进程与用例共享的可写目录：真实服务进程以它作为工作目录，用例在这里读写
+// 配置、数据库与日志。它位于系统临时目录下的运行工作空间根目录内，不在产物目录里。
+func (c *Context) WorkspaceDir() string {
+	return c.workspaceDir
 }
 
 // TempDir 在产物目录下创建一个临时目录，随产物保留以便排查失败现场。
