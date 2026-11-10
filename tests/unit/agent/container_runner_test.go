@@ -366,7 +366,6 @@ func newHarness(
 	return newHarnessWithOptions(t, responder, pi.Options{
 		Timeout:       30 * time.Second,
 		ExportTimeout: 5 * time.Second,
-		GraceTimeout:  2 * time.Second,
 	})
 }
 
@@ -739,7 +738,6 @@ func TestDownloadFailureKeepsRemoteCopy(t *testing.T) {
 	// 关闭 HTML 导出，使唯一的下载动作就是 Session 提取。
 	h := newHarnessWithOptions(t, successResponder, pi.Options{
 		Timeout:       30 * time.Second,
-		GraceTimeout:  2 * time.Second,
 		DisableExport: true,
 	})
 	h.executor.downloadFailures = 1
@@ -1277,7 +1275,7 @@ func TestStableSessionRestoreRejectsUnsupportedWriter(t *testing.T) {
 	h.writeArchive(t, testSessionJSONL)
 	// 只暴露 agent.ContainerExecutor：执行器不实现 agent.ContainerFileWriter。
 	runner, err := pi.NewContainerRunner(
-		pi.Options{Timeout: 30 * time.Second, GraceTimeout: 2 * time.Second},
+		pi.Options{Timeout: 30 * time.Second},
 		readerOnlyExecutor{ContainerExecutor: h.executor},
 		&fakeGuard{container: newContainer()},
 	)

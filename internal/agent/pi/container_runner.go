@@ -76,21 +76,14 @@ func NewContainerRunner(
 
 // resolveOptions 补齐默认配置。
 func resolveRunnerOptions(options Options) Options {
-	options.Executable = strings.TrimSpace(options.Executable)
 	if options.Timeout <= 0 {
 		options.Timeout = DefaultTimeout
 	}
 	if options.ExportTimeout <= 0 {
 		options.ExportTimeout = DefaultExportTimeout
 	}
-	if options.GraceTimeout <= 0 {
-		options.GraceTimeout = DefaultGraceTimeout
-	}
 	if options.OutputLimit <= 0 {
 		options.OutputLimit = DefaultOutputLimit
-	}
-	if options.StderrLimit <= 0 {
-		options.StderrLimit = DefaultStderrLimit
 	}
 	if options.LogLimit <= 0 {
 		options.LogLimit = DefaultLogLimit

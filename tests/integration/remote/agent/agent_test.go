@@ -872,7 +872,6 @@ func TestRemoteAgentRunSessions(t *testing.T) {
 	runner, err := pi.NewContainerRunner(pi.Options{
 		Timeout:       remoteRunTimeout,
 		ExportTimeout: remoteOpTimeout,
-		GraceTimeout:  5 * time.Second,
 	}, exec, &guard{runner: exec.runner, record: record})
 	if err != nil {
 		t.Fatalf("构造容器内 Runner 失败: %v", err)

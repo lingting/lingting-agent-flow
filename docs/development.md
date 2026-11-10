@@ -58,8 +58,8 @@
 - Git：用于工作区隔离与版本管理，Makefile 会用 `git rev-parse` 注入提交号。
 - Node.js 22 + pnpm 11：仅在构建或开发 Web UI 时需要；`make release` 会用它完成前端生产构建，产物随后
   由 Go 通过 `//go:embed` 嵌入可执行文件。
-- Pi CLI：只有 `agent check` 需要 PATH 中存在 `pi`，它不发起模型调用。所有真实 Agent 调用都在远程任务
-  容器内执行，因此容器镜像内必须安装可用版本的 `pi`，并完成对应 Provider 的凭据配置。
+- Pi CLI：本机不需要安装 `pi`。所有真实 Agent 调用都在远程任务容器内执行，因此容器镜像内必须
+  安装可用版本的 `pi`，并完成对应 Provider 的凭据配置。
 
 SQLite 驱动为 `modernc.org/sqlite`，纯 Go 实现，无需安装 CGO 工具链或系统 SQLite。
 

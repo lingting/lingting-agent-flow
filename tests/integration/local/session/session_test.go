@@ -307,7 +307,6 @@ func newFixture(
 	options := pi.Options{
 		Timeout:       60 * time.Second,
 		ExportTimeout: 10 * time.Second,
-		GraceTimeout:  2 * time.Second,
 	}
 	if configure != nil {
 		configure(executor, &options)
@@ -485,7 +484,6 @@ func TestConcurrentSessionsDoNotOverwrite(t *testing.T) {
 			runner, err := pi.NewContainerRunner(pi.Options{
 				Timeout:       60 * time.Second,
 				ExportTimeout: 10 * time.Second,
-				GraceTimeout:  2 * time.Second,
 			}, executor, &fakeGuard{container: domain.Container{
 				ID:          domain.ID(testContainerID),
 				HostID:      domain.ID("host-1"),

@@ -105,7 +105,6 @@
 | `docker env list/show/history/build/log/edit` | 管理远程环境定义与不可覆盖的配置版本 |
 | `docker container create/list/show/logs/exec/start/stop/delete/detach` | 管理由 AgentFlow 创建的远程容器 |
 | `docker container lifecycle <container-id>` / `restart` | 按任务结果应用容器生命周期策略 / 重新开始失败任务 |
-| `agent check` | 检查 Pi 安装与非交互式执行所需的参数（不发起模型调用） |
 | `agent run <container>` | 在任务容器内执行一次 Pi 调用并把 Session 保存到本机 |
 
 这些命令用于诊断与运维，不是业务执行入口：业务链路只能经由 `agentflow server` 中的编排器推进。
