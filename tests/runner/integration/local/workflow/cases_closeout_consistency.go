@@ -3,16 +3,17 @@
 // 这些用例验证的是"任务结论不会被伪造成功"这一条不变量，断言对象是数据库里的真实
 // 记录与真实的写入顺序，而不是方法的返回值。外部执行（容器内 Agent、检查命令、
 // 代码保存、会话归档）由受控替身提供，业务判定与持久化路径全部走生产代码。
-package workflow_test
+package workflow
 
 import (
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/agent"
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/domain"
+
+	"github.com/lingting/agentflow/internal/testrunner"
 )
 
 // TestCloseoutWritesRunBeforeTask 验证收尾写入顺序是"先执行记录、后任务"。
@@ -20,8 +21,7 @@ import (
 // 顺序是不变量而不是实现细节：只有执行记录的条件写入成功（栅栏通过），才允许把
 // 任务标记为成功。反过来（先写任务）会在收尾失败时留下"任务成功、执行记录未完成"
 // 的现场，而且因为 completed 是终态，任何恢复都无法修正它。
-func TestCloseoutWritesRunBeforeTask(t *testing.T) {
-	t.Parallel()
+func runCloseoutWritesRunBeforeTask(t *testrunner.Context) {
 	fixture := newDeliveryFixture(t, deliveryOptions{
 		stepCount: 1,
 		agentReplies: []deliveryAgentReply{
@@ -48,8 +48,7 @@ func TestCloseoutWritesRunBeforeTask(t *testing.T) {
 }
 
 // TestCloseoutTaskWriteFailsAfterRunCompleted 验证任务写入失败不伪造成功。
-func TestCloseoutTaskWriteFailsAfterRunCompleted(t *testing.T) {
-	t.Parallel()
+func runCloseoutTaskWriteFailsAfterRunCompleted(t *testrunner.Context) {
 	fixture := newDeliveryFixture(t, deliveryOptions{
 		stepCount: 1,
 		agentReplies: []deliveryAgentReply{
@@ -86,8 +85,7 @@ func TestCloseoutTaskWriteFailsAfterRunCompleted(t *testing.T) {
 }
 
 // TestCloseoutRunWriteFailsBeforeTaskWrite 验证执行记录写入失败时不写任务成功。
-func TestCloseoutRunWriteFailsBeforeTaskWrite(t *testing.T) {
-	t.Parallel()
+func runCloseoutRunWriteFailsBeforeTaskWrite(t *testrunner.Context) {
 	fixture := newDeliveryFixture(t, deliveryOptions{
 		stepCount: 1,
 		agentReplies: []deliveryAgentReply{
@@ -123,8 +121,7 @@ func TestCloseoutRunWriteFailsBeforeTaskWrite(t *testing.T) {
 //
 // 该用例覆盖此前的一个真实阻塞：verifying / saving 既不在 CheckTaskLaunchStart 的
 // 准入集合里，也不在 AllowsStepExecution 里，任务会永久无法启动也无法恢复。
-func TestRestartConvergesTaskStuckInSaving(t *testing.T) {
-	t.Parallel()
+func runRestartConvergesTaskStuckInSaving(t *testrunner.Context) {
 	fixture := newDeliveryFixture(t, deliveryOptions{
 		stepCount: 1,
 		agentReplies: []deliveryAgentReply{
@@ -178,8 +175,7 @@ func TestRestartConvergesTaskStuckInSaving(t *testing.T) {
 }
 
 // TestRestartCompletesTaskFromCompletedRun 验证证据齐备时补齐成功终态。
-func TestRestartCompletesTaskFromCompletedRun(t *testing.T) {
-	t.Parallel()
+func runRestartCompletesTaskFromCompletedRun(t *testrunner.Context) {
 	fixture := newDeliveryFixture(t, deliveryOptions{
 		stepCount: 1,
 		agentReplies: []deliveryAgentReply{
@@ -259,8 +255,7 @@ func TestRestartCompletesTaskFromCompletedRun(t *testing.T) {
 }
 
 // TestRestartFlagsLegacyCompletedWithRecoveryRun 验证遗留不一致只被报告不被改写。
-func TestRestartFlagsLegacyCompletedWithRecoveryRun(t *testing.T) {
-	t.Parallel()
+func runRestartFlagsLegacyCompletedWithRecoveryRun(t *testrunner.Context) {
 	fixture := newDeliveryFixture(t, deliveryOptions{
 		stepCount: 1,
 		agentReplies: []deliveryAgentReply{
@@ -355,7 +350,7 @@ func firstBeforeLast(order []string, before, after string) bool {
 
 // taskCloseoutState 通过真实应用服务派生任务结论的闭环状态。
 func taskCloseoutState(
-	t *testing.T,
+	t *testrunner.Context,
 	fixture *deliveryFixture,
 	task domain.Task,
 ) domain.TaskCloseoutState {
@@ -375,7 +370,7 @@ func taskCloseoutState(
 }
 
 // completeDeliverySession 写入一条满足归档要求的会话记录。
-func completeDeliverySession(t *testing.T, fixture *deliveryFixture) domain.Session {
+func completeDeliverySession(t *testrunner.Context, fixture *deliveryFixture) domain.Session {
 	t.Helper()
 	role, err := fixture.db.GetRole(fixture.ctx, fixture.task.Config.DeveloperRoleID)
 	if err != nil {

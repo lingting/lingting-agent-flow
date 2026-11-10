@@ -1,16 +1,18 @@
-// Package environment_local 覆盖远程操作的执行节点准入校验。
+// 本文件是 tests/integration/local/environment/host_gate_test.go 中 4 个用例的迁移结果。
+//
+// 改造点：函数头改成 func run*、删除 t.Parallel()、数据库改为注入的 sqlite-db 句柄、
+// 私钥与 known_hosts 落在用例工作空间内；断言与注释保持原样。
 //
 // 本文件验证"未通过环境预检的节点不得用于真实远程操作"这一硬性约束：
 // 所有远程操作都经由 remoteDockerService.withRemoteSession，因此拒绝必须发生在
 // 建立 SSH 连接之前，且错误信息要能定位到具体节点与后续操作。
-package environment_local
+package environment
 
 import (
 	"context"
 	"errors"
 	"path/filepath"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/app"
@@ -18,6 +20,7 @@ import (
 	"github.com/lingting/agentflow/internal/logging"
 	"github.com/lingting/agentflow/internal/storage"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
+	"github.com/lingting/agentflow/internal/testrunner"
 	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
@@ -28,11 +31,11 @@ type discardWriter struct{}
 func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 
 // newHostGateFixture 构造只用于准入校验的环境服务。
-func newHostGateFixture(t *testing.T) (*app.EnvironmentService, storage.Store) {
+func newHostGateFixture(t *testrunner.Context) (*app.EnvironmentService, storage.Store) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	t.Cleanup(cancel)
-	db, err := sqlite.Open(ctx, sqlite.Options{Path: filepath.Join(testkit.Dir(t), "agentflow.db")})
+	db, err := sqlite.Open(ctx, sqlite.Options{Path: databasePath(t)})
 	if err != nil {
 		t.Fatalf("打开测试数据库失败: %v", err)
 	}
@@ -46,7 +49,7 @@ func newHostGateFixture(t *testing.T) (*app.EnvironmentService, storage.Store) {
 		t.Fatalf("构造日志器失败: %v", err)
 	}
 	sshService, err := app.NewSSHService(db, logger, app.SSHOptions{
-		KnownHostsPath: filepath.Join(testkit.Dir(t), "known_hosts"),
+		KnownHostsPath: filepath.Join(testkit.NewAt(t, t.WorkspaceDir()).Dir("ssh"), "known_hosts"),
 	})
 	if err != nil {
 		t.Fatalf("构造 SSH 服务失败: %v", err)
@@ -64,7 +67,7 @@ func newHostGateFixture(t *testing.T) (*app.EnvironmentService, storage.Store) {
 
 // insertHost 写入一个带指定校验状态的执行节点。
 func insertHost(
-	t *testing.T,
+	t *testrunner.Context,
 	store storage.Store,
 	status domain.ValidationStatus,
 ) domain.ExecutionHost {
@@ -88,8 +91,7 @@ func insertHost(
 }
 
 // TestRemoteOperationsRejectUnvalidatedHost 验证未通过校验的节点被拒绝。
-func TestRemoteOperationsRejectUnvalidatedHost(t *testing.T) {
-	t.Parallel()
+func runRemoteOperationsRejectUnvalidatedHost(t *testrunner.Context) {
 	service, store := newHostGateFixture(t)
 	cases := map[string]domain.ValidationStatus{
 		"校验中": domain.ValidationStatusChecking,
@@ -115,8 +117,7 @@ func TestRemoteOperationsRejectUnvalidatedHost(t *testing.T) {
 }
 
 // TestDisabledHostIsRejected 验证已禁用节点被拒绝。
-func TestDisabledHostIsRejected(t *testing.T) {
-	t.Parallel()
+func runDisabledHostIsRejected(t *testrunner.Context) {
 	service, store := newHostGateFixture(t)
 	ctx := context.Background()
 	host := insertHost(t, store, domain.ValidationStatusNormal)
@@ -143,8 +144,7 @@ func TestDisabledHostIsRejected(t *testing.T) {
 // 预检的职责正是报告节点是否可用，因此它必须在节点尚未通过校验时也能执行；
 // 这里断言它不会因为 validation_status = checking 被准入校验拦下，而是因为
 // 连接失败（端口 1 不可达）而返回连接错误。
-func TestReadOnlyPreflightBypassesGate(t *testing.T) {
-	t.Parallel()
+func runReadOnlyPreflightBypassesGate(t *testrunner.Context) {
 	service, store := newHostGateFixture(t)
 	host := insertHost(t, store, domain.ValidationStatusChecking)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -162,8 +162,7 @@ func TestReadOnlyPreflightBypassesGate(t *testing.T) {
 //
 // 该函数是远程操作与未来任务执行器共用的判定入口，因此它必须对未知状态与
 // 空状态一律拒绝，避免新增状态时被默认放行。
-func TestEnsureHostUsableForRemoteTaskIsShared(t *testing.T) {
-	t.Parallel()
+func runEnsureHostUsableForRemoteTaskIsShared(t *testrunner.Context) {
 	statuses := []domain.ValidationStatus{
 		"",
 		"verifying_v2",
@@ -188,7 +187,7 @@ func TestEnsureHostUsableForRemoteTaskIsShared(t *testing.T) {
 // testPrivateKeyPath 返回测试工作空间中的一个私钥文件路径。
 //
 // 本版本只支持私钥认证，构造执行节点时必须提供该路径。
-func testPrivateKeyPath(t *testing.T) string {
+func testPrivateKeyPath(t *testrunner.Context) string {
 	t.Helper()
-	return testkit.PrivateKeyPath(t)
+	return testkit.PrivateKeyIn(t, t.WorkspaceDir())
 }

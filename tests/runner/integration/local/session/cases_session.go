@@ -1,9 +1,12 @@
-// Package session_local 提供 Session 提取与持久化边界的本机集成测试。
+// 本文件是 tests/integration/local/session/session_test.go 中 7 个用例的迁移结果。
 //
 // 这里使用把容器与远程宿主机映射到本机目录的执行替身，因此"容器内文件 →
 // 宿主机临时文件 → 本机持久化文件"的三段式传输、字节校验、原子提交与
 // 失败保留行为都在真实文件系统上验证，不需要 SSH 或 Docker。
-package session_local
+//
+// 改造点：函数头改成 func run*、删除 t.Parallel()、工作空间改用编排进程下发的目录；
+// 断言与注释保持原样。
+package session
 
 import (
 	"context"
@@ -12,12 +15,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/agent"
 	"github.com/lingting/agentflow/internal/agent/pi"
 	"github.com/lingting/agentflow/internal/domain"
+	"github.com/lingting/agentflow/internal/testrunner"
 	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
@@ -212,7 +215,7 @@ func (e *fileExecutor) writeContainerFile(target, content string) {
 }
 
 // hostFileCount 返回宿主机临时目录中的文件数量。
-func (e *fileExecutor) hostFileCount(t *testing.T) int {
+func (e *fileExecutor) hostFileCount(t *testrunner.Context) int {
 	t.Helper()
 	total := 0
 	walkErr := filepath.Walk(e.hostRoot, func(path string, info os.FileInfo, err error) error {
@@ -289,12 +292,12 @@ type fixture struct {
 
 // newFixture 构造 Session 提取测试装置。
 func newFixture(
-	t *testing.T,
+	t *testrunner.Context,
 	lines int,
 	configure func(executor *fileExecutor, options *pi.Options),
 ) *fixture {
 	t.Helper()
-	workspace := testkit.New(t)
+	workspace := testkit.NewAt(t, t.WorkspaceDir())
 	workspace.Report()
 	containerRoot := workspace.Dir("container")
 	hostRoot := workspace.Dir("remote-host")
@@ -350,8 +353,7 @@ func newFixture(
 }
 
 // TestSessionTransferredCompletely 验证完整 Session 被逐字节复制到本机。
-func TestSessionTransferredCompletely(t *testing.T) {
-	t.Parallel()
+func runSessionTransferredCompletely(t *testrunner.Context) {
 	f := newFixture(t, 200, nil)
 	result, err := f.runner.Run(context.Background(), f.request, nil)
 	if err != nil {
@@ -380,8 +382,7 @@ func TestSessionTransferredCompletely(t *testing.T) {
 }
 
 // TestLargeSessionNotLoadedIntoMemory 验证大文件也能通过分段复制完成传输。
-func TestLargeSessionNotLoadedIntoMemory(t *testing.T) {
-	t.Parallel()
+func runLargeSessionNotLoadedIntoMemory(t *testrunner.Context) {
 	// 约 5 MiB 的合法 Session 内容。
 	f := newFixture(t, 20000, nil)
 	result, err := f.runner.Run(context.Background(), f.request, nil)
@@ -403,8 +404,7 @@ func TestLargeSessionNotLoadedIntoMemory(t *testing.T) {
 }
 
 // TestInterruptedTransferKeepsPartialFile 验证传输中断时已有部分文件仍可检查。
-func TestInterruptedTransferKeepsPartialFile(t *testing.T) {
-	t.Parallel()
+func runInterruptedTransferKeepsPartialFile(t *testrunner.Context) {
 	f := newFixture(t, 200, func(executor *fileExecutor, options *pi.Options) {
 		// 关闭导出，使唯一的下载动作是 Session 提取。
 		options.DisableExport = true
@@ -438,8 +438,7 @@ func TestInterruptedTransferKeepsPartialFile(t *testing.T) {
 }
 
 // TestExportFailureKeepsJSONL 验证导出失败时原始 JSONL 仍然保留。
-func TestExportFailureKeepsJSONL(t *testing.T) {
-	t.Parallel()
+func runExportFailureKeepsJSONL(t *testrunner.Context) {
 	f := newFixture(t, 20, func(executor *fileExecutor, options *pi.Options) {
 		executor.exportFails = true
 	})
@@ -460,9 +459,8 @@ func TestExportFailureKeepsJSONL(t *testing.T) {
 }
 
 // TestConcurrentSessionsDoNotOverwrite 验证并行调用的 Session 互不覆盖。
-func TestConcurrentSessionsDoNotOverwrite(t *testing.T) {
-	t.Parallel()
-	workspace := testkit.New(t)
+func runConcurrentSessionsDoNotOverwrite(t *testrunner.Context) {
+	workspace := testkit.NewAt(t, t.WorkspaceDir())
 	workspace.Report()
 	sessionRoot := workspace.SessionRoot()
 	type outcome struct {
@@ -530,8 +528,7 @@ func TestConcurrentSessionsDoNotOverwrite(t *testing.T) {
 }
 
 // TestSessionSurvivesContainerRemoval 验证容器目录删除后本机 Session 仍可读。
-func TestSessionSurvivesContainerRemoval(t *testing.T) {
-	t.Parallel()
+func runSessionSurvivesContainerRemoval(t *testrunner.Context) {
 	f := newFixture(t, 20, nil)
 	result, err := f.runner.Run(context.Background(), f.request, nil)
 	if err != nil {
@@ -555,8 +552,7 @@ func TestSessionSurvivesContainerRemoval(t *testing.T) {
 }
 
 // TestIncompleteSessionNotMarkedComplete 验证不完整 Session 不会被标记为 complete。
-func TestIncompleteSessionNotMarkedComplete(t *testing.T) {
-	t.Parallel()
+func runIncompleteSessionNotMarkedComplete(t *testrunner.Context) {
 	f := newFixture(t, 5, func(executor *fileExecutor, options *pi.Options) {
 		// 写入非法 JSON，模拟进程异常退出后的残缺文件。
 		executor.sessionContent = `{"type":"session","version":3,"id":"fake","cwd":"/workspace/project"}

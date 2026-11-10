@@ -3,17 +3,18 @@
 // 用例使用真实 SQLite 与正式的 app.TaskLaunchService / app.TaskWorkflowService：
 // 断言的对象是数据库里真实留下的 Task / WorkflowRun / Step / Attempt 记录，而不是
 // 方法的返回值。Agent 执行与容器核验由受控替身提供，恢复链路本身不重放任何调用。
-package workflow_test
+package workflow
 
 import (
 	"context"
 	"errors"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage"
+
+	"github.com/lingting/agentflow/internal/testrunner"
 )
 
 // startOccupiedStep 把步骤推进到指定占用状态并登记一次执行尝试。
@@ -21,7 +22,7 @@ import (
 // 它与真实执行路径一致：先创建 running 尝试，再让步骤进入占用状态并关联该尝试。
 // 只有这样，收敛时才需要同时验证"步骤状态被改写"与"尝试占用被释放"。
 func startOccupiedStep(
-	t *testing.T,
+	t *testrunner.Context,
 	fixture *launchFixture,
 	step domain.Step,
 	status domain.StepStatus,
@@ -64,8 +65,7 @@ func startOccupiedStep(
 // 重启后 TaskWorkflowService 先把执行记录收敛为 blocked，TaskLaunchService 再收敛
 // 步骤占用。修复前 blocked 记录被当作"仍有未结束执行"，步骤永远得不到收敛，
 // 任务既无法 Launch 也无法 ResumeWorkflow。
-func TestStepOccupancyConvergesAfterRunBlocked(t *testing.T) {
-	t.Parallel()
+func runStepOccupancyConvergesAfterRunBlocked(t *testrunner.Context) {
 	fixture := newLaunchFixture(t)
 	steps := fixture.writeSteps(t, 1)
 	step := startOccupiedStep(t, fixture, steps[0], domain.StepStatusVerifying)
@@ -131,8 +131,7 @@ func TestStepOccupancyConvergesAfterRunBlocked(t *testing.T) {
 //
 // 判据必须是"执行记录仍在推进"而不是"存在未结束记录"：否则一个仍在长调用中的正常
 // 执行会被启动恢复误判为残留（B6 的另一面）。
-func TestStepOccupancyKeepsRunningWorkflowOwner(t *testing.T) {
-	t.Parallel()
+func runStepOccupancyKeepsRunningWorkflowOwner(t *testrunner.Context) {
 	fixture := newLaunchFixture(t)
 	steps := fixture.writeSteps(t, 1)
 	step := startOccupiedStep(t, fixture, steps[0], domain.StepStatusVerifying)
@@ -176,8 +175,7 @@ func TestStepOccupancyKeepsRunningWorkflowOwner(t *testing.T) {
 //
 // B1 的关键验收点：不能只是把 running 改成 recovery_required，却没有任何正式入口
 // 可以核验或处理现场。
-func TestStepOccupancyConvergedTaskCanLaunch(t *testing.T) {
-	t.Parallel()
+func runStepOccupancyConvergedTaskCanLaunch(t *testrunner.Context) {
 	fixture := newLaunchFixture(t)
 	steps := fixture.writeSteps(t, 1)
 	step := startOccupiedStep(t, fixture, steps[0], domain.StepStatusRunning)
@@ -236,8 +234,7 @@ func TestStepOccupancyConvergedTaskCanLaunch(t *testing.T) {
 //
 // 两个实例共享同一数据库同时启动：状态迁移以状态为前置条件，只有一个能写入，
 // 因此最终状态唯一且恢复事件只有一条。
-func TestStepOccupancyConvergesOnceAcrossRestarts(t *testing.T) {
-	t.Parallel()
+func runStepOccupancyConvergesOnceAcrossRestarts(t *testrunner.Context) {
 	fixture := newLaunchFixture(t)
 	steps := fixture.writeSteps(t, 1)
 	step := startOccupiedStep(t, fixture, steps[0], domain.StepStatusVerifying)
@@ -274,8 +271,7 @@ func TestStepOccupancyConvergesOnceAcrossRestarts(t *testing.T) {
 // TestStepOccupancyReadFailureDoesNotConverge 验证读取执行记录失败时不抢占。
 //
 // 读取失败不能被当作"没有未结束执行"：那会让恢复在没有证据的情况下改写步骤状态。
-func TestStepOccupancyReadFailureDoesNotConverge(t *testing.T) {
-	t.Parallel()
+func runStepOccupancyReadFailureDoesNotConverge(t *testrunner.Context) {
 	fixture := newLaunchFixture(t)
 	steps := fixture.writeSteps(t, 1)
 	step := startOccupiedStep(t, fixture, steps[0], domain.StepStatusVerifying)

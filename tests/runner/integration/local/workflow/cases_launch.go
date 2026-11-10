@@ -3,14 +3,12 @@
 // 用例使用真实数据库文件与真实的 app.TaskLaunchService，只把外部依赖（环境准备、
 // 容器核验、计划生成、工作流启动）替换为受控替身：启动阶段判定、状态写入、事件
 // 追加与步骤占用收敛全部走产品代码，因此断言的是数据库里真实留下的现场。
-package workflow_test
+package workflow
 
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/app"
@@ -20,6 +18,7 @@ import (
 	"github.com/lingting/agentflow/internal/source"
 	"github.com/lingting/agentflow/internal/storage"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
+	"github.com/lingting/agentflow/internal/testrunner"
 	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
@@ -34,12 +33,11 @@ type launchFixture struct {
 }
 
 // newLaunchFixture 在工作空间中创建数据库、执行节点与任务。
-func newLaunchFixture(t *testing.T) *launchFixture {
+func newLaunchFixture(t *testrunner.Context) *launchFixture {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	t.Cleanup(cancel)
-	workspace := testkit.New(t)
-	path := filepath.Join(workspace.Root(), "agentflow.db")
+	path := databasePath(t)
 	logger, err := testkit.Logger(logging.LevelError)
 	if err != nil {
 		t.Fatalf("构造日志器失败: %v", err)
@@ -69,7 +67,7 @@ func newLaunchFixture(t *testing.T) *launchFixture {
 }
 
 // createHost 写入一个已通过环境预检的执行节点。
-func (f *launchFixture) createHost(t *testing.T) domain.ExecutionHost {
+func (f *launchFixture) createHost(t *testrunner.Context) domain.ExecutionHost {
 	t.Helper()
 	host, err := domain.NewExecutionHost(
 		"",
@@ -79,7 +77,7 @@ func (f *launchFixture) createHost(t *testing.T) domain.ExecutionHost {
 		"deploy",
 		"/srv/agentflow",
 		f.now,
-		domain.WithPrivateKey(testkit.PrivateKeyPath(t)),
+		domain.WithPrivateKey(testkit.PrivateKeyIn(t, t.WorkspaceDir())),
 	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
@@ -111,7 +109,7 @@ func (f *launchFixture) createHost(t *testing.T) domain.ExecutionHost {
 }
 
 // createTask 写入一个未绑定容器的 queued 任务。
-func (f *launchFixture) createTask(t *testing.T) domain.Task {
+func (f *launchFixture) createTask(t *testrunner.Context) domain.Task {
 	t.Helper()
 	requirement, err := domain.NewRequirement(
 		"需求标题",
@@ -157,7 +155,7 @@ func (f *launchFixture) createTask(t *testing.T) domain.Task {
 // attachContainer 写入一条属于该任务的容器记录并把关联写入任务记录。
 //
 // 归属核验读取的是容器登记记录，因此只给任务填一个字符串不足以构成可执行现场。
-func (f *launchFixture) attachContainer(t *testing.T, containerID string) {
+func (f *launchFixture) attachContainer(t *testrunner.Context, containerID string) {
 	t.Helper()
 	task, err := f.db.GetTask(f.ctx, f.task.ID)
 	if err != nil {
@@ -174,7 +172,7 @@ func (f *launchFixture) attachContainer(t *testing.T, containerID string) {
 }
 
 // writeSteps 写入一组计划步骤并返回它们。
-func (f *launchFixture) writeSteps(t *testing.T, count int) []domain.Step {
+func (f *launchFixture) writeSteps(t *testrunner.Context, count int) []domain.Step {
 	t.Helper()
 	developer, err := f.db.GetRole(f.ctx, "developer")
 	if err != nil {
@@ -373,7 +371,7 @@ func (w *launchWorkspaceStub) RecoverInterrupted(ctx context.Context) error {
 //
 // 它用于验证"编排器先收敛执行记录、启动服务再收敛步骤占用"的真实顺序：两个服务
 // 共享同一数据库，恢复结论必须由数据库事实决定。
-func (f *launchFixture) workflowService(t *testing.T) *app.TaskWorkflowService {
+func (f *launchFixture) workflowService(t *testrunner.Context) *app.TaskWorkflowService {
 	t.Helper()
 	service, err := app.NewTaskWorkflowService(app.TaskWorkflowOptions{
 		Store:        f.db,
@@ -399,7 +397,7 @@ func (f *launchFixture) workflowService(t *testing.T) *app.TaskWorkflowService {
 }
 
 // events 读取任务事件。
-func (f *launchFixture) events(t *testing.T, taskID domain.ID) []domain.Event {
+func (f *launchFixture) events(t *testrunner.Context, taskID domain.ID) []domain.Event {
 	t.Helper()
 	events, err := f.db.ListEventsByTask(f.ctx, taskID, storage.EventFilter{})
 	if err != nil {
@@ -409,7 +407,7 @@ func (f *launchFixture) events(t *testing.T, taskID domain.ID) []domain.Event {
 }
 
 func (f *launchFixture) launchService(
-	t *testing.T,
+	t *testrunner.Context,
 	environments app.TaskLaunchEnvironmentPort,
 	containers app.TaskLaunchContainerPort,
 	planner app.TaskLaunchPlanPort,
@@ -442,8 +440,7 @@ func (f *launchFixture) launchService(
 }
 
 // TestLaunchPersistsContainerAndPlanAcrossStages 校验一次完整启动把容器关联写回任务。
-func TestLaunchPersistsContainerAndPlanAcrossStages(t *testing.T) {
-	t.Parallel()
+func runLaunchPersistsContainerAndPlanAcrossStages(t *testrunner.Context) {
 	fixture := newLaunchFixture(t)
 	steps := fixture.writeSteps(t, 1)
 	environments := &launchEnvironment{containerID: "container-launch"}
@@ -485,8 +482,7 @@ func TestLaunchPersistsContainerAndPlanAcrossStages(t *testing.T) {
 }
 
 // TestLaunchDoesNotCreateSecondContainer 校验已有可用容器时不重复准备。
-func TestLaunchDoesNotCreateSecondContainer(t *testing.T) {
-	t.Parallel()
+func runLaunchDoesNotCreateSecondContainer(t *testrunner.Context) {
 	fixture := newLaunchFixture(t)
 	fixture.attachContainer(t, "container-existing")
 	steps := fixture.writeSteps(t, 1)
@@ -521,8 +517,7 @@ func TestLaunchDoesNotCreateSecondContainer(t *testing.T) {
 }
 
 // TestLaunchRejectsSecondCallWhileRunActive 校验未结束执行存在时拒绝再次启动。
-func TestLaunchRejectsSecondCallWhileRunActive(t *testing.T) {
-	t.Parallel()
+func runLaunchRejectsSecondCallWhileRunActive(t *testrunner.Context) {
 	fixture := newLaunchFixture(t)
 	fixture.attachContainer(t, "container-existing")
 	steps := fixture.writeSteps(t, 1)
@@ -566,8 +561,7 @@ func TestLaunchRejectsSecondCallWhileRunActive(t *testing.T) {
 }
 
 // TestRecoverStepOccupancyPersistsRecoveryRequired 校验步骤占用收敛真实落库。
-func TestRecoverStepOccupancyPersistsRecoveryRequired(t *testing.T) {
-	t.Parallel()
+func runRecoverStepOccupancyPersistsRecoveryRequired(t *testrunner.Context) {
 	fixture := newLaunchFixture(t)
 	steps := fixture.writeSteps(t, 1)
 	step := steps[0]
@@ -612,8 +606,7 @@ func TestRecoverStepOccupancyPersistsRecoveryRequired(t *testing.T) {
 //
 // 判据是"执行记录仍在推进"，不是"存在未结束记录"：pending / blocked /
 // recovery_required 记录都已经没有执行权，不能阻止其残留步骤被收敛（B1）。
-func TestRecoverStepOccupancyKeepsActiveRunOccupancy(t *testing.T) {
-	t.Parallel()
+func runRecoverStepOccupancyKeepsActiveRunOccupancy(t *testrunner.Context) {
 	fixture := newLaunchFixture(t)
 	steps := fixture.writeSteps(t, 1)
 	run, err := domain.NewWorkflowRun(fixture.task.ID, steps, fixture.now)
@@ -655,8 +648,7 @@ func TestRecoverStepOccupancyKeepsActiveRunOccupancy(t *testing.T) {
 }
 
 // TestLaunchInitializesWorkspaceBeforePlan 校验工作区未就绪时先初始化再生成计划。
-func TestLaunchInitializesWorkspaceBeforePlan(t *testing.T) {
-	t.Parallel()
+func runLaunchInitializesWorkspaceBeforePlan(t *testrunner.Context) {
 	fixture := newLaunchFixture(t)
 	fixture.attachContainer(t, "container-existing")
 	environments := &launchEnvironment{containerID: "container-new"}
@@ -694,8 +686,7 @@ func TestLaunchInitializesWorkspaceBeforePlan(t *testing.T) {
 }
 
 // TestLaunchStopsAtWorkspaceStageWhenUncertain 校验结果不确定时停在 workspace 阶段。
-func TestLaunchStopsAtWorkspaceStageWhenUncertain(t *testing.T) {
-	t.Parallel()
+func runLaunchStopsAtWorkspaceStageWhenUncertain(t *testrunner.Context) {
 	fixture := newLaunchFixture(t)
 	fixture.attachContainer(t, "container-existing")
 	environments := &launchEnvironment{containerID: "container-new"}
@@ -735,8 +726,7 @@ func TestLaunchStopsAtWorkspaceStageWhenUncertain(t *testing.T) {
 }
 
 // TestWorkspaceInitializationPersistsAcrossRestart 校验重启后记录仍然有效。
-func TestWorkspaceInitializationPersistsAcrossRestart(t *testing.T) {
-	t.Parallel()
+func runWorkspaceInitializationPersistsAcrossRestart(t *testrunner.Context) {
 	fixture := newLaunchFixture(t)
 	fixture.attachContainer(t, "container-existing")
 	// 直接写入一条成功记录：等价于上一次进程已完成初始化。
@@ -801,8 +791,7 @@ func TestWorkspaceInitializationPersistsAcrossRestart(t *testing.T) {
 }
 
 // TestWorkspaceInterruptedConvergesToUncertain 校验中断记录收敛且不重放。
-func TestWorkspaceInterruptedConvergesToUncertain(t *testing.T) {
-	t.Parallel()
+func runWorkspaceInterruptedConvergesToUncertain(t *testrunner.Context) {
 	fixture := newLaunchFixture(t)
 	fixture.attachContainer(t, "container-existing")
 	record, err := domain.NewTaskWorkspaceInitRecord(

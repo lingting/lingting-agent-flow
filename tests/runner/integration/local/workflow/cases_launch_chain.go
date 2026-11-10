@@ -5,19 +5,19 @@
 // SQLite、真实 app.TaskLaunchService、真实 app.TaskWorkspaceService 与真实
 // app.TaskWorkflowService，只把容器内 Git 与容器内 Pi 调用替换为受控替身，
 // 因此断言的是数据库里真实留下的现场，而不是方法的返回值。
-package workflow_test
+package workflow
 
 import (
 	"context"
 	"errors"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/agent"
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/source"
+	"github.com/lingting/agentflow/internal/testrunner"
 	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
@@ -209,7 +209,7 @@ type chainServices struct {
 
 // newChainServices 用真实服务装配启动链路，只替换容器内 Git 与 Pi 调用。
 func (f *launchFixture) newChainServices(
-	t *testing.T,
+	t *testrunner.Context,
 	containers *chainContainers,
 	workflowPort app.TaskLaunchWorkflowPort,
 ) *chainServices {
@@ -224,7 +224,7 @@ func (f *launchFixture) newChainServices(
 	}
 	sessions, err := app.NewSessionService(
 		f.db,
-		testkit.New(t).SessionRoot(),
+		testkit.NewAt(t, t.WorkspaceDir()).SessionRoot(),
 		f.logger.Slog(),
 	)
 	if err != nil {
@@ -283,7 +283,7 @@ func (f *launchFixture) newChainServices(
 }
 
 // steps 读取任务当前已持久化的计划步骤。
-func (f *launchFixture) steps(t *testing.T) []domain.Step {
+func (f *launchFixture) steps(t *testrunner.Context) []domain.Step {
 	t.Helper()
 	steps, err := f.db.ListStepsByTask(f.ctx, f.task.ID)
 	if err != nil {
@@ -294,8 +294,7 @@ func (f *launchFixture) steps(t *testing.T) []domain.Step {
 
 // TestLaunchChainReachesPlannedWithPersistedPlan 校验一次启动经工作区初始化与
 // 计划生成到达 planned，且完整计划已落库。
-func TestLaunchChainReachesPlannedWithPersistedPlan(t *testing.T) {
-	t.Parallel()
+func runLaunchChainReachesPlannedWithPersistedPlan(t *testrunner.Context) {
 	fixture := newLaunchFixture(t)
 	fixture.attachContainer(t, chainContainerID)
 	containers := &chainContainers{running: true, finalText: chainPlanJSON}
@@ -379,8 +378,7 @@ func TestLaunchChainReachesPlannedWithPersistedPlan(t *testing.T) {
 
 // TestLaunchChainIsIdempotentOnRepeat 校验重复启动不重复 Clone、不覆盖计划，
 // 且如实报告计划已持久化。
-func TestLaunchChainIsIdempotentOnRepeat(t *testing.T) {
-	t.Parallel()
+func runLaunchChainIsIdempotentOnRepeat(t *testrunner.Context) {
 	fixture := newLaunchFixture(t)
 	fixture.attachContainer(t, chainContainerID)
 	containers := &chainContainers{running: true, finalText: chainPlanJSON}
@@ -433,8 +431,7 @@ func TestLaunchChainIsIdempotentOnRepeat(t *testing.T) {
 }
 
 // TestLaunchChainStopsOnWorkspaceFailure 校验工作区失败后不再生成计划。
-func TestLaunchChainStopsOnWorkspaceFailure(t *testing.T) {
-	t.Parallel()
+func runLaunchChainStopsOnWorkspaceFailure(t *testrunner.Context) {
 	fixture := newLaunchFixture(t)
 	fixture.attachContainer(t, chainContainerID)
 	containers := &chainContainers{running: true, finalText: chainPlanJSON}
@@ -482,8 +479,7 @@ func TestLaunchChainStopsOnWorkspaceFailure(t *testing.T) {
 
 // TestLaunchChainRejectsUncertainWorkspaceWithoutReplay 校验工作区结果不确定时
 // 启动停止且不重放代码获取。
-func TestLaunchChainRejectsUncertainWorkspaceWithoutReplay(t *testing.T) {
-	t.Parallel()
+func runLaunchChainRejectsUncertainWorkspaceWithoutReplay(t *testrunner.Context) {
 	fixture := newLaunchFixture(t)
 	fixture.attachContainer(t, chainContainerID)
 	// 直接写入一条 uncertain 记录：等价于上一次远端操作结果无法确认。

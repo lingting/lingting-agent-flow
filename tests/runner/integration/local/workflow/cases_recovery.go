@@ -1,11 +1,10 @@
-package workflow_test
+package workflow
 
 import (
 	"context"
 	"errors"
-	"path/filepath"
+	"fmt"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/agent"
@@ -14,6 +13,7 @@ import (
 	"github.com/lingting/agentflow/internal/logging"
 	"github.com/lingting/agentflow/internal/storage"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
+	"github.com/lingting/agentflow/internal/testrunner"
 	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
@@ -34,12 +34,23 @@ type restartFixture struct {
 }
 
 // newRestartFixture 在工作空间中创建数据库、角色、执行节点与需求。
-func newRestartFixture(t *testing.T) *restartFixture {
+func newRestartFixture(t *testrunner.Context) *restartFixture {
+	return newRestartSceneFixture(t, 1)
+}
+
+// newRestartSceneFixture 构造第 scene 个场景的现场（表驱动多场景用例使用）。
+//
+// 每个场景各用一份数据库资源与一个工作空间子目录：共用一个数据库会让同一节点、容器与
+// 任务的唯一约束在前一个场景就被占住，共用工作空间也会让计划与 Session 文件互相覆盖。
+func newRestartSceneFixture(t *testrunner.Context, scene int) *restartFixture {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	t.Cleanup(cancel)
-	workspace := testkit.New(t)
-	path := filepath.Join(workspace.Root(), "agentflow.db")
+	workspace := testkit.NewAt(t, t.WorkspaceDir())
+	if scene > 1 {
+		workspace = testkit.NewAt(t, workspace.Dir(fmt.Sprintf("scene-%d", scene)))
+	}
+	path := databasePathAt(t, scene)
 	logger, err := testkit.Logger(logging.LevelError)
 	if err != nil {
 		t.Fatalf("构造日志器失败: %v", err)
@@ -71,7 +82,7 @@ func newRestartFixture(t *testing.T) *restartFixture {
 }
 
 // open 打开（或重新打开）数据库并注册关闭清理。
-func (f *restartFixture) open(t *testing.T) *sqlite.DB {
+func (f *restartFixture) open(t *testrunner.Context) *sqlite.DB {
 	t.Helper()
 	db, err := sqlite.Open(f.ctx, sqlite.Options{Path: f.path})
 	if err != nil {
@@ -86,7 +97,7 @@ func (f *restartFixture) open(t *testing.T) *sqlite.DB {
 }
 
 // restart 关闭当前连接并用同一文件重新打开，模拟进程退出后重新启动。
-func (f *restartFixture) restart(t *testing.T) {
+func (f *restartFixture) restart(t *testrunner.Context) {
 	t.Helper()
 	if err := f.db.Close(); err != nil {
 		t.Fatalf("关闭数据库失败: %v", err)
@@ -95,7 +106,7 @@ func (f *restartFixture) restart(t *testing.T) {
 }
 
 // createHost 写入一个已通过环境预检的执行节点。
-func (f *restartFixture) createHost(t *testing.T) domain.ExecutionHost {
+func (f *restartFixture) createHost(t *testrunner.Context) domain.ExecutionHost {
 	t.Helper()
 	host, err := domain.NewExecutionHost(
 		"",
@@ -105,7 +116,7 @@ func (f *restartFixture) createHost(t *testing.T) domain.ExecutionHost {
 		"deploy",
 		"/srv/agentflow",
 		f.now,
-		domain.WithPrivateKey(testkit.PrivateKeyPath(t)),
+		domain.WithPrivateKey(testkit.PrivateKeyIn(t, t.WorkspaceDir())),
 	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
@@ -142,7 +153,7 @@ func (f *restartFixture) createHost(t *testing.T) domain.ExecutionHost {
 
 // createTask 写入一个绑定容器与角色的任务，并推进到指定状态。
 func (f *restartFixture) createTask(
-	t *testing.T,
+	t *testrunner.Context,
 	status domain.TaskStatus,
 	cancelRequested bool,
 ) domain.Task {
@@ -235,7 +246,7 @@ func statusPath(target domain.TaskStatus) []domain.TaskStatus {
 }
 
 // writePlanSteps 直接写入一组计划步骤，模拟"事务已提交"的现场。
-func (f *restartFixture) writePlanSteps(t *testing.T, task domain.Task, count int) []domain.Step {
+func (f *restartFixture) writePlanSteps(t *testrunner.Context, task domain.Task, count int) []domain.Step {
 	t.Helper()
 	steps := make([]domain.Step, 0, count)
 	for index := 0; index < count; index++ {
@@ -264,7 +275,7 @@ func (f *restartFixture) writePlanSteps(t *testing.T, task domain.Task, count in
 
 // startService 构造并启动一个编排器实例。
 func (f *restartFixture) startService(
-	t *testing.T,
+	t *testrunner.Context,
 	store app.TaskWorkflowStore,
 	containers app.WorkflowContainerPort,
 	runner app.WorkflowStepRunner,
@@ -299,7 +310,7 @@ func (f *restartFixture) startService(
 
 // mustStartService 构造并启动编排器，启动失败时终止用例。
 func (f *restartFixture) mustStartService(
-	t *testing.T,
+	t *testrunner.Context,
 	store app.TaskWorkflowStore,
 	containers app.WorkflowContainerPort,
 	runner app.WorkflowStepRunner,
@@ -320,7 +331,7 @@ func (f *restartFixture) mustStartService(
 }
 
 // task 读取任务当前状态。
-func (f *restartFixture) task(t *testing.T, id domain.ID) domain.Task {
+func (f *restartFixture) task(t *testrunner.Context, id domain.ID) domain.Task {
 	t.Helper()
 	task, err := f.db.GetTask(f.ctx, id)
 	if err != nil {
@@ -330,7 +341,7 @@ func (f *restartFixture) task(t *testing.T, id domain.ID) domain.Task {
 }
 
 // steps 读取任务当前步骤。
-func (f *restartFixture) steps(t *testing.T, id domain.ID) []domain.Step {
+func (f *restartFixture) steps(t *testrunner.Context, id domain.ID) []domain.Step {
 	t.Helper()
 	steps, err := f.db.ListStepsByTask(f.ctx, id)
 	if err != nil {
@@ -340,7 +351,7 @@ func (f *restartFixture) steps(t *testing.T, id domain.ID) []domain.Step {
 }
 
 // events 读取任务事件。
-func (f *restartFixture) events(t *testing.T, id domain.ID) []domain.Event {
+func (f *restartFixture) events(t *testrunner.Context, id domain.ID) []domain.Event {
 	t.Helper()
 	events, err := f.db.ListEventsByTask(f.ctx, id, storage.EventFilter{})
 	if err != nil {
@@ -350,7 +361,7 @@ func (f *restartFixture) events(t *testing.T, id domain.ID) []domain.Event {
 }
 
 // sessions 读取任务会话。
-func (f *restartFixture) sessions(t *testing.T, id domain.ID) []domain.Session {
+func (f *restartFixture) sessions(t *testrunner.Context, id domain.ID) []domain.Session {
 	t.Helper()
 	sessions, err := f.db.ListSessionsByTask(f.ctx, id)
 	if err != nil {
@@ -360,7 +371,7 @@ func (f *restartFixture) sessions(t *testing.T, id domain.ID) []domain.Session {
 }
 
 // runs 读取任务的执行记录。
-func (f *restartFixture) runs(t *testing.T, id domain.ID) []domain.WorkflowRun {
+func (f *restartFixture) runs(t *testrunner.Context, id domain.ID) []domain.WorkflowRun {
 	t.Helper()
 	runs, err := f.db.ListWorkflowRunsByTask(f.ctx, id)
 	if err != nil {
@@ -381,7 +392,7 @@ func countEvents(events []domain.Event, eventType domain.EventType) int {
 }
 
 // assertNoRunningResidue 断言不存在 running 的会话或执行记录。
-func assertNoRunningResidue(t *testing.T, fixture *restartFixture, taskID domain.ID) {
+func assertNoRunningResidue(t *testrunner.Context, fixture *restartFixture, taskID domain.ID) {
 	t.Helper()
 	for _, session := range fixture.sessions(t, taskID) {
 		if session.Status == domain.SessionStatusRunning ||
@@ -408,8 +419,7 @@ func (discardWriter) Write(p []byte) (int, error) {
 //
 // 两条路径都必须被覆盖：事务已提交（有步骤 → planned）与无法确认（无步骤 →
 // recovery_required）。两者都不得重放 Planner。
-func TestRecoverPlanGenerationOnRestart(t *testing.T) {
-	t.Parallel()
+func runRecoverPlanGenerationOnRestart(t *testrunner.Context) {
 	cases := []struct {
 		name        string
 		steps       int
@@ -429,10 +439,9 @@ func TestRecoverPlanGenerationOnRestart(t *testing.T) {
 			expectEvent: domain.EventTypeTaskRecoveryRequired,
 		},
 	}
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
-			fixture := newRestartFixture(t)
+	for index, testCase := range cases {
+		t.Run(testCase.name, func(t *testrunner.Context) {
+			fixture := newRestartSceneFixture(t, index+1)
 			task := fixture.createTask(t, domain.TaskStatusPlanning, false)
 			if testCase.steps > 0 {
 				fixture.writePlanSteps(t, task, testCase.steps)
@@ -471,8 +480,7 @@ func TestRecoverPlanGenerationOnRestart(t *testing.T) {
 // TestRecoverPlanGenerationFailureBlocksStartup 验证恢复写入失败时启动失败。
 //
 // 恢复结论没有落库时服务继续启动，会让残留现场被当作已收敛而无人处理。
-func TestRecoverPlanGenerationFailureBlocksStartup(t *testing.T) {
-	t.Parallel()
+func runRecoverPlanGenerationFailureBlocksStartup(t *testrunner.Context) {
 	cases := []struct {
 		name   string
 		store  *failingStore
@@ -489,10 +497,9 @@ func TestRecoverPlanGenerationFailureBlocksStartup(t *testing.T) {
 			status: domain.TaskStatusPlanning,
 		},
 	}
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
-			fixture := newRestartFixture(t)
+	for index, testCase := range cases {
+		t.Run(testCase.name, func(t *testrunner.Context) {
+			fixture := newRestartSceneFixture(t, index+1)
 			task := fixture.createTask(t, domain.TaskStatusPlanning, false)
 			fixture.restart(t)
 			testCase.store.TaskWorkflowStore = fixture.db
@@ -513,8 +520,7 @@ func TestRecoverPlanGenerationFailureBlocksStartup(t *testing.T) {
 }
 
 // TestRecoverUnfinishedRunFailureBlocksStartup 验证执行记录恢复失败时启动失败。
-func TestRecoverUnfinishedRunFailureBlocksStartup(t *testing.T) {
-	t.Parallel()
+func runRecoverUnfinishedRunFailureBlocksStartup(t *testrunner.Context) {
 	fixture := newRestartFixture(t)
 	task := fixture.createTask(t, domain.TaskStatusPlanned, false)
 	steps := fixture.writePlanSteps(t, task, 1)
@@ -538,7 +544,7 @@ func TestRecoverUnfinishedRunFailureBlocksStartup(t *testing.T) {
 
 // writeStaleRun 写入一条"上一次进程退出留下的 running 残留"。
 func writeStaleRun(
-	t *testing.T,
+	t *testrunner.Context,
 	fixture *restartFixture,
 	task domain.Task,
 	steps []domain.Step,
@@ -558,8 +564,7 @@ func writeStaleRun(
 }
 
 // TestRecoverUnfinishedRunOnRestart 验证重启后未结束的执行记录被收敛。
-func TestRecoverUnfinishedRunOnRestart(t *testing.T) {
-	t.Parallel()
+func runRecoverUnfinishedRunOnRestart(t *testrunner.Context) {
 	fixture := newRestartFixture(t)
 	task := fixture.createTask(t, domain.TaskStatusPlanned, false)
 	steps := fixture.writePlanSteps(t, task, 1)
@@ -584,8 +589,7 @@ func TestRecoverUnfinishedRunOnRestart(t *testing.T) {
 //
 // 三条路径的判定规则集中在 domain.DecideCancellationRecovery：存在未结束执行或
 // 缺少取消请求时不得判定取消生效。
-func TestRecoverCancellingOnRestart(t *testing.T) {
-	t.Parallel()
+func runRecoverCancellingOnRestart(t *testrunner.Context) {
 	cases := []struct {
 		name            string
 		cancelRequested bool
@@ -613,10 +617,9 @@ func TestRecoverCancellingOnRestart(t *testing.T) {
 			expectedEvent:   domain.EventTypeTaskRecoveryRequired,
 		},
 	}
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
-			fixture := newRestartFixture(t)
+	for index, testCase := range cases {
+		t.Run(testCase.name, func(t *testrunner.Context) {
+			fixture := newRestartSceneFixture(t, index+1)
 			task := fixture.createTask(
 				t,
 				domain.TaskStatusCancelling,
@@ -648,8 +651,7 @@ func TestRecoverCancellingOnRestart(t *testing.T) {
 }
 
 // TestRecoverCancellingFailureBlocksStartup 验证取消现场恢复失败时启动失败。
-func TestRecoverCancellingFailureBlocksStartup(t *testing.T) {
-	t.Parallel()
+func runRecoverCancellingFailureBlocksStartup(t *testrunner.Context) {
 	fixture := newRestartFixture(t)
 	task := fixture.createTask(t, domain.TaskStatusCancelling, true)
 	fixture.restart(t)
@@ -666,8 +668,7 @@ func TestRecoverCancellingFailureBlocksStartup(t *testing.T) {
 }
 
 // TestRecoverCancellingActiveRunReadFailure 验证读取未结束执行失败时不得判定取消生效。
-func TestRecoverCancellingActiveRunReadFailure(t *testing.T) {
-	t.Parallel()
+func runRecoverCancellingActiveRunReadFailure(t *testrunner.Context) {
 	fixture := newRestartFixture(t)
 	task := fixture.createTask(t, domain.TaskStatusCancelling, true)
 	fixture.restart(t)
@@ -687,8 +688,7 @@ func TestRecoverCancellingActiveRunReadFailure(t *testing.T) {
 //
 // 两个实例共享同一数据库文件同时启动：状态迁移以状态为前置条件，只有一个能写入，
 // 因此最终状态唯一且恢复事件只有一条。
-func TestConcurrentRecoveryConvergesOnce(t *testing.T) {
-	t.Parallel()
+func runConcurrentRecoveryConvergesOnce(t *testrunner.Context) {
 	fixture := newRestartFixture(t)
 	task := fixture.createTask(t, domain.TaskStatusPlanning, false)
 	fixture.writePlanSteps(t, task, 1)
@@ -768,8 +768,7 @@ func TestConcurrentRecoveryConvergesOnce(t *testing.T) {
 //
 // 关闭发生在 Planner 调用进行中：调用被取消，任务必须收敛为需要人工核验，会话与
 // 执行记录都不得停留在 running，也不得写入任何计划步骤。
-func TestPlanGenerationInterruptedByShutdown(t *testing.T) {
-	t.Parallel()
+func runPlanGenerationInterruptedByShutdown(t *testrunner.Context) {
 	fixture := newRestartFixture(t)
 	task := fixture.createTask(t, domain.TaskStatusPreparing, false)
 
@@ -822,8 +821,7 @@ func TestPlanGenerationInterruptedByShutdown(t *testing.T) {
 }
 
 // TestPlanGenerationPersistsAcrossRestart 验证真实调用成功后计划在重启后仍可用。
-func TestPlanGenerationPersistsAcrossRestart(t *testing.T) {
-	t.Parallel()
+func runPlanGenerationPersistsAcrossRestart(t *testrunner.Context) {
 	fixture := newRestartFixture(t)
 	task := fixture.createTask(t, domain.TaskStatusPreparing, false)
 	service := fixture.mustStartService(t, nil, nil, nil)
@@ -861,8 +859,7 @@ func TestPlanGenerationPersistsAcrossRestart(t *testing.T) {
 }
 
 // TestConcurrentGeneratePlanRejectsSecond 验证同一服务内并发只有一个能生成计划。
-func TestConcurrentGeneratePlanRejectsSecond(t *testing.T) {
-	t.Parallel()
+func runConcurrentGeneratePlanRejectsSecond(t *testrunner.Context) {
 	fixture := newRestartFixture(t)
 	task := fixture.createTask(t, domain.TaskStatusPreparing, false)
 	service := fixture.mustStartService(t, nil, nil, nil)

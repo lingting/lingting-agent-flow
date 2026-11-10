@@ -1,12 +1,13 @@
-package workflow_test
+package workflow
 
 import (
 	"context"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
+
+	"github.com/lingting/agentflow/internal/testrunner"
 )
 
 // 容器归属测试数据。
@@ -25,7 +26,7 @@ const (
 //
 // 返回写入后的容器记录；调用方需要把它的标识写回任务记录。
 func seedOwnedContainer(
-	t *testing.T,
+	t *testrunner.Context,
 	db *sqlite.DB,
 	ctx context.Context,
 	task domain.Task,

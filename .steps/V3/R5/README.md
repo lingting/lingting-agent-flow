@@ -1,8 +1,10 @@
 # V3 R5：集成与 E2E 用例迁移
 
-**状态：** 执行中。§4.1 `--audit-coverage` 已落地；批次 B1 已收口：`e2e/cli` 64 条、`local/source` 6 条、
-`local/validation` 11 条、`local/codesaver` 12 条、`local/ssh` 22 条全部迁移，覆盖 156 / 328、dropped 3，
-运行与对照结果见 §5.2。B2/B3 未开始。
+**状态：** 执行中。§4.1 `--audit-coverage` 已落地；批次 B1、B2 已收口。B1：`e2e/cli` 64 条、
+`local/source` 6 条、`local/validation` 11 条、`local/codesaver` 12 条、`local/ssh` 22 条。B2：
+`local/environment` 7 条、`local/execenv` 28 条、`local/session` 7 条、`local/workflow` 49 条，
+另有 workflow 中 32 条依赖本机真实 Git 的用例按确认移除并登记 dropped。当前覆盖 247 / 328、
+dropped 35、缺失 46（全部属于未开始的 B3），运行与对照结果见 §5.2。
 **上游文档：** [路线总规划](../ROADMAP.md)、[R4.5 试点](../R4.5/README.md)。
 **范围：** 迁移 `tests/integration/**` 与 `tests/e2e/cli` 的 328 个用例（R4.5 已覆盖其中的 41 个），
 并让覆盖对账可执行。不迁移 `tests/unit`（路径 C）、不做前端（R6）、不改 `Makefile` / CI / `docs/`。
@@ -110,7 +112,7 @@
 |---|---|---|---|---|---|
 | P | 41 / 41 | R4.5 已记录 | 0 | 无差异 | 完成 |
 | B1 | 116 / 116（`e2e/cli` 64、source 6、validation 11、codesaver 12、ssh 22） | 64 / 64 与 51 / 51 通过（各自连续三次，删除旧入口后合并复跑） | 0 | 1 条断言语义偏差 + 2 条表驱动子测试计数差异（见 §5.2） | 完成 |
-| B2 | 0 / 123 | 待填 | 待填 | 待填 | 未开始 |
+| B2 | 123 / 123（`local/environment` 7、`local/execenv` 28、`local/session` 7、`local/workflow` 81） | 91 / 91 通过（连续三次；91 = 123 − 32 条已移除的本机 Git 用例） | 32 / 32（本机真实 Git 的 workflow 用例，理由见 §5.2） | 2 类：表驱动子测试计数差异（D6）与「本机 Git 路径上限」用例移除（D8） | 完成 |
 | B3 | 0 / 48 | 待填 | 待填 | 待填 | 未开始 |
 
 ### 5.1 进度记录
@@ -126,12 +128,12 @@
 | dropped | `testrunner.DeclareDropped(清单ID, 理由)`，`tests/runner/legacy` 登记 3 条（2 条本机 Pi + 1 条依赖已移除的 `check` 子命令） |
 | 输出 | 文本摘要（逐包 `覆盖/范围`、缺失、dropped、多余、问题）+ 可选 JSON（`agentflow-test-coverage/1`） |
 | 退出码 | 0 全部覆盖或有理由的 dropped；1 缺失 / 未解释的多余 / 结构性问题；2 用法错误 |
-| 当前结论 | 范围 R5 共 328 条：覆盖 156、dropped 3、缺失 169、多余 0，退出码 1（B2/B3 未迁移） |
+| 当前结论 | 范围 R5 共 328 条：覆盖 247、dropped 35、缺失 46、多余 0，退出码 1（缺失全部属于未开始的 B3） |
 
-`dropped` 目前 3 条，都由 commit 9515a72「移除本机pi测试」造成，没有可迁移的等价断言：
-`tests/integration/pi` 的 2 条（`TestRealPiCheck`、`TestRealPiModelRecognition`）与
-`tests/e2e/cli` 的 `TestAgentCheckUnknownExecutable`（`agent check` 只在 Pi 不可用时才有意义）。
-其余 169 条属于 B2/B3，因此对账当前仍非零退出。
+`dropped` 目前 35 条：3 条由 commit 9515a72「移除本机pi测试」造成（`tests/integration/pi` 的
+`TestRealPiCheck`、`TestRealPiModelRecognition` 与 `tests/e2e/cli` 的 `TestAgentCheckUnknownExecutable`），
+32 条是 B2 中 workflow 依赖本机真实 Git 的用例（理由见 §5.2、D8）。其余 46 条属于未开始的 B3，
+因此对账当前仍非零退出。
 
 **B1 已迁移并通过对照的包**
 
@@ -144,6 +146,18 @@
 | `local/ssh` | `integration-local-ssh` | 22 | 无 | 进程内真实 SSH/SFTP 服务端；`known_hosts` 与私钥落在用例工作空间 |
 
 B1 的 5 个包按 §4.3 删除了旧 `_test.go` 与 `TestMain`，`tests/e2e` 目录随后整体移除，不再保留双轨。
+
+**B2 已迁移并通过对照的包**
+
+| 包 | 分组 | 用例 | 资源声明 | 迁移要点 |
+|---|---|---:|---|---|
+| `local/environment` | `integration-local-environment` | 7 | 3 条声明 1 份 `sqlite-db` | 文件传输替身把远程路径映射到用例工作空间；准入校验的拒绝发生在建立 SSH 会话之前 |
+| `local/execenv` | `integration-local-execenv` | 28 | 无 | 镜像、容器与 SSH 执行全部是受控替身；断言落在 Docker 命令构造与兼容性基线上 |
+| `local/session` | `integration-local-session` | 7 | 无 | 容器、远程宿主机与本机文件系统三段式都映射到用例工作空间；中断时保留部分文件 |
+| `local/workflow` | `integration-local-workflow` | 49（另 32 条 dropped） | 每条 1 份 `sqlite-db`；4 条多场景用例按场景声明 2 / 2 / 3 / 4 份 | 启动链、修复循环、取消收敛、重启恢复与闭环一致性；表驱动 `t.Run` 由 `Context.Run` 顺序执行并记录子测试名 |
+
+B2 的 4 个包按 §4.3 删除了旧 `_test.go` 与 `TestMain`，`tests/integration/local/{environment,execenv,session,workflow}`
+目录已整体移除，同包内不再有两套入口。
 
 ### 5.2 运行与对照记录（授权：B1 范围）
 
@@ -167,6 +181,35 @@ B1 的 5 个包按 §4.3 删除了旧 `_test.go` 与 `TestMain`，`tests/e2e` �
 的 2 条表驱动子测试差异沿用 D6（按 Case 登记，子测试名写入日志）。
 ---
 
+### 5.3 运行与对照记录（授权：B2 范围）
+
+授权按 §7 的 B2 执行：4 个包的新集合各连续三次，同范围 `go test` 对照一次；未跑 B3、unit 与前端。
+
+| 项 | 结果 |
+|---|---|
+| 新执行器首次全量（123 条，含后续移出的用例） | 117 通过 / 6 失败：4 条多场景用例共用一份数据库（`containers.id` 唯一约束冲突）、2 条本机 Git 用例路径超限 |
+| 修复后重跑（123 条） | 121 通过 / 2 失败，剩余失败全部是本机 Git 路径上限 |
+| 移除 32 条本机 Git 用例后的新执行器（91 条） | 连续三次：每次 91 通过 / 0 跳过；峰值 8 / 上限 8；排队合计 62610 / 63545 / 61196ms（最长 2036 / 2035 / 2153ms）；零残留 `passed` |
+| `go test` 对照（同 4 包） | 134 通过：123 条用例 + 11 个表驱动子测试；逐条与 91 条 Case 对齐，差异只有下面三条 |
+| 静态检查 | `go vet ./...` 与 `gofmt -l cmd internal tests` 无新增问题；`--audit-coverage` 显示 workflow 49 / 81（dropped 32，缺失 0） |
+
+三次报告分别在 `.test-artifacts/20261110t154642z-d927`、`…t154647z-715c`、`…t154650z-76d7`。
+对照在删除旧入口之前完成；对照结束后按 §4.3 删除 4 个包的旧 `_test.go` 与 `TestMain`。
+
+差异与处置：
+
+1. **表驱动子测试（D6）。** 11 个 `t.Run` 子测试对应 4 条 Case（`recovery_test.go` 的 2 + 2 + 3 与
+   `delivery_chain_test.go` 的 4）。按 D6 仍按 Case 登记，子测试由 `Context.Run` 就地顺序执行，
+   子测试名写入日志；子测试里的 `Fatalf` 只结束该子测试，结论仍属于整条 Case。
+2. **多场景数据库（D7）。** 上述 4 条用例每个场景需要互相独立的现场：共用一份数据库会让
+   `type=node/container` 的唯一约束被前一个场景占住。这 4 条按场景声明 2 / 2 / 3 / 4 份
+   `sqlite-db`，并用工作空间的 `scene-<n>` 子目录隔离文件，其余 45 条仍只声明 1 份。
+3. **本机真实 Git 的路径上限（D8）。** workflow 的 `e2e_*` 与 `repair_budget_*` 在用例工作空间里
+   建 bare 仓库并执行真实 clone / push；Windows 下 `remote.git/objects/tmp_objdir-incoming-*/xx/<38 位哈希>`
+   使路径达到约 268 字符，超过 260 上限，`receive-pack` 报 `Filename too long`；实测 `core.longpaths`
+   对子进程写入不生效。按确认把这 32 条整体移除并在 `tests/runner/legacy` 登记 dropped（不再换成替身，
+   也不改写断言），workflow 覆盖由 81 降为 49。
+
 ## 6. 阶段内需要冻结的决策
 
 | 编号 | 决策 | 建议 |
@@ -177,6 +220,8 @@ B1 的 5 个包按 §4.3 删除了旧 `_test.go` 与 `TestMain`，`tests/e2e` �
 | D4 | `--audit-coverage` 输出 | 文本摘要 + JSON，退出码语义见 §4.1 |
 | D5 | dropped 的审批 | 只在用例确实不适用时使用，理由写入本文并核对 |
 | D6 | 子测试对账粒度 | 有字符串字面量名的子测试逐条登记；表驱动按 Case 登记 |
+| D7 | 多场景用例的数据库声明 | 每个场景各声明一份 `sqlite-db`（本阶段为 2 / 2 / 3 / 4 份），场景数据与工作空间子目录互相隔离；份数不得超过 `sqlite-db` 容量 4 |
+| D8 | 依赖本机真实 Git 的用例 | 按确认整体移除并登记 dropped（理由见 §5.3）；不换成替身、不改写断言，真实 Git 链路的验收不再放在本机集成层 |
 
 ---
 
@@ -218,6 +263,8 @@ B1 的 5 个包按 §4.3 删除了旧 `_test.go` 与 `TestMain`，`tests/e2e` �
 | SQLite 与端口并发争用 | 依赖 R3 的容量控制；不用重试掩盖 |
 | 覆盖口径被悄悄放宽 | `--audit-coverage` 硬门禁；dropped 必须带理由 |
 | 迁移工作量超出预期 | 每批完成后评估；超出即停并反馈，不擅自缩小范围 |
+| 多场景用例占满 `sqlite-db` 容量 | 一条用例声明的份数不得超过容量 4；超出时调度器会判「无法调度」，新增多场景用例前先核对容量 |
+| 本机 Git 与 Windows `MAX_PATH` | 依赖本机真实 Git 的用例不再迁移（D8）；真实 Git 链路的验收不在本机集成层承担，改由真实环境批次负责 |
 
 ---
 
@@ -232,8 +279,13 @@ B1 的 5 个包按 §4.3 删除了旧 `_test.go` 与 `TestMain`，`tests/e2e` �
 ---
 
 ## 11. 输出给 R6 / R7 / R8
-
-1. 328 条覆盖结论与 dropped 清单。
-2. 迁移后仍依赖 `testkit` 的包与函数清单（R7 输入）。
-3. 已确认的资源排布、包级串行声明与容量取值（R8 输入）。
-4. `--audit-coverage` 的命令形态与 CI 接入点。
+1. 覆盖结论：R5 范围 328 条中已处理 282 条（覆盖 247 + dropped 35），剩余 46 条全部属于 B3；
+   dropped 清单见 §5.1 与 `tests/runner/legacy`（2 条本机 Pi + 1 条依赖已移除的 `check` 子命令 +
+   32 条 workflow 本机真实 Git 用例）。
+2. 迁移后仍依赖 `testkit` 的包与函数清单（R7 输入）：用例侧只使用 `testkit.NewAt`、`PrivateKeyIn`、
+   `Logger`、`Workspace` 等按路径构造的入口，不再触发运行根目录 `sync.Once`；`TestMain` 已在
+   B1 / B2 的 9 个包中全部消失。
+3. 已确认的资源排布、包级串行声明与容量取值（R8 输入）：`sqlite-db` 仍是每条用例 1 份，例外是
+   workflow 的 4 条多场景用例（2 / 2 / 3 / 4 份，D7）；其余包未新增资源类型，未新增包级串行声明。
+4. `--audit-coverage` 的命令形态与 CI 接入点不变；本阶段新增的唯一执行器能力是
+   `testrunner.Context.Run`（单层顺序子测试，D6），R6 / R7 不需要再实现子测试语义。

@@ -2,15 +2,16 @@
 //
 // 用例使用真实 SQLite 与正式的 app.TaskWorkflowService：断言的对象是数据库里真实
 // 留下的 Task / WorkflowRun 记录与事件，而不是方法的返回值。
-package workflow_test
+package workflow
 
 import (
 	"errors"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/domain"
+
+	"github.com/lingting/agentflow/internal/testrunner"
 )
 
 // writeCancelledRun 写入一条"已记录取消请求并已取消"的执行记录。
@@ -18,7 +19,7 @@ import (
 // 它精确复现 B5 的故障窗口：执行记录层已经确认取消生效，任务层却还停在
 // developing——取消入口先写执行记录、后写任务层，进程恰好停在两次写入之间。
 func writeCancelledRun(
-	t *testing.T,
+	t *testrunner.Context,
 	fixture *restartFixture,
 	task domain.Task,
 	steps []domain.Step,
@@ -51,8 +52,7 @@ func writeCancelledRun(
 // 故障现场：执行记录已记录取消请求（任务层尚未同步），任务仍是 developing。
 // 修复前 recoverRun 只把执行记录收敛为 cancelled，任务保持 developing，
 // 之后还能被 StartWorkflow 重新推进——用户取消意图丢失。
-func TestRecoverCancelIntentConvergesTask(t *testing.T) {
-	t.Parallel()
+func runRecoverCancelIntentConvergesTask(t *testrunner.Context) {
 	fixture := newRestartFixture(t)
 	task := fixture.createTask(t, domain.TaskStatusDeveloping, false)
 	steps := fixture.writePlanSteps(t, task, 1)
@@ -86,8 +86,7 @@ func TestRecoverCancelIntentConvergesTask(t *testing.T) {
 // TestRecoverCancelIntentBlocksNewWorkflow 验证收敛后不能再启动新工作流。
 //
 // 这是"取消意图没有丢失"的真正判据：不仅状态正确，正式入口也必须拒绝继续推进。
-func TestRecoverCancelIntentBlocksNewWorkflow(t *testing.T) {
-	t.Parallel()
+func runRecoverCancelIntentBlocksNewWorkflow(t *testrunner.Context) {
 	fixture := newRestartFixture(t)
 	task := fixture.createTask(t, domain.TaskStatusDeveloping, false)
 	steps := fixture.writePlanSteps(t, task, 1)
@@ -103,8 +102,7 @@ func TestRecoverCancelIntentBlocksNewWorkflow(t *testing.T) {
 }
 
 // TestRecoverCancelIntentIsIdempotent 验证重复恢复不会重复写入矛盾结果。
-func TestRecoverCancelIntentIsIdempotent(t *testing.T) {
-	t.Parallel()
+func runRecoverCancelIntentIsIdempotent(t *testrunner.Context) {
 	fixture := newRestartFixture(t)
 	task := fixture.createTask(t, domain.TaskStatusDeveloping, false)
 	steps := fixture.writePlanSteps(t, task, 1)
@@ -126,8 +124,7 @@ func TestRecoverCancelIntentIsIdempotent(t *testing.T) {
 }
 
 // TestRecoverCancelIntentKeepsTerminalTask 验证已结束的任务不被恢复流程重新打开。
-func TestRecoverCancelIntentKeepsTerminalTask(t *testing.T) {
-	t.Parallel()
+func runRecoverCancelIntentKeepsTerminalTask(t *testrunner.Context) {
 	fixture := newRestartFixture(t)
 	task := fixture.createTask(t, domain.TaskStatusPlanned, false)
 	steps := fixture.writePlanSteps(t, task, 1)
@@ -163,8 +160,7 @@ func TestRecoverCancelIntentKeepsTerminalTask(t *testing.T) {
 // TestRecoverCancelIntentFailureBlocksStartup 验证补齐写入失败时启动失败。
 //
 // 取消意图没有落库时服务继续启动，会让用户以为取消已经生效。
-func TestRecoverCancelIntentFailureBlocksStartup(t *testing.T) {
-	t.Parallel()
+func runRecoverCancelIntentFailureBlocksStartup(t *testrunner.Context) {
 	fixture := newRestartFixture(t)
 	task := fixture.createTask(t, domain.TaskStatusDeveloping, false)
 	steps := fixture.writePlanSteps(t, task, 1)

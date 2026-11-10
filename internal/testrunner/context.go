@@ -216,6 +216,40 @@ func (c *Context) Deadline() time.Time {
 	return deadline
 }
 
+// Run 在用例内执行一个顺序子测试，语义对齐 testing.T.Run 的单层顺序形态。
+//
+// 统一执行器没有独立子测试结论（V3 R5 D6：表驱动子测试按 Case 登记），子测试名只
+// 写入日志，结论仍属于整条 Case。子测试内部的 Fatalf 只结束该子测试，后面的子测试
+// 继续执行；Skipf 只跳过该子测试，不会让整条 Case 变成跳过；其余 panic 原样外抛，
+// 由 worker 判为 panic。
+func (c *Context) Run(name string, run func(*Context)) {
+	if run == nil {
+		return
+	}
+	c.Logf("SUBTEST %s", name)
+	c.mu.Lock()
+	previousSkip := c.skipReason
+	c.mu.Unlock()
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			return
+		}
+		signal, ok := recovered.(fatalSignal)
+		if !ok {
+			panic(recovered)
+		}
+		if signal.skip {
+			c.mu.Lock()
+			reason := c.skipReason
+			c.skipReason = previousSkip
+			c.mu.Unlock()
+			c.Logf("SUBTEST SKIP %s: %s", name, reason)
+		}
+	}()
+	run(c)
+}
+
 // Helper 把调用它的函数标记为辅助函数，等价于 testing.T.Helper。
 //
 // 失败定位会跳过这些函数，指向真正做断言的位置；辅助函数自己调用 Helper 是唯一的

@@ -1,9 +1,12 @@
-// Package environment_local 提供环境版本管理在真实文件系统与 SQLite 上的本机集成测试。
+// 本文件是 tests/integration/local/environment/environment_test.go 中 3 个用例的迁移结果。
 //
 // 这里使用可控的远程文件替身代替真实 SFTP：替身把远程路径映射到测试工作空间中的
 // 目录，因此可以在真实文件读写与真实数据库约束下验证版本不可覆盖、哈希记录与
 // 清单一致性，而不依赖真实远程机器。
-package environment_local
+//
+// 改造点：函数头改成 func run*、删除 t.Parallel()、工作空间改用编排进程下发的目录；
+// 断言与注释保持原样。
+package environment
 
 import (
 	"context"
@@ -12,12 +15,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/sshclient"
+	"github.com/lingting/agentflow/internal/testrunner"
 	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
@@ -224,9 +227,9 @@ func (t *localTransfer) Close() error {
 }
 
 // newTransfer 在测试工作空间中构造远程文件替身。
-func newTransfer(t *testing.T) (*localTransfer, string) {
+func newTransfer(t *testrunner.Context) (*localTransfer, string) {
 	t.Helper()
-	ws := testkit.New(t)
+	ws := testkit.NewAt(t, t.WorkspaceDir())
 	ws.Report()
 	root := ws.Dir("remote")
 	return &localTransfer{root: root}, root
@@ -238,7 +241,7 @@ func workspaceRoot(root string) string {
 }
 
 // newLayout 构造测试用远程目录布局。
-func newLayout(t *testing.T) docker.Layout {
+func newLayout(t *testrunner.Context) docker.Layout {
 	t.Helper()
 	layout, err := docker.NewLayout(workspaceRoot(""))
 	if err != nil {
@@ -248,8 +251,7 @@ func newLayout(t *testing.T) docker.Layout {
 }
 
 // TestVersionFilesAreNotOverwritten 验证版本目录写入后不会被覆盖。
-func TestVersionFilesAreNotOverwritten(t *testing.T) {
-	t.Parallel()
+func runVersionFilesAreNotOverwritten(t *testrunner.Context) {
 	transfer, root := newTransfer(t)
 	layout := newLayout(t)
 	ref, err := domain.NewEnvironmentRef(domain.EnvironmentTypeBase, "")
@@ -293,8 +295,7 @@ func TestVersionFilesAreNotOverwritten(t *testing.T) {
 }
 
 // TestManifestRoundTripOnDisk 验证镜像清单与容器清单在磁盘上的读写一致性。
-func TestManifestRoundTripOnDisk(t *testing.T) {
-	t.Parallel()
+func runManifestRoundTripOnDisk(t *testrunner.Context) {
 	transfer, _ := newTransfer(t)
 	layout := newLayout(t)
 	runner, err := docker.NewRunner(&stubClient{}, docker.RunnerOptions{})
@@ -398,8 +399,7 @@ func (c *stubClient) Close() error {
 }
 
 // TestContextUploadAndCleanup 验证构建上下文上传与临时目录清理。
-func TestContextUploadAndCleanup(t *testing.T) {
-	t.Parallel()
+func runContextUploadAndCleanup(t *testrunner.Context) {
 	transfer, root := newTransfer(t)
 	layout := newLayout(t)
 	runner, err := docker.NewRunner(&stubClient{}, docker.RunnerOptions{})

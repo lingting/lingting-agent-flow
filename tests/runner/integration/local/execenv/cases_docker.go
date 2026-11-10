@@ -2,19 +2,20 @@
 //
 // 用例使用可控的 SSH 执行替身：不访问真实 Docker Engine 与远程机器，因此可以
 // 精确断言命令参数、转义与 API 基准，同时不修改任何真实 Docker 资源。
-package execenv_local
+package execenv
 
 import (
 	"context"
 	"io"
 	"strings"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/sshclient"
+
+	"github.com/lingting/agentflow/internal/testrunner"
 )
 
 // fakeClient 是 sshclient.Client 的可控替身。
@@ -86,7 +87,7 @@ func (c *fakeClient) recorded() []string {
 }
 
 // newRunner 构造使用替身连接的 Docker 执行器。
-func newRunner(t *testing.T, client *fakeClient) *docker.Runner {
+func newRunner(t *testrunner.Context, client *fakeClient) *docker.Runner {
 	t.Helper()
 	runner, err := docker.NewRunner(client, docker.RunnerOptions{
 		QueryTimeout:  5 * time.Second,
@@ -98,8 +99,7 @@ func newRunner(t *testing.T, client *fakeClient) *docker.Runner {
 	return runner
 }
 
-func TestExecCommandInPassesEnvAndWorkDir(t *testing.T) {
-	t.Parallel()
+func runExecCommandInPassesEnvAndWorkDir(t *testrunner.Context) {
 	client := &fakeClient{}
 	runner := newRunner(t, client)
 	if _, err := runner.ExecCommandIn(
@@ -141,8 +141,7 @@ func TestExecCommandInPassesEnvAndWorkDir(t *testing.T) {
 	}
 }
 
-func TestExecCommandInRejectsInvalidEnv(t *testing.T) {
-	t.Parallel()
+func runExecCommandInRejectsInvalidEnv(t *testrunner.Context) {
 	client := &fakeClient{}
 	runner := newRunner(t, client)
 	cases := []struct {
@@ -172,8 +171,7 @@ func TestExecCommandInRejectsInvalidEnv(t *testing.T) {
 	}
 }
 
-func TestExecCommandInWithInputEnablesInteractive(t *testing.T) {
-	t.Parallel()
+func runExecCommandInWithInputEnablesInteractive(t *testrunner.Context) {
 	client := &fakeClient{}
 	runner := newRunner(t, client)
 	if _, err := runner.ExecCommandInWithInput(
@@ -205,8 +203,7 @@ func TestExecCommandInWithInputEnablesInteractive(t *testing.T) {
 	}
 }
 
-func TestRequiredCLICommandsCoversExecEnv(t *testing.T) {
-	t.Parallel()
+func runRequiredCLICommandsCoversExecEnv(t *testrunner.Context) {
 	// docker exec 实际使用的参数必须全部出现在兼容性清单中，
 	// 否则环境预检会漏检新增参数。
 	var execOptions []string
@@ -233,8 +230,7 @@ func TestRequiredCLICommandsCoversExecEnv(t *testing.T) {
 	}
 }
 
-func TestCompatibilityBaselineIsUnchanged(t *testing.T) {
-	t.Parallel()
+func runCompatibilityBaselineIsUnchanged(t *testrunner.Context) {
 	if docker.MinimumCLIVersion != "29.0.0" {
 		t.Fatalf("Docker CLI 最低版本基线被改动: %s", docker.MinimumCLIVersion)
 	}
@@ -246,8 +242,7 @@ func TestCompatibilityBaselineIsUnchanged(t *testing.T) {
 	}
 }
 
-func TestContainerCreateArgsKeepSafetyBoundaries(t *testing.T) {
-	t.Parallel()
+func runContainerCreateArgsKeepSafetyBoundaries(t *testrunner.Context) {
 	ref, err := domain.NewEnvironmentRef(domain.EnvironmentTypeLanguage, "go")
 	if err != nil {
 		t.Fatalf("构造语言环境失败: %v", err)

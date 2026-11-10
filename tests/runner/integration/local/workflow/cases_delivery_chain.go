@@ -9,14 +9,13 @@
 // app.SessionService；只把容器内 Pi 调用、容器内命令执行、容器核验与外部 Git
 // 操作替换为受控替身。因此断言的对象是数据库里真实留下的 Attempt / Session /
 // Validation Run / CodeSave 记录与任务、工作流状态，而不是方法的返回值。
-package workflow_test
+package workflow
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/agent"
@@ -28,6 +27,7 @@ import (
 	"github.com/lingting/agentflow/internal/sshclient"
 	"github.com/lingting/agentflow/internal/storage"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
+	"github.com/lingting/agentflow/internal/testrunner"
 	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
@@ -379,12 +379,28 @@ type deliveryOptions struct {
 }
 
 // newDeliveryFixture 在工作空间中准备一套可执行完整交付链路的测试数据。
-func newDeliveryFixture(t *testing.T, options deliveryOptions) *deliveryFixture {
+// newDeliveryFixture 在工作空间中准备一套可执行完整交付链路的测试数据。
+func newDeliveryFixture(t *testrunner.Context, options deliveryOptions) *deliveryFixture {
+	return newDeliverySceneFixture(t, 1, options)
+}
+
+// newDeliverySceneFixture 准备第 scene 个场景的交付链路现场（表驱动多场景用例使用）。
+//
+// 场景之间各用一份数据库资源与一个工作空间子目录：共用一个库会让同一任务与容器的唯一
+// 约束在前一个场景就被占住，共用工作空间会让仓库与 Session 文件互相覆盖。
+func newDeliverySceneFixture(
+	t *testrunner.Context,
+	scene int,
+	options deliveryOptions,
+) *deliveryFixture {
 	t.Helper()
-	workspace := testkit.New(t)
+	workspace := testkit.NewAt(t, t.WorkspaceDir())
+	if scene > 1 {
+		workspace = testkit.NewAt(t, workspace.Dir(fmt.Sprintf("scene-%d", scene)))
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	t.Cleanup(cancel)
-	db, err := sqlite.Open(ctx, sqlite.Options{Path: workspace.DatabasePath()})
+	db, err := sqlite.Open(ctx, sqlite.Options{Path: databasePathAt(t, scene)})
 	if err != nil {
 		t.Fatalf("打开测试数据库失败: %v", err)
 	}
@@ -411,7 +427,7 @@ func newDeliveryFixture(t *testing.T, options deliveryOptions) *deliveryFixture 
 }
 
 // seed 写入角色、执行节点、需求、任务与计划步骤。
-func (f *deliveryFixture) seed(t *testing.T, options deliveryOptions) {
+func (f *deliveryFixture) seed(t *testrunner.Context, options deliveryOptions) {
 	t.Helper()
 	developer := deliveryRole(t, f.db, f.ctx, domain.RoleTypeDeveloper, "开发角色", f.now)
 	host := deliveryHost(t, f.db, f.ctx, f.now)
@@ -494,7 +510,7 @@ func (f *deliveryFixture) seed(t *testing.T, options deliveryOptions) {
 }
 
 // assemble 装配真实服务链路，只把外部执行与外部 Git 替换为受控替身。
-func (f *deliveryFixture) assemble(t *testing.T, options deliveryOptions) {
+func (f *deliveryFixture) assemble(t *testrunner.Context, options deliveryOptions) {
 	t.Helper()
 	sessions, err := app.NewSessionService(f.db, f.workspace.SessionRoot(), f.logger.Slog())
 	if err != nil {
@@ -576,7 +592,7 @@ func (f *deliveryFixture) assemble(t *testing.T, options deliveryOptions) {
 }
 
 // startServices 启动后台服务并在用例结束时逆序停止。
-func startServices(t *testing.T, services ...interface {
+func startServices(t *testrunner.Context, services ...interface {
 	Start(ctx context.Context) error
 	Stop(ctx context.Context) error
 }) {
@@ -600,7 +616,7 @@ func startServices(t *testing.T, services ...interface {
 }
 
 // start 启动任务级工作流。
-func (f *deliveryFixture) start(t *testing.T) app.WorkflowRunView {
+func (f *deliveryFixture) start(t *testrunner.Context) app.WorkflowRunView {
 	t.Helper()
 	view, err := f.workflow.StartWorkflow(f.ctx, app.StartWorkflowRequest{
 		TaskID: f.task.ID.String(),
@@ -612,7 +628,7 @@ func (f *deliveryFixture) start(t *testing.T) app.WorkflowRunView {
 }
 
 // settle 等待工作流停止自动推进并返回最后的记录。
-func (f *deliveryFixture) settle(t *testing.T) app.WorkflowStatusResult {
+func (f *deliveryFixture) settle(t *testrunner.Context) app.WorkflowStatusResult {
 	t.Helper()
 	const timeout = 60 * time.Second
 	deadline := time.Now().Add(timeout)
@@ -641,7 +657,7 @@ func (f *deliveryFixture) settle(t *testing.T) app.WorkflowStatusResult {
 }
 
 // reloadTask 读取数据库中的任务。
-func (f *deliveryFixture) reloadTask(t *testing.T) domain.Task {
+func (f *deliveryFixture) reloadTask(t *testrunner.Context) domain.Task {
 	t.Helper()
 	task, err := f.db.GetTask(f.ctx, f.task.ID)
 	if err != nil {
@@ -651,7 +667,7 @@ func (f *deliveryFixture) reloadTask(t *testing.T) domain.Task {
 }
 
 // reloadRun 读取数据库中的工作流执行记录。
-func (f *deliveryFixture) reloadRun(t *testing.T, id domain.ID) domain.WorkflowRun {
+func (f *deliveryFixture) reloadRun(t *testrunner.Context, id domain.ID) domain.WorkflowRun {
 	t.Helper()
 	run, err := f.db.GetWorkflowRun(f.ctx, id)
 	if err != nil {
@@ -661,7 +677,7 @@ func (f *deliveryFixture) reloadRun(t *testing.T, id domain.ID) domain.WorkflowR
 }
 
 // reloadSteps 读取数据库中的步骤。
-func (f *deliveryFixture) reloadSteps(t *testing.T) []domain.Step {
+func (f *deliveryFixture) reloadSteps(t *testrunner.Context) []domain.Step {
 	t.Helper()
 	steps, err := f.db.ListStepsByTask(f.ctx, f.task.ID)
 	if err != nil {
@@ -671,7 +687,7 @@ func (f *deliveryFixture) reloadSteps(t *testing.T) []domain.Step {
 }
 
 // attempts 读取某步骤的全部尝试。
-func (f *deliveryFixture) attempts(t *testing.T, stepID domain.ID) []domain.Attempt {
+func (f *deliveryFixture) attempts(t *testrunner.Context, stepID domain.ID) []domain.Attempt {
 	t.Helper()
 	attempts, err := f.db.ListAttemptsByStep(f.ctx, stepID)
 	if err != nil {
@@ -681,7 +697,7 @@ func (f *deliveryFixture) attempts(t *testing.T, stepID domain.ID) []domain.Atte
 }
 
 // sessions 读取任务的全部会话。
-func (f *deliveryFixture) sessionsOf(t *testing.T) []domain.Session {
+func (f *deliveryFixture) sessionsOf(t *testrunner.Context) []domain.Session {
 	t.Helper()
 	sessions, err := f.db.ListSessionsByTask(f.ctx, f.task.ID)
 	if err != nil {
@@ -691,7 +707,7 @@ func (f *deliveryFixture) sessionsOf(t *testing.T) []domain.Session {
 }
 
 // validationRuns 读取某次尝试的全部验证记录。
-func (f *deliveryFixture) validationRuns(t *testing.T, attemptID domain.ID) []domain.ValidationRun {
+func (f *deliveryFixture) validationRuns(t *testrunner.Context, attemptID domain.ID) []domain.ValidationRun {
 	t.Helper()
 	runs, err := f.db.ListValidationRunsByAttempt(f.ctx, attemptID)
 	if err != nil {
@@ -701,7 +717,7 @@ func (f *deliveryFixture) validationRuns(t *testing.T, attemptID domain.ID) []do
 }
 
 // events 读取任务的全部事件。
-func (f *deliveryFixture) events(t *testing.T) []domain.Event {
+func (f *deliveryFixture) events(t *testrunner.Context) []domain.Event {
 	t.Helper()
 	events, err := f.db.ListEventsByTask(f.ctx, f.task.ID, storage.EventFilter{})
 	if err != nil {
@@ -714,7 +730,7 @@ func (f *deliveryFixture) events(t *testing.T) []domain.Event {
 //
 // 事件与状态写入是两次独立的持久化：状态先落盘，事件随后追加。因此"状态已可见"
 // 并不保证"事件已写入"，断言事件必须按截止时间轮询，而不是一次性读取。
-func (f *deliveryFixture) waitEvents(t *testing.T, expected ...domain.EventType) {
+func (f *deliveryFixture) waitEvents(t *testrunner.Context, expected ...domain.EventType) {
 	t.Helper()
 	const timeout = 20 * time.Second
 	deadline := time.Now().Add(timeout)
@@ -743,8 +759,7 @@ func (f *deliveryFixture) waitEvents(t *testing.T, expected ...domain.EventType)
 // 场景：第 1 步首轮验证失败 → 修复重验通过 → 第 2 步验证通过 → 代码保存成功 →
 // 全部会话已归档 → 任务与工作流进入 completed。断言覆盖 Attempt / Session /
 // Validation Run / 修复事件 / 代码保存记录之间的关联与历史保留。
-func TestDeliveryChainRepairThenCodeSaveArchiveAndCloseout(t *testing.T) {
-	t.Parallel()
+func runDeliveryChainRepairThenCodeSaveArchiveAndCloseout(t *testrunner.Context) {
 	fixture := newDeliveryFixture(t, deliveryOptions{
 		stepCount: 2,
 		retry:     domain.RetryConfig{MaxAttempts: 2, RetryVerification: true},
@@ -921,8 +936,7 @@ func TestDeliveryChainRepairThenCodeSaveArchiveAndCloseout(t *testing.T) {
 }
 
 // TestDeliveryChainStopsAtRepairLimit 验证修复达到上限后不进入交付阶段。
-func TestDeliveryChainStopsAtRepairLimit(t *testing.T) {
-	t.Parallel()
+func runDeliveryChainStopsAtRepairLimit(t *testrunner.Context) {
 	fixture := newDeliveryFixture(t, deliveryOptions{
 		stepCount: 1,
 		retry:     domain.RetryConfig{MaxAttempts: 2, RetryVerification: true},
@@ -979,8 +993,7 @@ func TestDeliveryChainStopsAtRepairLimit(t *testing.T) {
 }
 
 // TestDeliveryChainStopsWhenCodeSaveFails 验证代码保存明确失败时不判成功。
-func TestDeliveryChainStopsWhenCodeSaveFails(t *testing.T) {
-	t.Parallel()
+func runDeliveryChainStopsWhenCodeSaveFails(t *testrunner.Context) {
 	fixture := newDeliveryFixture(t, deliveryOptions{
 		stepCount: 1,
 		agentReplies: []deliveryAgentReply{
@@ -1013,8 +1026,7 @@ func TestDeliveryChainStopsWhenCodeSaveFails(t *testing.T) {
 }
 
 // TestDeliveryChainStopsWhenCodeSaveIndeterminate 验证保存结果不确定时不判成功。
-func TestDeliveryChainStopsWhenCodeSaveIndeterminate(t *testing.T) {
-	t.Parallel()
+func runDeliveryChainStopsWhenCodeSaveIndeterminate(t *testrunner.Context) {
 	record := deliveryCodeSaveRecord()
 	// 推送结果未知：远程可能已收到提交，必须先核验再决定。
 	record.PushStatus = domain.PushStatusUnknown
@@ -1040,8 +1052,7 @@ func TestDeliveryChainStopsWhenCodeSaveIndeterminate(t *testing.T) {
 }
 
 // TestDeliveryChainStopsWhenCodeSaveRecordUnconfirmed 验证记录未可靠落盘时不判成功。
-func TestDeliveryChainStopsWhenCodeSaveRecordUnconfirmed(t *testing.T) {
-	t.Parallel()
+func runDeliveryChainStopsWhenCodeSaveRecordUnconfirmed(t *testrunner.Context) {
 	record := deliveryCodeSaveRecord()
 	record.PersistStatus = domain.PersistStatusUnconfirmed
 	record.PersistError = "database is locked"
@@ -1067,8 +1078,7 @@ func TestDeliveryChainStopsWhenCodeSaveRecordUnconfirmed(t *testing.T) {
 }
 
 // TestDeliveryChainStopsWithoutCodeSaver 验证缺少代码保存能力时不判成功。
-func TestDeliveryChainStopsWithoutCodeSaver(t *testing.T) {
-	t.Parallel()
+func runDeliveryChainStopsWithoutCodeSaver(t *testrunner.Context) {
 	fixture := newDeliveryFixture(t, deliveryOptions{
 		stepCount: 1,
 		agentReplies: []deliveryAgentReply{
@@ -1089,8 +1099,7 @@ func TestDeliveryChainStopsWithoutCodeSaver(t *testing.T) {
 }
 
 // TestDeliveryChainStopsWhenSessionArchiveIncomplete 验证会话归档不完整时不判成功。
-func TestDeliveryChainStopsWhenSessionArchiveIncomplete(t *testing.T) {
-	t.Parallel()
+func runDeliveryChainStopsWhenSessionArchiveIncomplete(t *testrunner.Context) {
 	cases := []struct {
 		name        string
 		adjust      func(session domain.Session) domain.Session
@@ -1138,11 +1147,10 @@ func TestDeliveryChainStopsWhenSessionArchiveIncomplete(t *testing.T) {
 			description: "没有可用原始会话文件时不得判定归档完成",
 		},
 	}
-	for _, testCase := range cases {
+	for index, testCase := range cases {
 		testCase := testCase
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
-			fixture := newDeliveryFixture(t, deliveryOptions{
+		t.Run(testCase.name, func(t *testrunner.Context) {
+			fixture := newDeliverySceneFixture(t, index+1, deliveryOptions{
 				stepCount: 1,
 				agentReplies: []deliveryAgentReply{
 					{status: agent.RunCompleted, finalText: "实现完成"},
@@ -1174,8 +1182,7 @@ func TestDeliveryChainStopsWhenSessionArchiveIncomplete(t *testing.T) {
 }
 
 // TestDeliveryChainStopsWhenSessionQueryFails 验证会话查询失败不被当成"没有会话"。
-func TestDeliveryChainStopsWhenSessionQueryFails(t *testing.T) {
-	t.Parallel()
+func runDeliveryChainStopsWhenSessionQueryFails(t *testrunner.Context) {
 	fixture := newDeliveryFixture(t, deliveryOptions{
 		stepCount: 1,
 		agentReplies: []deliveryAgentReply{
@@ -1198,8 +1205,7 @@ func TestDeliveryChainStopsWhenSessionQueryFails(t *testing.T) {
 }
 
 // TestDeliveryChainKeepsTaskCompletedWhenCloseoutFails 验证收尾写入失败不被报告为成功。
-func TestDeliveryChainKeepsTaskCompletedWhenCloseoutFails(t *testing.T) {
-	t.Parallel()
+func runDeliveryChainKeepsTaskCompletedWhenCloseoutFails(t *testrunner.Context) {
 	fixture := newDeliveryFixture(t, deliveryOptions{
 		stepCount: 1,
 		agentReplies: []deliveryAgentReply{
@@ -1235,7 +1241,7 @@ func TestDeliveryChainKeepsTaskCompletedWhenCloseoutFails(t *testing.T) {
 
 // incompleteSession 构造一条按用例调整后不再满足归档要求的会话记录。
 func incompleteSession(
-	t *testing.T,
+	t *testrunner.Context,
 	fixture *deliveryFixture,
 	adjust func(session domain.Session) domain.Session,
 ) domain.Session {
@@ -1268,7 +1274,7 @@ func incompleteSession(
 
 // deliveryRole 写入一个启用中的角色。
 func deliveryRole(
-	t *testing.T,
+	t *testrunner.Context,
 	db *sqlite.DB,
 	ctx context.Context,
 	roleType domain.RoleType,
@@ -1295,7 +1301,7 @@ func deliveryRole(
 
 // deliveryHost 写入一个执行节点（校验状态为 checking）。
 func deliveryHost(
-	t *testing.T,
+	t *testrunner.Context,
 	db *sqlite.DB,
 	ctx context.Context,
 	now time.Time,
@@ -1309,7 +1315,7 @@ func deliveryHost(
 		"deploy",
 		"/srv/agentflow",
 		now,
-		domain.WithPrivateKey(testkit.PrivateKeyPath(t)),
+		domain.WithPrivateKey(testkit.PrivateKeyIn(t, t.WorkspaceDir())),
 	)
 	if err != nil {
 		t.Fatalf("构造执行节点失败: %v", err)
@@ -1322,7 +1328,7 @@ func deliveryHost(
 
 // deliveryMarkHostNormal 把执行节点置为已通过环境预检。
 func deliveryMarkHostNormal(
-	t *testing.T,
+	t *testrunner.Context,
 	db *sqlite.DB,
 	ctx context.Context,
 	host domain.ExecutionHost,
@@ -1386,7 +1392,7 @@ func deliverySettled(status domain.WorkflowRunStatus) bool {
 //
 // 它复用同一份数据库与同一组装配，因此恢复读到的就是真实持久化事实；已启动的
 // 依赖服务保持运行，只有编排器本身被重建。
-func (f *deliveryFixture) restartWorkflow(t *testing.T) *app.TaskWorkflowService {
+func (f *deliveryFixture) restartWorkflow(t *testrunner.Context) *app.TaskWorkflowService {
 	t.Helper()
 	stopCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

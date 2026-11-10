@@ -4,7 +4,7 @@
 // 执行、容器核验、步骤闭环）替换为受控替身：恢复链路本身、事务边界、状态机与
 // 持久化写入全部走产品代码，因此断言的是数据库里真实留下的现场，而不是方法的
 // 返回值。
-package workflow_test
+package workflow
 
 import (
 	"context"

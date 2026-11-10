@@ -1,4 +1,4 @@
-// Package execenv_local 提供统一执行环境在容器生命周期与工作区隔离方面的本机测试。
+// 本文件是 tests/integration/local/execenv/execenv_test.go 中 22 个用例的迁移结果。
 //
 // 用例使用受控的镜像与容器替身：不访问真实 Docker Engine、SSH 或远程机器，
 // 因此可以在任意开发机上完整验证
@@ -7,7 +7,7 @@
 //   - 容器内项目目录与远程管理工作区的边界；
 //   - 命令执行的工作目录、参数与环境变量传递；
 //   - 超时、取消与执行层错误不会产生虚假的成功结果。
-package execenv_local
+package execenv
 
 import (
 	"context"
@@ -17,7 +17,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/app"
@@ -26,6 +25,7 @@ import (
 	"github.com/lingting/agentflow/internal/execenv"
 	"github.com/lingting/agentflow/internal/sshclient"
 	"github.com/lingting/agentflow/internal/storage"
+	"github.com/lingting/agentflow/internal/testrunner"
 	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
@@ -382,9 +382,9 @@ type fixture struct {
 }
 
 // newFixture 构造执行环境服务与受控替身。
-func newFixture(t *testing.T) *fixture {
+func newFixture(t *testrunner.Context) *fixture {
 	t.Helper()
-	workspace := testkit.New(t)
+	workspace := testkit.NewAt(t, t.WorkspaceDir())
 	images := &fakeImages{}
 	// 默认核验命令成功：准备流程会探测工作目录与 git / pi 入口。
 	containers := &fakeContainers{execReply: successfulExec()}
@@ -492,7 +492,7 @@ func (f *fakeTaskStore) AppendEvent(
 }
 
 // prepareSpec 返回一个合法的准备请求。
-func prepareSpec(t *testing.T) execenv.PrepareSpec {
+func prepareSpec(t *testrunner.Context) execenv.PrepareSpec {
 	t.Helper()
 	language, err := domain.NewEnvironmentRef(domain.EnvironmentTypeLanguage, "go")
 	if err != nil {
@@ -505,8 +505,7 @@ func prepareSpec(t *testing.T) execenv.PrepareSpec {
 	}
 }
 
-func TestPrepareSucceedsAndRecordsStages(t *testing.T) {
-	t.Parallel()
+func runPrepareSucceedsAndRecordsStages(t *testrunner.Context) {
 	fixture := newFixture(t)
 	prepared, err := fixture.service.Prepare(context.Background(), prepareSpec(t))
 	if err != nil {
@@ -570,8 +569,7 @@ func TestPrepareSucceedsAndRecordsStages(t *testing.T) {
 	}
 }
 
-func TestPrepareFailsWhenImagePreparationFails(t *testing.T) {
-	t.Parallel()
+func runPrepareFailsWhenImagePreparationFails(t *testrunner.Context) {
 	fixture := newFixture(t)
 	fixture.images.buildErr = errors.New("镜像构建失败: 网络不可达")
 	prepared, err := fixture.service.Prepare(context.Background(), prepareSpec(t))
@@ -592,8 +590,7 @@ func TestPrepareFailsWhenImagePreparationFails(t *testing.T) {
 	}
 }
 
-func TestPrepareFailsWhenContainerCreationFails(t *testing.T) {
-	t.Parallel()
+func runPrepareFailsWhenContainerCreationFails(t *testrunner.Context) {
 	fixture := newFixture(t)
 	fixture.containers.createErr = errors.New("docker create 失败")
 	prepared, err := fixture.service.Prepare(context.Background(), prepareSpec(t))
@@ -608,8 +605,7 @@ func TestPrepareFailsWhenContainerCreationFails(t *testing.T) {
 	}
 }
 
-func TestPrepareFailsWhenContainerNotRunning(t *testing.T) {
-	t.Parallel()
+func runPrepareFailsWhenContainerNotRunning(t *testrunner.Context) {
 	fixture := newFixture(t)
 	// 容器创建后立刻被判定为未运行：准备流程必须拒绝把这种环境当作可用。
 	fixture.containers.createErr = nil
@@ -634,8 +630,7 @@ func TestPrepareFailsWhenContainerNotRunning(t *testing.T) {
 	}
 }
 
-func TestStatusDistinguishesReleasedAndDetached(t *testing.T) {
-	t.Parallel()
+func runStatusDistinguishesReleasedAndDetached(t *testrunner.Context) {
 	fixture := newFixture(t)
 	prepared, err := fixture.service.Prepare(context.Background(), prepareSpec(t))
 	if err != nil {
@@ -664,8 +659,7 @@ func TestStatusDistinguishesReleasedAndDetached(t *testing.T) {
 	}
 }
 
-func TestStatusReportsUnknownOnInspectFailure(t *testing.T) {
-	t.Parallel()
+func runStatusReportsUnknownOnInspectFailure(t *testrunner.Context) {
 	fixture := newFixture(t)
 	prepared, err := fixture.service.Prepare(context.Background(), prepareSpec(t))
 	if err != nil {
@@ -683,8 +677,7 @@ func TestStatusReportsUnknownOnInspectFailure(t *testing.T) {
 	}
 }
 
-func TestExecPassesWorkDirArgsAndEnv(t *testing.T) {
-	t.Parallel()
+func runExecPassesWorkDirArgsAndEnv(t *testrunner.Context) {
 	fixture := newFixture(t)
 	prepared, err := fixture.service.Prepare(context.Background(), prepareSpec(t))
 	if err != nil {
@@ -727,8 +720,7 @@ func TestExecPassesWorkDirArgsAndEnv(t *testing.T) {
 	}
 }
 
-func TestExecRejectsWorkDirOutsideWorkspace(t *testing.T) {
-	t.Parallel()
+func runExecRejectsWorkDirOutsideWorkspace(t *testrunner.Context) {
 	fixture := newFixture(t)
 	prepared, err := fixture.service.Prepare(context.Background(), prepareSpec(t))
 	if err != nil {
@@ -746,8 +738,7 @@ func TestExecRejectsWorkDirOutsideWorkspace(t *testing.T) {
 	}
 }
 
-func TestExecPropagatesTimeoutAndCancellation(t *testing.T) {
-	t.Parallel()
+func runExecPropagatesTimeoutAndCancellation(t *testrunner.Context) {
 	fixture := newFixture(t)
 	prepared, err := fixture.service.Prepare(context.Background(), prepareSpec(t))
 	if err != nil {
@@ -791,8 +782,7 @@ func TestExecPropagatesTimeoutAndCancellation(t *testing.T) {
 	}
 }
 
-func TestExecReportsExecutionLayerError(t *testing.T) {
-	t.Parallel()
+func runExecReportsExecutionLayerError(t *testrunner.Context) {
 	fixture := newFixture(t)
 	prepared, err := fixture.service.Prepare(context.Background(), prepareSpec(t))
 	if err != nil {
@@ -812,8 +802,7 @@ func TestExecReportsExecutionLayerError(t *testing.T) {
 	}
 }
 
-func TestReleaseDeleteRemovesContainer(t *testing.T) {
-	t.Parallel()
+func runReleaseDeleteRemovesContainer(t *testrunner.Context) {
 	fixture := newFixture(t)
 	prepared, err := fixture.service.Prepare(context.Background(), prepareSpec(t))
 	if err != nil {
@@ -841,8 +830,7 @@ func TestReleaseDeleteRemovesContainer(t *testing.T) {
 	}
 }
 
-func TestReleaseKeepsContainerOnFailure(t *testing.T) {
-	t.Parallel()
+func runReleaseKeepsContainerOnFailure(t *testrunner.Context) {
 	fixture := newFixture(t)
 	prepared, err := fixture.service.Prepare(context.Background(), prepareSpec(t))
 	if err != nil {
@@ -870,8 +858,7 @@ func TestReleaseKeepsContainerOnFailure(t *testing.T) {
 	}
 }
 
-func TestReleaseDetachOnInterruptedKeepsControl(t *testing.T) {
-	t.Parallel()
+func runReleaseDetachOnInterruptedKeepsControl(t *testrunner.Context) {
 	fixture := newFixture(t)
 	prepared, err := fixture.service.Prepare(context.Background(), prepareSpec(t))
 	if err != nil {
@@ -899,8 +886,7 @@ func TestReleaseDetachOnInterruptedKeepsControl(t *testing.T) {
 	}
 }
 
-func TestReleaseDeleteIsIdempotentWhenContainerMissing(t *testing.T) {
-	t.Parallel()
+func runReleaseDeleteIsIdempotentWhenContainerMissing(t *testrunner.Context) {
 	fixture := newFixture(t)
 	prepared, err := fixture.service.Prepare(context.Background(), prepareSpec(t))
 	if err != nil {
@@ -928,8 +914,7 @@ func TestReleaseDeleteIsIdempotentWhenContainerMissing(t *testing.T) {
 // 归属校验失败说明同名容器存在但标签与登记记录不一致：容器可能仍在运行。把它当成
 // "确认不存在"会让释放流程报告"按删除成功处理"，伪造一次没有发生的清理，并让现场
 // 失去诊断线索。只有 CodeContainerNotFound 才允许按删除成功处理。
-func TestReleaseRejectsOwnershipMismatchAsMissing(t *testing.T) {
-	t.Parallel()
+func runReleaseRejectsOwnershipMismatchAsMissing(t *testrunner.Context) {
 	fixture := newFixture(t)
 	prepared, err := fixture.service.Prepare(context.Background(), prepareSpec(t))
 	if err != nil {
@@ -980,8 +965,7 @@ func TestReleaseRejectsOwnershipMismatchAsMissing(t *testing.T) {
 	}
 }
 
-func TestPrepareForTaskCreatesFreshContainerPerAttempt(t *testing.T) {
-	t.Parallel()
+func runPrepareForTaskCreatesFreshContainerPerAttempt(t *testrunner.Context) {
 	fixture := newFixture(t)
 	language, err := domain.NewEnvironmentRef(domain.EnvironmentTypeLanguage, "go")
 	if err != nil {
@@ -1042,8 +1026,7 @@ func TestPrepareForTaskCreatesFreshContainerPerAttempt(t *testing.T) {
 	}
 }
 
-func TestPrepareForTaskRejectsUnknownAttempt(t *testing.T) {
-	t.Parallel()
+func runPrepareForTaskRejectsUnknownAttempt(t *testrunner.Context) {
 	fixture := newFixture(t)
 	language, err := domain.NewEnvironmentRef(domain.EnvironmentTypeLanguage, "go")
 	if err != nil {
@@ -1093,8 +1076,7 @@ func ptrID(id domain.ID) *domain.ID {
 	return &id
 }
 
-func TestPrepareRejectsUnvalidatedHost(t *testing.T) {
-	t.Parallel()
+func runPrepareRejectsUnvalidatedHost(t *testrunner.Context) {
 	fixture := newFixture(t)
 	service, err := app.NewExecutionEnvironmentService(app.ExecutionEnvironmentOptions{
 		Environments:  &app.EnvironmentService{},
@@ -1140,8 +1122,7 @@ func (p *unvalidatedHostPort) LoadHost(
 	}, nil
 }
 
-func TestWorkspaceIsolationFromManagementArea(t *testing.T) {
-	t.Parallel()
+func runWorkspaceIsolationFromManagementArea(t *testrunner.Context) {
 	fixture := newFixture(t)
 	prepared, err := fixture.service.Prepare(context.Background(), prepareSpec(t))
 	if err != nil {
@@ -1174,8 +1155,7 @@ func TestWorkspaceIsolationFromManagementArea(t *testing.T) {
 	}
 }
 
-func TestSessionFilesSurviveContainerRelease(t *testing.T) {
-	t.Parallel()
+func runSessionFilesSurviveContainerRelease(t *testrunner.Context) {
 	fixture := newFixture(t)
 	prepared, err := fixture.service.Prepare(context.Background(), prepareSpec(t))
 	if err != nil {
@@ -1258,8 +1238,7 @@ func (c *checkContainer) Exec(
 	return app.ExecResult{Result: successfulExec()}, nil
 }
 
-func TestCheckEnvironmentRunsInGivenWorkspace(t *testing.T) {
-	t.Parallel()
+func runCheckEnvironmentRunsInGivenWorkspace(t *testrunner.Context) {
 	container := &checkContainer{running: true}
 	executor, err := app.NewCheckEnvironmentForTest(
 		container,
@@ -1302,8 +1281,7 @@ func TestCheckEnvironmentRunsInGivenWorkspace(t *testing.T) {
 	}
 }
 
-func TestPrepareForTaskReportsConflictWhenTaskAdvanced(t *testing.T) {
-	t.Parallel()
+func runPrepareForTaskReportsConflictWhenTaskAdvanced(t *testrunner.Context) {
 	fixture := newFixture(t)
 	language, err := domain.NewEnvironmentRef(domain.EnvironmentTypeLanguage, "go")
 	if err != nil {
