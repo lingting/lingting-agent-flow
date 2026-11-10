@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check vet test test-unit test-local test-pi test-ssh test-e2e test-race build release release-dist release-verify release-notes run web-install web-build web-dev web-verify serve clean check
+.PHONY: fmt fmt-check vet inventory test test-unit test-local test-pi test-ssh test-e2e test-race build release release-dist release-verify release-notes run web-install web-build web-dev web-verify serve clean check
 
 VERSION ?= dev
 # 开发构建使用短提交便于阅读；正式发布制品中的提交由 cmd/agentflow-release 写入完整 SHA。
@@ -29,6 +29,10 @@ fmt-check:
 
 vet:
 	go vet ./...
+
+# inventory 重新生成 V3 R0 的用例清单与资源矩阵：只读盘点，不运行任何测试。
+inventory:
+	go run ./cmd/agentflow-test-inventory -out .steps/V3/R0
 
 test:
 	go test -count=1 -v -p $(PARALLEL) -parallel $(PARALLEL) ./tests/...

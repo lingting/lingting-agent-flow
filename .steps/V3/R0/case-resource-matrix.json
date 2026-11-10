@@ -1,0 +1,2043 @@
+{
+  "schema_version": "agentflow-case-resources/1",
+  "baseline_commit": "f5eb3ef955d22c45f4f76c8d3ab001c24760c1ad",
+  "resource_types": [
+    {
+      "name": "docker-daemon",
+      "description": "远程 Docker daemon 命令入口（经 internal/docker）",
+      "default_scope": "run-shared"
+    },
+    {
+      "name": "remote-container",
+      "description": "本次用例独占的真实远程容器（testkit 容器登记与零残留核验）",
+      "default_scope": "case-exclusive"
+    },
+    {
+      "name": "remote-workspace",
+      "description": "远程机器上的临时测试目录",
+      "default_scope": "case-exclusive"
+    },
+    {
+      "name": "ssh-host",
+      "description": "tests/config/ssh.yml 指向的真实远程主机",
+      "default_scope": "run-shared"
+    },
+    {
+      "name": "ssh-session",
+      "description": "一条真实 SSH 连接及其会话",
+      "default_scope": "case-exclusive"
+    },
+    {
+      "name": "local-ssh-server",
+      "description": "测试进程内启动的 SSH/SFTP 服务端",
+      "default_scope": "case-exclusive"
+    },
+    {
+      "name": "pi-cli",
+      "description": "本机真实 Pi CLI 调用",
+      "default_scope": "case-exclusive"
+    },
+    {
+      "name": "sqlite-db",
+      "description": "用例工作空间内的 SQLite 数据库文件",
+      "default_scope": "case-exclusive"
+    },
+    {
+      "name": "local-port",
+      "description": "用例自己监听的本地端口",
+      "default_scope": "case-exclusive"
+    },
+    {
+      "name": "local-http-server",
+      "description": "httptest 启动的进程内 HTTP 服务",
+      "default_scope": "case-exclusive"
+    },
+    {
+      "name": "child-process",
+      "description": "用例启动的外部子进程（git、ssh、docker、pi 等）",
+      "default_scope": "case-exclusive"
+    },
+    {
+      "name": "service-process",
+      "description": "被测服务进程（./cmd/agentflow 构建产物）",
+      "default_scope": "case-exclusive"
+    },
+    {
+      "name": "git-worktree",
+      "description": "用例独占的 Git 仓库或工作区",
+      "default_scope": "case-exclusive"
+    },
+    {
+      "name": "node-worker",
+      "description": "Vitest fork 进程（一个文件一个 worker）",
+      "default_scope": "case-exclusive"
+    },
+    {
+      "name": "frontend-dev-server",
+      "description": "前端 Vite dev server（Playwright webServer）",
+      "default_scope": "run-shared"
+    },
+    {
+      "name": "browser",
+      "description": "无头浏览器实例（Playwright project）",
+      "default_scope": "case-exclusive"
+    }
+  ],
+  "packages": [
+    {
+      "dir": "tests/e2e/cli",
+      "package_path": "github.com/lingting/agentflow/tests/e2e/cli",
+      "stage": "R5",
+      "case_count": 65,
+      "real_test_gate": false,
+      "resources": [
+        {
+          "type": "local-port",
+          "scope": "case-exclusive",
+          "evidence": [
+            "call:net.Listen"
+          ]
+        },
+        {
+          "type": "local-ssh-server",
+          "scope": "case-exclusive",
+          "evidence": [
+            "call:net.Listen",
+            "import golang.org/x/crypto/ssh"
+          ]
+        },
+        {
+          "type": "sqlite-db",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/storage/sqlite"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "serial_declared": false,
+      "needs_review": false
+    },
+    {
+      "dir": "tests/integration/local/codesaver",
+      "package_path": "github.com/lingting/agentflow/tests/integration/local/codesaver",
+      "stage": "R5",
+      "case_count": 12,
+      "real_test_gate": false,
+      "resources": [
+        {
+          "type": "child-process",
+          "scope": "case-exclusive",
+          "evidence": [
+            "call:exec.Command"
+          ]
+        },
+        {
+          "type": "git-worktree",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/codesaver"
+          ]
+        },
+        {
+          "type": "ssh-session",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/sshclient"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "serial_declared": false,
+      "needs_review": false
+    },
+    {
+      "dir": "tests/integration/local/environment",
+      "package_path": "github.com/lingting/agentflow/tests/integration/local/environment",
+      "stage": "R5",
+      "case_count": 7,
+      "real_test_gate": false,
+      "resources": [
+        {
+          "type": "sqlite-db",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/storage/sqlite"
+          ]
+        },
+        {
+          "type": "ssh-session",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/sshclient"
+          ]
+        }
+      ],
+      "sharing": "exclusive-required",
+      "destructive_hints": [
+        "text:RemoveAll("
+      ],
+      "serial_declared": false,
+      "needs_review": true,
+      "review_reasons": [
+        "命中不可逆操作线索，禁止与共享资源组合"
+      ]
+    },
+    {
+      "dir": "tests/integration/local/execenv",
+      "package_path": "github.com/lingting/agentflow/tests/integration/local/execenv",
+      "stage": "R5",
+      "case_count": 28,
+      "real_test_gate": false,
+      "resources": [
+        {
+          "type": "remote-container",
+          "scope": "case-exclusive",
+          "evidence": [
+            "testkit.ContainerInspectFor"
+          ]
+        },
+        {
+          "type": "ssh-session",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/sshclient"
+          ]
+        }
+      ],
+      "sharing": "exclusive-required",
+      "destructive_hints": [
+        "text:ContainerRemove"
+      ],
+      "serial_declared": false,
+      "needs_review": true,
+      "review_reasons": [
+        "真实容器按用例独享；镜像构建属 Docker 写入，需走缓存产物通道（P1-6）",
+        "命中不可逆操作线索，禁止与共享资源组合"
+      ]
+    },
+    {
+      "dir": "tests/integration/local/fetcher",
+      "package_path": "github.com/lingting/agentflow/tests/integration/local/fetcher",
+      "stage": "R5",
+      "case_count": 14,
+      "real_test_gate": false,
+      "resources": [
+        {
+          "type": "child-process",
+          "scope": "case-exclusive",
+          "evidence": [
+            "call:exec.Command"
+          ]
+        },
+        {
+          "type": "git-worktree",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/source"
+          ]
+        },
+        {
+          "type": "remote-container",
+          "scope": "case-exclusive",
+          "evidence": [
+            "testkit.ContainerInspectFor"
+          ]
+        },
+        {
+          "type": "sqlite-db",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/storage/sqlite"
+          ]
+        },
+        {
+          "type": "ssh-session",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/sshclient"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "serial_declared": false,
+      "needs_review": true,
+      "review_reasons": [
+        "真实容器按用例独享；镜像构建属 Docker 写入，需走缓存产物通道（P1-6）"
+      ]
+    },
+    {
+      "dir": "tests/integration/local/scheduler",
+      "package_path": "github.com/lingting/agentflow/tests/integration/local/scheduler",
+      "stage": "R5",
+      "case_count": 41,
+      "real_test_gate": false,
+      "resources": [
+        {
+          "type": "sqlite-db",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/storage/sqlite"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "serial_declared": false,
+      "needs_review": false
+    },
+    {
+      "dir": "tests/integration/local/session",
+      "package_path": "github.com/lingting/agentflow/tests/integration/local/session",
+      "stage": "R5",
+      "case_count": 7,
+      "real_test_gate": false,
+      "resources": [],
+      "sharing": "shared-candidate",
+      "destructive_hints": [
+        "text:RemoveAll("
+      ],
+      "serial_declared": false,
+      "needs_review": true,
+      "review_reasons": [
+        "集成包未推断出任何资源：需确认是纯内存用例还是漏识别"
+      ]
+    },
+    {
+      "dir": "tests/integration/local/source",
+      "package_path": "github.com/lingting/agentflow/tests/integration/local/source",
+      "stage": "R5",
+      "case_count": 6,
+      "real_test_gate": false,
+      "resources": [
+        {
+          "type": "child-process",
+          "scope": "case-exclusive",
+          "evidence": [
+            "call:exec.Command"
+          ]
+        },
+        {
+          "type": "git-worktree",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/source"
+          ]
+        },
+        {
+          "type": "ssh-session",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/sshclient"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "serial_declared": false,
+      "needs_review": false
+    },
+    {
+      "dir": "tests/integration/local/ssh",
+      "package_path": "github.com/lingting/agentflow/tests/integration/local/ssh",
+      "stage": "R5",
+      "case_count": 22,
+      "real_test_gate": false,
+      "resources": [
+        {
+          "type": "local-port",
+          "scope": "case-exclusive",
+          "evidence": [
+            "call:net.Listen"
+          ]
+        },
+        {
+          "type": "local-ssh-server",
+          "scope": "case-exclusive",
+          "evidence": [
+            "call:net.Listen",
+            "import golang.org/x/crypto/ssh"
+          ]
+        },
+        {
+          "type": "ssh-session",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/sshclient"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "serial_declared": false,
+      "needs_review": false
+    },
+    {
+      "dir": "tests/integration/local/validation",
+      "package_path": "github.com/lingting/agentflow/tests/integration/local/validation",
+      "stage": "R5",
+      "case_count": 11,
+      "real_test_gate": false,
+      "resources": [
+        {
+          "type": "local-port",
+          "scope": "case-exclusive",
+          "evidence": [
+            "call:net.Listen"
+          ]
+        },
+        {
+          "type": "local-ssh-server",
+          "scope": "case-exclusive",
+          "evidence": [
+            "call:net.Listen",
+            "import golang.org/x/crypto/ssh"
+          ]
+        },
+        {
+          "type": "sqlite-db",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/storage/sqlite"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "serial_declared": false,
+      "needs_review": false
+    },
+    {
+      "dir": "tests/integration/local/workflow",
+      "package_path": "github.com/lingting/agentflow/tests/integration/local/workflow",
+      "stage": "R5",
+      "case_count": 81,
+      "real_test_gate": false,
+      "resources": [
+        {
+          "type": "child-process",
+          "scope": "case-exclusive",
+          "evidence": [
+            "call:exec.Command"
+          ]
+        },
+        {
+          "type": "git-worktree",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/codesaver",
+            "import github.com/lingting/agentflow/internal/source"
+          ]
+        },
+        {
+          "type": "remote-container",
+          "scope": "case-exclusive",
+          "evidence": [
+            "testkit.ContainerInspectFor"
+          ]
+        },
+        {
+          "type": "sqlite-db",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/storage/sqlite"
+          ]
+        },
+        {
+          "type": "ssh-session",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/sshclient"
+          ]
+        }
+      ],
+      "sharing": "exclusive-required",
+      "destructive_hints": [
+        "text:Shutdown("
+      ],
+      "serial_declared": false,
+      "needs_review": true,
+      "review_reasons": [
+        "真实容器按用例独享；镜像构建属 Docker 写入，需走缓存产物通道（P1-6）",
+        "命中不可逆操作线索，禁止与共享资源组合"
+      ]
+    },
+    {
+      "dir": "tests/integration/pi",
+      "package_path": "github.com/lingting/agentflow/tests/integration/pi",
+      "stage": "R5",
+      "case_count": 2,
+      "real_test_gate": true,
+      "real_dependencies": [
+        "pi"
+      ],
+      "resources": [
+        {
+          "type": "pi-cli",
+          "scope": "case-exclusive",
+          "evidence": [
+            "testkit.LoadPiConfig"
+          ]
+        }
+      ],
+      "sharing": "unclassified",
+      "serial_declared": false,
+      "needs_review": true,
+      "review_reasons": [
+        "真实依赖门禁（RequireRealTests）：共享或独享必须在 R2 按用例确认"
+      ]
+    },
+    {
+      "dir": "tests/integration/remote/agent",
+      "package_path": "github.com/lingting/agentflow/tests/integration/remote/agent",
+      "stage": "R5",
+      "case_count": 2,
+      "real_test_gate": true,
+      "real_dependencies": [
+        "pi",
+        "ssh",
+        "docker"
+      ],
+      "resources": [
+        {
+          "type": "docker-daemon",
+          "scope": "run-shared",
+          "evidence": [
+            "testkit.LoadDockerConfig"
+          ]
+        },
+        {
+          "type": "git-worktree",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/source"
+          ]
+        },
+        {
+          "type": "pi-cli",
+          "scope": "case-exclusive",
+          "evidence": [
+            "testkit.LoadPiConfig"
+          ]
+        },
+        {
+          "type": "remote-container",
+          "scope": "case-exclusive",
+          "evidence": [
+            "testkit.NewContainerRun",
+            "testkit.RegisterContainerFinalizer"
+          ]
+        },
+        {
+          "type": "remote-workspace",
+          "scope": "case-exclusive",
+          "evidence": [
+            "testkit.ResolveRemoteTestRoot"
+          ]
+        },
+        {
+          "type": "ssh-host",
+          "scope": "run-shared",
+          "evidence": [
+            "testkit.KnownHostsSources",
+            "testkit.LoadSSHConfig"
+          ]
+        },
+        {
+          "type": "ssh-session",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/sshclient"
+          ]
+        }
+      ],
+      "sharing": "exclusive-required",
+      "destructive_hints": [
+        "text:RemoveAll("
+      ],
+      "serial_declared": false,
+      "needs_review": true,
+      "review_reasons": [
+        "真实依赖门禁（RequireRealTests）：共享或独享必须在 R2 按用例确认",
+        "真实容器按用例独享；镜像构建属 Docker 写入，需走缓存产物通道（P1-6）",
+        "命中不可逆操作线索，禁止与共享资源组合"
+      ]
+    },
+    {
+      "dir": "tests/integration/remote/codesaver",
+      "package_path": "github.com/lingting/agentflow/tests/integration/remote/codesaver",
+      "stage": "R5",
+      "case_count": 2,
+      "real_test_gate": true,
+      "real_dependencies": [
+        "ssh",
+        "docker"
+      ],
+      "resources": [
+        {
+          "type": "docker-daemon",
+          "scope": "run-shared",
+          "evidence": [
+            "testkit.LoadDockerConfig"
+          ]
+        },
+        {
+          "type": "git-worktree",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/codesaver"
+          ]
+        },
+        {
+          "type": "remote-container",
+          "scope": "case-exclusive",
+          "evidence": [
+            "testkit.NewContainerRun",
+            "testkit.RegisterContainerFinalizer"
+          ]
+        },
+        {
+          "type": "sqlite-db",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/storage/sqlite"
+          ]
+        },
+        {
+          "type": "ssh-host",
+          "scope": "run-shared",
+          "evidence": [
+            "testkit.KnownHostsSources",
+            "testkit.LoadSSHConfig"
+          ]
+        },
+        {
+          "type": "ssh-session",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/sshclient"
+          ]
+        }
+      ],
+      "sharing": "unclassified",
+      "serial_declared": false,
+      "needs_review": true,
+      "review_reasons": [
+        "真实依赖门禁（RequireRealTests）：共享或独享必须在 R2 按用例确认",
+        "真实容器按用例独享；镜像构建属 Docker 写入，需走缓存产物通道（P1-6）"
+      ]
+    },
+    {
+      "dir": "tests/integration/remote/docker",
+      "package_path": "github.com/lingting/agentflow/tests/integration/remote/docker",
+      "stage": "R5",
+      "case_count": 6,
+      "real_test_gate": true,
+      "real_dependencies": [
+        "ssh",
+        "docker"
+      ],
+      "resources": [
+        {
+          "type": "docker-daemon",
+          "scope": "run-shared",
+          "evidence": [
+            "testkit.LoadDockerConfig"
+          ]
+        },
+        {
+          "type": "remote-container",
+          "scope": "case-exclusive",
+          "evidence": [
+            "testkit.NewContainerRun",
+            "testkit.RegisterContainerFinalizer"
+          ]
+        },
+        {
+          "type": "remote-workspace",
+          "scope": "case-exclusive",
+          "evidence": [
+            "testkit.ResolveRemoteTestRoot"
+          ]
+        },
+        {
+          "type": "sqlite-db",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/storage/sqlite"
+          ]
+        },
+        {
+          "type": "ssh-host",
+          "scope": "run-shared",
+          "evidence": [
+            "testkit.KnownHostsSources",
+            "testkit.LoadSSHConfig"
+          ]
+        },
+        {
+          "type": "ssh-session",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/sshclient"
+          ]
+        }
+      ],
+      "sharing": "unclassified",
+      "serial_declared": false,
+      "needs_review": true,
+      "review_reasons": [
+        "真实依赖门禁（RequireRealTests）：共享或独享必须在 R2 按用例确认",
+        "真实容器按用例独享；镜像构建属 Docker 写入，需走缓存产物通道（P1-6）"
+      ]
+    },
+    {
+      "dir": "tests/integration/remote/planning",
+      "package_path": "github.com/lingting/agentflow/tests/integration/remote/planning",
+      "stage": "R5",
+      "case_count": 9,
+      "real_test_gate": true,
+      "real_dependencies": [
+        "ssh",
+        "docker"
+      ],
+      "resources": [
+        {
+          "type": "child-process",
+          "scope": "case-exclusive",
+          "evidence": [
+            "call:exec.Command"
+          ]
+        },
+        {
+          "type": "docker-daemon",
+          "scope": "run-shared",
+          "evidence": [
+            "testkit.DockerConfig",
+            "testkit.LoadDockerConfig"
+          ]
+        },
+        {
+          "type": "local-port",
+          "scope": "case-exclusive",
+          "evidence": [
+            "call:net.Listen"
+          ]
+        },
+        {
+          "type": "remote-container",
+          "scope": "case-exclusive",
+          "evidence": [
+            "testkit.NewContainerRun",
+            "testkit.RegisterContainerFinalizer"
+          ]
+        },
+        {
+          "type": "remote-workspace",
+          "scope": "case-exclusive",
+          "evidence": [
+            "testkit.RemoteTestRoot",
+            "testkit.ResolveRemoteTestRoot"
+          ]
+        },
+        {
+          "type": "service-process",
+          "scope": "case-exclusive",
+          "evidence": [
+            "text:./cmd/agentflow"
+          ]
+        },
+        {
+          "type": "sqlite-db",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/storage/sqlite"
+          ]
+        },
+        {
+          "type": "ssh-host",
+          "scope": "run-shared",
+          "evidence": [
+            "testkit.KnownHostsSources",
+            "testkit.LoadSSHConfig",
+            "testkit.SSHConfig"
+          ]
+        },
+        {
+          "type": "ssh-session",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/sshclient"
+          ]
+        }
+      ],
+      "sharing": "exclusive-required",
+      "destructive_hints": [
+        "text:docker rm "
+      ],
+      "serial_declared": false,
+      "needs_review": true,
+      "review_reasons": [
+        "真实依赖门禁（RequireRealTests）：共享或独享必须在 R2 按用例确认",
+        "真实容器按用例独享；镜像构建属 Docker 写入，需走缓存产物通道（P1-6）",
+        "命中不可逆操作线索，禁止与共享资源组合"
+      ]
+    },
+    {
+      "dir": "tests/integration/remote/workflow",
+      "package_path": "github.com/lingting/agentflow/tests/integration/remote/workflow",
+      "stage": "R5",
+      "case_count": 7,
+      "real_test_gate": true,
+      "real_dependencies": [
+        "pi",
+        "ssh",
+        "docker"
+      ],
+      "resources": [
+        {
+          "type": "docker-daemon",
+          "scope": "run-shared",
+          "evidence": [
+            "testkit.LoadDockerConfig"
+          ]
+        },
+        {
+          "type": "pi-cli",
+          "scope": "case-exclusive",
+          "evidence": [
+            "testkit.LoadPiConfig"
+          ]
+        },
+        {
+          "type": "remote-container",
+          "scope": "case-exclusive",
+          "evidence": [
+            "testkit.NewContainerRun",
+            "testkit.RegisterContainerFinalizer"
+          ]
+        },
+        {
+          "type": "remote-workspace",
+          "scope": "case-exclusive",
+          "evidence": [
+            "testkit.RemoteTestRoot"
+          ]
+        },
+        {
+          "type": "sqlite-db",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/storage/sqlite"
+          ]
+        },
+        {
+          "type": "ssh-host",
+          "scope": "run-shared",
+          "evidence": [
+            "testkit.KnownHostsSources",
+            "testkit.LoadSSHConfig"
+          ]
+        },
+        {
+          "type": "ssh-session",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/sshclient"
+          ]
+        }
+      ],
+      "sharing": "exclusive-required",
+      "destructive_hints": [
+        "text:RemoveAll("
+      ],
+      "serial_declared": true,
+      "serial_reason": "执行方式：本包的用例固定串行，不使用 t.Parallel。它们共用同一台真实远程 Docker：",
+      "needs_review": true,
+      "review_reasons": [
+        "真实依赖门禁（RequireRealTests）：共享或独享必须在 R2 按用例确认",
+        "真实容器按用例独享；镜像构建属 Docker 写入，需走缓存产物通道（P1-6）",
+        "命中不可逆操作线索，禁止与共享资源组合"
+      ]
+    },
+    {
+      "dir": "tests/integration/ssh",
+      "package_path": "github.com/lingting/agentflow/tests/integration/ssh",
+      "stage": "R5",
+      "case_count": 6,
+      "real_test_gate": true,
+      "real_dependencies": [
+        "ssh"
+      ],
+      "resources": [
+        {
+          "type": "remote-workspace",
+          "scope": "case-exclusive",
+          "evidence": [
+            "testkit.ResolveRemoteTestRoot"
+          ]
+        },
+        {
+          "type": "ssh-host",
+          "scope": "run-shared",
+          "evidence": [
+            "testkit.KnownHostsSources",
+            "testkit.LoadSSHConfig"
+          ]
+        },
+        {
+          "type": "ssh-session",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/sshclient"
+          ]
+        }
+      ],
+      "sharing": "unclassified",
+      "serial_declared": false,
+      "needs_review": true,
+      "review_reasons": [
+        "真实依赖门禁（RequireRealTests）：共享或独享必须在 R2 按用例确认"
+      ]
+    },
+    {
+      "dir": "tests/unit/agent",
+      "package_path": "github.com/lingting/agentflow/tests/unit/agent",
+      "stage": "keep-go-test",
+      "case_count": 35,
+      "real_test_gate": false,
+      "resources": [],
+      "sharing": "shared-candidate",
+      "serial_declared": false,
+      "needs_review": false
+    },
+    {
+      "dir": "tests/unit/agent/pi",
+      "package_path": "github.com/lingting/agentflow/tests/unit/agent/pi",
+      "stage": "keep-go-test",
+      "case_count": 9,
+      "real_test_gate": false,
+      "resources": [],
+      "sharing": "shared-candidate",
+      "serial_declared": false,
+      "needs_review": false
+    },
+    {
+      "dir": "tests/unit/app",
+      "package_path": "github.com/lingting/agentflow/tests/unit/app",
+      "stage": "keep-go-test",
+      "case_count": 406,
+      "real_test_gate": false,
+      "resources": [
+        {
+          "type": "local-port",
+          "scope": "case-exclusive",
+          "evidence": [
+            "call:net.Listen"
+          ]
+        },
+        {
+          "type": "local-ssh-server",
+          "scope": "case-exclusive",
+          "evidence": [
+            "call:net.Listen",
+            "import golang.org/x/crypto/ssh"
+          ]
+        },
+        {
+          "type": "sqlite-db",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/storage/sqlite",
+            "testkit.OpenSQLite"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "destructive_hints": [
+        "text:RemoveAll(",
+        "text:docker rm "
+      ],
+      "serial_declared": false,
+      "needs_review": false
+    },
+    {
+      "dir": "tests/unit/app/planningagent",
+      "package_path": "github.com/lingting/agentflow/tests/unit/app/planningagent",
+      "stage": "keep-go-test",
+      "case_count": 9,
+      "real_test_gate": false,
+      "resources": [
+        {
+          "type": "sqlite-db",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/storage/sqlite"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "serial_declared": false,
+      "needs_review": false
+    },
+    {
+      "dir": "tests/unit/app/planninganalysis",
+      "package_path": "github.com/lingting/agentflow/tests/unit/app/planninganalysis",
+      "stage": "keep-go-test",
+      "case_count": 24,
+      "real_test_gate": false,
+      "resources": [
+        {
+          "type": "sqlite-db",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/storage/sqlite",
+            "testkit.OpenSQLite"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "serial_declared": false,
+      "needs_review": false
+    },
+    {
+      "dir": "tests/unit/cigate",
+      "package_path": "github.com/lingting/agentflow/tests/unit/cigate",
+      "stage": "keep-go-test",
+      "case_count": 9,
+      "real_test_gate": false,
+      "resources": [],
+      "sharing": "shared-candidate",
+      "serial_declared": false,
+      "needs_review": false
+    },
+    {
+      "dir": "tests/unit/container",
+      "package_path": "github.com/lingting/agentflow/tests/unit/container",
+      "stage": "keep-go-test",
+      "case_count": 29,
+      "real_test_gate": false,
+      "resources": [],
+      "sharing": "shared-candidate",
+      "serial_declared": false,
+      "needs_review": false
+    },
+    {
+      "dir": "tests/unit/domain",
+      "package_path": "github.com/lingting/agentflow/tests/unit/domain",
+      "stage": "keep-go-test",
+      "case_count": 249,
+      "real_test_gate": false,
+      "resources": [],
+      "sharing": "shared-candidate",
+      "serial_declared": false,
+      "needs_review": false
+    },
+    {
+      "dir": "tests/unit/environment",
+      "package_path": "github.com/lingting/agentflow/tests/unit/environment",
+      "stage": "keep-go-test",
+      "case_count": 11,
+      "real_test_gate": false,
+      "resources": [],
+      "sharing": "shared-candidate",
+      "serial_declared": false,
+      "needs_review": false
+    },
+    {
+      "dir": "tests/unit/execenv",
+      "package_path": "github.com/lingting/agentflow/tests/unit/execenv",
+      "stage": "keep-go-test",
+      "case_count": 20,
+      "real_test_gate": false,
+      "resources": [],
+      "sharing": "shared-candidate",
+      "serial_declared": false,
+      "needs_review": false
+    },
+    {
+      "dir": "tests/unit/httpapi",
+      "package_path": "github.com/lingting/agentflow/tests/unit/httpapi",
+      "stage": "keep-go-test",
+      "case_count": 241,
+      "real_test_gate": false,
+      "resources": [
+        {
+          "type": "local-http-server",
+          "scope": "case-exclusive",
+          "evidence": [
+            "call:httptest.New"
+          ]
+        },
+        {
+          "type": "sqlite-db",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/storage/sqlite",
+            "testkit.OpenSQLite"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "serial_declared": false,
+      "needs_review": false
+    },
+    {
+      "dir": "tests/unit/image",
+      "package_path": "github.com/lingting/agentflow/tests/unit/image",
+      "stage": "keep-go-test",
+      "case_count": 10,
+      "real_test_gate": false,
+      "resources": [],
+      "sharing": "shared-candidate",
+      "serial_declared": false,
+      "needs_review": false
+    },
+    {
+      "dir": "tests/unit/lifecycle",
+      "package_path": "github.com/lingting/agentflow/tests/unit/lifecycle",
+      "stage": "keep-go-test",
+      "case_count": 6,
+      "real_test_gate": false,
+      "resources": [],
+      "sharing": "shared-candidate",
+      "serial_declared": false,
+      "needs_review": false
+    },
+    {
+      "dir": "tests/unit/server",
+      "package_path": "github.com/lingting/agentflow/tests/unit/server",
+      "stage": "keep-go-test",
+      "case_count": 13,
+      "real_test_gate": false,
+      "resources": [
+        {
+          "type": "sqlite-db",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/storage/sqlite"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "serial_declared": false,
+      "needs_review": false
+    },
+    {
+      "dir": "tests/unit/source",
+      "package_path": "github.com/lingting/agentflow/tests/unit/source",
+      "stage": "keep-go-test",
+      "case_count": 21,
+      "real_test_gate": false,
+      "resources": [],
+      "sharing": "shared-candidate",
+      "serial_declared": false,
+      "needs_review": false
+    },
+    {
+      "dir": "tests/unit/store",
+      "package_path": "github.com/lingting/agentflow/tests/unit/store",
+      "stage": "keep-go-test",
+      "case_count": 248,
+      "real_test_gate": false,
+      "resources": [
+        {
+          "type": "sqlite-db",
+          "scope": "case-exclusive",
+          "evidence": [
+            "import github.com/lingting/agentflow/internal/storage/sqlite",
+            "testkit.OpenSQLite"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "serial_declared": false,
+      "needs_review": false
+    },
+    {
+      "dir": "tests/unit/testkit",
+      "package_path": "github.com/lingting/agentflow/tests/unit/testkit",
+      "stage": "keep-go-test",
+      "case_count": 2,
+      "real_test_gate": false,
+      "resources": [],
+      "sharing": "shared-candidate",
+      "serial_declared": false,
+      "needs_review": false
+    }
+  ],
+  "frontend": [
+    {
+      "file": "lingting-agent-flow-ui/tests/e2e/api-connection.spec.ts",
+      "runtime": "playwright",
+      "case_id": "playwright:lingting-agent-flow-ui/tests/e2e/api-connection.spec.ts",
+      "resources": [
+        {
+          "type": "browser",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:playwright.config.ts projects[chromium]"
+          ]
+        },
+        {
+          "type": "frontend-dev-server",
+          "scope": "run-shared",
+          "evidence": [
+            "config:playwright.config.ts webServer"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": true,
+      "review_reasons": [
+        "P1-5：共享 dev server 的写操作策略需在 R6 确认；当前 spec 全部使用受控后端（page.route 或 tests/e2e 下的 helper），不产生真实服务端写入"
+      ]
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/e2e/layout.spec.ts",
+      "runtime": "playwright",
+      "case_id": "playwright:lingting-agent-flow-ui/tests/e2e/layout.spec.ts",
+      "resources": [
+        {
+          "type": "browser",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:playwright.config.ts projects[chromium]"
+          ]
+        },
+        {
+          "type": "frontend-dev-server",
+          "scope": "run-shared",
+          "evidence": [
+            "config:playwright.config.ts webServer"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": true,
+      "review_reasons": [
+        "P1-5：共享 dev server 的写操作策略需在 R6 确认；当前 spec 全部使用受控后端（page.route 或 tests/e2e 下的 helper），不产生真实服务端写入"
+      ]
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/e2e/planning-analysis-states.spec.ts",
+      "runtime": "playwright",
+      "case_id": "playwright:lingting-agent-flow-ui/tests/e2e/planning-analysis-states.spec.ts",
+      "resources": [
+        {
+          "type": "browser",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:playwright.config.ts projects[chromium]"
+          ]
+        },
+        {
+          "type": "frontend-dev-server",
+          "scope": "run-shared",
+          "evidence": [
+            "config:playwright.config.ts webServer"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": true,
+      "review_reasons": [
+        "P1-5：共享 dev server 的写操作策略需在 R6 确认；当前 spec 全部使用受控后端（page.route 或 tests/e2e 下的 helper），不产生真实服务端写入"
+      ]
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/e2e/planning-confirm.spec.ts",
+      "runtime": "playwright",
+      "case_id": "playwright:lingting-agent-flow-ui/tests/e2e/planning-confirm.spec.ts",
+      "resources": [
+        {
+          "type": "browser",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:playwright.config.ts projects[chromium]"
+          ]
+        },
+        {
+          "type": "frontend-dev-server",
+          "scope": "run-shared",
+          "evidence": [
+            "config:playwright.config.ts webServer"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": true,
+      "review_reasons": [
+        "P1-5：共享 dev server 的写操作策略需在 R6 确认；当前 spec 全部使用受控后端（page.route 或 tests/e2e 下的 helper），不产生真实服务端写入"
+      ]
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/e2e/planning-states.spec.ts",
+      "runtime": "playwright",
+      "case_id": "playwright:lingting-agent-flow-ui/tests/e2e/planning-states.spec.ts",
+      "resources": [
+        {
+          "type": "browser",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:playwright.config.ts projects[chromium]"
+          ]
+        },
+        {
+          "type": "frontend-dev-server",
+          "scope": "run-shared",
+          "evidence": [
+            "config:playwright.config.ts webServer"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": true,
+      "review_reasons": [
+        "P1-5：共享 dev server 的写操作策略需在 R6 确认；当前 spec 全部使用受控后端（page.route 或 tests/e2e 下的 helper），不产生真实服务端写入"
+      ]
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/e2e/planning-workbench.spec.ts",
+      "runtime": "playwright",
+      "case_id": "playwright:lingting-agent-flow-ui/tests/e2e/planning-workbench.spec.ts",
+      "resources": [
+        {
+          "type": "browser",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:playwright.config.ts projects[chromium]"
+          ]
+        },
+        {
+          "type": "frontend-dev-server",
+          "scope": "run-shared",
+          "evidence": [
+            "config:playwright.config.ts webServer"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": true,
+      "review_reasons": [
+        "P1-5：共享 dev server 的写操作策略需在 R6 确认；当前 spec 全部使用受控后端（page.route 或 tests/e2e 下的 helper），不产生真实服务端写入"
+      ]
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/e2e/projects.spec.ts",
+      "runtime": "playwright",
+      "case_id": "playwright:lingting-agent-flow-ui/tests/e2e/projects.spec.ts",
+      "resources": [
+        {
+          "type": "browser",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:playwright.config.ts projects[chromium]"
+          ]
+        },
+        {
+          "type": "frontend-dev-server",
+          "scope": "run-shared",
+          "evidence": [
+            "config:playwright.config.ts webServer"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": true,
+      "review_reasons": [
+        "P1-5：共享 dev server 的写操作策略需在 R6 确认；当前 spec 全部使用受控后端（page.route 或 tests/e2e 下的 helper），不产生真实服务端写入"
+      ]
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/e2e/requirement-delete.spec.ts",
+      "runtime": "playwright",
+      "case_id": "playwright:lingting-agent-flow-ui/tests/e2e/requirement-delete.spec.ts",
+      "resources": [
+        {
+          "type": "browser",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:playwright.config.ts projects[chromium]"
+          ]
+        },
+        {
+          "type": "frontend-dev-server",
+          "scope": "run-shared",
+          "evidence": [
+            "config:playwright.config.ts webServer"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": true,
+      "review_reasons": [
+        "P1-5：共享 dev server 的写操作策略需在 R6 确认；当前 spec 全部使用受控后端（page.route 或 tests/e2e 下的 helper），不产生真实服务端写入"
+      ]
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/e2e/settings-environments.spec.ts",
+      "runtime": "playwright",
+      "case_id": "playwright:lingting-agent-flow-ui/tests/e2e/settings-environments.spec.ts",
+      "resources": [
+        {
+          "type": "browser",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:playwright.config.ts projects[chromium]"
+          ]
+        },
+        {
+          "type": "frontend-dev-server",
+          "scope": "run-shared",
+          "evidence": [
+            "config:playwright.config.ts webServer"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": true,
+      "review_reasons": [
+        "P1-5：共享 dev server 的写操作策略需在 R6 确认；当前 spec 全部使用受控后端（page.route 或 tests/e2e 下的 helper），不产生真实服务端写入"
+      ]
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/e2e/task-closeout.spec.ts",
+      "runtime": "playwright",
+      "case_id": "playwright:lingting-agent-flow-ui/tests/e2e/task-closeout.spec.ts",
+      "resources": [
+        {
+          "type": "browser",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:playwright.config.ts projects[chromium]"
+          ]
+        },
+        {
+          "type": "frontend-dev-server",
+          "scope": "run-shared",
+          "evidence": [
+            "config:playwright.config.ts webServer"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": true,
+      "review_reasons": [
+        "P1-5：共享 dev server 的写操作策略需在 R6 确认；当前 spec 全部使用受控后端（page.route 或 tests/e2e 下的 helper），不产生真实服务端写入"
+      ]
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/e2e/task-code-save-verification.spec.ts",
+      "runtime": "playwright",
+      "case_id": "playwright:lingting-agent-flow-ui/tests/e2e/task-code-save-verification.spec.ts",
+      "resources": [
+        {
+          "type": "browser",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:playwright.config.ts projects[chromium]"
+          ]
+        },
+        {
+          "type": "frontend-dev-server",
+          "scope": "run-shared",
+          "evidence": [
+            "config:playwright.config.ts webServer"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": true,
+      "review_reasons": [
+        "P1-5：共享 dev server 的写操作策略需在 R6 确认；当前 spec 全部使用受控后端（page.route 或 tests/e2e 下的 helper），不产生真实服务端写入"
+      ]
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/e2e/task-code-saves.spec.ts",
+      "runtime": "playwright",
+      "case_id": "playwright:lingting-agent-flow-ui/tests/e2e/task-code-saves.spec.ts",
+      "resources": [
+        {
+          "type": "browser",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:playwright.config.ts projects[chromium]"
+          ]
+        },
+        {
+          "type": "frontend-dev-server",
+          "scope": "run-shared",
+          "evidence": [
+            "config:playwright.config.ts webServer"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": true,
+      "review_reasons": [
+        "P1-5：共享 dev server 的写操作策略需在 R6 确认；当前 spec 全部使用受控后端（page.route 或 tests/e2e 下的 helper），不产生真实服务端写入"
+      ]
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/e2e/task-containers.spec.ts",
+      "runtime": "playwright",
+      "case_id": "playwright:lingting-agent-flow-ui/tests/e2e/task-containers.spec.ts",
+      "resources": [
+        {
+          "type": "browser",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:playwright.config.ts projects[chromium]"
+          ]
+        },
+        {
+          "type": "frontend-dev-server",
+          "scope": "run-shared",
+          "evidence": [
+            "config:playwright.config.ts webServer"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": true,
+      "review_reasons": [
+        "P1-5：共享 dev server 的写操作策略需在 R6 确认；当前 spec 全部使用受控后端（page.route 或 tests/e2e 下的 helper），不产生真实服务端写入"
+      ]
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/e2e/task-create-project-inheritance.spec.ts",
+      "runtime": "playwright",
+      "case_id": "playwright:lingting-agent-flow-ui/tests/e2e/task-create-project-inheritance.spec.ts",
+      "resources": [
+        {
+          "type": "browser",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:playwright.config.ts projects[chromium]"
+          ]
+        },
+        {
+          "type": "frontend-dev-server",
+          "scope": "run-shared",
+          "evidence": [
+            "config:playwright.config.ts webServer"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": true,
+      "review_reasons": [
+        "P1-5：共享 dev server 的写操作策略需在 R6 确认；当前 spec 全部使用受控后端（page.route 或 tests/e2e 下的 helper），不产生真实服务端写入"
+      ]
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/e2e/task-create-selectors.spec.ts",
+      "runtime": "playwright",
+      "case_id": "playwright:lingting-agent-flow-ui/tests/e2e/task-create-selectors.spec.ts",
+      "resources": [
+        {
+          "type": "browser",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:playwright.config.ts projects[chromium]"
+          ]
+        },
+        {
+          "type": "frontend-dev-server",
+          "scope": "run-shared",
+          "evidence": [
+            "config:playwright.config.ts webServer"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": true,
+      "review_reasons": [
+        "P1-5：共享 dev server 的写操作策略需在 R6 确认；当前 spec 全部使用受控后端（page.route 或 tests/e2e 下的 helper），不产生真实服务端写入"
+      ]
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/e2e/task-event-history.spec.ts",
+      "runtime": "playwright",
+      "case_id": "playwright:lingting-agent-flow-ui/tests/e2e/task-event-history.spec.ts",
+      "resources": [
+        {
+          "type": "browser",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:playwright.config.ts projects[chromium]"
+          ]
+        },
+        {
+          "type": "frontend-dev-server",
+          "scope": "run-shared",
+          "evidence": [
+            "config:playwright.config.ts webServer"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": true,
+      "review_reasons": [
+        "P1-5：共享 dev server 的写操作策略需在 R6 确认；当前 spec 全部使用受控后端（page.route 或 tests/e2e 下的 helper），不产生真实服务端写入"
+      ]
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/e2e/task-execution.spec.ts",
+      "runtime": "playwright",
+      "case_id": "playwright:lingting-agent-flow-ui/tests/e2e/task-execution.spec.ts",
+      "resources": [
+        {
+          "type": "browser",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:playwright.config.ts projects[chromium]"
+          ]
+        },
+        {
+          "type": "frontend-dev-server",
+          "scope": "run-shared",
+          "evidence": [
+            "config:playwright.config.ts webServer"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": true,
+      "review_reasons": [
+        "P1-5：共享 dev server 的写操作策略需在 R6 确认；当前 spec 全部使用受控后端（page.route 或 tests/e2e 下的 helper），不产生真实服务端写入"
+      ]
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/e2e/task-launch.spec.ts",
+      "runtime": "playwright",
+      "case_id": "playwright:lingting-agent-flow-ui/tests/e2e/task-launch.spec.ts",
+      "resources": [
+        {
+          "type": "browser",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:playwright.config.ts projects[chromium]"
+          ]
+        },
+        {
+          "type": "frontend-dev-server",
+          "scope": "run-shared",
+          "evidence": [
+            "config:playwright.config.ts webServer"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": true,
+      "review_reasons": [
+        "P1-5：共享 dev server 的写操作策略需在 R6 确认；当前 spec 全部使用受控后端（page.route 或 tests/e2e 下的 helper），不产生真实服务端写入"
+      ]
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/e2e/task-progress-auto-refresh.spec.ts",
+      "runtime": "playwright",
+      "case_id": "playwright:lingting-agent-flow-ui/tests/e2e/task-progress-auto-refresh.spec.ts",
+      "resources": [
+        {
+          "type": "browser",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:playwright.config.ts projects[chromium]"
+          ]
+        },
+        {
+          "type": "frontend-dev-server",
+          "scope": "run-shared",
+          "evidence": [
+            "config:playwright.config.ts webServer"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": true,
+      "review_reasons": [
+        "P1-5：共享 dev server 的写操作策略需在 R6 确认；当前 spec 全部使用受控后端（page.route 或 tests/e2e 下的 helper），不产生真实服务端写入"
+      ]
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/e2e/task-resume-action.spec.ts",
+      "runtime": "playwright",
+      "case_id": "playwright:lingting-agent-flow-ui/tests/e2e/task-resume-action.spec.ts",
+      "resources": [
+        {
+          "type": "browser",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:playwright.config.ts projects[chromium]"
+          ]
+        },
+        {
+          "type": "frontend-dev-server",
+          "scope": "run-shared",
+          "evidence": [
+            "config:playwright.config.ts webServer"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": true,
+      "review_reasons": [
+        "P1-5：共享 dev server 的写操作策略需在 R6 确认；当前 spec 全部使用受控后端（page.route 或 tests/e2e 下的 helper），不产生真实服务端写入"
+      ]
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/e2e/task-resume-eligibility.spec.ts",
+      "runtime": "playwright",
+      "case_id": "playwright:lingting-agent-flow-ui/tests/e2e/task-resume-eligibility.spec.ts",
+      "resources": [
+        {
+          "type": "browser",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:playwright.config.ts projects[chromium]"
+          ]
+        },
+        {
+          "type": "frontend-dev-server",
+          "scope": "run-shared",
+          "evidence": [
+            "config:playwright.config.ts webServer"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": true,
+      "review_reasons": [
+        "P1-5：共享 dev server 的写操作策略需在 R6 确认；当前 spec 全部使用受控后端（page.route 或 tests/e2e 下的 helper），不产生真实服务端写入"
+      ]
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/e2e/task-retry.spec.ts",
+      "runtime": "playwright",
+      "case_id": "playwright:lingting-agent-flow-ui/tests/e2e/task-retry.spec.ts",
+      "resources": [
+        {
+          "type": "browser",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:playwright.config.ts projects[chromium]"
+          ]
+        },
+        {
+          "type": "frontend-dev-server",
+          "scope": "run-shared",
+          "evidence": [
+            "config:playwright.config.ts webServer"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": true,
+      "review_reasons": [
+        "P1-5：共享 dev server 的写操作策略需在 R6 确认；当前 spec 全部使用受控后端（page.route 或 tests/e2e 下的 helper），不产生真实服务端写入"
+      ]
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/e2e/task-step-timestamps.spec.ts",
+      "runtime": "playwright",
+      "case_id": "playwright:lingting-agent-flow-ui/tests/e2e/task-step-timestamps.spec.ts",
+      "resources": [
+        {
+          "type": "browser",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:playwright.config.ts projects[chromium]"
+          ]
+        },
+        {
+          "type": "frontend-dev-server",
+          "scope": "run-shared",
+          "evidence": [
+            "config:playwright.config.ts webServer"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": true,
+      "review_reasons": [
+        "P1-5：共享 dev server 的写操作策略需在 R6 确认；当前 spec 全部使用受控后端（page.route 或 tests/e2e 下的 helper），不产生真实服务端写入"
+      ]
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/e2e/tasks.spec.ts",
+      "runtime": "playwright",
+      "case_id": "playwright:lingting-agent-flow-ui/tests/e2e/tasks.spec.ts",
+      "resources": [
+        {
+          "type": "browser",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:playwright.config.ts projects[chromium]"
+          ]
+        },
+        {
+          "type": "frontend-dev-server",
+          "scope": "run-shared",
+          "evidence": [
+            "config:playwright.config.ts webServer"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": true,
+      "review_reasons": [
+        "P1-5：共享 dev server 的写操作策略需在 R6 确认；当前 spec 全部使用受控后端（page.route 或 tests/e2e 下的 helper），不产生真实服务端写入"
+      ]
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/unit/planning-confirm.test.ts",
+      "runtime": "vitest",
+      "case_id": "vitest:lingting-agent-flow-ui/tests/unit/planning-confirm.test.ts",
+      "resources": [
+        {
+          "type": "node-worker",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:vite.config.ts test.include"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": false
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/unit/planning.test.ts",
+      "runtime": "vitest",
+      "case_id": "vitest:lingting-agent-flow-ui/tests/unit/planning.test.ts",
+      "resources": [
+        {
+          "type": "node-worker",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:vite.config.ts test.include"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": false
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/unit/projects.test.ts",
+      "runtime": "vitest",
+      "case_id": "vitest:lingting-agent-flow-ui/tests/unit/projects.test.ts",
+      "resources": [
+        {
+          "type": "node-worker",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:vite.config.ts test.include"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": false
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/unit/requirement-actions.test.ts",
+      "runtime": "vitest",
+      "case_id": "vitest:lingting-agent-flow-ui/tests/unit/requirement-actions.test.ts",
+      "resources": [
+        {
+          "type": "node-worker",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:vite.config.ts test.include"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": false
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/unit/settings-environments.test.ts",
+      "runtime": "vitest",
+      "case_id": "vitest:lingting-agent-flow-ui/tests/unit/settings-environments.test.ts",
+      "resources": [
+        {
+          "type": "node-worker",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:vite.config.ts test.include"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": false
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/unit/task-closeout.test.ts",
+      "runtime": "vitest",
+      "case_id": "vitest:lingting-agent-flow-ui/tests/unit/task-closeout.test.ts",
+      "resources": [
+        {
+          "type": "node-worker",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:vite.config.ts test.include"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": false
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/unit/task-code-save-verification.test.ts",
+      "runtime": "vitest",
+      "case_id": "vitest:lingting-agent-flow-ui/tests/unit/task-code-save-verification.test.ts",
+      "resources": [
+        {
+          "type": "node-worker",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:vite.config.ts test.include"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": false
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/unit/task-code-saves.test.ts",
+      "runtime": "vitest",
+      "case_id": "vitest:lingting-agent-flow-ui/tests/unit/task-code-saves.test.ts",
+      "resources": [
+        {
+          "type": "node-worker",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:vite.config.ts test.include"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": false
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/unit/task-containers.test.ts",
+      "runtime": "vitest",
+      "case_id": "vitest:lingting-agent-flow-ui/tests/unit/task-containers.test.ts",
+      "resources": [
+        {
+          "type": "node-worker",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:vite.config.ts test.include"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": false
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/unit/task-environments.test.ts",
+      "runtime": "vitest",
+      "case_id": "vitest:lingting-agent-flow-ui/tests/unit/task-environments.test.ts",
+      "resources": [
+        {
+          "type": "node-worker",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:vite.config.ts test.include"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": false
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/unit/task-resume-eligibility.test.ts",
+      "runtime": "vitest",
+      "case_id": "vitest:lingting-agent-flow-ui/tests/unit/task-resume-eligibility.test.ts",
+      "resources": [
+        {
+          "type": "node-worker",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:vite.config.ts test.include"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": false
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/unit/task-retry.test.ts",
+      "runtime": "vitest",
+      "case_id": "vitest:lingting-agent-flow-ui/tests/unit/task-retry.test.ts",
+      "resources": [
+        {
+          "type": "node-worker",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:vite.config.ts test.include"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": false
+    },
+    {
+      "file": "lingting-agent-flow-ui/tests/unit/tasks-page.test.ts",
+      "runtime": "vitest",
+      "case_id": "vitest:lingting-agent-flow-ui/tests/unit/tasks-page.test.ts",
+      "resources": [
+        {
+          "type": "node-worker",
+          "scope": "case-exclusive",
+          "evidence": [
+            "config:vite.config.ts test.include"
+          ]
+        }
+      ],
+      "sharing": "shared-candidate",
+      "needs_review": false
+    }
+  ],
+  "parallel_suspects": [
+    {
+      "file": "tests/integration/local/scheduler/concurrency_acceptance_test.go",
+      "evidence": [
+        "sync.Once：包级一次性初始化"
+      ],
+      "risk": "包级状态或固定端口可能让用例依赖并行时序；迁移后语义变化需人工判定"
+    },
+    {
+      "file": "tests/integration/remote/planning/ssh_teardown_test.go",
+      "evidence": [
+        "sync.Once：包级一次性初始化"
+      ],
+      "risk": "包级状态或固定端口可能让用例依赖并行时序；迁移后语义变化需人工判定"
+    },
+    {
+      "file": "tests/integration/remote/workflow/acceptance_m6_test.go",
+      "evidence": [
+        "sync.Once：包级一次性初始化"
+      ],
+      "risk": "包级状态或固定端口可能让用例依赖并行时序；迁移后语义变化需人工判定"
+    },
+    {
+      "file": "tests/unit/app/planning_runtime_fixture_test.go",
+      "evidence": [
+        "sync.Once：包级一次性初始化"
+      ],
+      "risk": "包级状态或固定端口可能让用例依赖并行时序；迁移后语义变化需人工判定"
+    },
+    {
+      "file": "tests/unit/app/requirement_delete_test.go",
+      "evidence": [
+        "sync.Once：包级一次性初始化"
+      ],
+      "risk": "包级状态或固定端口可能让用例依赖并行时序；迁移后语义变化需人工判定"
+    },
+    {
+      "file": "tests/unit/app/planningagent/planning_agent_fixture_test.go",
+      "evidence": [
+        "sync.Once：包级一次性初始化"
+      ],
+      "risk": "包级状态或固定端口可能让用例依赖并行时序；迁移后语义变化需人工判定"
+    }
+  ]
+}
