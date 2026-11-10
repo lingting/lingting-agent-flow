@@ -87,8 +87,6 @@ type PiConfig struct {
 	// Pi 的模型清单按 provider 与模型两列列出，`--model` 使用 provider/model 形式：
 	// 只给模型名而清单里的 provider 不同名时无法被识别，因此模型标识需要 provider 限定。
 	Provider string `yaml:"provider"`
-	// Executable 是 Pi 可执行文件路径，为空时使用 PATH 中的 pi。
-	Executable string `yaml:"executable"`
 }
 
 // DockerConfig 是 tests/config/docker.yml 的内容。

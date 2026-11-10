@@ -15,7 +15,8 @@ const (
 	HandleFileSchemaVersion = "agentflow-case-handles/1"
 )
 
-// 资源类型取值来自 V3 R0 冻结的词汇表（case-resource-matrix.json 的 resource_types）。
+// 资源类型取值来自 V3 R0 冻结的词汇表（case-resource-matrix.json 的 resource_types）；
+// 随本机 Pi 测试废弃的 pi-cli 已从词汇表移除。
 const (
 	ResourceDockerDaemon      = "docker-daemon"
 	ResourceRemoteContainer   = "remote-container"
@@ -23,7 +24,6 @@ const (
 	ResourceSSHHost           = "ssh-host"
 	ResourceSSHSession        = "ssh-session"
 	ResourceLocalSSHServer    = "local-ssh-server"
-	ResourcePiCLI             = "pi-cli"
 	ResourceSQLiteDB          = "sqlite-db"
 	ResourceLocalPort         = "local-port"
 	ResourceLocalHTTPServer   = "local-http-server"
@@ -51,7 +51,6 @@ var resourceTypes = map[string]struct{}{
 	ResourceSSHHost:           {},
 	ResourceSSHSession:        {},
 	ResourceLocalSSHServer:    {},
-	ResourcePiCLI:             {},
 	ResourceSQLiteDB:          {},
 	ResourceLocalPort:         {},
 	ResourceLocalHTTPServer:   {},

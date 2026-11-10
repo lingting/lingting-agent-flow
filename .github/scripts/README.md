@@ -32,7 +32,7 @@
 | `check-frontend-clean.sh` | `ci.yml` / `ui-test` | 核验 `vp fmt` / `vp lint --fix` 之后工作区没有残留改动 | `--path REL`（默认 `lingting-agent-flow-ui`） | 改动清单与 diff | 0 干净；1 有残留改动；2 参数错误 |
 | `check-real-test-authorization.sh` | `ci.yml` / `real-tests-gate` | 把事件上下文交给 `cmd/agentflow-ci real-tests-gate`，判定规则只在 `internal/cigate` | 无（全部输入来自 `env:`） | `real_tests_enabled` / `mode` / `reason` 与判定摘要 | 0 判定完成（含拒绝）；1 写输出失败；2 参数错误 |
 | `prepare-real-tests-config.py` | `ci.yml` / `real-tests` | 由 Environment Secrets 生成 `tests/config/*.yml` 与临时私钥文件 | 无（读取约定环境变量） | `configured=true/false` 与摘要 | 0 完成（缺少 Secret 时 `configured=false`）；1 配置非法 |
-| `run-real-tests.sh` | `ci.yml` / `real-tests` | 只跑真实外部依赖测试包（真实 Pi / SSH / 远程 Docker），未获授权时直接失败 | `--artifact-dir DIR`（必填）、`--parallel N`（默认 4） | `DIR/real-tests-output.log` | 0 通过；1 失败或未授权；2 参数错误 |
+| `run-real-tests.sh` | `ci.yml` / `real-tests` | 只跑真实外部依赖测试包（真实 SSH 机器 / 远程 Docker / 容器内真实 Pi），未获授权时直接失败 | `--artifact-dir DIR`（必填）、`--parallel N`（默认 4） | `DIR/real-tests-output.log` | 0 通过；1 失败或未授权；2 参数错误 |
 | `summarize-real-tests.sh` | `ci.yml` / `real-tests` | 授权模式、配置状态、测试结论与跳过清单摘要（只做展示） | `--skip-base DIR` | `GITHUB_STEP_SUMMARY` 与标准输出 | 0 汇总完成；2 参数错误 |
 | `summarize-ci-gate.sh` | `ci.yml` / `ci-summary` | 依据 `needs.*.result` 与 `steps.*.outcome` 生成门禁结论 | `--report-path FILE`（可选） | 报告文件、控制台与 `GITHUB_STEP_SUMMARY` | 0 全部必需 Job 成功；1 存在非成功必需 Job 或真实测试失败；2 参数错误 |
 | `resolve-release-version.sh` | `publish.yml` / `resolve`、`release.yml` / `resolve` | 校验版本标签与提交号，只在此处生成制品名 | `--require-tag`、`--input-version V` | `version` / `commit` / `artifact_name` 与摘要 | 0 解析成功；1 版本或提交非法；2 参数错误 |
@@ -68,12 +68,11 @@ bash .github/scripts/resolve-release-version.sh --require-tag   # 需要 REF_TYP
 | `unit` | 普通 CI | `./tests/unit/...` | `make test-unit` | `go-unit` |
 | `local` | 普通 CI | `./tests/integration/local/...` | `make test-local` | `go-local` |
 | `e2e` | 普通 CI | `./tests/e2e/...` | `make test-e2e` | `go-e2e` |
-| `pi` | 真实外部依赖 | `./tests/integration/pi/...` | 无（需要真实 Pi CLI） | `real-tests`（授权后） |
 | `ssh` | 真实外部依赖 | `./tests/integration/ssh/...` | 无（需要真实主机） | `real-tests`（授权后） |
 | `remote` | 真实外部依赖 | `./tests/integration/remote/...` | 无（需要真实远程 Docker） | `real-tests`（授权后） |
 
 `tests/integration/local/` 下的 SSH、Docker、Agent 用例都是本机进程内模拟，属于普通 CI 的
-`local` 分组；只有 `tests/integration/{pi,ssh,remote/...}` 需要真实外部设备。
+`local` 分组；只有 `tests/integration/{ssh,remote/...}` 需要真实外部设备。
 
 分组覆盖由 `go-test-groups.sh --check` 机械核验，`go-inventory` Job 在跑测试之前执行它：
 

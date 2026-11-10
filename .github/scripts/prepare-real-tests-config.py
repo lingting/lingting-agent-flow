@@ -138,7 +138,6 @@ def pi_config():
         "pi:",
         "  enable: true",
         "  model: {0}".format(quote(trimmed("REAL_PI_MODEL") or DEFAULT_PI_MODEL)),
-        '  executable: ""',
     ]
 
 

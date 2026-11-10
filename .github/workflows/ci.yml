@@ -26,7 +26,7 @@
 #   这些用例在读取配置、建立连接之前就输出 WARN [SKIP] 并跳过。跳过不是通过，也不会
 #   让 CI 失败。
 # - real-tests 只在真实测试授权判断通过后运行，且只执行 go-test-groups.sh 中 real 分组
-#   （pi / ssh / remote），不重复执行普通 Go 测试。
+#   （ssh / remote），不重复执行普通 Go 测试。
 #
 # 真实测试授权由唯一的用户变量 AGENTFLOW_REAL_TESTS 控制（self / collaborator / all；
 # 未设置、为空或取值未知时关闭）。判定规则集中在 internal/cigate，由

@@ -14,8 +14,6 @@ type ProviderOptions struct {
 	RunID string
 	// SelfExecutable 是当前编排进程的可执行文件，供 child-process 的默认常驻子进程使用。
 	SelfExecutable string
-	// PiBinary 覆盖 pi-cli 的可执行文件路径；空值改用声明 Spec 或 PATH 查找。
-	PiBinary string
 	// Hosts 是远程提供者使用的真实主机配置，键为 host_id；R4.5 试点负责装载。
 	Hosts map[string]RemoteHost
 }
@@ -42,7 +40,6 @@ func DefaultProviders(opts ProviderOptions) (*Providers, error) {
 		{ResourceServiceProcess, NewServiceProcessProvider(opts.SelfExecutable)},
 		{ResourceGitWorktree, NewGitWorktreeProvider(root)},
 		{ResourceLocalSSHServer, NewLocalSSHServerProvider(root)},
-		{ResourcePiCLI, NewPiCLIProvider(opts.PiBinary)},
 		{ResourceSSHHost, NewSSHHostProvider(hosts)},
 		{ResourceSSHSession, NewSSHSessionProvider(hosts)},
 		{ResourceDockerDaemon, NewDockerDaemonProvider(hosts)},

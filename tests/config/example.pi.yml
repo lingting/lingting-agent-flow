@@ -1,7 +1,7 @@
 # 使用方式：复制当前文件为 tests/config/pi.yml，然后按需修改内容。
 #
-# 该文件提供需要真实 Pi CLI 的测试（tests/integration/pi、
-# tests/integration/remote/agent、tests/integration/remote/workflow）所使用的配置。
+# 该文件提供需要真实模型调用的测试（tests/integration/remote/agent、
+# tests/integration/remote/workflow）所使用的配置。
 #
 # 取值支持 ${NAME} 占位符：解析配置时会查找同名环境变量，存在则替换为它的值，
 # 不存在则保留原样 ${NAME}。
@@ -9,19 +9,17 @@
 # 真实配置文件不入库，只提交本示例文件。
 
 pi:
-  # 是否执行需要真实 Pi CLI 的测试（tests/integration/pi），默认 false。
-  # 设为 true 前请确认本机已安装 Pi，并已填好下文的模型与可执行文件路径。
+  # 是否允许真实模型调用测试（tests/integration/remote/workflow）执行，默认 false。
+  # 设为 true 前请确认已填好模型，并已提供 docker.yml 的容器内 Pi 接入配置。
   enable: false
   # 真实调用使用的模型标识，留空时使用默认免费模型 group/free。
   # 每次调用都会显式传入模型，不回退到 Pi CLI 配置中的默认模型。
   model: group/free
-  # 宿主 Pi CLI 的 provider 名称，留空时按 model 原样检查。
+  # 真实调用使用的 provider 名称，留空时按 model 原样使用。
   #
   # Pi 的模型清单按 provider 与模型两列列出，`--model` 使用 provider/model 形式。
   # 模型在清单中挂在不含 model 前缀的 provider 下时（例如 provider 为 magpie、
   # 模型标识为 group/free），必须在这里填写 provider，检查与真实调用才会按
-  # provider/model 组装模型标识。该字段只影响本机 Pi 调用；容器内 Pi 的模型来自
+  # provider/model 组装模型标识。容器内 Pi 的模型来自
   # docker.yml 的 pi 配置，与此无关。
   provider: ""
-  # Pi 可执行文件路径，留空时使用 PATH 中的 pi。
-  executable: ""

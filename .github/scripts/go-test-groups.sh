@@ -45,7 +45,7 @@ normal_groups() {
 
 # real_groups 是只在真实测试授权通过后执行的分组。
 real_groups() {
-    printf '%s\n' pi ssh remote
+    printf '%s\n' ssh remote
 }
 
 # all_groups 返回全部分组，用于覆盖核验。
@@ -58,7 +58,7 @@ all_groups() {
 group_kind() {
     case "$1" in
         unit | local | e2e) printf 'normal\n' ;;
-        pi | ssh | remote) printf 'real\n' ;;
+        ssh | remote) printf 'real\n' ;;
         *) return 1 ;;
     esac
 }
@@ -69,7 +69,6 @@ group_patterns() {
         unit) printf './tests/unit/...\n' ;;
         local) printf './tests/integration/local/...\n' ;;
         e2e) printf './tests/e2e/...\n' ;;
-        pi) printf './tests/integration/pi/...\n' ;;
         ssh) printf './tests/integration/ssh/...\n' ;;
         remote) printf './tests/integration/remote/...\n' ;;
         *) return 1 ;;

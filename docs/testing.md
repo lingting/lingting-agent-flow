@@ -15,7 +15,7 @@
 ## 2. 目录
 
 - 所有测试代码与测试入口必须放在根目录 `tests/` 下，按 `unit/`、`integration/local/`、
-  `integration/pi/`、`integration/ssh/`、`integration/remote/`、`e2e/` 分层。
+  `integration/ssh/`、`integration/remote/`、`e2e/` 分层。
 - 禁止在生产源码目录（`internal/`、`cmd/`）新增或保留测试文件。
 - `tests/integration/local/workflow/` 是应用层编排的集成测试目录：使用真实 SQLite 文件与真实
   `app.TaskWorkflowService`，只把外部依赖（Agent 执行、容器核验、单步骤闭环）替换为受控替身。恢复类
@@ -51,8 +51,8 @@
 - 测试结束禁止删除工作空间与测试产物：不调用 `os.RemoveAll` 删除测试根目录，不使用会在结束时自动清理
   目录的临时目录 API，也不在 `t.Cleanup` 中删除目录。允许关闭数据库连接、终止测试启动的子进程、关闭
   监听端口等运行时资源。
-- 每个测试包必须用 `testkit.Main` 作为统一入口（`os.Exit(testkit.Main(m))`；已有 `TestMain` 的包在替身
-  分支之后转调），由它把本次运行的完整输出写入 `<TEST_ARTIFACT_DIR>/test.log` 并在基目录记录
+- 每个测试包必须用 `testkit.Main` 作为统一入口（`os.Exit(testkit.Main(m))`），由它把本次运行的
+  完整输出写入 `<TEST_ARTIFACT_DIR>/test.log` 并在基目录记录
   `latest-run.txt`，同时默认打开 `-test.v`。不得各包自行丢弃测试日志，应用服务日志统一用
   `testkit.Logger` / `testkit.Slog` 构造。
 
@@ -73,12 +73,14 @@
 `make test-local` 只跑不需要真实设备的分组。跳过只能来自"未获授权"或"未提供配置"，配置完整但连接、
 认证或主机密钥校验失败时必须让测试失败。
 
-- 本机没有 `pi` 时，只有依赖真实 Pi CLI 的用例输出 `WARN [SKIP]` 并跳过；Pi Runner 的单元测试使用
-  替身，必须继续执行。
-- 真实 Pi 测试由 `tests/config/pi.yml` 的 `pi.enable` 显式开启，默认模型为 `group/free`；每次真实调用
-  都必须显式传入模型，不得回退到 Pi CLI 配置中的默认付费模型。模型在 Pi 的模型清单里挂在不含模型前缀的
-  provider 下时，用同文件的 `pi.provider` 补充 provider 前缀（由 `testkit.PiConfig.ResolvedModel` 统一
-  组装，留空时原样使用模型标识）；该前缀只影响本机 Pi 调用，容器内 Pi 的模型来自 `docker.yml` 的 `pi.*`。
+- 本机不执行 Pi：所有 Agent 调用都在容器内，测试不检查本机是否安装 `pi`，也不读取本机 Pi
+  可执行文件路径；容器内 Pi 的可用性由 `tests/integration/remote/agent/` 在容器内执行
+  `pi --version` 与 `pi --list-models` 确认。
+- 真实模型调用由 `tests/config/pi.yml` 的 `pi.enable` 显式开启（当前只作用于
+  `tests/integration/remote/workflow`），默认模型为 `group/free`；每次真实调用都必须显式传入
+  模型，不得回退到 Pi CLI 配置中的默认付费模型。模型在清单里挂在不含模型前缀的 provider 下时，
+  用同文件的 `pi.provider` 补充 provider 前缀（由 `testkit.PiConfig.ResolvedModel` 统一组装，
+  留空时原样使用模型标识）；容器内 Pi 的模型来自 `docker.yml` 的 `pi.*`。
 - 真实 SSH 测试的目标统一来自 `tests/config/ssh.yml`（`ssh.host`、`ssh.user`、`ssh.port`、
   `ssh.private_key_path`、`ssh.known_hosts`），并由 `ssh.enable` 显式开启；未启用时输出警告并跳过，
   启用但必需目标缺失时输出警告并跳过，目标配置完整但连接、认证或主机密钥校验失败时必须让测试失败。

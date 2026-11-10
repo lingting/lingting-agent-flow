@@ -83,7 +83,6 @@ var resourceTypes = []ResourceType{
 	{Name: "ssh-host", DefaultScope: ScopeRunShared, Description: "tests/config/ssh.yml 指向的真实远程主机"},
 	{Name: "ssh-session", DefaultScope: ScopeCaseExclusive, Description: "一条真实 SSH 连接及其会话"},
 	{Name: "local-ssh-server", DefaultScope: ScopeCaseExclusive, Description: "测试进程内启动的 SSH/SFTP 服务端"},
-	{Name: "pi-cli", DefaultScope: ScopeCaseExclusive, Description: "本机真实 Pi CLI 调用"},
 	{Name: "sqlite-db", DefaultScope: ScopeCaseExclusive, Description: "用例工作空间内的 SQLite 数据库文件"},
 	{Name: "local-port", DefaultScope: ScopeCaseExclusive, Description: "用例自己监听的本地端口"},
 	{Name: "local-http-server", DefaultScope: ScopeCaseExclusive, Description: "httptest 启动的进程内 HTTP 服务"},
@@ -150,7 +149,6 @@ func inferResources(pkg *packageScan) []ResourceNeed {
 			"LoadSSHConfig", "SSHConfig", "KnownHostsSources",
 		))
 		builder.add("ssh-session", ScopeCaseExclusive, pkg.hasImport(ModulePath+"/internal/sshclient"))
-		builder.add("pi-cli", ScopeCaseExclusive, pkg.hasSymbol("LoadPiConfig"))
 	}
 	if pkg.Markers.NetListen {
 		builder.add("local-port", ScopeCaseExclusive, []string{"call:net.Listen"})

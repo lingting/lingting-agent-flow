@@ -62,12 +62,6 @@ var resourceProfiles = []ResourceProfile{
 		Note:         "测试 SSH 服务端端口、主机密钥与客户端密钥都属于单次分配",
 	},
 	{
-		Type:         ResourcePiCLI,
-		DefaultScope: ScopeCaseExclusive,
-		Capacity:     1,
-		Note:         "真实 Pi CLI 调用串行，避免同一账号并发互相干扰",
-	},
-	{
 		Type:         ResourceSSHHost,
 		DefaultScope: ScopeRunShared,
 		Note:         "同一 host_id 的连接在一次运行内复用",

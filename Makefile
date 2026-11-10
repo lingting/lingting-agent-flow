@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check vet inventory test test-unit test-local test-pi test-ssh test-e2e test-race build release release-dist release-verify release-notes run web-install web-build web-dev web-verify serve clean check
+.PHONY: fmt fmt-check vet inventory test test-unit test-local test-ssh test-e2e test-race build release release-dist release-verify release-notes run web-install web-build web-dev web-verify serve clean check
 
 VERSION ?= dev
 # 开发构建使用短提交便于阅读；正式发布制品中的提交由 cmd/agentflow-release 写入完整 SHA。
@@ -42,9 +42,6 @@ test-unit:
 
 test-local:
 	go test -count=1 -v -p $(PARALLEL) -parallel $(PARALLEL) ./tests/integration/local/...
-
-test-pi:
-	go test -count=1 -v ./tests/integration/pi/...
 
 test-ssh:
 	go test -count=1 -v ./tests/integration/ssh/...

@@ -81,6 +81,9 @@
   说明：M5 的 `project_execution_leases` 不是多实例仲裁机制——它服务于单进程内的跨请求与跨重启识别
   （`owner` + 单调 `epoch` + `expires_at`），进程锁仍是唯一的多进程边界。
 - 不得在容器缺失、未运行、已 detached 或节点未通过预检时静默回退到宿主机执行 Pi、Docker 或 Git。
+- 测试禁止使用本机 Pi：不得在任何测试中执行或探测本机 `pi`（含 `pi --version`、`pi --list-models`、
+  `pi.Check` 一类的本机能力检查），不得新增依赖本机 Pi 的用例、替身、可执行文件路径配置或测试资源；
+  Agent 相关验收一律在远程任务容器内使用容器内真实 Pi（见 [docs/testing.md](docs/testing.md)）。
 - 不得关闭 SSH 主机密钥校验，不得引入密码认证、私钥口令或产品级 Git 凭据管理。
 - Docker 调用必须遵守既定版本与 API 基线，且只经由
   `internal/docker` 的命令入口（见 [docs/docker-compatibility.md](docs/docker-compatibility.md)）。

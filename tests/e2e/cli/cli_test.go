@@ -270,18 +270,6 @@ func TestAgentRunRejectsUnknownContainer(t *testing.T) {
 	}
 }
 
-// TestAgentCheckUnknownExecutable 校验 Pi 不可用时检查命令返回明确错误。
-func TestAgentCheckUnknownExecutable(t *testing.T) {
-	t.Setenv("PATH", testkit.Dir(t))
-	code, _, stderr := run(t, "agent", "check")
-	if code == 0 {
-		t.Fatal("Pi 不可用时应返回非零退出码")
-	}
-	if !strings.Contains(stderr, "未找到可执行程序") {
-		t.Fatalf("错误信息应说明可执行程序缺失，实际: %s", stderr)
-	}
-}
-
 // TestWorkspaceConfigUsesAbsolutePaths 校验测试配置不把运行期数据指向相对路径。
 //
 // 相对路径会按进程工作目录解析：go test 的工作目录是包目录，因此把相对路径交给

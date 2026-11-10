@@ -11,11 +11,10 @@
 ```text
 tests/
 ├── internal/
-│   ├── testkit/        # 统一测试入口（testkit.Main）、日志落盘、工作空间、known_hosts 快照与测试数据构造
-│   └── fakepi/         # 以测试二进制充当 Pi CLI 的可控替身
+│   └── testkit/        # 统一测试入口（testkit.Main）、日志落盘、工作空间、known_hosts 快照与测试数据构造
 ├── unit/               # 快速单元测试，不依赖真实 Pi、SSH 或网络
 │   ├── agent/          # Agent 事件、结果类型与容器内 Pi Runner（使用替身）
-│   │   └── pi/         # Pi Runner 单元测试（使用 fakepi 替身）
+│   │   └── pi/         # Session 目录与归档路径构造
 │   ├── app/            # 应用服务层
 │   ├── cigate/         # 真实测试授权判定（只读、fail closed）
 │   ├── container/      # 容器状态、生命周期策略与 Docker 命令参数构造
@@ -28,7 +27,7 @@ tests/
 │   ├── server/         # 服务端进程锁与启动守卫（真实 SQLite 与真实文件锁）
 │   ├── source/         # Git Clone 代码来源（容器执行替身）
 │   ├── store/          # SQLite 仓储与数据库约束
-│   └── testkit/        # 测试辅助逻辑：文件缺失探针分类、宿主 Pi 模型标识组成
+│   └── testkit/        # 测试辅助逻辑：文件缺失探针分类、Pi 模型标识组成
 ├── integration/
 │   ├── local/          # 本机集成测试，不依赖外部服务
 │   │   ├── codesaver/  # 真实 Git 提交、推送与合并（本机 bare 仓库）
@@ -41,7 +40,6 @@ tests/
 │   │   ├── ssh/        # 本地模拟 SSH/SFTP 服务端
 │   │   ├── validation/ # 验证执行与检查结论（真实 SQLite）
 │   │   └── workflow/   # 应用层编排、取消与收尾一致性（真实 SQLite）
-│   ├── pi/             # 需要本机真实 Pi CLI
 │   ├── remote/
 │   │   ├── agent/      # 需要真实远程容器与容器内真实 Pi CLI
 │   │   ├── codesaver/  # 需要真实远程容器与容器内 Git
@@ -68,8 +66,6 @@ go test -count=1 -v -p 8 -parallel 8 ./tests/integration/local/...
 # 本机 Git 代码保存集成测试
 go test -count=1 -v ./tests/integration/local/codesaver/...
 
-# 真实 Pi 集成测试（在 tests/config/pi.yml 中把 pi.enable 设为 true 后才会执行）
-go test -count=1 -v ./tests/integration/pi/...
 
 # 真实 SSH 集成测试（在 tests/config/ssh.yml 中把 ssh.enable 设为 true 后才会执行）
 go test -count=1 -v ./tests/integration/ssh/...
@@ -130,7 +126,7 @@ SQLite 初始化与连接建立对并发量敏感，在高核数机器上用默�
 | `go-race` | `make test-race` 的全部范围 + 业务并发写入 + 调度与任务级工作流编排 | `make test-race`，再执行下文两条补充命令 |
 | `ui-test` | 前端单元（`--maxWorkers 4`）、Playwright E2E（`--workers=4`）、格式、lint、类型检查、生产构建 | `cd lingting-agent-flow-ui && pnpm test:all:safe` |
 | `real-tests-gate` | 只读判定真实测试是否获授权，输出 `real_tests_enabled`、`mode` 与 `reason` | `go run ./cmd/agentflow-ci real-tests-gate -mode ... -event ...` |
-| `real-tests` | 仅授权通过时执行真实外部依赖测试包（见下文清单） | `go test -count=1 ./tests/integration/pi/... ./tests/integration/ssh/... ./tests/integration/remote/...` |
+| `real-tests` | 仅授权通过时执行真实外部依赖测试包（见下文清单） | `go test -count=1 ./tests/integration/ssh/... ./tests/integration/remote/...` |
 | `ci-summary` | 其余全部 Job 都成功才通过；分组核验失败算失败，授权判断失败算失败，真实测试未授权跳过不算失败但也不计为通过 | 无（仅 CI） |
 
 这些 Job 的执行逻辑都在 `.github/scripts/` 下，工作流只负责触发、依赖与参数传递：脚本内部
@@ -147,7 +143,7 @@ Go 测试的分组与并行策略：
   `go list` 的真实清单核验，而不是人眼比对；
 - 每个分组 Job 独享一台 4 vCPU Runner，`go test` 只用 `-p 4` / `-parallel 4`；`go-race` 也
   显式传入 `--parallel 4`（`-race` 下 SQLite 初始化与连接建立对并发量敏感）；
-- 真实测试（`pi` / `ssh` / `remote`）不进普通 CI，并由 `real-tests` 单 Job 执行，包之间固定
+- 真实测试（`ssh` / `remote`）不进普通 CI，并由 `real-tests` 单 Job 执行，包之间固定
   `-p 1` 串行：全部真实套件共用同一台远程机器与同一个 Docker Engine。
 
 本地等价入口与全量入口的关系：`make test` 仍是本地全量入口（`tests/...` 全部测试包），
@@ -256,11 +252,10 @@ Actions 表达式能够兜住的问题。
 - 身份字段缺失、变量取值未知、权限查询失败都按拒绝处理（fail closed）。
 
 真实测试包清单（`real-tests` Job 只执行这些，不重复跑普通 Go 测试）。范围由
-`.github/scripts/go-test-groups.sh` 的 `real` 分组定义（`pi` / `ssh` / `remote`），执行脚本
+`.github/scripts/go-test-groups.sh` 的 `real` 分组定义（`ssh` / `remote`），执行脚本
 不自己列举包路径：
 
 ```text
-tests/integration/pi/                 # pi 分组：本机真实 Pi CLI
 tests/integration/ssh/                # ssh 分组：真实远程 Linux 机器
 tests/integration/remote/docker/      # remote 分组：真实远程 Docker Engine
 tests/integration/remote/agent/       # remote 分组：真实远程容器与容器内真实 Pi
@@ -270,7 +265,7 @@ tests/integration/remote/workflow/    # remote 分组：真实远程端到端工
 ```
 
 以下本机模拟测试**不属于**真实测试，继续在普通 CI 的 `go-local` 分组中执行：
-`tests/integration/local/ssh/`、使用本机 SQLite 的调度与工作流测试、使用 `tests/internal/fakepi`
+`tests/integration/local/ssh/`、使用本机 SQLite 的调度与工作流测试、使用容器执行替身
 的 Agent 测试，以及使用本机 bare 仓库的代码保存测试。
 
 #### 跳过规则
@@ -300,7 +295,7 @@ tests/integration/remote/workflow/    # remote 分组：真实远程端到端工
 GITHUB_ACTIONS=true make test
 
 # 只跑真实测试包并观察跳过原因
-GITHUB_ACTIONS=true go test -count=1 -v ./tests/integration/pi/... ./tests/integration/ssh/... ./tests/integration/remote/...
+GITHUB_ACTIONS=true go test -count=1 -v ./tests/integration/ssh/... ./tests/integration/remote/...
 ```
 
 #### 凭据边界
@@ -363,7 +358,7 @@ TEST_ARTIFACT_DIR=<绝对路径>
 
 - 逐用例结论（`=== RUN` / `--- PASS` / `--- FAIL` / `--- SKIP`）；
 - `t.Logf` 与 `fmt.Println` 等标准输出内容；
-- `WARN [SKIP]` 跳过原因（例如配置未启用、缺少配置项、本机没有 `pi`）；
+- `WARN [SKIP]` 跳过原因（例如配置未启用、缺少配置项）；
 - 应用服务的 `slog` 日志：测试统一用 `testkit.Logger` / `testkit.Slog` 构造日志器。
 
 入口同时默认打开 `-test.v`，因为非 verbose 模式下 `go test` 会缓冲包输出、只在失败时
@@ -376,8 +371,7 @@ TEST_ARTIFACT_DIR=<绝对路径>
 cat "$(os.TempDir)/lingting-agent-flow-tests/latest-run.txt"   # 具体路径按平台解析
 ```
 
-已有 `TestMain` 的包（`tests/integration/pi`、`tests/unit/agent/pi`）在替身分支之后转调
-`testkit.Main`，替身行为不受影响。
+所有测试包的 `TestMain` 都只转调 `testkit.Main`，不存在自行接管输出的分包入口。
 
 ## SSH 测试分层
 
@@ -486,21 +480,21 @@ Engine），远程预检与真实容器流程由 `tests/integration/remote/docke
 真实配置文件不入库。环境变量只用于在配置值中写 `${NAME}` 占位符，不再有逐项覆盖配置的
 测试专用环境变量（`AGENTFLOW_TEST_CONFIG_DIR` 仍然存在，仅用于把测试指向另一份配置目录）。
 
-### 真实 Pi
+### 真实 Pi 模型调用
 
-真实 Pi 测试的全部配置来自 `tests/config/pi.yml`（示例文件为 `example.pi.yml`）：
+真实模型调用测试的全部配置来自 `tests/config/pi.yml`（示例文件为 `example.pi.yml`）：
 
 | 配置项 | 用途 | 默认值 |
 |---|---|---|
-| `pi.enable` | 是否执行需要真实 Pi CLI 的测试 | `false` |
-| `pi.model` | 真实 Pi 测试使用的模型 | `group/free` |
-| `pi.provider` | 宿主 Pi CLI 的 provider 名称，留空时按 `pi.model` 原样检查 | 空 |
-| `pi.executable` | Pi 可执行文件路径 | PATH 中的 `pi` |
+| `pi.enable` | 是否执行真实远程端到端验收（`tests/integration/remote/workflow`） | `false` |
+| `pi.model` | 真实调用使用的模型 | `group/free` |
+| `pi.provider` | 模型 provider 名称，留空时按 `pi.model` 原样使用 | 空 |
 
-`pi.enable` 未设为 `true` 或本机 PATH 中没有 `pi` 时，真实 Pi 用例输出 `WARN [SKIP]` 并
-跳过；Pi Runner 的单元测试位于 `tests/unit/agent/pi/`，使用替身，始终执行；统一 Runner 的
-生命周期用例位于 `tests/unit/app/`，验证「启动失败不残留 running」「停止服务取消在途调用
-并收敛」等约束，同样不依赖本机 Pi。
+本机不执行 Pi：Agent 调用全部在容器内完成，因此测试不检查本机是否安装 `pi`，也不再读取本机
+Pi 可执行文件路径。容器内 Pi 是否可用由 `tests/integration/remote/agent/` 在容器内执行
+`pi --version` 与 `pi --list-models` 确认；容器内 Pi Runner 的单元测试位于 `tests/unit/agent/`，
+使用容器执行替身，始终执行；统一 Runner 的生命周期用例位于 `tests/unit/app/`，验证「启动失败
+不残留 running」「停止服务取消在途调用并收敛」等约束，同样不依赖容器内 Pi。
 
 默认模型 `group/free` 是特意选定的、不会意外消耗付费额度的标识。它挂在哪个 provider 下由 `pi.provider`
 指定：填写后调用标识组装为 `provider/model`（例如 `magpie/group/free`），留空时按 `pi.model` 原样使用。
@@ -652,11 +646,12 @@ docker build -t agentflow-test-agent:1.0.0 -f tests/integration/remote/agent/Doc
 | `ssh.enable` 及 `ssh.*` | SSH 目标，见「真实 SSH」 | 是 |
 | `docker.pi.*` | 可选的容器内 Pi 模型接入覆盖 | 否 |
 
-真实模型标识来自 `tests/config/pi.yml` 的 `pi.model`，默认 `group/free`。本机 Pi 的模型清单按 provider 与
-模型两列列出，`--model` 使用 `provider/model` 形式：模型挂在不含模型前缀的 provider 下时（例如 provider 为
-`magpie`、模型标识为 `group/free`），必须同时填写 `pi.provider`，本机检查与真实调用才会组装成
-`magpie/group/free`；`pi.provider` 留空时按 `pi.model` 原样使用。容器内 Pi 的模型来自 `docker.yml` 的
-`pi.*`（provider 固定），不受 `pi.provider` 影响。是否执行本机真实 Pi 测试由同一文件的 `pi.enable` 控制。
+真实模型标识来自 `tests/config/pi.yml` 的 `pi.model`，默认 `group/free`。模型标识按 provider 与
+模型两列组装，`--model` 使用 `provider/model` 形式：模型挂在不含模型前缀的 provider 下时（例如
+provider 为 `magpie`、模型标识为 `group/free`），必须同时填写 `pi.provider`，调用标识才会组装成
+`magpie/group/free`；`pi.provider` 留空时按 `pi.model` 原样使用。容器内 Pi 的模型来自 `docker.yml`
+的 `pi.*`（provider 固定），不受 `pi.provider` 影响。`pi.enable` 只控制真实远程端到端验收
+（`tests/integration/remote/workflow`）是否执行。
 
 ```bash
 # 先在 docker.yml 与 ssh.yml 中启用，并准备好测试镜像

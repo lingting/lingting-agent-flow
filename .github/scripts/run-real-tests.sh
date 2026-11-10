@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# 用途: 真实外部依赖测试的执行入口。只运行需要真实设备的测试包（真实 Pi CLI、
-#       真实 SSH 机器、真实远程 Docker / Agent / 代码保存 / 工作流），不重复执行
-#       本机模拟测试（它们属于普通 Go CI 的 run-go-group-tests.sh）。真实测试范围由
-#       go-test-groups.sh 的 real 分组（pi / ssh / remote）定义。
+# 用途: 真实外部依赖测试的执行入口。只运行需要真实设备的测试包（真实 SSH 机器、
+#       真实远程 Docker / Agent / 代码保存 / 工作流），不重复执行本机模拟测试
+#       （它们属于普通 Go CI 的 run-go-group-tests.sh）。真实测试范围由
+#       go-test-groups.sh 的 real 分组（ssh / remote）定义。
 #
 # 参数:
 #   --artifact-dir DIR  必填。测试产物目录，同时作为 TMPDIR。
@@ -111,7 +111,7 @@ echo "测试日志: $log_file"
 
 cd "$repo_root"
 
-# 真实测试范围只从 go-test-groups.sh 解析（pi / ssh / remote 三个分组）：本脚本不认识
+# 真实测试范围只从 go-test-groups.sh 解析（ssh / remote 两个分组）：本脚本不认识
 # 具体测试包，分组清单变更后无需改这里。本机模拟测试仍由普通 CI 的分组 Job 覆盖。
 groups_script="$script_dir/go-test-groups.sh"
 mapfile -t real_groups < <(bash "$groups_script" --list real)

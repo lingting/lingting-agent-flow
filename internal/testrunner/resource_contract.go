@@ -29,7 +29,7 @@ type ResourceContract struct {
 	Fingerprint string
 }
 
-// resourceContracts 是 16 种资源类型的冻结契约，顺序与 R0 词汇表一致。
+// resourceContracts 是 15 种资源类型的冻结契约，顺序与 R0 词汇表一致（pi-cli 已移除）。
 var resourceContracts = []ResourceContract{
 	{
 		Type:        ResourceLocalPort,
@@ -89,16 +89,6 @@ var resourceContracts = []ResourceContract{
 			"user",
 			"private_key_path",
 		},
-	},
-	{
-		Type:        ResourcePiCLI,
-		PayloadKeys: []string{"path", "version"},
-		PayloadRequired: []string{
-			"path",
-			"version",
-		},
-		SpecKeys:    []string{"binary", "version_timeout_ms"},
-		Fingerprint: "可执行文件内容的 SHA256",
 	},
 	{
 		Type:            ResourceSSHHost,
