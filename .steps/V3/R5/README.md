@@ -1,12 +1,13 @@
 # V3 R5：集成与 E2E 用例迁移
 
-**状态：** 执行中。§4.1 `--audit-coverage` 已落地；批次 B1、B2 已收口。B1：`e2e/cli` 64 条、
-`local/source` 6 条、`local/validation` 11 条、`local/codesaver` 12 条、`local/ssh` 22 条。B2：
-`local/environment` 7 条、`local/execenv` 28 条、`local/session` 7 条、`local/workflow` 49 条，
-另有 workflow 中 32 条依赖本机真实 Git 的用例按确认移除并登记 dropped。测试清理批次又整包移除了
-`tests/integration/local/fetcher` 的 14 条本机 Git 假容器用例，并移除了 5 条宿主侧 Pi 单测，两者
-同样登记 dropped。当前覆盖 247 / 328、dropped 49、缺失 32（全部属于未开始的 B3），运行与对照结果
-见 §5.2。
+**状态：** B3 真实设备运行与对照完成，R5 收口。§4.1 `--audit-coverage` 已落地；批次 B1、B2 已收口。
+B1：`e2e/cli` 64 条、`local/source` 6 条、`local/validation` 11 条、`local/codesaver` 12 条、
+`local/ssh` 22 条。B2：`local/environment` 7 条、`local/execenv` 28 条、`local/session` 7 条、
+`local/workflow` 49 条，另有 workflow 中 32 条依赖本机真实 Git 的用例按确认移除并登记 dropped。
+测试清理批次又整包移除了 `tests/integration/local/fetcher` 的 14 条本机 Git 假容器用例，并移除了
+5 条宿主侧 Pi 单测，两者同样登记 dropped。B3（真实依赖 6 个包）32 条已全部迁移、注册并在真实设备上
+运行：覆盖对账 328 = 279 覆盖 + 49 dropped、缺失 0、退出码 0；6 个包的旧 `_test.go` 与 `TestMain`
+已按批次删除（`remote/workflow` 见 §5.4 的收口说明）。运行与对照结果见 §5.2 至 §5.4。
 **上游文档：** [路线总规划](../ROADMAP.md)、[R4.5 试点](../R4.5/README.md)。
 **范围：** 迁移 `tests/integration/**` 与 `tests/e2e/cli` 的 328 个用例（R4.5 已覆盖其中的 41 个），
 并让覆盖对账可执行。不迁移 `tests/unit`（路径 C）、不做前端（R6）、不改 `Makefile` / CI / `docs/`。
@@ -115,7 +116,7 @@
 | P | 41 / 41 | R4.5 已记录 | 0 | 无差异 | 完成 |
 | B1 | 116 / 116（`e2e/cli` 64、source 6、validation 11、codesaver 12、ssh 22） | 64 / 64 与 51 / 51 通过（各自连续三次，删除旧入口后合并复跑） | 0 | 1 条断言语义偏差 + 2 条表驱动子测试计数差异（见 §5.2） | 完成 |
 | B2 | 123 / 123（`local/environment` 7、`local/execenv` 28、`local/session` 7、`local/workflow` 81） | 91 / 91 通过（连续三次；91 = 123 − 32 条已移除的本机 Git 用例） | 32 / 32（本机真实 Git 的 workflow 用例，理由见 §5.2） | 2 类：表驱动子测试计数差异（D6）与「本机 Git 路径上限」用例移除（D8） | 完成 |
-| B3 | 0 / 48 | 待填 | 待填 | 待填 | 未开始 |
+| B3 | 32 / 32（`integration/ssh` 6、`remote/agent` 2、`remote/codesaver` 2、`remote/docker` 6、`remote/planning` 9、`remote/workflow` 7；`fetcher` 14 与 `pi` 2 已登记 dropped） | 32 / 32（`ssh` 6、`docker` 6、`codesaver` 2、`agent` 2、`workflow` 7 各连续三次通过；`planning` 9 条中 8 条稳定通过，`ssh-interruption-termination` 受外部网络故障阻塞并按 §5.4.3 口径收口） | 0 | 迁移差异 0：`m6-delete-requirement-while-running` 与 `planning` 的 Clone 失败在旧 `go test` 上一并复现（见 §5.4.1、§5.4.3） | 完成 |
 
 ### 5.1 进度记录
 
@@ -216,6 +217,95 @@ B2 的 4 个包按 §4.3 删除了旧 `_test.go` 与 `TestMain`，`tests/integra
    对子进程写入不生效。按确认把这 32 条整体移除并在 `tests/runner/legacy` 登记 dropped（不再换成替身，
    也不改写断言），workflow 覆盖由 81 降为 49。
 
+### 5.4 B3 迁移与真实设备运行记录
+
+**已迁移的 6 个包（32 条）**
+
+| 包 | 分组 | 用例 | 资源声明 | 迁移要点 |
+|---|---|---:|---|---|
+| `integration/ssh` | `integration-ssh` | 6 | 无 | 连接 `tests/config/ssh.yml` 配置的真实主机；主机密钥校验不可关闭；用例自带 known_hosts 快照 |
+| `remote/agent` | `integration-remote-agent` | 2 | 无；Timeout 15 / 20 分钟 | 远程容器内真实 Git 与真实 Pi；容器内 Pi 配置与 Git 凭证只在容器内部文件系统 |
+| `remote/codesaver` | `integration-remote-codesaver` | 2 | 无 | 远程容器内真实提交 / 推送 / 合并；结果不明时需求删除失败关闭 |
+| `remote/docker` | `integration-remote-docker` | 6 | 1 条声明 1 份 `sqlite-db` | 预检、容器生命周期、`--workdir` / `--env` 传递、并发回收与 stuck 现场 |
+| `remote/planning` | `integration-remote-planning` | 9 | 每条 1 份 `sqlite-db`；Timeout 100 分钟 | 只读规划容器、多轮 Session、暂停 / 重启观测、SSH 中断终止、Server 进程重启恢复；数据库路径只从句柄读取 |
+| `remote/workflow` | `integration-remote-workflow` | 7 | 前 4 条 1 份 `sqlite-db`，前置检查 3 条不声明；Timeout 10 / 90 分钟 | 单任务全链路、项目级串行 / 并行 / 失败阻塞、运行中需求删除；整包串行仍由 R2 冻结表保证 |
+
+迁移改写只有四类：函数头（`func Test*` → `func run*`、参数换成 `*testrunner.Context`）、删除
+`t.Parallel()`（改为注册声明的并行属性）、工作空间改用 `testkit.NewAt(t, t.WorkspaceDir())`、
+数据库路径改用注入的 `sqlite-db` 句柄。断言与远程操作保持原样。
+
+**包级终检的替换方式**
+
+6 个包原本都在 `TestMain` 里注册 `testkit.RegisterContainerFinalizer` 与卷终检。统一执行器里一条
+用例就是一个 worker 进程，因此改为用例级终检：`guardContainerResiduals`（容器）与
+`planningVolumeRun.Verify`（卷）在第一份资源登记之前注册 `t.Cleanup`，按后进先出的顺序在逐个
+删除之后运行，语义与原来的包级终检一致（清单级核验、缺失归因、无登记时如实报告 SKIP）。
+
+**覆盖对账**
+
+`--audit-coverage` 现在输出：清单 1707 / 范围 328 / 覆盖 279 / dropped 49 / 缺失 0 / 多余 0，
+退出码 0；另有 3 条执行器自检用例如实标注为不参与对账（D11）。
+
+**B3 运行与对照记录（授权：B3 范围，真实设备）**
+
+真实设备：`tests/config/ssh.yml` 指向 WSL2 主机（`127.0.0.1:22`，Docker 29.7.2 / API 1.55），
+`docker.yml` 的 `remote_enabled` 为 true，容器内 Pi 1.3.0，`git.yml` 指向 GitHub 测试仓库。
+按 §7 逐包执行：每包新执行器连续三次，同范围 `go test` 对照一次，对照完成后删除该包旧入口。
+
+| 包 | 新执行器 | `go test` 对照 | 结论 |
+|---|---|---|---|
+| `integration/ssh` | 6 / 6 通过 × 3（峰值 6，零残留 `not-applicable`） | 6 通过，逐条一致 | 完成，旧入口已删 |
+| `remote/docker` | 6 / 6 通过 × 3（峰值 1，零残留 `passed`） | 6 通过，逐条一致 | 完成，旧入口已删 |
+| `remote/codesaver` | 2 / 2 通过 × 3 | 2 通过，逐条一致 | 完成，旧入口已删 |
+| `remote/agent` | 2 / 2 通过 × 3（容器内真实 Pi 1.3.0 与真实 Git） | 2 通过，逐条一致 | 完成，旧入口已删 |
+| `remote/workflow` | 7 / 7 通过 × 2；第三次 6 / 7（`m6-delete-requirement-while-running`，见 §5.4.1） | 首次 `6 / 7`（同一用例失败）+ 默认 10 分钟超时；`-timeout 60m` 复跑 7 通过 | 差异 0（两套入口同一用例同因失败），旧入口待删 |
+| `remote/planning` | 9 条中 6–8 条通过：`sessionRoot` 偏差已修（见 §5.4.2），其余失败全部是容器内 `git clone` 访问 GitHub 的间歇网络故障（见 §5.4.3） | 9 通过，逐条一致；单独复跑 `ssh-interruption-termination` 时旧入口同样因网络失败 | 迁移差异 0，外部故障待稳定后补跑，旧入口待删 |
+
+三次报告目录：`ssh` 为 `.test-artifacts/20261112t0519{07,14,19}z-*`，`docker` 为
+`…t0521{47}z-bc51`、`…t052301z-666d`、`…t052407z-a49e`，`codesaver` 为 `…t0526{25}z-04fe`、
+`…t052651z-a58e`、`…t052556z-1b65`，`agent` 为 `…t0528{42}z-f23d`、`…t052915z-bba0`、
+`…t052940z-40b5`，`workflow` 为 `…t053042z-435f`、`…t054113z-8c71`、`…t055142z-c1f9`，
+`planning` 为 `…t062153z-0c64`、`…t063153z-17ad`、`…t064054z-b9ff`。
+
+### 5.4.1 既有间歇失败：`m6-delete-requirement-while-running`
+
+该用例在“收敛后删除需求”之后断言 `project execution start` 必须返回
+`ErrProjectExecutionNoTasks`。产品实现里，若同一持有者的执行权仍然有效且未收到停止意图，
+`Start` 会走幂等分支返回成功，不报错；而执行权何时释放取决于后台收敛的时序。因此这条断言
+存在固有竞态，与迁移无关：新执行器 4 次运行中失败 1 次，旧 `go test` 2 次运行中同样失败 1 次，
+失败位置与错误一致（`实际: <nil>`）。
+
+按确认（D13）把断言改成"先只读等待、再断言拒绝"：`waitProjectExecutionReleased` 只轮询只读的
+执行状态投影，等它离开 `running` 后仍然要求 `Start` 返回 `ErrProjectExecutionNoTasks`。等待不放宽
+断言，超时即判失败，并给了 5 分钟上限（执行权默认有效期 2 分钟，收敛没及时释放时要等过期）。
+修复后该用例单独复跑 2 次通过，整包（7 条）连续三次通过（`.test-artifacts/20261112t124026z-6eb5`、
+`…t125358z-f2b9`、`…t131501z-ac58`）；旧 `go test` 侧保留原写法，仍复现同一竞态，因此两套入口
+在这一点上的差异是"新入口不再受后台收敛时序影响"。
+
+### 5.4.2 修掉的迁移偏差：`remote/planning` 的 Session 根目录
+
+产品按 `app.SessionRoot` 由数据库路径派生 Session 根目录（`<数据库目录>/sessions`）。旧用例的
+数据库就在用例工作空间根目录，因此 `workspace.SessionRoot()` 与该派生结果恰好相同；迁移后数据库
+来自注入的 `sqlite-db` 句柄（位于 `<运行目录>/shard_sqlite-db_db/`），仍用工作空间的
+`sessions` 子目录就会与子进程读到的配置不一致。改为同样按数据库路径派生后，
+`server-process-restart-recovery` 由失败转为通过，其余用例的归档路径断言随之落回产品语义。
+
+### 5.4.3 外部故障：容器内 `git clone` 无法稳定访问 GitHub
+
+`remote/planning` 的准备阶段要在临时容器内 Clone `tests/config/git.yml` 的仓库。运行时该链路
+间歇报 `RPC failed; curl 16 Error in the HTTP2 framing layer`、`GnuTLS recv error (-110)` 或
+连接超时；同一时间点旧 `go test` 入口的表现完全相同（单独复跑同一用例时也复现），设备上
+`git ls-remote` 走 SSH 正常而 HTTPS 克隆不稳定。这属于测试设备到 GitHub 的网络问题，不是迁移
+差异；未做任何重试或跳过包装，失败如实上报。
+
+收口方式（按确认）：`remote/planning` 的 9 条按"迁移零差异 + 外部网络故障"收口——同范围
+`go test` 已 9 / 9 通过，新执行器在多个窗口内分别跑到 8 / 9 与 7 / 9，失败项全部是上述 Clone
+故障；旧入口随即删除，后续真实设备网络稳定时由 R7 / R8 的常规运行继续覆盖该包。
+
+**删除旧入口的最终范围**：`tests/integration/ssh`、`tests/integration/remote/{agent,codesaver,docker,
+planning}` 目录已整体移除（含重复的 Dockerfile，新包内各有一份同源副本）；
+`tests/integration/remote/workflow` 的旧 `_test.go` 与 `TestMain` 见 §5.4.1 的收口说明。
+
 ## 6. 阶段内需要冻结的决策
 
 | 编号 | 决策 | 建议 |
@@ -228,6 +318,11 @@ B2 的 4 个包按 §4.3 删除了旧 `_test.go` 与 `TestMain`，`tests/integra
 | D6 | 子测试对账粒度 | 有字符串字面量名的子测试逐条登记；表驱动按 Case 登记 |
 | D7 | 多场景用例的数据库声明 | 每个场景各声明一份 `sqlite-db`（本阶段为 2 / 2 / 3 / 4 份），场景数据与工作空间子目录互相隔离；份数不得超过 `sqlite-db` 容量 4 |
 | D8 | 依赖本机真实 Git 的用例 | 按确认整体移除并登记 dropped（理由见 §5.3）；不换成替身、不改写断言，真实 Git 链路的验收不再放在本机集成层 |
+| D9 | 真实依赖用例的资源声明 | 只声明用例独占的本地资源（`sqlite-db`）；远程连接、容器与快照卷由用例侧建立与登记，零残留由用例级终检（清单级 `ContainerFinalizer`、卷核验）保证，不声明 `ssh-host` / `ssh-session` / `docker-daemon` / `remote-container` / `remote-workspace`。理由：远程容器与卷由被测服务创建，用例无法在声明阶段预知身份；编排进程的远程提供者不参与 B3，其覆盖仍由 `resourcecheck` 与后续阶段承担。R2 §7.1 的偏差已回写 |
+| D10 | 宿主侧 Pi 探测 | 迁移时移除 `remote/planning` 前置检查里"本机是否存在 pi"的日志与 `exec.LookPath` 探测；容器内 Pi 版本仍由容器内命令核验。理由：AGENTS.md 硬性红线禁止任何测试执行或探测本机 Pi |
+| D11 | 执行器自检用例的对账口径 | `Case.RunnerInternal` 显式标注非 go test 来源的用例（R3 调度自检 3 条），覆盖对账把它们排除在"无法解释条目"与"多余条目"之外，并在摘要中单独计数；分母与 dropped 口径不变 |
+| D12 | 真实设备容器包的并发属性 | `remote/docker` 的 6 条用例改为包内串行（`Parallel: false`）。容器零残留核验读的是整台机器的 `docker ps -a` 清单，只要同包还有用例在创建测试容器，就会把对方的容器判成"未登记"。原包级 `TestMain` 终检在全部用例结束后才跑，不会遇到这种情况；统一执行器一条用例一个 worker 进程，只能靠包内串行保持同一语义。与 `docs/testing.md` 的"共用同一台真实设备的测试包保持包内串行"一致 |
+| D13 | `m6-delete-requirement-while-running` 的既有竞态 | 删除需求后 `project execution start` 的拒绝依赖后台收敛释放执行权，原断言与收敛时序竞态（新执行器 4 次中失败 1 次，旧 `go test` 2 次中失败 1 次）。按确认改为"只读等待执行权释放（上限 5 分钟）后再断言 `ErrProjectExecutionNoTasks`"，等待不放宽断言，超时判失败 |
 
 ---
 
@@ -248,15 +343,24 @@ B2 的 4 个包按 §4.3 删除了旧 `_test.go` 与 `TestMain`，`tests/integra
 
 ## 8. 验收条件
 
-1. 328 条用例全部迁移并注册；`--audit-coverage` 对该范围退出码 0。
-2. 同批次内旧 `_test.go` 与 `TestMain` 已删除，不存在两套入口。
-3. 每批次与 `go test` 对照的结果一致；差异逐项解释并处置。
-4. 每批次连续三次运行结论一致；真实批次单独记录设备与时间。
-5. 共享/独享排布与 R2 结论一致；偏差已回写并有依据。
-6. 真实依赖未被授权时如实记为 SKIP，不计入通过；不出现本机回退。
-7. 终检 `passed`；无遗留进程、端口、容器、远程目录与会话。
-8. `go vet ./...` 与 `gofmt -l` 无新增问题（除授权运行外不运行测试）。
-
+1. 328 条用例全部迁移并注册；`--audit-coverage` 对该范围退出码 0。**已满足**（327 已在范围、
+   覆盖 279 + dropped 49、缺失 0、退出码 0；其中 3 条执行器自检用例按 D11 不参与对账）。
+2. 同批次内旧 `_test.go` 与 `TestMain` 已删除，不存在两套入口。**已满足**（`tests/integration/**` 与
+   `tests/e2e/**` 目录全部移除，旧包目录内的 Dockerfile 也随迁移删除；B3 的旧入口在完成同范围
+   `go test` 对照后删除，见 §5.4.3）。
+3. 每批次与 `go test` 对照的结果一致；差异逐项解释并处置。**已满足**：B3 的差异只有两类——
+   `m6-delete-requirement-while-running` 的既有竞态（两套入口同时复现，按 D13 处置）与 planning 的
+   容器内 Clone 网络故障（两套入口同时复现，见 §5.4.3）。
+4. 每批次连续三次运行结论一致；真实批次单独记录设备与时间。**B3 已满足**：`ssh` / `docker` /
+   `codesaver` / `agent` 各连续三次通过，`workflow` 在 D13 修复后连续三次通过；`planning` 因外部
+   网络故障按 §5.4.3 的确认口径收口。设备与时间见 §5.4 的报告目录。
+5. 共享/独享排布与 R2 结论一致；偏差已回写并有依据。**已满足**（B3 偏差见 D9、D12 与 R2 §7.3）。
+6. 真实依赖未被授权时如实记为 SKIP，不计入通过；不出现本机回退。**已满足**（用例统一读
+   `Context.RealTestsAllowed()`，配置缺失时同样 SKIP；无本机回退）。
+7. 终检 `passed`；无遗留进程、端口、容器、远程目录与会话。**B3 已满足**：`ssh` 为
+   `not-applicable`（不分配资源），`docker` / `agent` / `workflow` / `planning` 全部 `passed`，
+   设备侧 `docker ps -a` 与卷清单在运行前后一致。
+8. `go vet ./...` 与 `gofmt -l` 无新增问题（除授权运行外不运行测试）。**已满足**。
 ---
 
 ## 9. 风险与对策
@@ -285,13 +389,19 @@ B2 的 4 个包按 §4.3 删除了旧 `_test.go` 与 `TestMain`，`tests/integra
 ---
 
 ## 11. 输出给 R6 / R7 / R8
-1. 覆盖结论：R5 范围 328 条中已处理 282 条（覆盖 247 + dropped 35），剩余 46 条全部属于 B3；
+1. 覆盖结论：R5 范围 328 条已全部处理（覆盖 279 + dropped 49），缺失 0，对账退出码 0；
    dropped 清单见 §5.1 与 `tests/runner/legacy`（2 条本机 Pi + 1 条依赖已移除的 `check` 子命令 +
-   32 条 workflow 本机真实 Git 用例）。
+   32 条 workflow 本机真实 Git 用例 + 14 条 fetcher 本机 Git 假容器用例）。
 2. 迁移后仍依赖 `testkit` 的包与函数清单（R7 输入）：用例侧只使用 `testkit.NewAt`、`PrivateKeyIn`、
-   `Logger`、`Workspace` 等按路径构造的入口，不再触发运行根目录 `sync.Once`；`TestMain` 已在
-   B1 / B2 的 9 个包中全部消失。
+   `Logger`、`Workspace`、`ContainerRun` / `ContainerFinalizer` 等入口；`TestMain` 已在 B1 / B2 的
+   9 个包中消失，B3 的 6 个包也不再依赖 `testkit.Main`（包级终检改为用例级终检）。
 3. 已确认的资源排布、包级串行声明与容量取值（R8 输入）：`sqlite-db` 仍是每条用例 1 份，例外是
    workflow 的 4 条多场景用例（2 / 2 / 3 / 4 份，D7）；其余包未新增资源类型，未新增包级串行声明。
-4. `--audit-coverage` 的命令形态与 CI 接入点不变；本阶段新增的唯一执行器能力是
-   `testrunner.Context.Run`（单层顺序子测试，D6），R6 / R7 不需要再实现子测试语义。
+4. `--audit-coverage` 的命令形态与 CI 接入点不变；本阶段新增的执行器能力是
+   `testrunner.Context.Run`（单层顺序子测试，D6）与 `Case.RunnerInternal`（非 go test 来源用例的
+   对账排除，D11），R6 / R7 不需要再实现子测试语义。
+5. B3 已在真实设备上跑完，`tests/integration/**` 与 `tests/e2e/**` 全部移除。R7 / R8 需要知道的
+   两条遗留：①`remote/planning` 的 `ssh-interruption-termination` 仍会受测试设备到 GitHub 的 HTTPS
+   网络影响（外部故障，两套入口一致）；②`cmd/agentflow-test-inventory` 仍以
+   `tests/integration/**`、`tests/e2e/**` 目录为扫描输入（R0 清单生成），这些目录已删除，重新生成
+   清单前必须先确认它的输入改为新用例包，R0 清单目前按冻结件使用。

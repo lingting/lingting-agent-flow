@@ -228,7 +228,27 @@ R6 才消费的 `node-worker` / `browser` / `frontend-dev-server` 本阶段只�
 | `integration/local/validation` | 共享 | 端口与数据库按用例分配 |
 
 `integration/remote/workflow` 是唯一需要整包串行的包（镜像标签互斥）。其余包的逐资源排布在 R4.5 试点
+`integration/remote/workflow` 是唯一需要整包串行的包（镜像标签互斥）。其余包的逐资源排布在 R4.5 试点
 与 R5 批次中复核，偏差回写本表并写明依据。
+
+### 7.3 R5 B3 的实际排布与偏差（已回写）
+
+B3 的 6 个真实依赖包在迁移时按 R5 §6 D9 调整了资源声明方式，§7.1 的排布按下面这张表理解：
+
+| 包 | §7.1 结论 | B3 实际排布 | 依据 |
+|---|---|---|---|
+| `integration/ssh` | 共享 `ssh-host` + 独享 `ssh-session` | 不声明远程资源 | 用例自己用 `testkit` 的配置与 known_hosts 快照建立连接，编排进程不再额外持有一份连接；零残留不涉及远程容器 |
+| `integration/remote/{agent,codesaver,docker,planning,workflow}` | 独享（workflow 另加整包串行） | 只声明 `sqlite-db`；远程容器、快照卷与远程目录由用例侧登记并在用例结束前删除 + 清单级核验 | 远程容器与卷由被测服务创建，声明阶段无法预知身份；用例级终检保留了与原包级终检一致的零残留语义 |
+
+整包串行仍由 §7.1 的 `integration/remote/workflow` 条目与 `SerialPackageReason` 冻结表保证，未改动。
+编排进程的远程提供者（`ssh-host` / `ssh-session` / `docker-daemon` / `remote-container` /
+`remote-workspace`）在 B3 中不被触发，其覆盖仍由 `resourcecheck` 与后续阶段承担；B3 也没有向
+`ProviderOptions.Hosts` 注入真实主机，编排进程不会在未授权时建立远程连接。
+
+补充（R5 §6 D12）：`integration/remote/docker` 的 6 条用例改为包内串行（`Parallel: false`）。容器零残留
+核验读的是整台机器的容器清单，同一包内并发跑时会把别的用例正在使用的容器判成"未登记"；原包级
+`TestMain` 终检在全部用例结束后才执行，所以旧写法没有暴露这个问题。串行属性属于用例声明，不改变
+§7.1 的独享结论，也没有新增资源类型或整包串行条目。
 
 ---
 

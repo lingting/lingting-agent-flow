@@ -26,11 +26,15 @@ var (
 )
 
 // serialPackageCase 注册一条声明所属 Go 测试包的占用用例。
+//
+// 这里声明 Package 只是为了复用生产的包级串行表；用例本身不是从 go test 迁移而来，
+// 因此同时标记 RunnerInternal，覆盖对账不会把它当作未解释的迁移条目。
 func serialPackageCase(id, pkg string) testrunner.Case {
 	return testrunner.Register(testrunner.Case{
-		ID:       id,
-		Package:  pkg,
-		Parallel: true,
+		ID:             id,
+		Package:        pkg,
+		RunnerInternal: true,
+		Parallel:       true,
 		Run: func(c *testrunner.Context) {
 			c.Logf("用例 %s 声明的包是 %s", c.Name(), pkg)
 			time.Sleep(holdWindow)

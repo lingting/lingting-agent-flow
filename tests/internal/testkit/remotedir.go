@@ -34,17 +34,17 @@ const (
 //
 // 每个测试包只使用自己的子目录，禁止跨包复用，使清理与排查可以按测试包收敛。
 const (
-	// RemoteTestPackageAgent 是 tests/integration/remote/agent 的子目录。
+	// RemoteTestPackageAgent 是 tests/runner/integration/remote/agent 的子目录。
 	RemoteTestPackageAgent = "agent"
-	// RemoteTestPackageDocker 是 tests/integration/remote/docker 的子目录。
+	// RemoteTestPackageDocker 是 tests/runner/integration/remote/docker 的子目录。
 	RemoteTestPackageDocker = "docker"
-	// RemoteTestPackageCodeSaver 是 tests/integration/remote/codesaver 的子目录。
+	// RemoteTestPackageCodeSaver 是 tests/runner/integration/remote/codesaver 的子目录。
 	RemoteTestPackageCodeSaver = "codesaver"
-	// RemoteTestPackageWorkflow 是 tests/integration/remote/workflow 的子目录。
+	// RemoteTestPackageWorkflow 是 tests/runner/integration/remote/workflow 的子目录。
 	RemoteTestPackageWorkflow = "workflow"
-	// RemoteTestPackageSSH 是 tests/integration/ssh 的子目录。
+	// RemoteTestPackageSSH 是 tests/runner/integration/ssh 的子目录。
 	RemoteTestPackageSSH = "ssh"
-	// RemoteTestPackagePlanning 是 tests/integration/remote/planning 的子目录。
+	// RemoteTestPackagePlanning 是 tests/runner/integration/remote/planning 的子目录。
 	RemoteTestPackagePlanning = "planning"
 )
 

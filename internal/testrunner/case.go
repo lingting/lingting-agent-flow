@@ -47,6 +47,12 @@ type Case struct {
 	// false 表示该用例在串行作用域内独占执行（对齐 go test 里未标记 t.Parallel 的用例）；
 	// 并发最终由调度器决定，用例无法自行扩大或缩小。
 	Parallel bool
+	// RunnerInternal 标记该用例不是从既有 go test 迁移而来（执行器与调度自检）。
+	//
+	// 这类用例只验证执行器自身语义，但仍可能声明 Package 以参与串行作用域判定（R3 的
+	// 调度自检就是这样）。覆盖对账把它排除在外：既不报成无法解释的条目，也不计入多余
+	// 条目；它本来就不属于 R0 冻结清单的任何一条。
+	RunnerInternal bool
 	// Resources 是用例需要的资源声明，由编排进程分配后以句柄形式注入 worker。
 	Resources []ResourceDecl
 	// Run 是用例主体，运行在 worker 子进程中；失败与跳过通过 Context 表达。

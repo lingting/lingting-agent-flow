@@ -151,6 +151,8 @@ type CoverageTotals struct {
 	Missing int `json:"missing"`
 	// Extra 是注册表里存在、但清单范围内没有对应条目的用例数。
 	Extra int `json:"extra"`
+	// RunnerInternal 是不参与对账的执行器自检用例数（Case.RunnerInternal）。
+	RunnerInternal int `json:"runner_internal"`
 }
 
 // CoverageReport 是 --audit-coverage 的输出。
@@ -303,10 +305,16 @@ func AuditCoverage(cases []Case, opts CoverageOptions) (CoverageReport, error) {
 // indexCoverage 建立「来源包路径 + 来源函数名」到用例 ID 的索引。
 //
 // 只统计设了 Package 的用例：Package 为空的是 R1 起新增的自检用例，没有清单来源。
+// 显式声明 RunnerInternal 的用例同样排除：它们只验证执行器自身语义，即便声明了 Package
+// 也不对应清单里的任何一条。
 func indexCoverage(cases []Case, report *CoverageReport) map[string]string {
 	covered := make(map[string]string, len(cases))
 	seen := make(map[string]string, len(cases))
 	for _, c := range cases {
+		if c.RunnerInternal {
+			report.Totals.RunnerInternal++
+			continue
+		}
 		if strings.TrimSpace(c.Package) == "" {
 			continue
 		}
@@ -424,6 +432,13 @@ func (r CoverageReport) Summary() string {
 		r.Totals.Missing,
 		r.Totals.Extra,
 	)
+	if r.Totals.RunnerInternal > 0 {
+		fmt.Fprintf(
+			&builder,
+			"自检用例：%d 条不参与对账（RunnerInternal）\n",
+			r.Totals.RunnerInternal,
+		)
+	}
 	for _, stats := range r.Packages {
 		fmt.Fprintf(
 			&builder,
