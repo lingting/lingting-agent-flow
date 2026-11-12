@@ -1,6 +1,6 @@
 # AgentFlow V3：统一测试执行器路线总规划
 
-**文档状态：** 主线规划。R0、R1 已完成，R2 起待执行。
+**文档状态：** 主线规划。R0–R5 已完成，下一步是 R6（前端适配器）。
 **上游输入：** [审阅意见](TEST-RUNNER-REFACTOR-REVIEW.md)（P0/P1/P2 结论）、
 [R0 盘点与决策](R0/README.md)、[R1 接口与可运行骨架](R1/README.md)、
 [.plan/mian.md](../../.plan/mian.md) 的「测试调整」。
@@ -32,7 +32,8 @@ agentflow-test（编排进程）
 
 ## 2. 基线（R0 盘点 + R1 落地）
 
-R0 冻结的规模基线（AST 口径，可用 `make inventory` 复现）：
+R0 冻结的规模基线（AST 口径）。清单按冻结件使用：`make inventory` 的扫描输入是 R5 已删除的
+`tests/integration/**` 与 `tests/e2e/**`，重新生成清单前必须先改它的输入。
 
 | 项 | 数量 |
 |---|---:|
@@ -47,7 +48,7 @@ R0 冻结的规模基线（AST 口径，可用 `make inventory` 复现）：
 | 阶段 | 用例 | 范围 |
 |---|---:|---|
 | 保持 `go test` | 1342 | `tests/unit/**`，17 个包 |
-| R5 | 328 | `tests/integration/**` 17 个包 + `tests/e2e/cli` |
+| R5 | 328 | `tests/integration/**` 17 个包 + `tests/e2e/cli`（已迁完，源目录删除） |
 | R6 | 37 | 前端 13 个 Vitest + 24 个 Playwright 文件 |
 
 R1 已落地并冻结：`cmd/agentflow-test`、`internal/testrunner`（Case 注册表、上下文、句柄、worker、
@@ -66,6 +67,29 @@ R3 已落地并冻结：`internal/testrunner/scheduler.go` 是唯一并发决策
 零残留终检」的取消时序，`late.go` 让已定型结论不被迟到结果文件改写；报告新增 `concurrency` 与
 `cancellation`，用例 `timings` 新增 `queue_enter_at` / `dispatch_at`。9 个调度场景由
 `tests/runner/concurrencycheck` 覆盖（`sqlite-db` 容量在 R3 收紧为 4）。
+
+R4 / R4.5 已落地并冻结：`service-process` 真实服务进程的启动、就绪、取消与零残留（R4），以及
+`local/scheduler` 41 条集成用例的迁移试点，冻结了迁移写法（`func run<原函数名>`、`Context.Run` 子测试、
+按用例初始化资源）与用例包位置（R4.5）。
+
+R5 已收口：328 条集成与 E2E 用例全部迁到 Case 模型并注册，`--audit-coverage` 对 R5 范围退出码 0
+（覆盖 279 + dropped 49，缺失 0）。`tests/e2e`、`tests/integration` 目录连同 `TestMain` 已整体删除，
+集成与 E2E 现在只有 `agentflow-test` 一个入口。B3 的 6 个真实依赖包在真实设备（WSL2 主机 + Docker
+29.7.2、容器内真实 Pi 与 Git）上跑过：`ssh` / `docker` / `codesaver` / `agent` / `workflow` 连续三次
+通过，`planning` 9 条中 8 条稳定通过，剩余 1 条受测试设备到 GitHub 的 HTTPS 间歇故障阻塞（旧
+`go test` 同一时间点同样失败，迁移差异 0）。执行器能力新增 `Context.Run`（单层顺序子测试，D6）与
+`Case.RunnerInternal`（自检用例不参与对账，D11）。阶段内冻结 D9–D13：真实依赖用例只声明本地独占
+资源（D9）、禁止宿主侧 Pi 探测（D10）、自检用例对账口径（D11）、`remote/docker` 包内串行（D12）、
+既有竞态的只读等待处置（D13）。
+
+R5 遗留（按归属交给后续阶段，不在 R5 内处理）：
+
+- `Makefile` 的 `test-ssh` / `test-e2e` 目标仍指向已删除的 `tests/integration/ssh`、`tests/e2e` 目录，
+  与 §7 的替代关系一起交给 R8 收敛。
+- `cmd/agentflow-test-inventory` 的扫描输入仍是 `tests/integration/**` 与 `tests/e2e/**`；R0 清单在
+  重新生成前按冻结件使用，改输入属于 R0 工具的后续维护。
+- `testkit.Main` 与包级终检仍被 `tests/unit`、`tests/runner` 自检包使用，收口归 R7。
+- `docs/` 里仍有大量 `tests/integration/...` 路径描述，文档同步归 R9。
 
 ---
 
@@ -110,7 +134,7 @@ R2–R7 只改代码、用例资产与本目录内的阶段文档；`Makefile`�
 | R3 | 已完成 | 并发调度、容量与互斥、取消与进程树终止、迟到结果防护 | [R3](R3/README.md) |
 | R4 | 已完成 | 试点：真实服务进程的启动、就绪、取消与零残留 | [R4](R4/README.md) |
 | R4.5 | 已完成 | 试点：`local/scheduler` 41 条集成用例迁移，验证 Case API 与迁移成本 | [R4.5](R4.5/README.md) |
-| R5 | 执行中 | 迁移 18 个包 / 328 个集成与 E2E 用例，覆盖对账可执行 | [R5](R5/README.md) |
+| R5 | 已完成 | 迁移 18 个包 / 328 个集成与 E2E 用例，覆盖对账可执行，真实依赖包在真实设备上跑完 | [R5](R5/README.md) |
 | R6 | 待执行 | 前端适配器：Vitest 13 + Playwright 24，一文件一 Case | [R6](R6/README.md) |
 | R7 | 待执行 | TestMain 与 `testkit` 最终核验收口，删除迁移遗留 | [R7](R7/README.md) |
 | R8 | 待执行 | Makefile / CI / 脚本收敛，非测试门禁保持可用 | [R8](R8/README.md) |
@@ -128,7 +152,8 @@ R2 ──> R3 ──> R4 ──> R4.5 ──> R5 ──> R7 ──> R9
   包级串行声明。
 - R3 的 9 个调度场景未通过，不得进入 R4。
 - R4.5 试点结论未确认，不得开始 R5 的批量迁移。
-- R5 / R6 未完成，不得进入 R7 / R8。
+- R5 已完成；R6 未完成，仍不得进入 R7 / R8（R7 的 `testkit` 收口要跑在 R5 迁移后的用例包上，
+  R8 的门禁收敛要等 R6 的前端适配器一起做完）。
 - R8 未完成，不得进入 R9（R9 的验收必须跑在收敛后的门禁上）。
 
 ---
@@ -174,7 +199,7 @@ R2 ──> R3 ──> R4 ──> R4.5 ──> R5 ──> R7 ──> R9
 | `go test ./tests/...` | `agentflow-test`（全部已注册 Case）；`tests/unit` 仍用 `go test` |
 | `go test -run 'TestFoo' ./tests/unit/store/...` | 单元层不变；集成层用 `agentflow-test <group>/<name>` 或分组前缀 |
 | `make test-unit` | 保留，仍是 `go test ./tests/unit/...` |
-| `make test-local` / `test-e2e` / `test-pi` / `test-ssh` | 改为 `agentflow-test` 对应分组，真实依赖分组保留授权门禁 |
+| `make test-e2e` / `test-ssh`（当前目标指向 R5 已删除的目录） | 改为 `agentflow-test` 对应分组，真实依赖分组保留授权门禁；`test-local` / `test-pi` 目标已不存在 |
 | `-count=1` | Case 默认不复用结果，不提供 `--count`；重复运行即重新执行 |
 | `-short` | 不支持：现状 0 处 `testing.Short()` |
 | `-timeout` | `--timeout`（默认 10m），Case 可用 `Timeout` 覆盖 |
@@ -189,7 +214,7 @@ R2 ──> R3 ──> R4 ──> R4.5 ──> R5 ──> R7 ──> R9
 |---|---|---|
 | 无 `-race` 门禁 | 显式接受，R9 写入文档与风险清单；恢复路径见 §3.3 | R0/R9 |
 | `tests/unit` 仍依赖 `go test` | 路径 C 的既定结果；报告层聚合，不改写断言 | R0 |
-| `t.Parallel()` 语义降级 | 1744 处统一映射为调度器属性；6 个 `sync.Once` 文件逐个人工判定 | R5 |
+| `t.Parallel()` 语义降级 | 1744 处统一映射为调度器属性；6 个 `sync.Once` 文件已逐个判定：R5 范围内 3 处均为 Case 内局部状态，另 3 处在 `tests/unit`（路径 C），结论见 R5 §5.4.4 | R5（已完成） |
 | Windows 进程树终止不可靠 | `taskkill /T /F` + 回收失败判 error，不用「已杀」冒充通过 | R1/R3 |
 | 取消只能通过终止 worker 进程树生效 | worker 与编排进程之间不新增取消 IPC；宽限期后强制终止，回收失败判 error | R3 |
 | 包级串行 / 独占键声明误配 | 声明只来自用例与 R2 冻结表，冲突表现为排队而非静默并行；R4.5 / R5 逐包复核 | R3/R5 |
@@ -197,19 +222,23 @@ R2 ──> R3 ──> R4 ──> R4.5 ──> R5 ──> R7 ──> R9
 | 共享 dev server 的写污染 | 写入必须可命名空间化，否则改独享后端 | R6 |
 | 镜像构建属写入语义 | 构建产物走独立缓存通道，不与 `Destructive + Shared` 混用 | R2 |
 | 测试工作空间是保留产物而非泄漏 | 零残留核验排除 `TEST_ARTIFACT_DIR` 与 `.test-artifacts` | R2 |
-| 真实设备占用与残留 | 真实批次单独授权；运行前后各做一次快照 | R5/R7 |
-| 覆盖清单与实际注册漂移 | `--audit-coverage` 作为 R5/R9 的硬门禁 | R5/R9 |
+| 真实设备占用与残留 | 真实批次单独授权；运行前后各做一次快照。B3 已在真实设备跑完，容器与卷在运行前后一致，远程 per-case 目录按迁移前口径保留 | R5（已完成）/R7 |
+| 覆盖清单与实际注册漂移 | `--audit-coverage` 作为 R5/R9 的硬门禁；R5 收口时为 279 覆盖 + 49 dropped、缺失 0、退出码 0 | R5（已完成）/R9 |
 | `service-process` 端口存在「探测空闲 → 服务监听」竞争窗口 | 就绪判定在超时内重试，窗口期失败判「没有就绪」 | R2 |
 | 远程用例漏声明 `ssh-host` 会让连接在终检里成为残留 | 有意保留：终检判 failed 并指出残留条目，强制声明依赖 | R2 |
+| 容器零残留核验是设备级的，同包并发会把别的用例的容器判成未登记 | 真实设备容器包整包串行（`remote/docker` 按 R5 D12 改为 `Parallel: false`），核验语义保持清单级 | R5（已完成）/R7 |
+| 需求删除后立即断言「拒绝重新开始」与后台收敛释放执行权竞态 | R5 D13：先只读等待执行权释放（上限 5 分钟）再断言，不放宽断言 | R5（已完成） |
 
 ---
 
 ## 9. 文档与 CI 同步清单（R8 / R9）
 
-- R8：`Makefile` 测试目标、`.github/workflows/ci.yml` 测试相关 Job、`.github/scripts/` 逐脚本归属。
-- R9：`docs/testing.md`、`docs/development.md`（常用命令）、`docs/workspace.md`（新增目录）、
-  `README.md`（索引与命令）、`.github/scripts/README.md`、`docs/runbook.md`（若涉及测试排障）、
-  `tests/README.md`（入口与目录说明）。
+- R8：`Makefile` 测试目标（`test-ssh` / `test-e2e` 仍指向 R5 已删除的 `tests/integration/ssh`、
+  `tests/e2e`，必须与 §7 的替代关系一起收敛）、`.github/workflows/ci.yml` 测试相关 Job、
+  `.github/scripts/` 逐脚本归属。
+- R9：`docs/testing.md`、`docs/development.md`（常用命令）、`docs/workspace.md`（新增目录与
+  已删除的 `tests/integration/**`、`tests/e2e/**` 路径）、`README.md`（索引与命令）、
+  `.github/scripts/README.md`、`docs/runbook.md`（若涉及测试排障）、`tests/README.md`（入口与目录说明）。
 - 文档只描述已落地能力；R9 之前不得提前写入未实现命令。
 
 ---

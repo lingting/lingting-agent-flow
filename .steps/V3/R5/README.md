@@ -306,6 +306,24 @@ B2 的 4 个包按 §4.3 删除了旧 `_test.go` 与 `TestMain`，`tests/integra
 planning}` 目录已整体移除（含重复的 Dockerfile，新包内各有一份同源副本）；
 `tests/integration/remote/workflow` 的旧 `_test.go` 与 `TestMain` 见 §5.4.1 的收口说明。
 
+### 5.4.4 `sync.Once` 判定结论（§4.5）
+
+R0 标记的 6 个含 `sync.Once` 的文件逐个判定完毕：
+
+| 文件 | 判定 |
+|---|---|
+| `local/scheduler/concurrency_acceptance_test.go` | `scanBarrier.once`，每条用例各自新建，已随迁移落到 Case 内局部状态 |
+| `remote/planning/ssh_teardown_test.go` | `breakableSSH.closeOnce`，同样是每条用例新建 |
+| `remote/workflow/acceptance_m6_test.go` | `watchConcurrency` 的局部 `once`，用例内创建 |
+| `tests/unit/app/planning_runtime_fixture_test.go` | 路径 C 范围，仍由 `go test` 执行，不在 R5 内处理 |
+| `tests/unit/app/requirement_delete_test.go` | 同上 |
+| `tests/unit/app/planningagent/planning_agent_fixture_test.go` | 同上 |
+
+结论：R5 范围内的 3 处 `sync.Once` 全部是 Case 内局部状态（结构体字段或函数内变量），不依赖包级
+时序，因此除 R2 冻结表里的 `remote/workflow` 之外没有新增整包串行声明；另外 3 处在 `tests/unit`，
+属于路径 C，不受迁移影响。`testkit` 里另有两处进程级 `once`（`runLogOnce` 与 `RunRoot` 的
+`rootOnce`）：迁移后的用例包改用 `NewAt`，不再触发它们，收口归 R7。
+
 ## 6. 阶段内需要冻结的决策
 
 | 编号 | 决策 | 建议 |
