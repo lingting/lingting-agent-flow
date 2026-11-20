@@ -1,7 +1,7 @@
 // Package testkit 提供 AgentFlow 测试统一使用的工作空间与环境辅助组件。
 //
 // 该文件集中处理真实远程测试容器的生命周期：登记清理责任、删除后核验实际状态、
-// 以及在全部测试结束后对远程 docker ps -a 做零残留核验。
+// 以及在用例结束时对远程 docker ps -a 做零残留核验。
 //
 // 三条硬性语义：
 //
@@ -30,7 +30,7 @@ const (
 	ContainerCleanupTimeout = 3 * time.Minute
 	// ContainerBaselineTimeout 是测试容器基线快照的超时上限。
 	ContainerBaselineTimeout = time.Minute
-	// ContainerVerifyTimeout 是包级最终核验的超时上限。
+	// ContainerVerifyTimeout 是零残留核验的超时上限。
 	ContainerVerifyTimeout = 5 * time.Minute
 	// containerStopTimeoutSeconds 是删除前停止容器时传给 docker stop 的秒数。
 	containerStopTimeoutSeconds = 10
@@ -81,10 +81,9 @@ type TrackedContainer struct {
 	Resolve func(ctx context.Context) ([]TrackedContainer, error)
 }
 
-// ContainerRun 记录一次测试运行创建的容器，负责逐容器清理与包级最终核验。
+// ContainerRun 记录一次测试运行创建的容器，负责逐容器清理与零残留核验。
 //
-// 每个测试包创建自己的 ContainerRun，并在 TestMain 里通过
-// RegisterContainerFinalizer 注册最终核验。
+// 用例在创建容器前登记清理责任，并在 t.Cleanup 里用 ContainerFinalizer 核验零残留。
 type ContainerRun struct {
 	// label 是本次运行的标识，出现在清理与核验日志中。
 	label string

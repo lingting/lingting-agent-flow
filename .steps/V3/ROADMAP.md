@@ -1,6 +1,6 @@
 # AgentFlow V3：统一测试执行器路线总规划
 
-**文档状态：** 主线规划。R0–R6 已完成，下一步是 R7（`testkit` 与 `TestMain` 收口）。
+**文档状态：** 主线规划。R0–R7 已完成，下一步是 R8（Makefile / CI / 脚本收敛）。
 **上游输入：** [审阅意见](TEST-RUNNER-REFACTOR-REVIEW.md)（P0/P1/P2 结论）、
 [R0 盘点与决策](R0/README.md)、[R1 接口与可运行骨架](R1/README.md)、
 [.plan/mian.md](../../.plan/main.md) 的「测试调整」。
@@ -112,6 +112,28 @@ R6 遗留（按归属交给后续阶段）：
 - `lingting-agent-flow-ui/README.md` 仍引用已删除的 `tests/internal/test-resource-policy.ts`，
   `test:e2e:safe` / `test:all:safe` 的说明需随 R8 一起更新。
 
+R7 已收口：`tests/internal/testkit` 的无引用组件（包级终检注册表 `finalize.go`、真实依赖旧门禁
+`realgate.go`、`FormatSQLite`、`RunLogPath`、`repoRoot`）已删除，`go build` / `go vet` / `gofmt` 干净；
+`testkit.Main` 收敛为只服务仍由 `go test` 执行的 16 个 unit 包（运行根目录 + `test.log`）。零残留只剩
+「用例级 `ContainerFinalizer` + 运行级 `residual_check`」一套实现，真实设备批次前后容器与卷一致，
+6 个真实包 12 次 `REMOTE_CONTAINER_VERIFY` PASS。阶段内冻结 D1–D6，其中 D6 解除 `remote/workflow`
+整包串行：远端工作空间、数据库、容器名与分支本就按用例隔离，`serialPackages` 现在为空表；同组内
+并发跑两条长用例均通过（656s→215s、1069s→311s），未出现设备级核验假失败。`remote/docker` 的包内
+串行（R5 D12）保持不变。
+
+R7 遗留（按归属交给后续阶段）：
+
+- `integration-remote-workflow/m6-requirement-sequential-tasks` 三次运行都被外部环境阻塞（代码保存
+  Git 结果不确定、`node:22.19.0-bookworm-slim` 元数据解析命中华为云镜像站 500、任务在
+  `project_task_not_head` 闸门下排队 15 分钟未收敛），需在环境恢复后复跑一次；这不是断言或迁移差异。
+- 已处置：最后一次复跑时消失的非测试容器 `agentflow-d13c8058797d`（8 天前创建、已 Exited）经确认是
+  设备维护者人工删除；用例级核验当时按设计只输出 `WARN REMOTE_CONTAINER_BASELINE_GONE`，不判失败，
+  语义按预期工作。R9 只需在运行手册里写清「基线差异只报告」这一点。
+- 一次长跑被中止后留下一只产品容器，说明「中止运行不会做零残留终检」，处置流程需写进
+  `docs/runbook.md`（R9）。
+- `cmd/agentflow-test-inventory` 的扫描输入仍是已删除的 `tests/integration/**`、`tests/e2e/**`；
+  R0 清单继续按冻结件使用。
+
 ---
 
 ## 3. 已冻结决策
@@ -157,7 +179,7 @@ R2–R7 只改代码、用例资产与本目录内的阶段文档；`Makefile`�
 | R4.5 | 已完成 | 试点：`local/scheduler` 41 条集成用例迁移，验证 Case API 与迁移成本 | [R4.5](R4.5/README.md) |
 | R5 | 已完成 | 迁移 18 个包 / 328 个集成与 E2E 用例，覆盖对账可执行，真实依赖包在真实设备上跑完 | [R5](R5/README.md) |
 | R6 | 已完成 | 前端适配器：Vitest 13 + Playwright 24 接入执行器，dev server 改为共享资源，覆盖对账退出码 0 | [R6](R6/README.md) |
-| R7 | 待执行 | TestMain 与 `testkit` 最终核验收口，删除迁移遗留 | [R7](R7/README.md) |
+| R7 | 已完成 | TestMain 与 `testkit` 最终核验收口、删除迁移遗留、真实设备零残留复核；1 条用例被外部环境阻塞已记录 | [R7](R7/README.md) |
 | R8 | 待执行 | Makefile / CI / 脚本收敛，非测试门禁保持可用 | [R8](R8/README.md) |
 | R9 | 待执行 | 全量验收、覆盖对账、文档同步与 V3 收口 | [R9](R9/README.md) |
 
@@ -173,8 +195,8 @@ R2 ──> R3 ──> R4 ──> R4.5 ──> R5 ──> R7 ──> R9
   包级串行声明。
 - R3 的 9 个调度场景未通过，不得进入 R4。
 - R4.5 试点结论未确认，不得开始 R5 的批量迁移。
-- R5 与 R6 已完成，可以进入 R7 / R8（R7 的 `testkit` 收口跑在 R5 迁移后的用例包与 R6 的前端用例包上，
-  R8 的门禁收敛需要前端适配器已就位）。
+- R5、R6 与 R7 已完成，可以进入 R8（R7 的 `testkit` 收口跑在 R5 迁移后的用例包与 R6 的前端用例包上，
+  R8 的门禁收敛需要前端适配器与收口后的入口都已就位）。
 - R8 未完成，不得进入 R9（R9 的验收必须跑在收敛后的门禁上）。
 
 ---
@@ -250,8 +272,10 @@ R2 ──> R3 ──> R4 ──> R4.5 ──> R5 ──> R7 ──> R9
 | 覆盖清单与实际注册漂移 | `--audit-coverage` 作为 R5/R9 的硬门禁；R5 收口时为 279 覆盖 + 49 dropped、缺失 0、退出码 0 | R5（已完成）/R9 |
 | `service-process` 端口存在「探测空闲 → 服务监听」竞争窗口 | 就绪判定在超时内重试，窗口期失败判「没有就绪」 | R2 |
 | 远程用例漏声明 `ssh-host` 会让连接在终检里成为残留 | 有意保留：终检判 failed 并指出残留条目，强制声明依赖 | R2 |
-| 容器零残留核验是设备级的，同包并发会把别的用例的容器判成未登记 | 真实设备容器包整包串行（`remote/docker` 按 R5 D12 改为 `Parallel: false`），核验语义保持清单级 | R5（已完成）/R7 |
+| 容器零残留核验是设备级的，同包并发会把别的用例的容器判成未登记 | 真实设备容器包整包串行（`remote/docker` 按 R5 D12 改为 `Parallel: false`），核验语义保持清单级；R7 D6 复核后 `remote/workflow` 解除串行——产品容器不匹配 testkit 测试前缀，不参与未登记判定 | R5（已完成）/R7 |
 | 需求删除后立即断言「拒绝重新开始」与后台收敛释放执行权竞态 | R5 D13：先只读等待执行权释放（上限 5 分钟）再断言，不放宽断言 | R5（已完成） |
+| 真实设备外部故障（GitHub HTTPS、镜像站 500、容器内模型 10 分钟超时） | 如实记为环境失败，不换本机替身、不放宽断言；`remote/workflow/m6-requirement-sequential-tasks` 待环境恢复后复跑一次 | R7（已完成）/R9 |
+| 中止运行不做零残留终检 | 编排进程被中止后残留需人工确认（R7 §4.4 事故记录），处置流程写入 `docs/runbook.md` | R9 |
 
 ---
 

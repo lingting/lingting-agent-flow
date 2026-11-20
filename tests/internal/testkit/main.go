@@ -33,7 +33,6 @@ var (
 	consoleError  = os.Stderr
 
 	runLogOnce sync.Once
-	runLogPath string
 	runLogFile *os.File
 	runLogErr  error
 	runLogPipe *os.File
@@ -41,7 +40,10 @@ var (
 	runLogSink io.Writer
 )
 
-// Main 是测试包统一入口，返回进程退出码。
+// Main 是 go test 测试包的统一入口，返回进程退出码。
+//
+// 只服务仍由 go test 执行的 tests/unit 包：集成与 E2E 用例由 agentflow-test 在 worker
+// 子进程里执行，不经过本入口。本入口只负责运行根目录与日志，不再承担包级资源核验。
 //
 // 它在 m.Run 之前完成三件事：
 //
@@ -59,19 +61,7 @@ func Main(m *testing.M) int {
 	}
 	forceVerbose()
 	code := m.Run()
-	// 最终核验必须在日志刷新之前执行：核验结论（清理结果、docker ps -a 证据）
-	// 要与测试结论出现在同一份 test.log 中，并且核验失败必须改变进程退出码。
-	finalizeFailed := runRegisteredFinalizers()
-	flushRunLog()
-	if finalizeFailed && code == 0 {
-		code = 1
-	}
 	return code
-}
-
-// RunLogPath 返回本次运行日志文件的绝对路径，尚未初始化时返回空字符串。
-func RunLogPath() string {
-	return runLogPath
 }
 
 // setupRunLog 创建运行根目录与日志文件，并把标准输出与 slog 重定向过去。
@@ -88,7 +78,6 @@ func setupRunLog() error {
 			runLogErr = fmt.Errorf("创建测试日志失败: %s: %w", path, openErr)
 			return
 		}
-		runLogPath = path
 		runLogFile = file
 		// 控制台输出与日志文件同时接收，终端上仍然能看到完整输出。
 		runLogSink = io.MultiWriter(consoleOutput, file)

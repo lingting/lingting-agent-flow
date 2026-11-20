@@ -122,12 +122,14 @@ var profileByType = func() map[string]ResourceProfile {
 	return index
 }()
 
-// serialPackages 是必须整包串行的包（R0 §6）。
+// serialPackages 是必须整包串行的包（R0 §6、R7 D6）。
 //
 // 键是 Go 测试包目录，与迁移后用例的 group 前缀一致；R5 迁移时按同一张表声明包级串行。
-var serialPackages = map[string]string{
-	"tests/integration/remote/workflow": "同一台真实远程 Docker 与镜像标签互斥，整包串行",
-}
+// R7 复核后表为空：remote/workflow 的每条用例都使用带随机后缀的独立远程工作空间、
+// 独立数据库与独立容器名，设备级容器核验也只把 testkit 前缀的容器当作测试资源，
+// 剩余共享面只有同输入的同名镜像构建，不再需要整包串行。机制保留，供后续确有互斥
+// 需要的包直接登记。
+var serialPackages = map[string]string{}
 
 // ResourceProfileOf 返回资源类型的调度属性。
 func ResourceProfileOf(resourceType string) (ResourceProfile, error) {

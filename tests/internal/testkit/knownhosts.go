@@ -53,7 +53,7 @@ func KnownHostsSources(t Tester) []string {
 // snapshotKnownHosts 把 known_hosts 来源复制进指定目录并返回快照路径。
 //
 // 校验只读快照，用户真实文件不会被任何代码写入；该函数不依赖 *testing.T，
-// 因此包级最终核验也可以复用同一套快照逻辑。
+// 因此不依赖测试上下文的调用方也可以直接复用。
 func snapshotKnownHosts(baseDir string, sources []string) ([]string, error) {
 	snapshotDir := filepath.Join(baseDir, "known_hosts-snapshot")
 	if err := os.MkdirAll(snapshotDir, 0o700); err != nil {
@@ -85,7 +85,7 @@ func knownHostsSourcePaths(t Tester) (paths []string, explicit bool) {
 // resolveKnownHostsSources 解析参与校验的 known_hosts 来源路径，不依赖 *testing.T。
 //
 // 显式配置但文件不可读时返回错误而不是回落到空信任库，使"配置写错"与"连接层缺陷"
-// 可以区分；包级最终核验复用同一套解析逻辑。
+// 可以区分；不依赖 *testing.T 的调用方复用同一套解析逻辑。
 func resolveKnownHostsSources() (paths []string, explicit bool, err error) {
 	configDir, err := configDirPath()
 	if err != nil {

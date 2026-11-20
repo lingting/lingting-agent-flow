@@ -9,10 +9,11 @@
 // tests/config/pi.yml 的 pi.enable。未启用或配置缺失时按缺少配置跳过；授权由编排进程
 // 判定一次并下发，用例不再读取 CI 环境变量。
 //
-// 资源：R2 判定本包为「独享 + 整包串行」（同一台真实远程 Docker 与镜像标签互斥）。
-// 本包按 Package 字段落在 R2 冻结的包级串行表里，用例不声明自并行；任务容器由用例
-// 登记清理责任，用例结束时逐条删除并按真实远程 docker ps -a 清单核验零残留。用例不
-// 声明远程资源，偏差与依据见 .steps/V3/R5/README.md 的 B3 决策 D9。
+// 资源：R2 原判定本包为「独享 + 整包串行」，R7 D6 复核后解除整包串行——每条用例的
+// 远端工作空间（带随机后缀）、数据库、容器名与分支都按用例隔离，设备级容器核验也
+// 只把 testkit 前缀的容器当作测试资源。任务容器仍由用例登记清理责任，用例结束时逐条
+// 删除并按真实远程 docker ps -a 清单核验零残留。用例不声明远程资源，偏差与依据见
+// .steps/V3/R5/README.md 的 B3 决策 D9。
 package workflow
 
 import (
@@ -35,13 +36,14 @@ const (
 // register 登记一条用例。
 //
 // 端到端链路包含两次真实镜像构建、容器内 Git 与 Pi 调用，执行时间远超默认上限，
-// 因此显式给出 Timeout；串行由包级串行表保证，用例不再声明并行。
+// 因此显式给出 Timeout。R7 D6 复核后本包不再整包串行：远端工作空间、数据库、
+// 容器名与分支都按用例隔离，用例声明自并行，并发上限仍只由 --parallel 决定。
 func register(name string, timeout time.Duration, run func(*testrunner.Context)) testrunner.Case {
 	return testrunner.Register(testrunner.Case{
 		ID:        caseGroup + "/" + name,
 		Package:   packagePath,
 		Timeout:   timeout,
-		Parallel:  false,
+		Parallel:  true,
 		Resources: databaseDecl(),
 		Run:       run,
 	})
@@ -55,7 +57,7 @@ func registerWithoutDB(name string, timeout time.Duration, run func(*testrunner.
 		ID:       caseGroup + "/" + name,
 		Package:  packagePath,
 		Timeout:  timeout,
-		Parallel: false,
+		Parallel: true,
 		Run:      run,
 	})
 }

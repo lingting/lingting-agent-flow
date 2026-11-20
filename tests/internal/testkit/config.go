@@ -537,15 +537,6 @@ func expandValue(value reflect.Value) {
 	}
 }
 
-func repoRoot(t Tester) string {
-	t.Helper()
-	root, err := repoRootPath()
-	if err != nil {
-		t.Fatalf("%v", err)
-	}
-	return root
-}
-
 // repoRootPath 通过编译期源码路径定位仓库根目录，不依赖 *testing.T。
 //
 // 该路径与工作目录无关，因此在任意包目录下执行 go test 都能找到 tests/config。

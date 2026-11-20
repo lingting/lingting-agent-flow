@@ -2,7 +2,6 @@ package testkit
 
 import (
 	"database/sql"
-	"fmt"
 
 	_ "modernc.org/sqlite" // 注册纯 Go 的 SQLite 驱动
 )
@@ -45,9 +44,4 @@ func (w *Workspace) SQLitePath() string {
 func (w *Workspace) MustSQLite(t Tester) *sql.DB {
 	t.Helper()
 	return OpenSQLite(t, w.DatabasePath())
-}
-
-// FormatSQLite 返回便于诊断的数据库描述。
-func FormatSQLite(path string) string {
-	return fmt.Sprintf("SQLITE=%s", path)
 }
