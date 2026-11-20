@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -49,6 +50,8 @@ type processLaunch struct {
 	dir string
 	// logPath 是子进程 stdout/stderr 的输出文件，空表示丢弃输出。
 	logPath string
+	// env 是追加到继承环境之上的变量，形如 KEY=VALUE；空表示完全继承。
+	env []string
 }
 
 // startManagedProcess 启动子进程并确认它没有在启动窗口内立即退出。
@@ -67,6 +70,9 @@ func startManagedProcess(launch processLaunch) (*managedProcess, error) {
 	cmd := exec.Command(launch.executable, launch.args...)
 	cmd.SysProcAttr = managedProcessGroupAttr()
 	cmd.Dir = launch.dir
+	if len(launch.env) > 0 {
+		cmd.Env = append(os.Environ(), launch.env...)
+	}
 	if logFile != nil {
 		cmd.Stdout = logFile
 		cmd.Stderr = logFile
@@ -149,6 +155,21 @@ func (p *managedProcess) stop(ctx context.Context) error {
 // 调用方必须按"无法确认"处理，不得当作已退出。
 func ProcessAlive(pid int) (bool, error) {
 	return processAlive(pid)
+}
+
+// KillProcessTree 终止指定进程的整棵进程树，可重复调用。
+//
+// 用例主体启动的前端 CLI（pnpm → node → 浏览器）同样按进程树回收：只杀直接子进程会留下
+// 浏览器与 Vitest fork，终检会把它们当成残留。
+func KillProcessTree(pid int) error {
+	return killProcessTree(pid)
+}
+
+// CommandProcessGroup 返回让外部 CLI 成为独立进程组的启动属性。
+//
+// 独立进程组是 KillProcessTree 的前提：Windows 用 taskkill /T，类 Unix 系统按 -pid 发信号。
+func CommandProcessGroup() *syscall.SysProcAttr {
+	return managedProcessGroupAttr()
 }
 
 // ChildProcessProvider 启动并托管一个随用例生命周期存活的子进程。

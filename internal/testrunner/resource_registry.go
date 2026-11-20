@@ -16,12 +16,16 @@ type ProviderOptions struct {
 	SelfExecutable string
 	// Hosts 是远程提供者使用的真实主机配置，键为 host_id；R4.5 试点负责装载。
 	Hosts map[string]RemoteHost
+	// FrontendRoot 是前端项目目录，供 dev server / browser / node-worker 三者定位 pnpm。
+	//
+	// 留空时提供者在分配阶段按当前目录向上查找 lingting-agent-flow-ui；找不到即如实失败。
+	FrontendRoot string
 }
 
-// DefaultProviders 按冻结契约构造 R2 的提供者集合。
+// DefaultProviders 按冻结契约构造 R2 与 R6 的提供者集合。
 //
-// 前端三类资源（node-worker / frontend-dev-server / browser）在 R6 补齐，本阶段没有
-// 提供者：声明它们的用例在分配阶段失败，不会退化成空句柄。
+// 前端三类资源（node-worker / frontend-dev-server / browser）由 R6 补齐：dev server 由
+// 编排进程启动并共享，browser / node-worker 只管理会话目录与进程登记。
 func DefaultProviders(opts ProviderOptions) (*Providers, error) {
 	root := strings.TrimSpace(opts.Root)
 	if root == "" {
@@ -45,6 +49,9 @@ func DefaultProviders(opts ProviderOptions) (*Providers, error) {
 		{ResourceDockerDaemon, NewDockerDaemonProvider(hosts)},
 		{ResourceRemoteContainer, NewRemoteContainerProvider(hosts, opts.RunID)},
 		{ResourceRemoteWorkspace, NewRemoteWorkspaceProvider(hosts, opts.RunID)},
+		{ResourceFrontendDevServer, NewFrontendDevServerProvider(root, opts.FrontendRoot)},
+		{ResourceBrowser, NewBrowserProvider(root, opts.FrontendRoot)},
+		{ResourceNodeWorker, NewNodeWorkerProvider(root, opts.FrontendRoot)},
 	}
 	for _, entry := range entries {
 		if err := providers.Register(entry.resourceType, entry.provider); err != nil {
@@ -56,12 +63,7 @@ func DefaultProviders(opts ProviderOptions) (*Providers, error) {
 
 // missingProviderError 返回未登记提供者的错误说明。
 func missingProviderError(resourceType string) error {
-	switch resourceType {
-	case ResourceNodeWorker, ResourceFrontendDevServer, ResourceBrowser:
-		return fmt.Errorf("资源类型 %q 的提供者由 R6（前端适配器）补齐", resourceType)
-	default:
-		return fmt.Errorf("资源类型 %q 没有已登记的提供者", resourceType)
-	}
+	return fmt.Errorf("资源类型 %q 没有已登记的提供者", resourceType)
 }
 
 // FaultInjection 是只用于自检的故障注入，正常运行全部保持零值。

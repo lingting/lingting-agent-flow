@@ -42,6 +42,13 @@ type Case struct {
 	// Register 从用例主体的函数名推导：迁移写法冻结为主体命名为 func run<原函数名去掉 Test
 	// 前缀>，因此推导结果与源文件一致；推导失败则保持为空，对账会把它报成无法解释的条目。
 	LegacyName string
+	// LegacyID 是 R0 冻结清单里非 go test 条目（R6 前端）的清单 ID。
+	//
+	// 前端用例是一条文件一条 Case，清单条目的 ID 形如
+	// "playwright:lingting-agent-flow-ui/tests/e2e/layout.spec.ts"，无法用包路径加测试
+	// 函数名表达，因此对账直接按清单 ID 匹配。它和 LegacyName 互斥：设置后不再按
+	// Package + LegacyName 对账，也不再要求用例主体遵循 run<Test*> 命名。
+	LegacyID string
 	// Parallel 表示调度器允许该用例与其他用例并行。
 	//
 	// false 表示该用例在串行作用域内独占执行（对齐 go test 里未标记 t.Parallel 的用例）；
@@ -64,6 +71,9 @@ var caseIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9/_-]*$`)
 
 // legacyNamePattern 约束来源 go test 函数名：只接受 Test 开头的标识符。
 var legacyNamePattern = regexp.MustCompile(`^Test[A-Za-z0-9_]+$`)
+
+// legacyIDPattern 约束非 go test 条目的清单 ID：形如 "playwright:<文件路径>"。
+var legacyIDPattern = regexp.MustCompile(`^[a-z]+:[^\s]+$`)
 
 // legacyRunPrefix 与 legacyTestPrefix 是迁移写法的命名约定：用例主体写成
 // func run<原函数名去掉 Test 前缀>，Register 据此把 Case 与冻结清单里的条目对上。
@@ -124,6 +134,17 @@ func (c Case) Validate() error {
 	if c.LegacyName != "" && !legacyNamePattern.MatchString(c.LegacyName) {
 		return fmt.Errorf("用例 %q 的 LegacyName %q 不是 go test 测试函数名", c.ID, c.LegacyName)
 	}
+	if c.LegacyID != "" {
+		if c.LegacyName != "" {
+			return fmt.Errorf("用例 %q 同时声明了 LegacyID 与 LegacyName", c.ID)
+		}
+		if strings.ContainsAny(c.LegacyID, " \t\r\n") {
+			return fmt.Errorf("用例 %q 的 LegacyID %q 不能包含空白字符", c.ID, c.LegacyID)
+		}
+		if !legacyIDPattern.MatchString(c.LegacyID) {
+			return fmt.Errorf("用例 %q 的 LegacyID %q 不是清单条目的 ID 形态", c.ID, c.LegacyID)
+		}
+	}
 	seen := make(map[string]struct{}, len(c.Resources))
 	for _, decl := range c.Resources {
 		if err := decl.Validate(); err != nil {
@@ -159,7 +180,8 @@ func Register(c Case) Case {
 	if c.Group == "" {
 		c.Group = groupOf(c.ID)
 	}
-	if c.LegacyName == "" {
+	// 声明了 LegacyID 的用例（R6 前端）直接按清单 ID 对账，不再推导 go test 函数名。
+	if c.LegacyName == "" && c.LegacyID == "" {
 		c.LegacyName = legacyNameOf(c.Run)
 	}
 	registryMu.Lock()

@@ -3,7 +3,6 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite-plus";
 
-import { resolveVitestWorkers } from "./tests/internal/test-resource-policy";
 import { peerDependencies } from "lingting-react-ui/package.json";
 
 // LRI 的 peerDependencies 是宿主去重列表的唯一来源。缺少任一条目时，构建产物会包含
@@ -14,6 +13,11 @@ const dedupe = Object.keys(peerDependencies);
 // Go HTTP 服务的开发监听地址。只用于开发代理，不会进入生产构建产物：
 // 前端源码始终请求同源相对路径 `/api/v1/...`。
 const DEV_API_TARGET = process.env.AGENTFLOW_DEV_API_TARGET ?? "http://127.0.0.1:26380";
+
+// 开发服务器监听地址：由执行器的 frontend-dev-server 提供者通过环境变量注入（R6 D7），
+// 独立运行时退回本地默认值。strictPort 保留：端口被占用时直接失败，不静默换端口。
+const DEV_HOST = process.env.AGENTFLOW_UI_HOST ?? "127.0.0.1";
+const DEV_PORT = Number(process.env.AGENTFLOW_UI_PORT ?? "26390");
 
 // 前端生产构建产物目录，即 Go 的嵌入包目录。
 const WEBUI_DIST_DIR = resolve(import.meta.dirname, "..", "internal", "webui", "dist");
@@ -51,8 +55,8 @@ export default defineConfig({
     },
   },
   server: {
-    host: "127.0.0.1",
-    port: 26390,
+    host: DEV_HOST,
+    port: DEV_PORT,
     // 开发环境把 /api 转发到 Go 服务：前端始终使用同源相对路径，生产环境由
     // Go 进程自身提供页面与 API，因此两套环境的请求路径完全一致。
     proxy: {
@@ -76,11 +80,10 @@ export default defineConfig({
   },
   test: {
     include: ["tests/**/*.test.ts"],
-    // 资源治理：Vitest 默认把 worker 数取成逻辑 CPU 数（18 核机器就是 18 个 fork），
-    // 会让前台负载长时间打满。这里统一从测试资源策略取值，默认最多 2 个 worker，
-    // 安全模式降到 1 个；`--maxWorkers` 仍可由命令行显式覆盖。
+    // 并发由统一执行器决定（R6 D6）：单次调用固定 1 个 worker，文件之间的并发只由调度器
+    // 控制，这里不再读取任何 worker 环境变量，也不保留第二套并发策略。
     // 只设置 maxWorkers，不同时设置 minWorkers / fileParallelism，避免参数互相冲突：
     // fileParallelism 保持默认，测试隔离（isolate）也保持默认开启。
-    maxWorkers: resolveVitestWorkers(),
+    maxWorkers: 1,
   },
 });

@@ -123,7 +123,9 @@ type CoverageEntry struct {
 	Stage string `json:"stage,omitempty"`
 	// PackagePath 是来源 go test 包路径（相对模块根）。
 	PackagePath string `json:"package_path,omitempty"`
-	// Name 是来源 go test 测试函数名。
+	// File 是前端条目的来源文件；go 条目为空。
+	File string `json:"file,omitempty"`
+	// Name 是来源 go test 测试函数名，前端条目为文件名里的用例名。
 	Name string `json:"name,omitempty"`
 	// CaseID 是注册表里的用例 ID，只对已覆盖条目有意义。
 	CaseID string `json:"case_id,omitempty"`
@@ -133,11 +135,13 @@ type CoverageEntry struct {
 
 // CoveragePackage 是单个来源包的覆盖统计，供批次验收逐包核对。
 type CoveragePackage struct {
-	PackagePath string `json:"package_path"`
-	InScope     int    `json:"in_scope"`
-	Covered     int    `json:"covered"`
-	Dropped     int    `json:"dropped"`
-	Missing     int    `json:"missing"`
+	PackagePath string `json:"package_path,omitempty"`
+	// File 是前端条目的来源文件（一个文件一条 Case），go 条目为空。
+	File    string `json:"file,omitempty"`
+	InScope int    `json:"in_scope"`
+	Covered int    `json:"covered"`
+	Dropped int    `json:"dropped"`
+	Missing int    `json:"missing"`
 }
 
 // CoverageTotals 是覆盖对账的汇总计数。
@@ -233,8 +237,12 @@ func AuditCoverage(cases []Case, opts CoverageOptions) (CoverageReport, error) {
 
 	inScope := make([]LegacyCaseEntry, 0, len(manifest.Cases))
 	byID := make(map[string]LegacyCaseEntry, len(manifest.Cases))
+	// stageByKey 记录清单全部条目的阶段：注册表里声明了清单条目、但该条目属于其它阶段的
+	// 用例不算「多余」，它们只是不在本次对账范围内（例如核对 R6 时仍在的 R5 用例）。
+	stageByKey := make(map[string]string, len(manifest.Cases))
 	for _, entry := range manifest.Cases {
 		byID[entry.ID] = entry
+		stageByKey[entryCoverageKey(entry)] = entry.Stage
 		if containsString(stages, entry.Stage) {
 			inScope = append(inScope, entry)
 		}
@@ -257,43 +265,36 @@ func AuditCoverage(cases []Case, opts CoverageOptions) (CoverageReport, error) {
 	packages := make(map[string]*CoveragePackage, len(inScope))
 	totals := &report.Totals
 	for _, entry := range inScope {
-		stats := packageStats(packages, entry.PackagePath)
+		stats := packageStats(packages, entry)
 		stats.InScope++
-		if _, ok := covered[auditKey(entry.PackagePath, entry.Name)]; ok {
+		key := entryCoverageKey(entry)
+		if _, ok := covered[key]; ok {
 			stats.Covered++
 			totals.Covered++
-			delete(covered, auditKey(entry.PackagePath, entry.Name))
+			delete(covered, key)
 			continue
 		}
 		if reason, ok := droppedByID[entry.ID]; ok {
 			stats.Dropped++
 			totals.Dropped++
-			report.Dropped = append(report.Dropped, CoverageEntry{
-				ID:          entry.ID,
-				Stage:       entry.Stage,
-				PackagePath: relativePackage(entry.PackagePath),
-				Name:        entry.Name,
-				Reason:      reason,
-			})
+			droppedEntry := coverageEntryOf(entry)
+			droppedEntry.Reason = reason
+			report.Dropped = append(report.Dropped, droppedEntry)
 			continue
 		}
 		stats.Missing++
 		totals.Missing++
-		report.Missing = append(report.Missing, CoverageEntry{
-			ID:          entry.ID,
-			Stage:       entry.Stage,
-			PackagePath: relativePackage(entry.PackagePath),
-			Name:        entry.Name,
-		})
+		report.Missing = append(report.Missing, coverageEntryOf(entry))
 	}
 	for _, leftover := range sortedCoverageKeys(covered) {
+		// 声明了清单条目、但条目属于其它阶段的用例只说明本次对账范围不同，不算多余。
+		if stage, ok := stageByKey[leftover]; ok && !containsString(stages, stage) {
+			continue
+		}
 		totals.Extra++
-		report.Extra = append(report.Extra, CoverageEntry{
-			CaseID:      covered[leftover],
-			PackagePath: strings.SplitN(leftover, "\x00", 2)[0],
-			Name:        strings.SplitN(leftover, "\x00", 2)[1],
-			Reason:      "注册表里的迁移用例在清单范围内没有对应条目",
-		})
+		extraEntry := covered[leftover]
+		extraEntry.Reason = "注册表里的迁移用例在清单范围内没有对应条目"
+		report.Extra = append(report.Extra, extraEntry)
 	}
 	report.Packages = flattenPackageStats(packages)
 	sortCoverageEntries(report.Missing)
@@ -302,17 +303,33 @@ func AuditCoverage(cases []Case, opts CoverageOptions) (CoverageReport, error) {
 	return report, nil
 }
 
-// indexCoverage 建立「来源包路径 + 来源函数名」到用例 ID 的索引。
+// indexCoverage 建立清单条目到用例 ID 的索引。
 //
-// 只统计设了 Package 的用例：Package 为空的是 R1 起新增的自检用例，没有清单来源。
-// 显式声明 RunnerInternal 的用例同样排除：它们只验证执行器自身语义，即便声明了 Package
-// 也不对应清单里的任何一条。
-func indexCoverage(cases []Case, report *CoverageReport) map[string]string {
-	covered := make(map[string]string, len(cases))
+// go 用例按「来源包路径 + 来源函数名」对账；声明 LegacyID 的用例（R6 前端，一个文件一条
+// Case）直接按清单 ID 对账。Package 为空且没有 LegacyID 的是 R1 起新增的自检用例，没有
+// 清单来源。显式声明 RunnerInternal 的用例同样排除：它们只验证执行器自身语义，即便声明了
+// Package 也不对应清单里的任何一条。
+func indexCoverage(cases []Case, report *CoverageReport) map[string]CoverageEntry {
+	covered := make(map[string]CoverageEntry, len(cases))
 	seen := make(map[string]string, len(cases))
 	for _, c := range cases {
 		if c.RunnerInternal {
 			report.Totals.RunnerInternal++
+			continue
+		}
+		if c.LegacyID != "" {
+			key := legacyIDKey(c.LegacyID)
+			if previous, exists := seen[key]; exists {
+				report.Problems = append(report.Problems, fmt.Sprintf(
+					"用例 %q 与 %q 都声明清单条目 %s",
+					previous,
+					c.ID,
+					c.LegacyID,
+				))
+				continue
+			}
+			seen[key] = c.ID
+			covered[key] = CoverageEntry{CaseID: c.ID, ID: c.LegacyID, File: c.Package}
 			continue
 		}
 		if strings.TrimSpace(c.Package) == "" {
@@ -337,14 +354,44 @@ func indexCoverage(cases []Case, report *CoverageReport) map[string]string {
 			continue
 		}
 		seen[key] = c.ID
-		covered[key] = c.ID
+		covered[key] = CoverageEntry{
+			CaseID:      c.ID,
+			PackagePath: relativePackage(c.Package),
+			Name:        c.LegacyName,
+		}
 	}
 	return covered
 }
 
-// auditKey 是覆盖对账的匹配键：来源包路径（相对模块根）+ 来源测试函数名。
+// auditKey 是 go 条目的匹配键：来源包路径（相对模块根）+ 来源测试函数名。
 func auditKey(packagePath, name string) string {
 	return relativePackage(packagePath) + "\x00" + name
+}
+
+// legacyIDKey 是非 go 条目（R6 前端）的匹配键，直接用清单 ID。
+func legacyIDKey(id string) string {
+	return "legacy-id\x00" + id
+}
+
+// entryCoverageKey 返回清单条目在注册表里的匹配键。
+//
+// 没有来源包路径的条目是前端条目：一个文件一条 Case，按清单 ID 对账。
+func entryCoverageKey(entry LegacyCaseEntry) string {
+	if strings.TrimSpace(entry.PackagePath) == "" {
+		return legacyIDKey(entry.ID)
+	}
+	return auditKey(entry.PackagePath, entry.Name)
+}
+
+// coverageEntryOf 把清单条目转成报告条目。
+func coverageEntryOf(entry LegacyCaseEntry) CoverageEntry {
+	report := CoverageEntry{ID: entry.ID, Stage: entry.Stage, Name: entry.Name}
+	if strings.TrimSpace(entry.PackagePath) == "" {
+		report.File = entry.File
+		return report
+	}
+	report.PackagePath = relativePackage(entry.PackagePath)
+	return report
 }
 
 // relativePackage 把完整导入路径统一成相对模块根的包路径。
@@ -352,41 +399,63 @@ func relativePackage(packagePath string) string {
 	return strings.TrimPrefix(packagePath, modulePath+"/")
 }
 
-// packageStats 取出（必要时新建）单个来源包的统计。
-func packageStats(stats map[string]*CoveragePackage, packagePath string) *CoveragePackage {
-	key := relativePackage(packagePath)
+// packageStats 取出（必要时新建）单个来源包或前端文件的统计。
+func packageStats(stats map[string]*CoveragePackage, entry LegacyCaseEntry) *CoveragePackage {
+	key := relativePackage(entry.PackagePath)
+	if strings.TrimSpace(entry.PackagePath) == "" {
+		key = entry.File
+	}
 	if existing, ok := stats[key]; ok {
 		return existing
 	}
-	created := &CoveragePackage{PackagePath: key}
+	created := &CoveragePackage{PackagePath: relativePackage(entry.PackagePath)}
+	if strings.TrimSpace(entry.PackagePath) == "" {
+		created = &CoveragePackage{File: entry.File}
+	}
 	stats[key] = created
 	return created
 }
 
-// flattenPackageStats 按包路径排序输出统计，便于逐包核对。
+// displayKey 返回统计行的显示键：go 条目用包路径，前端条目用来源文件。
+func (p CoveragePackage) displayKey() string {
+	if p.File != "" {
+		return p.File
+	}
+	return p.PackagePath
+}
+
+// flattenPackageStats 按包路径或来源文件排序输出统计，便于逐包核对。
 func flattenPackageStats(stats map[string]*CoveragePackage) []CoveragePackage {
 	flattened := make([]CoveragePackage, 0, len(stats))
 	for _, value := range stats {
 		flattened = append(flattened, *value)
 	}
 	sort.Slice(flattened, func(i, j int) bool {
-		return flattened[i].PackagePath < flattened[j].PackagePath
+		return flattened[i].displayKey() < flattened[j].displayKey()
 	})
 	return flattened
 }
 
-// sortCoverageEntries 按包路径与名称排序，使报告可复现。
+// displayKey 返回报告条目的显示键：go 条目用包路径，前端条目用来源文件。
+func (e CoverageEntry) displayKey() string {
+	if e.File != "" {
+		return e.File
+	}
+	return e.PackagePath
+}
+
+// sortCoverageEntries 按包路径（或来源文件）与名称排序，使报告可复现。
 func sortCoverageEntries(entries []CoverageEntry) {
 	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].PackagePath != entries[j].PackagePath {
-			return entries[i].PackagePath < entries[j].PackagePath
+		if entries[i].displayKey() != entries[j].displayKey() {
+			return entries[i].displayKey() < entries[j].displayKey()
 		}
 		return entries[i].Name < entries[j].Name
 	})
 }
 
 // sortedCoverageKeys 返回有序的索引键，使多余条目按稳定顺序输出。
-func sortedCoverageKeys(values map[string]string) []string {
+func sortedCoverageKeys(values map[string]CoverageEntry) []string {
 	keys := make([]string, 0, len(values))
 	for key := range values {
 		keys = append(keys, key)
@@ -443,7 +512,7 @@ func (r CoverageReport) Summary() string {
 		fmt.Fprintf(
 			&builder,
 			"  %-46s 覆盖 %3d / %3d（dropped %d，缺失 %d）\n",
-			stats.PackagePath,
+			stats.displayKey(),
 			stats.Covered,
 			stats.InScope,
 			stats.Dropped,
@@ -451,13 +520,13 @@ func (r CoverageReport) Summary() string {
 		)
 	}
 	for _, entry := range r.Missing {
-		fmt.Fprintf(&builder, "缺失 %s.%s（%s）\n", entry.PackagePath, entry.Name, entry.Stage)
+		fmt.Fprintf(&builder, "缺失 %s.%s（%s）\n", entry.displayKey(), entry.Name, entry.Stage)
 	}
 	for _, entry := range r.Dropped {
 		fmt.Fprintf(
 			&builder,
 			"dropped %s.%s：%s\n",
-			entry.PackagePath,
+			entry.displayKey(),
 			entry.Name,
 			entry.Reason,
 		)
@@ -467,7 +536,7 @@ func (r CoverageReport) Summary() string {
 			&builder,
 			"多余 %s（来源 %s.%s）\n",
 			entry.CaseID,
-			entry.PackagePath,
+			entry.displayKey(),
 			entry.Name,
 		)
 	}

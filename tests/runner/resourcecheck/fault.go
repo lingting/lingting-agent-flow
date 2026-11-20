@@ -18,17 +18,6 @@ var MissingSpecCase = testrunner.Register(testrunner.Case{
 	},
 })
 
-// UnimplementedCase 验证前端三类资源在 R2 分配阶段给出明确错误。
-var UnimplementedCase = testrunner.Register(testrunner.Case{
-	ID: "resourcecheck-fault/unimplemented",
-	Resources: []testrunner.ResourceDecl{{
-		Name: "browser", Type: testrunner.ResourceBrowser, Scope: testrunner.ScopeCaseExclusive,
-	}},
-	Run: func(c *testrunner.Context) {
-		c.Fatalf("browser 资源在 R2 不应被分配")
-	},
-})
-
 // ReleaseFailureCase 用于验证零残留终检本身。
 //
 // 正常运行时用例主体通过；配合 --selfcheck-fail-release local-port 时，端口释放必定失败，

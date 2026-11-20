@@ -95,20 +95,21 @@ var resourceProfiles = []ResourceProfile{
 	{
 		Type:         ResourceNodeWorker,
 		DefaultScope: ScopeCaseExclusive,
-		Note:         "R6 冻结：一轮一个 Vitest worker 进程",
+		Capacity:     4,
+		Note:         "R6 决定：一次运行里同时最多 4 个 Vitest 进程，沿用原 maxWorkers 上限",
 	},
 	{
 		Type:             ResourceFrontendDevServer,
 		DefaultScope:     ScopeRunShared,
 		Capacity:         1,
 		ExclusiveKeyKind: "base_url",
-		Note:             "R6 冻结：单个 dev server 按 base_url 共享",
+		Note:             "R6 决定：整次运行只启动一个 dev server，全部前端用例共享它的 base_url",
 	},
 	{
 		Type:         ResourceBrowser,
 		DefaultScope: ScopeCaseExclusive,
-		Capacity:     2,
-		Note:         "R6 冻结：本机可并发启动的无头浏览器实例上限",
+		Capacity:     4,
+		Note:         "R6 决定：并发无头浏览器上限 4，与迁移前的 playwright workers 默认值一致",
 	},
 }
 

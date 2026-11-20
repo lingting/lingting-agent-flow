@@ -1,9 +1,9 @@
 # AgentFlow V3：统一测试执行器路线总规划
 
-**文档状态：** 主线规划。R0–R5 已完成，下一步是 R6（前端适配器）。
+**文档状态：** 主线规划。R0–R6 已完成，下一步是 R7（`testkit` 与 `TestMain` 收口）。
 **上游输入：** [审阅意见](TEST-RUNNER-REFACTOR-REVIEW.md)（P0/P1/P2 结论）、
 [R0 盘点与决策](R0/README.md)、[R1 接口与可运行骨架](R1/README.md)、
-[.plan/mian.md](../../.plan/mian.md) 的「测试调整」。
+[.plan/mian.md](../../.plan/main.md) 的「测试调整」。
 **适用范围：** 只重组测试执行体系，不改产品行为、不做界面改版、不改数据库 Schema。
 
 ---
@@ -61,7 +61,7 @@ R1 明确留下的缺口（后续阶段逐项补齐）：资源提供者只有 `
 R2 已落地并冻结：16 类资源的 payload / Spec 契约、13 类提供者（8 类本机含 `local-port` + 5 类远程）、`Provider` 新增
 `Verify` 与 `Snapshot`、资源级自证与运行级基线比对终检、容量 / 独占键 / 包级串行三类调度输入，以及
 `tests/runner/resourcecheck` 的 8 条本机资源自检用例。远程提供者本阶段只做编译与静态检查，未在真实
-Pi / SSH / 远程 Docker 上运行；`node-worker` / `frontend-dev-server` / `browser` 仍由 R6 补齐。
+Pi / SSH / 远程 Docker 上运行；`node-worker` / `frontend-dev-server` / `browser` 由 R6 补齐（已完成）。
 R3 已落地并冻结：`internal/testrunner/scheduler.go` 是唯一并发决策者（`--parallel` 默认 8、容量、独占键、
 `Case.Package` 串行作用域与包级串行），`cancel.go` 给出「停止派发 → 宽限 → 终止进程树 → 释放资源 →
 零残留终检」的取消时序，`late.go` 让已定型结论不被迟到结果文件改写；报告新增 `concurrency` 与
@@ -90,6 +90,27 @@ R5 遗留（按归属交给后续阶段，不在 R5 内处理）：
   重新生成前按冻结件使用，改输入属于 R0 工具的后续维护。
 - `testkit.Main` 与包级终检仍被 `tests/unit`、`tests/runner` 自检包使用，收口归 R7。
 - `docs/` 里仍有大量 `tests/integration/...` 路径描述，文档同步归 R9。
+
+R6 已收口：13 个 Vitest 文件与 24 个 Playwright spec 迁到 Case 模型（一文件一条 Case），
+`--audit-coverage --audit-stage R6` 退出码 0（37 / 37 覆盖、缺失 0、多余 0），R5 范围复核仍为
+328 = 279 + 49、退出码 0。Vite dev server 从 Playwright 的 `webServer` 改为 `run-shared` 的
+`frontend-dev-server` 提供者（端口由 OS 分配后注入，释放后自证进程、端口与 HTTP 三重消失），
+`browser` / `node-worker` 只分配会话目录并核验用例登记的 CLI 进程；配置侧删除
+`tests/internal/test-resource-policy.ts`，`workers` / `maxWorkers` 固定 1，并发只由调度器决定。
+七次全量运行的终检都是 `passed`（其中五次 37 / 37 全通过），Playwright 297 条与 Vitest 361 条与迁移前逐条一致、
+跳过 0；其中两次并行运行出现 5s `expect` / 30s 用例超时，而旧入口在同一台机器上以 `--workers=4`
+对照时同样出现同类失败，判定为前端用例既有的 UI 时序抖动，不是迁移差异。阶段内冻结 D2（一文件一次
+CLI 调用）、D5（冷启动阈值）、D6（删除并发策略文件）、D7（产物统一到 `cases/<case>/artifacts/`）、
+D8（会话类资源的进程登记与 `node-worker` 契约微调）、D9（前端组建议 `--parallel 4`）。
+
+R6 遗留（按归属交给后续阶段）：
+
+- `node-worker` 的 payload 契约调整（`pid` 改为可选、新增必填 `session_dir` 与 `version`）需要回写
+  R2 §7，与 `resourcecheck-fault/unimplemented` 用例随提供者补齐而删除的记录一起。
+- `Makefile` 与 `.github/workflows/ci.yml` 仍走 `pnpm test:all:safe`，而 `playwright.config.ts` 已删除
+  `webServer`：前端 E2E 必须由 `agentflow-test` 启动 dev server 才能运行，切换归 R8。
+- `lingting-agent-flow-ui/README.md` 仍引用已删除的 `tests/internal/test-resource-policy.ts`，
+  `test:e2e:safe` / `test:all:safe` 的说明需随 R8 一起更新。
 
 ---
 
@@ -135,7 +156,7 @@ R2–R7 只改代码、用例资产与本目录内的阶段文档；`Makefile`�
 | R4 | 已完成 | 试点：真实服务进程的启动、就绪、取消与零残留 | [R4](R4/README.md) |
 | R4.5 | 已完成 | 试点：`local/scheduler` 41 条集成用例迁移，验证 Case API 与迁移成本 | [R4.5](R4.5/README.md) |
 | R5 | 已完成 | 迁移 18 个包 / 328 个集成与 E2E 用例，覆盖对账可执行，真实依赖包在真实设备上跑完 | [R5](R5/README.md) |
-| R6 | 待执行 | 前端适配器：Vitest 13 + Playwright 24，一文件一 Case | [R6](R6/README.md) |
+| R6 | 已完成 | 前端适配器：Vitest 13 + Playwright 24 接入执行器，dev server 改为共享资源，覆盖对账退出码 0 | [R6](R6/README.md) |
 | R7 | 待执行 | TestMain 与 `testkit` 最终核验收口，删除迁移遗留 | [R7](R7/README.md) |
 | R8 | 待执行 | Makefile / CI / 脚本收敛，非测试门禁保持可用 | [R8](R8/README.md) |
 | R9 | 待执行 | 全量验收、覆盖对账、文档同步与 V3 收口 | [R9](R9/README.md) |
@@ -152,8 +173,8 @@ R2 ──> R3 ──> R4 ──> R4.5 ──> R5 ──> R7 ──> R9
   包级串行声明。
 - R3 的 9 个调度场景未通过，不得进入 R4。
 - R4.5 试点结论未确认，不得开始 R5 的批量迁移。
-- R5 已完成；R6 未完成，仍不得进入 R7 / R8（R7 的 `testkit` 收口要跑在 R5 迁移后的用例包上，
-  R8 的门禁收敛要等 R6 的前端适配器一起做完）。
+- R5 与 R6 已完成，可以进入 R7 / R8（R7 的 `testkit` 收口跑在 R5 迁移后的用例包与 R6 的前端用例包上，
+  R8 的门禁收敛需要前端适配器已就位）。
 - R8 未完成，不得进入 R9（R9 的验收必须跑在收敛后的门禁上）。
 
 ---
@@ -162,7 +183,7 @@ R2 ──> R3 ──> R4 ──> R4.5 ──> R5 ──> R7 ──> R9
 
 编号 9 与 14 采用 R0 第 4 节的改写口径，其余条目由审阅意见与各阶段出口合并而来。
 
-1. `agentflow-test` 是集成测试与 E2E 测试的唯一执行器；`tests/unit` 仍由 `go test` 执行。
+1. `agentflow-test` 是集成测试、E2E 测试与前端测试的唯一执行器；`tests/unit` 仍由 `go test` 执行。
 2. 资源声明、分配、释放只由编排进程完成；用例不得自行创建或清理共享资源。
 3. 并发只由调度器决定；用例无法通过代码自行扩大并发。
 4. 每条 Case 在独立 worker 子进程中执行，独占 stdout/stderr，产物落在 `cases/<case-id>/`。
@@ -200,6 +221,8 @@ R2 ──> R3 ──> R4 ──> R4.5 ──> R5 ──> R7 ──> R9
 | `go test -run 'TestFoo' ./tests/unit/store/...` | 单元层不变；集成层用 `agentflow-test <group>/<name>` 或分组前缀 |
 | `make test-unit` | 保留，仍是 `go test ./tests/unit/...` |
 | `make test-e2e` / `test-ssh`（当前目标指向 R5 已删除的目录） | 改为 `agentflow-test` 对应分组，真实依赖分组保留授权门禁；`test-local` / `test-pi` 目标已不存在 |
+| `pnpm test:e2e:safe` / `pnpm test:all:safe`（Playwright 依赖 `webServer` 自启 dev server，R6 已移除该能力） | 前端 E2E 改为 `agentflow-test --parallel 4 frontend`（dev server 由 `frontend-dev-server` 提供者启动）；Vitest 单测仍可用 `pnpm test`（`vp test run`） |
+| `run-frontend-tests.sh`（CI 的 `ui-test` Job） | 同上入口；脚本在 R8 删除，`ui-test` Job 改为调用 `agentflow-test` 的 `frontend` 组 |
 | `-count=1` | Case 默认不复用结果，不提供 `--count`；重复运行即重新执行 |
 | `-short` | 不支持：现状 0 处 `testing.Short()` |
 | `-timeout` | `--timeout`（默认 10m），Case 可用 `Timeout` 覆盖 |
@@ -218,8 +241,9 @@ R2 ──> R3 ──> R4 ──> R4.5 ──> R5 ──> R7 ──> R9
 | Windows 进程树终止不可靠 | `taskkill /T /F` + 回收失败判 error，不用「已杀」冒充通过 | R1/R3 |
 | 取消只能通过终止 worker 进程树生效 | worker 与编排进程之间不新增取消 IPC；宽限期后强制终止，回收失败判 error | R3 |
 | 包级串行 / 独占键声明误配 | 声明只来自用例与 R2 冻结表，冲突表现为排队而非静默并行；R4.5 / R5 逐包复核 | R3/R5 |
-| 前端冷启动开销 | R6 先测基线，再由用户确认可接受阈值后才批量迁移 | R6 |
-| 共享 dev server 的写污染 | 写入必须可命名空间化，否则改独享后端 | R6 |
+| 前端冷启动开销 | R6 先测基线再决定调用方式：基线全量 4m03，适配层 4m09–4m48，未超「慢一倍」红线，按一文件一次调用落地 | R6（已完成） |
+| 共享 dev server 的写污染 | R6 逐 spec 审计：18 个直接 `page.route`、5 个经 helper、1 个纯渲染，均无服务端写入与固定端口依赖，共享成立 | R6（已完成） |
+| 并发下前端 UI 时序抖动（既有） | 两套入口同形态复现；前端组建议 `--parallel 4`，不加重试、不放宽断言；如需消除须单独决策 | R6（已完成）/R7 |
 | 镜像构建属写入语义 | 构建产物走独立缓存通道，不与 `Destructive + Shared` 混用 | R2 |
 | 测试工作空间是保留产物而非泄漏 | 零残留核验排除 `TEST_ARTIFACT_DIR` 与 `.test-artifacts` | R2 |
 | 真实设备占用与残留 | 真实批次单独授权；运行前后各做一次快照。B3 已在真实设备跑完，容器与卷在运行前后一致，远程 per-case 目录按迁移前口径保留 | R5（已完成）/R7 |
@@ -235,10 +259,13 @@ R2 ──> R3 ──> R4 ──> R4.5 ──> R5 ──> R7 ──> R9
 
 - R8：`Makefile` 测试目标（`test-ssh` / `test-e2e` 仍指向 R5 已删除的 `tests/integration/ssh`、
   `tests/e2e`，必须与 §7 的替代关系一起收敛）、`.github/workflows/ci.yml` 测试相关 Job、
-  `.github/scripts/` 逐脚本归属。
+  `.github/scripts/` 逐脚本归属；`run-frontend-tests.sh` 与 `ci.yml` 的 `ui-test` Job 改为
+  `agentflow-test --parallel 4 frontend`（R6 已移除 Playwright 的 `webServer`，脚本不能再独立起 dev server）；
+  `lingting-agent-flow-ui/package.json` 的 `test:e2e:safe` / `test:all:safe` 同步调整。
 - R9：`docs/testing.md`、`docs/development.md`（常用命令）、`docs/workspace.md`（新增目录与
   已删除的 `tests/integration/**`、`tests/e2e/**` 路径）、`README.md`（索引与命令）、
-  `.github/scripts/README.md`、`docs/runbook.md`（若涉及测试排障）、`tests/README.md`（入口与目录说明）。
+  `.github/scripts/README.md`、`docs/runbook.md`（若涉及测试排障）、`tests/README.md`（入口与目录说明）、
+  `lingting-agent-flow-ui/README.md`（仍引用 R6 删除的 `tests/internal/test-resource-policy.ts`，需改写并发与入口说明）。
 - 文档只描述已落地能力；R9 之前不得提前写入未实现命令。
 
 ---
@@ -246,7 +273,7 @@ R2 ──> R3 ──> R4 ──> R4.5 ──> R5 ──> R7 ──> R9
 ## 10. 与 V2 的关系
 
 V2 已收口（[../V2-final.md](../V2-final.md)）。V3 是 V2 之后的独立里程碑，R0 是它的第一个阶段；
-不并入 V2 的阶段编号，也不替换 `.plan/mian.md` 的产品需求清单。V3 收口时新增 `.steps/V3-final.md`，
+不并入 V2 的阶段编号，也不替换 `../../.plan/main.md` 的产品需求清单。V3 收口时新增 `.steps/V3-final.md`，
 格式与 `V2-final.md` 对齐。
 
 ---

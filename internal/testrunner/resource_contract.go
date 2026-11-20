@@ -129,21 +129,21 @@ var resourceContracts = []ResourceContract{
 	},
 	{
 		Type:            ResourceNodeWorker,
-		PayloadKeys:     []string{"pid", "runtime"},
-		PayloadRequired: []string{"pid", "runtime"},
-		Fingerprint:     "R6 冻结",
+		PayloadKeys:     []string{"pid", "runtime", "session_dir", "version"},
+		PayloadRequired: []string{"runtime", "session_dir", "version"},
+		Fingerprint:     "Node 运行时版本（pnpm exec node --version）",
 	},
 	{
 		Type:            ResourceFrontendDevServer,
 		PayloadKeys:     []string{"base_url", "pid"},
 		PayloadRequired: []string{"base_url", "pid"},
-		Fingerprint:     "R6 冻结",
+		Fingerprint:     "前端 package.json 的 SHA-256",
 	},
 	{
 		Type:            ResourceBrowser,
 		PayloadKeys:     []string{"browser", "version", "session_dir"},
 		PayloadRequired: []string{"browser", "version", "session_dir"},
-		Fingerprint:     "R6 冻结",
+		Fingerprint:     "Playwright 版本（pnpm exec playwright --version）",
 	},
 }
 
