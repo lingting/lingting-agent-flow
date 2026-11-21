@@ -142,7 +142,7 @@ R6 才消费的 `node-worker` / `browser` / `frontend-dev-server` 本阶段只�
 | `remote-container` | case-exclusive | **container_id**、**host_id** | `host_id`、`image`（均必填）、`command` | 镜像 ID | R2 |
 | `remote-workspace` | case-exclusive | **host_id**、**path** | `host_id`（必填）、`path` | 空 | R2 |
 | `node-worker` | case-exclusive | **pid**、**runtime** | — | R6 冻结 | R6 |
-| `frontend-dev-server` | run-shared | **base_url**、**pid** | — | R6 冻结 | R6 |
+| `frontend-dev-server` | run-shared | **base_url**、**pid**、**listener_pids** | — | R6 冻结，V4 补监听进程号 | R6 |
 | `browser` | case-exclusive | **browser**、**version**、**session_dir** | — | R6 冻结 | R6 |
 
 `endpoint` 形如 `ssh://user@host:port`（Docker 命令经该 SSH 连接执行）。`host_key` 是 known_hosts

@@ -33,6 +33,29 @@ func verifyPortClosed(ctx context.Context, address string) error {
 	return nil
 }
 
+// waitPortClosed 在限时内轮询端口是否不再接受连接。
+//
+// 从投递终止信号到内核关闭监听 socket 有一个短窗口，固定休眠不能替代观测：只有连接失败
+// 才算关闭，期限用尽仍未关闭时返回最后一次观测到的原因。
+func waitPortClosed(ctx context.Context, port int, timeout time.Duration) error {
+	address := fmt.Sprintf("127.0.0.1:%d", port)
+	deadline := time.Now().Add(timeout)
+	for {
+		err := verifyPortClosed(ctx, address)
+		if err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("等待端口 %s 关闭时上下文已结束: %w", address, ctx.Err())
+		case <-time.After(processGonePollInterval):
+		}
+	}
+}
+
 // waitHTTPReady 轮询等待 HTTP 端点返回 200，用于服务类资源的就绪判定。
 func waitHTTPReady(ctx context.Context, baseURL string, timeout time.Duration) error {
 	if timeout <= 0 {

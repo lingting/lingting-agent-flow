@@ -1,11 +1,13 @@
 package resourcecheck
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"time"
 
 	"github.com/lingting/agentflow/internal/testrunner"
@@ -149,4 +151,111 @@ func waitPortClosed(c *testrunner.Context, address string) error {
 		case <-time.After(processTreePollInterval):
 		}
 	}
+}
+
+// OrphanListenerCase 验证启动器退出后仍能定位并回收它留下的监听进程。
+//
+// 现场来自前端 dev server 的真实故障：pnpm / vp dev 先退出，实际监听由已经换了进程组的
+// 进程持有，随后又被别的进程收养。此时从启动器 PID 出发的 PPID 与 PGID 两条线索都为空，
+// 必须改用端口监听查询定位；否则端口会一直开着，而按启动器回收看不到任何"残留进程"。
+var OrphanListenerCase = testrunner.Register(testrunner.Case{
+	ID:      "resourcecheck/orphan-listener",
+	Timeout: processTreeCaseTimeout,
+	Run:     runOrphanListener,
+})
+
+// runOrphanListener 构造"启动器先退出、监听进程被收养"的进程树，并按端口监听查询回收。
+func runOrphanListener(c *testrunner.Context) {
+	if runtime.GOOS == "windows" {
+		c.Skipf("孤儿监听进程场景用 setsid 构造，只在类 Unix 平台验证")
+	}
+	setsidPath, err := exec.LookPath("setsid")
+	if err != nil {
+		c.Skipf("当前环境没有 setsid，无法构造脱离会话的监听进程: %v", err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		c.Fatalf("获取执行器自身路径失败: %v", err)
+	}
+	address, err := freeLoopbackAddress()
+	if err != nil {
+		c.Fatalf("分配监听地址失败: %v", err)
+	}
+	port, err := listenerPort(address)
+	if err != nil {
+		c.Fatalf("%v", err)
+	}
+	c.Cleanup(func() {
+		pids, pidErr := testrunner.ListenerPIDs(context.Background(), port)
+		if pidErr != nil {
+			c.Errorf("清理时无法定位端口 %d 的监听进程: %v", port, pidErr)
+			return
+		}
+		for _, pid := range pids {
+			if killErr := testrunner.KillProcessTree(pid); killErr != nil {
+				c.Errorf("清理监听进程 %d 失败: %v", pid, killErr)
+			}
+		}
+	})
+	// 启动器把监听进程放进新会话后立即退出：监听进程随后被别的进程收养，PPID 与 PGID
+	// 都不再指向启动器，按启动器进程树回收必然扑空。
+	script := fmt.Sprintf("%q %q --serve %s >/dev/null 2>&1 & exit 0", setsidPath, executable, address)
+	command := exec.Command("sh", "-c", script)
+	if err := command.Start(); err != nil {
+		c.Fatalf("启动孤儿监听进程失败: %v", err)
+	}
+	launcher := command.Process.Pid
+	if err := command.Wait(); err != nil {
+		c.Fatalf("等待启动器 %d 退出失败: %v", launcher, err)
+	}
+	alive, err := testrunner.ProcessAlive(launcher)
+	if err != nil {
+		c.Fatalf("核验启动器 %d 是否退出失败: %v", launcher, err)
+	}
+	if alive {
+		c.Fatalf("启动器 %d 仍然存活，孤儿监听场景没有构造出来", launcher)
+	}
+	if err := waitListener(c, address); err != nil {
+		c.Fatalf("孤儿监听进程没有就绪: %v", err)
+	}
+	listeners, err := testrunner.ListenerPIDs(c.Context(), port)
+	if err != nil {
+		c.Fatalf("无法定位孤儿监听进程: %v", err)
+	}
+	if len(listeners) == 0 {
+		c.Fatalf("端口 %s 已可连接，但监听查询没有解析出任何进程", address)
+	}
+	c.Logf("孤儿监听进程已就绪：启动器 %d 已退出，监听进程 %v", launcher, listeners)
+
+	for _, pid := range listeners {
+		if err := testrunner.KillProcessTree(pid); err != nil {
+			c.Fatalf("按监听进程号终止 %d 失败: %v", pid, err)
+		}
+	}
+	if err := waitPortClosed(c, address); err != nil {
+		c.Fatal(err)
+	}
+	for _, pid := range listeners {
+		alive, err := testrunner.ProcessAlive(pid)
+		if err != nil {
+			c.Fatalf("核验监听进程 %d 是否存活失败: %v", pid, err)
+		}
+		if alive {
+			c.Fatalf("监听进程 %d 在终止后仍然存活", pid)
+		}
+	}
+	c.Logf("孤儿监听进程已按端口监听查询定位并回收：端口 %s 已关闭", address)
+}
+
+// listenerPort 从监听地址里取出端口号。
+func listenerPort(address string) (int, error) {
+	_, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		return 0, fmt.Errorf("解析监听地址 %q 失败: %w", address, err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		return 0, fmt.Errorf("监听地址 %q 的端口 %q 不是合法端口号: %w", address, portText, err)
+	}
+	return port, nil
 }

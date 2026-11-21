@@ -6,20 +6,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 )
-
-// listenerPattern 匹配 ss -p 输出里的 "pid=<进程号>" 片段。
-var listenerPattern = regexp.MustCompile(`pid=(\d+)`)
 
 // processGroupAttr 让 worker 成为独立进程组，便于按组终止整棵进程树。
 func processGroupAttr() *syscall.SysProcAttr {
@@ -216,84 +210,68 @@ func processZombie(pid int) (bool, error) {
 
 // describePortOccupied 在端口自证失败后补充占用该端口的进程信息。
 //
-// 自证结论不因诊断而改变：端口仍然可以连接就是释放失败，诊断只负责说明是谁占着它。
+// 自证结论不因诊断而改变：端口仍然可以连接就是释放失败，诊断只负责说明是谁占着它。查询
+// 没有解析出进程号时按矛盾处理并输出原始输出：TCP 连接成功已经证明监听项存在。
 func describePortOccupied(ctx context.Context, cause error, address string) error {
-	listeners, err := listenerProcesses(ctx, address)
+	port, err := listenerPortOf(address)
 	if err != nil {
-		return fmt.Errorf("%w（无法定位监听进程：%v）", cause, err)
+		return fmt.Errorf("%w（%v）", cause, err)
 	}
-	if len(listeners) == 0 {
-		return fmt.Errorf("%w（没有查到监听该端口的进程）", cause)
+	query, queryErr := queryPortListeners(ctx, port)
+	if queryErr != nil {
+		return fmt.Errorf("%w（无法定位监听进程：%v）", cause, queryErr)
 	}
-	return fmt.Errorf("%w（监听进程：%s）", cause, describeProcesses(listeners))
+	if len(query.PIDs) == 0 {
+		return fmt.Errorf(
+			"%w（端口 %d 仍可连接但查询没有解析出监听进程：%s）",
+			cause,
+			port,
+			describeListenerQuery(query),
+		)
+	}
+	return fmt.Errorf("%w（监听进程：%s）", cause, describeProcesses(listenerInfos(query.PIDs)))
 }
 
-// listenerProcesses 返回监听指定地址所在端口的进程，只用于失败诊断。
-func listenerProcesses(ctx context.Context, address string) ([]processInfo, error) {
-	_, port, err := net.SplitHostPort(address)
-	if err != nil {
-		return nil, fmt.Errorf("解析监听地址 %q 失败: %w", address, err)
+// listenerInfos 把监听进程号补全为进程观测信息，进程已退出时至少保留进程号。
+func listenerInfos(pids []int) []processInfo {
+	infos := make([]processInfo, 0, len(pids))
+	byPID := make(map[int]processInfo, len(pids))
+	if all, err := listProcesses(); err == nil {
+		for _, info := range all {
+			byPID[info.PID] = info
+		}
 	}
-	pids, err := listenerPIDs(ctx, port)
-	if err != nil {
-		return nil, err
-	}
-	if len(pids) == 0 {
-		return nil, nil
-	}
-	all, err := listProcesses()
-	if err != nil {
-		return nil, err
-	}
-	byPID := make(map[int]processInfo, len(all))
-	for _, info := range all {
-		byPID[info.PID] = info
-	}
-	listeners := make([]processInfo, 0, len(pids))
 	for _, pid := range pids {
 		info, exists := byPID[pid]
 		if !exists {
 			info = processInfo{PID: pid}
 		}
-		listeners = append(listeners, info)
+		infos = append(infos, info)
 	}
-	return listeners, nil
+	return infos
 }
 
-// listenerPIDs 查询监听指定端口的进程号：Linux 用 ss，macOS 用 lsof。
+// terminateProcessTrees 终止多个进程号各自的进程树，并返回终止前采集到的全部进程信息。
 //
-// 没有匹配项按"没有监听进程"处理：ss 返回空输出，lsof 返回非零退出码且同样没有输出。
-func listenerPIDs(ctx context.Context, port string) ([]int, error) {
-	commandCtx, cancel := context.WithTimeout(ctx, resourceProbeTimeout)
-	defer cancel()
-	var command *exec.Cmd
-	switch runtime.GOOS {
-	case "linux":
-		command = exec.CommandContext(commandCtx, "ss", "-H", "-ltnp", "sport = :"+port)
-	case "darwin":
-		command = exec.CommandContext(commandCtx, "lsof", "-nP", "-t", "-iTCP:"+port, "-sTCP:LISTEN")
-	default:
-		return nil, fmt.Errorf("平台 %s 没有提供端口监听进程查询", runtime.GOOS)
-	}
-	output, err := command.Output()
-	var exitErr *exec.ExitError
-	if err != nil && !(errors.As(err, &exitErr) && len(output) == 0) {
-		return nil, fmt.Errorf("查询端口 %s 的监听进程失败: %w", port, err)
-	}
-	text := string(output)
-	pids := make([]int, 0, 2)
-	if runtime.GOOS == "linux" {
-		for _, match := range listenerPattern.FindAllStringSubmatch(text, -1) {
-			if pid, parseErr := strconv.Atoi(match[1]); parseErr == nil {
-				pids = append(pids, pid)
-			}
+// 多个监听进程可能共享同一个监听 socket，必须全部回收；已经退出的进程号按空树处理，不把
+// ESRCH 当成失败。终止失败与采集结果一并返回：等待进程消失仍然需要这份清单。
+func terminateProcessTrees(pids []int) ([]processInfo, error) {
+	members := make([]processInfo, 0, len(pids))
+	var killErr error
+	seen := make(map[int]struct{}, len(pids))
+	for _, pid := range pids {
+		if pid <= 0 {
+			continue
 		}
-		return pids, nil
-	}
-	for _, line := range strings.Split(text, "\n") {
-		if pid, parseErr := strconv.Atoi(strings.TrimSpace(line)); parseErr == nil {
-			pids = append(pids, pid)
+		if _, exists := seen[pid]; exists {
+			continue
+		}
+		seen[pid] = struct{}{}
+		collected, err := terminateProcessTree(pid)
+		members = append(members, collected...)
+		if err != nil {
+			killErr = errors.Join(killErr, err)
 		}
 	}
-	return pids, nil
+	return members, killErr
 }

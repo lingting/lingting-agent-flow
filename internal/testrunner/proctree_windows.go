@@ -81,11 +81,39 @@ func terminateProcessTree(pid int) ([]processInfo, error) {
 	return nil, killProcessTree(pid)
 }
 
-// describePortOccupied 在端口自证失败后补充占用该端口的进程信息。
+// describePortOccupied 在端口自证失败后补充占用该端口的进程号。
 //
-// Windows 的进程树回收由 taskkill /T /F 覆盖，这里不额外调用 netstat，失败原因保持端口探测原文。
+// Windows 没有与 ps 等价的父子关系查询，诊断只给出 netstat 查到的监听进程号；自证结论不因
+// 诊断而改变：端口仍然可以连接就是释放失败。
 func describePortOccupied(ctx context.Context, cause error, address string) error {
-	return cause
+	port, err := listenerPortOf(address)
+	if err != nil {
+		return fmt.Errorf("%w（%v）", cause, err)
+	}
+	pids, queryErr := ListenerPIDs(ctx, port)
+	if queryErr != nil {
+		return fmt.Errorf("%w（无法定位监听进程：%v）", cause, queryErr)
+	}
+	if len(pids) == 0 {
+		return fmt.Errorf("%w（端口 %d 仍可连接但查询没有解析出监听进程）", cause, port)
+	}
+	return fmt.Errorf("%w（监听进程号：%v）", cause, pids)
+}
+
+// terminateProcessTrees 用 taskkill /T /F 逐个终止这些进程树。
+//
+// 返回值为空：Windows 没有与 ps 等价的父子关系查询，回收结果由进程存活自证确认。
+func terminateProcessTrees(pids []int) ([]processInfo, error) {
+	var killErr error
+	for _, pid := range pids {
+		if pid <= 0 {
+			continue
+		}
+		if err := killProcessTree(pid); err != nil {
+			killErr = errors.Join(killErr, err)
+		}
+	}
+	return nil, killErr
 }
 
 // processAlive 报告指定进程号是否仍然存在。

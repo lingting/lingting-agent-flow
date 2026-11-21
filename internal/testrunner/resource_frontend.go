@@ -28,6 +28,8 @@ const (
 	frontendSessionPIDFile = "process.pid"
 	// frontendPackageManager 是前端项目使用的包管理器可执行文件。
 	frontendPackageManager = "pnpm"
+	// frontendListenerPayload 是句柄里记录 dev server 监听进程号的 payload 键。
+	frontendListenerPayload = "listener_pids"
 )
 
 // defaultFrontendRoot 从当前工作目录向上查找前端项目目录，找不到时返回空字符串。
@@ -121,7 +123,10 @@ func NewFrontendDevServerProvider(root, frontendRoot string) *FrontendDevServerP
 	}
 }
 
-// Acquire 启动 dev server 并等待 HTTP 就绪，句柄给出 base_url 与 pid。
+// Acquire 启动 dev server 并等待 HTTP 就绪，句柄给出 base_url、pid 与监听进程号。
+//
+// 监听进程号在就绪后立即记录：它是资源回收的关键句柄，端口关闭只由 Verify 的探测断言，
+// 不能用"启动器已退出"替代。
 func (p *FrontendDevServerProvider) Acquire(ctx context.Context, decl ResourceDecl) (Handle, error) {
 	if err := acquirePrecheck(ctx, decl); err != nil {
 		return Handle{}, err
@@ -162,18 +167,39 @@ func (p *FrontendDevServerProvider) Acquire(ctx context.Context, decl ResourceDe
 		return Handle{}, err
 	}
 	if err := waitHTTPReady(ctx, baseURL+"/", frontendDevServerReadyTimeout); err != nil {
-		stopErr := process.stop(context.Background())
+		stopErr := stopFrontendDevServer(context.Background(), process, nil)
 		if stopErr != nil {
 			return Handle{}, fmt.Errorf("dev server %q 没有就绪且回收失败: %w", decl.Name, err)
 		}
 		return Handle{}, fmt.Errorf("分配资源 %q 时 dev server 没有就绪: %w", decl.Name, err)
 	}
+	listeners, err := waitPortListeners(ctx, port)
+	if err != nil {
+		stopErr := stopFrontendDevServer(context.Background(), process, listeners.PIDs)
+		if stopErr != nil {
+			return Handle{}, fmt.Errorf("dev server %q 的监听进程查询失败且回收失败: %w", decl.Name, err)
+		}
+		return Handle{}, fmt.Errorf("分配资源 %q 时无法定位 dev server 的监听进程: %w", decl.Name, err)
+	}
+	if len(listeners.PIDs) == 0 {
+		cause := fmt.Errorf(
+			"分配资源 %q 时监听发现与就绪探测矛盾: %s 已就绪，但%s",
+			decl.Name,
+			baseURL,
+			describeListenerQuery(listeners),
+		)
+		if stopErr := stopFrontendDevServer(context.Background(), process, nil); stopErr != nil {
+			return Handle{}, fmt.Errorf("%w（回收已启动的进程失败: %v）", cause, stopErr)
+		}
+		return Handle{}, cause
+	}
 	handle, err := buildHandle(decl, map[string]string{
-		"base_url": baseURL,
-		"pid":      strconv.Itoa(process.pid()),
+		"base_url":              baseURL,
+		"pid":                   strconv.Itoa(process.pid()),
+		frontendListenerPayload: encodeListenerPIDs(listeners.PIDs),
 	}, fingerprint)
 	if err != nil {
-		_ = process.stop(context.Background())
+		_ = stopFrontendDevServer(context.Background(), process, listeners.PIDs)
 		return Handle{}, err
 	}
 	p.mu.Lock()
@@ -187,16 +213,42 @@ func (p *FrontendDevServerProvider) Acquire(ctx context.Context, decl ResourceDe
 	return handle, nil
 }
 
-// Release 终止 dev server 的整棵进程树，可重复调用。
+// Release 回收 dev server 的启动器进程树与监听进程，并等待端口关闭，可重复调用。
+//
+// 只回收启动器不够：pnpm / vp dev 可能在就绪后先退出，实际监听由已经脱离父子链的进程持有。
+// 监听进程号在 Acquire 时记录在句柄里，这里必须一起回收，并观测到端口真正关闭。
 func (p *FrontendDevServerProvider) Release(ctx context.Context, handle Handle) error {
 	entry := p.take(handle.PayloadValue("pid"))
 	if entry == nil {
 		return nil
 	}
-	return entry.process.stop(ctx)
+	listeners, decodeErr := decodeListenerPIDs(handle.PayloadValue(frontendListenerPayload))
+	stopErr := stopFrontendDevServer(ctx, entry.process, listeners)
+	if decodeErr != nil {
+		return errors.Join(decodeErr, stopErr)
+	}
+	port, portErr := listenerPortOf(handle.PayloadValue("base_url"))
+	if portErr != nil {
+		return errors.Join(portErr, stopErr)
+	}
+	if closeErr := waitPortClosed(ctx, port, processStopTimeout); closeErr != nil {
+		return errors.Join(stopErr, describePortOccupied(ctx, closeErr, fmt.Sprintf("127.0.0.1:%d", port)))
+	}
+	return stopErr
 }
 
-// Verify 自证 dev server 已停止：进程消失、端口关闭、HTTP 不再可用。
+// stopFrontendDevServer 回收 dev server 的启动器进程树与记录的监听进程。
+//
+// 两个错误都保留：启动器回收失败与监听进程回收失败是两件独立的事，合并返回后由命令执行
+// 入口统一输出一次。
+func stopFrontendDevServer(ctx context.Context, process *managedProcess, listenerPIDs []int) error {
+	processErr := process.stop(ctx)
+	return errors.Join(processErr, stopProcessTrees(ctx, listenerPIDs))
+}
+
+// Verify 自证 dev server 已停止：启动器与监听进程消失、端口关闭、HTTP 不再可用。
+//
+// 启动器退出不能代替端口关闭：端口是资源的最终事实，两者必须分别核验。
 func (p *FrontendDevServerProvider) Verify(ctx context.Context, handle Handle) error {
 	raw := handle.PayloadValue("pid")
 	if p.holds(raw) {
@@ -212,6 +264,19 @@ func (p *FrontendDevServerProvider) Verify(ctx context.Context, handle Handle) e
 	}
 	if alive {
 		return fmt.Errorf("dev server 进程 %d 在释放后仍然存活", pid)
+	}
+	listeners, err := decodeListenerPIDs(handle.PayloadValue(frontendListenerPayload))
+	if err != nil {
+		return fmt.Errorf("核验 dev server 的监听进程失败: %w", err)
+	}
+	for _, listener := range listeners {
+		alive, aliveErr := processAlive(listener)
+		if aliveErr != nil {
+			return fmt.Errorf("核验 dev server 监听进程 %d 是否存活失败: %w", listener, aliveErr)
+		}
+		if alive {
+			return fmt.Errorf("dev server 监听进程 %d 在释放后仍然存活", listener)
+		}
 	}
 	baseURL := handle.PayloadValue("base_url")
 	if baseURL == "" {

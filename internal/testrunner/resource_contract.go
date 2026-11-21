@@ -135,8 +135,8 @@ var resourceContracts = []ResourceContract{
 	},
 	{
 		Type:            ResourceFrontendDevServer,
-		PayloadKeys:     []string{"base_url", "pid"},
-		PayloadRequired: []string{"base_url", "pid"},
+		PayloadKeys:     []string{"base_url", "pid", "listener_pids"},
+		PayloadRequired: []string{"base_url", "pid", "listener_pids"},
 		Fingerprint:     "前端 package.json 的 SHA-256",
 	},
 	{

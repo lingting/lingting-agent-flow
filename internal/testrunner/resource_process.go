@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -215,6 +216,15 @@ func (p *managedProcess) stop(ctx context.Context) error {
 		return fmt.Errorf("资源 %q 的进程树没有完整回收: %w", p.name, err)
 	}
 	return nil
+}
+
+// stopProcessTrees 终止这些进程号各自的进程树，并等待采集到的进程全部退出。
+//
+// 终止失败与等待超时合并返回：投递信号失败不代表进程已经退出，等待超时也不代表它一定
+// 还在运行；两者都保留，避免后一个结论掩盖前一个。
+func stopProcessTrees(ctx context.Context, pids []int) error {
+	members, killErr := terminateProcessTrees(pids)
+	return errors.Join(killErr, waitProcessesGone(ctx, members, processStopTimeout))
 }
 
 // ProcessAlive 报告指定进程号是否仍然存在。
