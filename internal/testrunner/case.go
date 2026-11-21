@@ -39,6 +39,11 @@ type Case struct {
 	// false 表示该用例在串行作用域内独占执行（对齐 go test 里未标记 t.Parallel 的用例）；
 	// 并发最终由调度器决定，用例无法自行扩大或缩小。
 	Parallel bool
+	// Concurrency 是用例的并发额度声明（V4 R2）：包级上限与参与的命名并发池。
+	//
+	// 声明只表达"这条用例需要多少额度"，实际能否并行仍由调度器决定；同包或同池的不同
+	// 非零声明在注册期硬失败，不静默取最小值。
+	Concurrency ConcurrencyDecl
 	// Resources 是用例需要的资源声明，由编排进程分配后以句柄形式注入 worker。
 	Resources []ResourceDecl
 	// Run 是用例主体，运行在 worker 子进程中；失败与跳过通过 Context 表达。
@@ -73,6 +78,12 @@ func (c Case) Validate() error {
 	}
 	if strings.ContainsAny(c.Package, " \t\r\n") {
 		return fmt.Errorf("用例 %q 的 Package %q 不能包含空白字符", c.ID, c.Package)
+	}
+	if err := c.Concurrency.validate(); err != nil {
+		return fmt.Errorf("用例 %q 的并发声明无效: %w", c.ID, err)
+	}
+	if strings.TrimSpace(c.Package) == "" && c.Concurrency.PackageLimit > 0 {
+		return fmt.Errorf("用例 %q 声明了包级额度但缺少 Package", c.ID)
 	}
 	seen := make(map[string]struct{}, len(c.Resources))
 	for _, decl := range c.Resources {
@@ -117,6 +128,10 @@ func Register(c Case) Case {
 	}
 	if _, exists := registryCases[c.ID]; exists {
 		registryErrs = append(registryErrs, fmt.Errorf("用例 %q 重复注册", c.ID))
+		return c
+	}
+	if err := recordConcurrencyDecl(c); err != nil {
+		registryErrs = append(registryErrs, err)
 		return c
 	}
 	registryCases[c.ID] = c

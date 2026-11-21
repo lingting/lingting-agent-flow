@@ -38,6 +38,13 @@ func run(args []string) int {
 	timeout := flags.Duration("timeout", testrunner.DefaultCaseTimeout, "用例默认执行上限")
 	grace := flags.Duration("grace", testrunner.DefaultWorkerGrace, "超时或取消后等待 worker 自行收尾的宽限时间")
 	parallel := flags.Int("parallel", testrunner.DefaultParallel, "同时在跑的 worker 上限")
+	packageLimit := flags.Int(
+		"package-limit",
+		0,
+		"包级并发上限；0 表示不限（运行级值优先于用例声明）",
+	)
+	pools := &poolFlags{}
+	flags.Var(pools, "pool", "命名并发池容量，形如 name=limit；可重复声明")
 	realTests := flags.String("real-tests", testrunner.RealTestsAuto, "真实依赖授权：auto/on/off")
 	execCase := flags.String("exec-case", "", "worker 内部参数：执行单个用例")
 	resultFile := flags.String("result-file", "", "worker 内部参数：结果文件路径")
@@ -115,6 +122,16 @@ func run(args []string) int {
 		fmt.Fprintf(os.Stderr, "错误: --parallel 必须大于等于 1，当前为 %d\n", *parallel)
 		return exitUsage
 	}
+	policy := testrunner.ConcurrencyPolicy{
+		Parallel:     *parallel,
+		PackageLimit: *packageLimit,
+		Pools:        pools.values,
+	}
+	// 池名拼错、负数与非整数都是参数错误（退出码 2），不是用例失败。
+	if err := testrunner.ValidateConcurrencyPolicy(policy, cases); err != nil {
+		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+		return exitUsage
+	}
 	cancelCtx, stopSignals := testrunner.SignalContext()
 	defer stopSignals()
 	report, err := testrunner.Run(cancelCtx, testrunner.RunOptions{
@@ -123,6 +140,7 @@ func run(args []string) int {
 		DefaultTimeout: *timeout,
 		Grace:          *grace,
 		Parallel:       *parallel,
+		Policy:         policy,
 		ArtifactRoot:   *artifactDir,
 		RealTests:      decision,
 		FaultInjection: testrunner.FaultInjection{
@@ -266,4 +284,39 @@ func runSelfCheckService(address string) int {
 		return testrunner.ExitFailure
 	}
 	return testrunner.ExitOK
+}
+
+// poolFlags 收集可重复的 --pool name=limit 声明（V4 R2）。
+type poolFlags struct {
+	values map[string]int
+	order  []string
+}
+
+// String 返回命令行形式的池声明，供 flag 包显示默认值。
+func (p *poolFlags) String() string {
+	if p == nil || len(p.order) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(p.order))
+	for _, name := range p.order {
+		parts = append(parts, fmt.Sprintf("%s=%d", name, p.values[name]))
+	}
+	return strings.Join(parts, ",")
+}
+
+// Set 解析一条 name=limit；格式、名称或容量非法时返回参数错误。
+func (p *poolFlags) Set(value string) error {
+	name, limit, err := testrunner.ParsePoolSpec(value)
+	if err != nil {
+		return err
+	}
+	if p.values == nil {
+		p.values = make(map[string]int)
+	}
+	if _, exists := p.values[name]; exists {
+		return fmt.Errorf("命名池 %q 重复声明", name)
+	}
+	p.values[name] = limit
+	p.order = append(p.order, name)
+	return nil
 }

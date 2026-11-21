@@ -7,8 +7,8 @@ import (
 	"time"
 )
 
-// ReportSchemaVersion 是统一报告的格式版本。
-const ReportSchemaVersion = "agentflow-test-report/1"
+// ReportSchemaVersion 是统一报告的格式版本：V4 R2 起为 v2（新增并发额度分节），不保留旧版读路径。
+const ReportSchemaVersion = "agentflow-test-report/2"
 
 // 运行级终检状态：正常运行结束时不允许停留在 not-run（R2 起由 residual.go 给出结论）。
 const (
@@ -102,6 +102,12 @@ type ConcurrencyReport struct {
 	QueuedTotalMS int64 `json:"queued_ms_total"`
 	// QueuedMaxMS 是单条用例的最长排队时长。
 	QueuedMaxMS int64 `json:"queued_ms_max"`
+	// Package 是包级上限的观测条目：本次运行出现过的包各一条（V4 R2）。
+	Package []QuotaReport `json:"package"`
+	// Quotas 是命名并发池的观测条目：本次运行出现过的池各一条（V4 R2）。
+	Quotas []QuotaReport `json:"quotas,omitempty"`
+	// Warnings 记录声明值与生效值不一致等需要人工核对的情况（D-04）。
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // CancellationRecord 是运行级取消结论。
@@ -206,6 +212,8 @@ func (r Report) Summary() string {
 		r.Concurrency.QueuedMaxMS,
 		r.Concurrency.WorkerLaunches,
 	)
+	writeQuotaLines(&builder, "包", r.Concurrency.Package)
+	writeQuotaLines(&builder, "池", r.Concurrency.Quotas)
 	if r.Cancellation.Cancelled {
 		fmt.Fprintf(
 			&builder,
@@ -241,4 +249,23 @@ func firstLine(text string) string {
 		return text[:index]
 	}
 	return text
+}
+
+// writeQuotaLines 输出有上限的额度条目观测结论；不限的条目只在 report.json 里留痕。
+func writeQuotaLines(builder *strings.Builder, label string, quotas []QuotaReport) {
+	for _, quota := range quotas {
+		if quota.Limit <= 0 {
+			continue
+		}
+		fmt.Fprintf(
+			builder,
+			"额度%s %s：上限 %d / 峰值 %d / 完成 %d / 排队 %dms\n",
+			label,
+			quota.Name,
+			quota.Limit,
+			quota.Peak,
+			quota.Completed,
+			quota.QueuedTotalMS,
+		)
+	}
 }

@@ -12,7 +12,12 @@ RELEASE_DIR ?= dist/release
 RELEASE_NOTES ?= dist/RELEASE_NOTES.md
 RELEASE_PLATFORMS ?=
 PARALLEL ?= 8
+# 并发额度（V4 R2）：运行级值优先于用例声明，留空表示按用例声明。
+# POOLS 形如 "name=limit,name=limit"，逐条透传为 --pool；Makefile 不解释池的含义。
+PACKAGE_LIMIT ?=
+POOLS ?=
 # 统一测试执行器：集成、E2E 与前端用例都经由它执行，tests/unit 仍由 go test 执行（V3 R8）。
+# 产物不带扩展名：Windows 下执行器会为 worker 与子进程准备带 .exe 的启动别名，产物本身保持同名。
 TEST_RUNNER := bin/agentflow-test
 # 执行器产物根目录：每次运行落在 <根目录>/<run-id>/，报告与用例日志都在其中。
 TEST_ARTIFACT_ROOT ?= .test-artifacts
@@ -62,7 +67,7 @@ test-runner:
 # 本地入口与 CI Job 共用同一份分组声明，不在 Makefile 里另写一份分组清单。
 # 前置由 TEST_KIND 决定：需要被测服务的分组先构建 bin/agentflow，其余分组只构建执行器。
 test-cases: $(TEST_CASES_PREREQUISITES)
-	bash .github/scripts/run-cases.sh --kind "$(TEST_KIND)" --artifact-dir "$(TEST_ARTIFACT_ROOT)" --parallel "$(PARALLEL)"
+	PACKAGE_LIMIT="$(PACKAGE_LIMIT)" POOLS="$(POOLS)" bash .github/scripts/run-cases.sh --kind "$(TEST_KIND)" --artifact-dir "$(TEST_ARTIFACT_ROOT)" --parallel "$(PARALLEL)"
 
 # test-real 运行真实设备分组：run-cases.sh 要求显式授权（AGENTFLOW_REAL_TESTS_GRANTED=true），
 # 未授权时直接失败，不会静默跳过或回退到本机替身。

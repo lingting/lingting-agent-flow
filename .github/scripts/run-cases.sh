@@ -17,6 +17,10 @@
 #                                     不是第二个用户开关；缺失时本脚本直接失败，
 #                                     不把"没跑任何真实用例"当成成功，也不回退到本机替身。
 #   AGENTFLOW_REAL_TESTS_GRANT_REASON 可选。授权原因，随判定结论写入报告。
+#   PACKAGE_LIMIT                    可选。运行级包级并发上限，透传为 --package-limit；
+#                                     留空表示按用例声明。
+#   POOLS                            可选。命名并发池容量，形如 "name=limit,name=limit"，
+#                                     逐条透传为 --pool；本脚本不解释池的含义。
 #   GITHUB_STEP_SUMMARY              可选。追加结论摘要。
 #
 # 输出:
@@ -137,6 +141,18 @@ arguments=(
     --artifact-dir "$artifact_dir"
     --real-tests "$real_mode"
 )
+# 并发额度只做透传：脚本不认识任何具体包或池，额度语义全在执行器里。
+if [ -n "${PACKAGE_LIMIT:-}" ]; then
+    arguments+=(--package-limit "$PACKAGE_LIMIT")
+fi
+if [ -n "${POOLS:-}" ]; then
+    IFS=', ' read -r -a pool_specs <<< "$POOLS"
+    for pool_spec in "${pool_specs[@]}"; do
+        if [ -n "$pool_spec" ]; then
+            arguments+=(--pool "$pool_spec")
+        fi
+    done
+fi
 if [ -n "$timeout" ]; then
     arguments+=(--timeout "$timeout")
 fi

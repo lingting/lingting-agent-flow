@@ -22,7 +22,9 @@ type RunOptions struct {
 	DefaultTimeout time.Duration
 	Grace          time.Duration
 	// Parallel 是同时在飞的 worker 上限；零值取 DefaultParallel。
-	Parallel     int
+	Parallel int
+	// Policy 是运行级并发额度（V4 R2）：包级上限与命名池容量，Parallel 由 Parallel 字段补齐。
+	Policy       ConcurrencyPolicy
 	ArtifactRoot string
 	RunID        string
 	RealTests    RealTestsDecision
@@ -58,6 +60,13 @@ func Run(ctx context.Context, opts RunOptions) (Report, error) {
 	if parallel <= 0 {
 		parallel = DefaultParallel
 	}
+	policy := opts.Policy
+	policy.Parallel = parallel
+	// 额度预检在派出第一条 Case 之前完成：冲突、缺容量与不可满足的声明都不允许降级为"先跑起来"。
+	limits, err := ResolveConcurrencyLimits(selected, policy)
+	if err != nil {
+		return Report{}, fmt.Errorf("并发额度预检失败: %w", err)
+	}
 	defaultTimeout := opts.DefaultTimeout
 	if defaultTimeout <= 0 {
 		defaultTimeout = DefaultCaseTimeout
@@ -87,13 +96,20 @@ func Run(ctx context.Context, opts RunOptions) (Report, error) {
 	if err := layout.CreateRunDir(); err != nil {
 		return Report{}, err
 	}
+	// worker 与子进程都按路径启动：Windows 下无扩展名的执行器需要一份可启动的别名。
+	workerExecutable, cleanupWorkerExecutable, err := spawnableExecutable(executable, layout.RunDir)
+	if err != nil {
+		return Report{}, err
+	}
+	defer cleanupWorkerExecutable()
 	providers := opts.Providers
 	if providers == nil {
 		providerOptions := opts.ProviderOptions
 		providerOptions.Root = layout.WorkspaceRoot()
 		providerOptions.RunID = runID
 		if providerOptions.SelfExecutable == "" {
-			providerOptions.SelfExecutable = executable
+			// 子进程同样按路径启动：无扩展名的执行器在 Windows 下需要这份别名。
+			providerOptions.SelfExecutable = workerExecutable
 		}
 		providers, err = DefaultProviders(providerOptions)
 		if err != nil {
@@ -127,12 +143,12 @@ func Run(ctx context.Context, opts RunOptions) (Report, error) {
 		Layout:         layout,
 		Providers:      providers,
 		Shared:         shared,
-		Executable:     executable,
+		Executable:     workerExecutable,
 		DefaultTimeout: defaultTimeout,
 		Grace:          grace,
 		RunID:          runID,
 		RealTests:      opts.RealTests,
-	}, selected, parallel, cancelOn, output)
+	}, selected, parallel, limits, cancelOn, output)
 	report.Cases = scheduled.Cases
 	report.Concurrency = scheduled.Concurrency
 	report.Cancellation = scheduled.Cancellation

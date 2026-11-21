@@ -11,7 +11,6 @@ import (
 //
 // 反馈按验证记录查询，不提供步骤级"最近一次"入口：验证历史接口已经返回每条验证
 // 记录及其检查结果，再开一个"最近一次反馈"入口会让同一语义出现两条路径。
-// 判定依据见 `.steps/P4-M2-5-validation-feedback-api.md` §3。
 const feedbackSegment = "feedback"
 
 // ValidationFailureFeedbackResponse 是一次验证失败的对外反馈表示。
