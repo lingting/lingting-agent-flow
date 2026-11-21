@@ -105,7 +105,9 @@ make check        # fmt-check + vet + build
 Pi、SSH 主机与远程 Docker，只能由 `make test-real` 在显式授权后运行（`tests/config/*.yml` 的
 `ssh.enable`、`docker.remote_enabled` 与 `pi.enable` 决定是否真的连设备，未启用时输出 `WARN [SKIP]`，
 CI 中还会额外经过 `AGENTFLOW_REAL_TESTS` 授权门禁）。`PARALLEL` 是唯一并发变量，同时作用于
-`go test` 与执行器 `--parallel`。规则细节见 [testing.md](testing.md)。
+`go test` 与执行器 `--parallel`。`TEST_KIND` 为 `normal`、`selfcheck` 或 `fault` 时，`make test-cases`
+还会先 `make build` 构建 `<repo>/bin/agentflow`：`pilot` 试点用例把它声明为 `service-process` 的可执行
+文件，缺失会让资源分配失败。规则细节见 [testing.md](testing.md)。
 
 不依赖 Make 时可以直接使用底层命令：
 

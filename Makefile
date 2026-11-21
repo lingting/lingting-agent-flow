@@ -19,6 +19,15 @@ TEST_ARTIFACT_ROOT ?= .test-artifacts
 # test-cases 的选择集合：normal 为全部普通 Case；也可以只跑一个 kind
 # （local / e2e / selfcheck / frontend）。真实设备分组用 test-real。
 TEST_KIND ?= normal
+# 需要被测服务二进制的 Case kind：pilot 试点用例把 <repo>/bin/agentflow 声明为
+# service-process 的可执行文件，缺失时资源分配失败并被记为 error（不是跳过）。因此只有这些
+# kind 的入口先构建它；其它 kind 不预构建，构建范围不因本规则扩大。
+CASE_KINDS_WITH_SERVER_BINARY := normal selfcheck fault
+ifeq ($(filter $(TEST_KIND),$(CASE_KINDS_WITH_SERVER_BINARY)),)
+TEST_CASES_PREREQUISITES := test-runner
+else
+TEST_CASES_PREREQUISITES := build test-runner
+endif
 # inventory 默认写到可写目录：R0 的 legacy-cases.manifest.json 是冻结基线，
 # 不得被默认目标覆盖，需要覆盖时必须显式传入 INVENTORY_DIR=.steps/V3/R0。
 INVENTORY_DIR ?= $(TEST_ARTIFACT_ROOT)/inventory
@@ -58,7 +67,8 @@ test-runner:
 
 # test-cases 通过执行器运行 Case；选择条件由 .github/scripts/go-test-groups.sh 提供，
 # 本地入口与 CI Job 共用同一份分组声明，不在 Makefile 里另写一份分组清单。
-test-cases: test-runner
+# 前置由 TEST_KIND 决定：需要被测服务的分组先构建 bin/agentflow，其余分组只构建执行器。
+test-cases: $(TEST_CASES_PREREQUISITES)
 	bash .github/scripts/run-cases.sh --kind "$(TEST_KIND)" --artifact-dir "$(TEST_ARTIFACT_ROOT)" --parallel "$(PARALLEL)"
 
 # test-real 运行真实设备分组：run-cases.sh 要求显式授权（AGENTFLOW_REAL_TESTS_GRANTED=true），

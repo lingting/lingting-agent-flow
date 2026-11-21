@@ -269,3 +269,28 @@ UI 时序抖动、镜像标签被并行构建改指、真实设备外部故障�
   中止后不做零残留终检）全部保持。
 - §5.1 的真实设备失败（`m6-requirement-sequential-tasks`）仍如实记为失败，仍需复跑。
 - R0 冻结清单（1707 条）与 R5/R6 的覆盖结论（316 + dropped 49、缺失 0、多余 0）不变。
+
+### 8.5 R10 已修复的环境准备缺口
+
+§8.2 表中"已确诊"的 `pilot` 缺口已按 R10 的 D2 结论修复：
+
+- `Makefile`：`test-cases` 的前置按 `TEST_KIND` 决定，`normal` / `selfcheck` / `fault` 先构建
+  `bin/agentflow`，其它 kind 仍只构建 `bin/agentflow-test`。
+- `.github/workflows/ci.yml`：`cases-selfcheck` Job 在「执行执行器自检用例」之前增加 `make build`。
+- 用例与断言未改动，缺失二进制仍按 `error` 记录，不会被改判为跳过。
+
+该缺口的运行结论（`pilot/server-shutdown` 报告为 `passed`）仍待一次真实运行与完整 CI，见
+[`.steps/V3/R10/README.md`](V3/R10/README.md) §9。
+
+### 8.6 R10 对并发删除用例的定级与处置
+
+§8.2 表中列为"未决"的 `integration-local-scheduler/concurrent-delete-and-scheduler-scan-keep-facts`
+已定级为**用例观察点错误**，不是产品缺陷：调度器在 `dispatch` 中先 `register` 再 `go s.run(grant)`，
+执行权由该协程释放，而用例等待的只是 `Scan` 与 `Delete` 返回，因此断言可能在释放之前执行。
+
+处置方式见 [`tests/runner/integration/local/scheduler/cases_requirement_delete.go`](tests/runner/integration/local/scheduler/cases_requirement_delete.go)：
+断言前 `waitFor` 轮询 `scheduler.ActiveDispatches() == 0`，等待之后**保留**原硬断言并打印全部仍被持有的
+任务标识；产品代码、断言语义与用例选择范围均未改动，也没有引入 `sleep`、重试或跳过。
+
+该定级的运行验证（连续通过、以及人为构造残留现场仍失败）待一次授权的运行，见
+[`.steps/V3/R10/README.md`](V3/R10/README.md) §5 C1。

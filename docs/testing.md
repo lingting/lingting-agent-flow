@@ -57,6 +57,10 @@ tests/
   `frontend` 分组。
 - `bin/agentflow-test` 由 `make test-runner` 构建；worker 由同一二进制以 `--exec-case` 重新启动，因此
   入口必须是最新构建，`make test-cases` / `make test-real` 会先构建再运行。
+- `pilot` 试点用例把 `<repo>/bin/agentflow` 声明为 `service-process` 的可执行文件，因此
+  `TEST_KIND` 为 `normal`、`selfcheck` 或 `fault` 时 `make test-cases` 会先 `make build` 再运行；
+  其它 kind 只构建 `bin/agentflow-test`。CI 的 `cases-selfcheck` Job 有同一条前置，缺少该二进制时
+  资源分配失败并被记为 `error`，不会被当成跳过。
 
 执行器的选择条件只有三种写法：分组名（如 `frontend`）、精确用例 ID（如
 `integration-local-scheduler/...` 的完整 ID）、以 `...` 结尾的前缀（如 `integration-local-...`）。

@@ -7,7 +7,8 @@
 # - go-unit          ：`./tests/unit/...`，仍由 `go test` 执行
 # - cases-local      ：本机集成用例（统一执行器，`integration-local-*`）
 # - cases-e2e        ：CLI 端到端用例（统一执行器，`e2e-cli`）
-# - cases-selfcheck  ：执行器自检用例（`selfcheck` / `resourcecheck` / `concurrencycheck` / `pilot`）
+# - cases-selfcheck  ：执行器自检用例（`selfcheck` / `resourcecheck` / `concurrencycheck` / `pilot`）；
+#                       pilot 需要被测服务二进制，Job 里先 `make build`
 # - ui-test          ：前端用例（统一执行器，`frontend`）与格式、lint、类型检查、生产构建门禁
 #
 # 集成、E2E 与前端用例只有 `agentflow-test` 一个执行器；本地入口与这些 Job 一一对应：
@@ -277,6 +278,15 @@ jobs:
           cache-dependency-path: |
             go.mod
             go.sum
+      # 自检分组包含 pilot 试点用例：它把 <repo>/bin/agentflow 声明为 service-process 的可执行
+      # 文件，缺失时资源分配失败并被记为 error（不是跳过）。因此本 Job 必须先构建被测二进制，
+      # 与本地 `make test-cases TEST_KIND=selfcheck` 的前置保持一致。
+      - name: 构建被测服务二进制
+        run: make build
+      # 显式核验路径与 pilot 的 serverBinaryPath() 一致：构建失败或产物路径漂移必须在这一步
+      # 失败，不能延迟到 Case 的资源分配阶段才以"可执行文件不可用"暴露。
+      - name: 核验被测服务二进制
+        run: test -x bin/agentflow
       - name: 执行执行器自检用例
         id: cases
         run: bash .github/scripts/run-cases.sh --kind selfcheck --artifact-dir "$TEST_ARTIFACT_ROOT/selfcheck" --parallel 4

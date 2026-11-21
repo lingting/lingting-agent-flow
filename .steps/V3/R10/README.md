@@ -1,6 +1,9 @@
 # V3 R10：V3 收口后的遗留治理
 
-**状态：** 未开始（本文件是计划，不是已完成记录）。
+**状态：** 进行中。B1（`pilot` 缺 `bin/agentflow` 的环境准备缺口）、C1（并发用例按"用例观察点错误"
+定级，只改收敛等待）与 F1（文档勘误）已落地，全部改动只动前置与观察条件，未改断言、未改产品逻辑、
+未引入跳过。D1（两条 Playwright）仍需 `ui-test` artifact 的 trace 才能定级；A1 的其余 artifact 与
+E1 的完整 CI 需要你的下载与推送授权。逐项状态见 §5 与 §6。
 **上游文档：** [路线总规划](../ROADMAP.md)、[V3 收口文档](../../V3-final.md)、[R9 验收记录](../R9/README.md)。
 **下游关系：** R10 只清理 V3 收口后暴露的缺陷与环境准备缺口，不改测试体系结构；测试目录收敛、
 unit 迁移到统一入口与并发额度属于 [V4](../../V4/ROADMAP.md)，不在本阶段内做。
@@ -137,7 +140,10 @@ run 级 artifacts 共 4 个（`expired=false`）：
 
 判定需要的最低证据（A1 阶段取回）：`report.json` 中该 Case 的 `message`（完整断言文本与实际 task id）、
 `cases/<case-id>/stdout.log`、以及 `report.json` 的 `concurrency.max_in_flight` 与 `timings`。
-**当前状态：未决（证据不足）。** 不允许按 (A) 直接改用例，也不允许按 (B)(C) 直接改产品。
+**当前状态：已定级为 (A) 用例观察点错误（owner 复核结论）。** 依据仍是代码层面的确定性事实：调度器
+在 `dispatch` 中先 `register` 再 `go s.run(grant)`，释放发生在该协程内，而用例等待的只是 `Scan` 与
+`Delete` 返回，因此"观察早于释放"不需要 artifact 也能成立。C1 的落地方式为等待 `ActiveDispatches()`
+归零后**保留**硬断言（见 §5 C1），产品代码未改；若真实运行仍出现残留，再按 (B)/(C) 继续。
 
 ### 4.2 `frontend/playwright-task-containers` 与 `frontend/playwright-task-create-project-inheritance`
 
@@ -179,6 +185,19 @@ spec 文件分别是 `lingting-agent-flow-ui/tests/e2e/task-containers.spec.ts` 
 **因此这是确定的 CI 环境准备缺口，不是用例缺陷。** 但"最小修复"有决策点（见 D2），并且**不允许**
 把 `pilot/server-shutdown` 改成跳过或按二进制缺失自动 skip —— 那会把"环境没准备"伪装成"无需执行"。
 
+**落地记录（B1）：** 按 D2 定稿的最小口径修复，只补前置，不改用例、不引入跳过：
+
+| 位置 | 改动 |
+|---|---|
+| `Makefile` | 新增 `CASE_KINDS_WITH_SERVER_BINARY := normal selfcheck fault` 与 `TEST_CASES_PREREQUISITES`；`test-cases` 的前置按 `TEST_KIND` 取 `test-runner` 或 `build test-runner`，其余 kind 的构建范围不变 |
+| `.github/workflows/ci.yml` | `cases-selfcheck` Job 在「执行执行器自检用例」之前增加「构建被测服务二进制」步骤，执行 `make build` |
+| `docs/testing.md`、`docs/development.md` | 说明 `normal` / `selfcheck` / `fault` 的入口会先构建 `bin/agentflow`，以及缺失时是 `error` 而不是跳过 |
+
+`make -n test-cases TEST_KIND=selfcheck` 解析出的命令顺序为 `go build -o bin/agentflow` →
+`go build -o bin/agentflow-test` → `run-cases.sh`；`TEST_KIND=e2e` 只构建执行器。
+`pilot-fault/server-not-ready` 与试点用例共用同一份二进制声明，因此随 `fault` kind 一并覆盖。
+该项仍需一次真实运行确认 `pilot/server-shutdown` 报告为 `passed`，见 §7 与 §9 第 3 条。
+
 ### 4.4 inventory 旧路径结论的纠正
 
 V3 文档里有两处关于盘点的表述需要纠正，且**都不是"扫描输入还是旧目录"**：
@@ -219,23 +238,31 @@ V3 文档里有两处关于盘点的表述需要纠正，且**都不是"扫描�
 
 ### B1 修 `pilot/server-shutdown` 的前置条件（已确诊，优先）
 
-- 决策 D2 定稿后改：
-  - `Makefile`：给需要被测二进制的入口加显式前置（`test-cases` 在 `TEST_KIND` 含 `selfcheck` 时先
-    `build`，或新增 `test-cases-selfcheck: build test-runner`），或
-  - `.github/workflows/ci.yml` 的 `cases-selfcheck` Job 增加一步 `make build`，或
-  - `run-cases.sh` 增加 `--require-binary` 前置校验并给出可执行的错误信息。
+- 状态：**已落地**（D2 按建议定稿，改动与解析结果见 §4.3 的"落地记录"）。
+- 已采用：`Makefile` 的 `test-cases` 需要被测二进制的分组先 `build`（`normal` / `selfcheck` / `fault`），
+  以及 `.github/workflows/ci.yml` 的 `cases-selfcheck` Job 增加一步 `make build`。
+- 未采用：`run-cases.sh --require-binary`（让脚本猜哪些 kind 需要该二进制，与"分组声明只有一个来源"
+  的口径冲突），也未新增独立的 `test-cases-selfcheck` 目标（会让 `make test-cases TEST_KIND=selfcheck`
+  与文档里的入口分叉）。
 - **不得**改用例断言、不得把缺失二进制转成 skip。
 - 验收：`make test-cases TEST_KIND=selfcheck` 在本机（授权后）与 CI 上都通过；`pilot/server-shutdown`
-  的报告状态为 `passed`，且 `resources[].name == "service"` 的记录出现。
+  的报告状态为 `passed`，且 `resources[].name == "service"` 的记录出现。**当前只完成前置，运行结论待
+  §7 授权后的真实运行与 E1 的完整 CI。**
 
 ### C1 处理 `concurrent-delete-and-scheduler-scan-keep-facts`
 
-- 先完成 A1；按 §4.1 的候选解释定级，并把结论写进 §4.1 的"结论状态"与 §4.5 的证据表。
-- 若为 (A)：把"等待 `Held` 收敛"改成等待条件（`waitFor` 轮询 + 明确的失败信息），
-  不改断言语义、不 sleep 固定时长。
-- 若为 (B)/(C)：先补一条**最小复现合同**（在 R10 内只允许修产品缺陷本身），修复点必须是证据指出的分支。
-- 验收：该 Case 在 `--parallel 4` 下连续 3 次通过（每次独立 run-id），且失败信息在人为构造的
-  残留现场下仍能准确报错（新增的等待条件不得掩盖真实残留）。
+- 状态：**已按 (A) 落地**（`tests/runner/integration/local/scheduler/cases_requirement_delete.go`）。
+- 定级结论见 §4.1：用例等待的是 `Scan` / `Delete` 返回，而执行权释放发生在 `go s.run(grant)` 协程内，
+  属"观察点早于收敛点"。按 (A) 只改等待条件，产品代码未动。
+- 已采用的写法：`waitFor(t, 10*time.Second, ...)` 轮询 `scheduler.ActiveDispatches() == 0`（在途分派
+  登记归零），**等待之后保留硬断言**，并把所有仍被持有的任务标识一次性打印出来。
+  选择 `ActiveDispatches()` 的依据是它读的 `dispatched` 登记在 `run` 的 `defer unregister` 中删除，
+  而 `Release` 发生在 `run` 函数体返回之前，因此登记归零即在途分派已经走完释放分支；
+  本用例 `ScanInterval` 为 1 小时且没有其它扫描协程，等待期间不会有新的分派进入。
+- 未采用：固定 `sleep`、失败重试断言、删除断言；也没有在 (B)/(C) 无证据时改产品代码。
+- 反向验证（真实残留仍会失败）：收敛后仍有登记时走 `分派结束后不得残留执行权: [...]` 硬断言，
+  不落在等待条件里，因此等待条件不能掩盖残留；这条需要在 §7 授权后的运行中构造现场确认。
+- 验收：该 Case 在 `--parallel 4` 下连续 3 次通过（每次独立 run-id）——**未执行，待运行授权**。
 
 ### D1 处理两条 Playwright 失败
 
@@ -265,10 +292,10 @@ V3 文档里有两处关于盘点的表述需要纠正，且**都不是"扫描�
 | 编号 | 决策 | 建议 | 状态 |
 |---|---|---|---|
 | D1 | CI #60 三个失败的定级口径 | 每条必须先给出"已确认事实 / 仍未知 / 需要什么证据"，定级只允许四类：产品缺陷、用例观察点错误、环境准备缺口、未决 | 待定稿 |
-| D2 | `pilot` 被测二进制的最小 CI 前置 | 在 Case Job 里显式构建（`make build`），而不是让 `run-cases.sh` 猜测哪些 kind 需要它；本地入口同步加依赖，保证 CI 与本机前置一致 | 待定稿 |
-| D3 | 并发用例的等待条件写法 | 只允许"轮询可观察状态收敛"，禁止固定 `sleep`；等待失败时必须打印现场（`Held` 的任务集合） | 待定稿 |
+| D2 | `pilot` 被测二进制的最小 CI 前置 | 在 Case Job 里显式构建（`make build`），而不是让 `run-cases.sh` 猜测哪些 kind 需要它；本地入口同步加依赖，保证 CI 与本机前置一致 | **已定稿（按建议落地，见 §4.3）** |
+| D3 | 并发用例的等待条件写法 | 只允许"轮询可观察状态收敛"，禁止固定 `sleep`；等待失败时必须打印现场（`Held` 的任务集合） | **已落地**（C1：`waitFor` 轮询 `ActiveDispatches()`，收敛后保留硬断言并打印残留集合） |
 | D4 | Playwright 失败的处置边界 | 时序问题只用条件等待；`retries` 保持 0；若确需提高稳定性上限，单独决策并记录证据 | 待定稿 |
-| D5 | inventory 陈旧结论的勘误位置 | 写在 `V3-final.md` 补遗 + `ROADMAP` §2 注记，**不改动** R0 冻结件；代码修复另立项 | 待定稿 |
+| D5 | inventory 陈旧结论的勘误位置 | 写在 `V3-final.md` 补遗 + `ROADMAP` §2 注记，**不改动** R0 冻结件；代码修复另立项 | **已落地**（`V3-final.md` §8.3、`ROADMAP` §2 注记） |
 | D6 | `--parallel` 是否调整 | 只在 D1 证据指向资源压力时才调整，并同时记录对其它 kind 的影响 | 待定稿 |
 
 ## 7. 运行授权申请

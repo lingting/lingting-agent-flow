@@ -227,7 +227,7 @@ R2–R7 只改代码、用例资产与本目录内的阶段文档；`Makefile`�
 | R7 | 已完成 | TestMain 与 `testkit` 最终核验收口、删除迁移遗留、真实设备零残留复核；1 条用例被外部环境阻塞已记录 | [R7](R7/README.md) |
 | R8 | 已完成 | Makefile / CI / 脚本收敛，非测试门禁保持可用；一次完整 CI 待推送确认 | [R8](R8/README.md) |
 | R9 | 已完成 | 全量验收（单元 + 312 条普通 Case + 32 条真实 Case）、覆盖对账退出码 0、文档同步与 V3 收口；一次完整 CI 待推送确认 | [R9](R9/README.md) |
-| R10 | 未开始 | 收口后的遗留治理：CI #60 三个失败的取证与定级、`pilot` 缺 `bin/agentflow` 的环境修复、文档勘误；不做目录收敛与 unit 迁移 | [R10](R10/README.md) |
+| R10 | 进行中 | 收口后的遗留治理：CI #60 三个失败的取证与定级、`pilot` 缺 `bin/agentflow` 的环境修复、文档勘误；不做目录收敛与 unit 迁移。`pilot` 前置、并发用例的收敛等待与文档勘误已落地，两条 Playwright 失败仍待 `ui-test` artifact 定级 | [R10](R10/README.md) |
 
 依赖与硬门禁：
 
@@ -371,9 +371,9 @@ R9 收口时"一次完整 CI 尚未运行"。该运行已经发生并失败：CI
 
 | 失败 | 已核实内容 | 状态 |
 |---|---|---|
-| `integration-local-scheduler/concurrent-delete-and-scheduler-scan-keep-facts` | 用例等待的是 `Scan` 与 `Delete` 返回，断言的是"分派结束后不得残留执行权"；`Scan` 在 `go s.run(grant)` 之后即返回，释放发生在该协程内 | 未决（需 artifact 证据） |
+| `integration-local-scheduler/concurrent-delete-and-scheduler-scan-keep-facts` | 用例等待的是 `Scan` 与 `Delete` 返回，断言的是"分派结束后不得残留执行权"；`Scan` 在 `go s.run(grant)` 之后即返回，释放发生在该协程内 | 已定级为用例观察点错误：等待 `ActiveDispatches()` 归零后保留硬断言，产品代码未改；重复运行待授权 |
 | `frontend/playwright-task-containers`、`frontend/playwright-task-create-project-inheritance` | Playwright 配置已启用 `trace: retain-on-failure` 与失败截图，证据在 `ui-test` artifact 内 | 未决（需 artifact 证据） |
-| `pilot/server-shutdown` | 确定的环境准备缺口：`Makefile` 的 `test-cases` 与 CI 的 `cases-selfcheck` 都不构建 `bin/agentflow`，而用例把它当 `service-process` 的 `binary`；资源分配失败被记为 `error`（不是跳过） | 已确诊，待修 |
+| `pilot/server-shutdown` | 确定的环境准备缺口：`Makefile` 的 `test-cases` 与 CI 的 `cases-selfcheck` 都不构建 `bin/agentflow`，而用例把它当 `service-process` 的 `binary`；资源分配失败被记为 `error`（不是跳过） | 前置已修（`normal` / `selfcheck` / `fault` 的入口先 `make build`，`cases-selfcheck` Job 增加构建步骤），报告结论待一次真实运行与完整 CI |
 
 ### 12.2 R10 的边界
 

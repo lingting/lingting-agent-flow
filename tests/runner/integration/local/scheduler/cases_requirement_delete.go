@@ -245,13 +245,25 @@ func runConcurrentDeleteAndSchedulerScanKeepFacts(t *testrunner.Context) {
 		}
 	}
 
+	// 分派是异步的：Scan 在 go s.run(grant) 之后立即返回，执行权由该协程释放。因此
+	// "两个并发入口都返回"不等于"分派已经收敛"，断言前必须等在途分派全部结束；
+	// 等待只改变观察时机，不改变断言语义，收敛之后仍有登记即真实残留。
+	waitFor(t, 10*time.Second, func() bool {
+		return scheduler.ActiveDispatches() == 0
+	}, "全部异步分派都应在超时前结束")
+
 	if claims := recorder.deletedClaims(); len(claims) != 0 {
 		t.Fatalf("调度器不得领取已删除任务: %v", claims)
 	}
-	for _, task := range recorder.launchedOrderSnapshot() {
+	launched := recorder.launchedOrderSnapshot()
+	held := make([]domain.ID, 0, len(launched))
+	for _, task := range launched {
 		if fixture.coordinator.Held(task) {
-			t.Fatalf("分派结束后不得残留执行权: %s", task)
+			held = append(held, task)
 		}
+	}
+	if len(held) != 0 {
+		t.Fatalf("分派结束后不得残留执行权: %v", held)
 	}
 }
 
