@@ -47,7 +47,7 @@ pnpm build                  # 生产构建，产物写入 ../internal/webui/dist
 pnpm build:assets           # 仅执行 vp build，不补回占位文件
 pnpm lint                   # vp fmt && vp lint --fix && tsc --noEmit
 pnpm test                   # vp test run，单元测试
-pnpm exec playwright test   # 基础布局与连接状态浏览器测试
+pnpm exec playwright test   # 浏览器用例（需自行启动 dev server；正式验收走 make test-cases TEST_KIND=frontend）
 ```
 
 ### 开发代理
@@ -139,75 +139,54 @@ tests/
 
 ## 测试
 
-- 单元测试（`tests/unit`）：`pnpm test`，覆盖 `lingting-react-ui` 实际安装版本、依赖去重配置的
-  推导方式、脚本命令、导航元数据、API 客户端（成功、非成功状态码、非法 JSON、网络失败、
-  超时、取消、错误结构解析、路径不带开发地址）、连接文案与构建输出配置，以及需求工作台
-  的接口路径与请求体、长请求超时覆盖、错误分类、状态可用性、执行节点判定与 Revision 选择。
-- 浏览器测试（`tests/e2e`）：`pnpm exec playwright test`，由 Playwright 自动启动 `vp dev`，覆盖
-  六个路由、根重定向、刷新后状态、导航切换、404、桌面与窄视口布局、水平溢出与渲染错误，以及
-  通过拦截 `/api/v1/health` 验证的已连接、未连接、503 与服务端错误说明；需求工作台用例通过
-  `tests/e2e/planning-backend.ts` 的受控后端覆盖完整闭环、失败重试、`409`、网络中断、历史会话
-  恢复、放弃规划、未知 / 已确认状态与空状态，不调用真实模型。
-- 两个测试入口都会输出 `TEST_ARTIFACT_DIR=<绝对路径>`，产物写入操作系统临时目录
-  `lingting-agent-flow-ui-tests/run-*`，测试结束后保留，不自动清理。
-- 测试默认不依赖 Go 后端、Docker、SSH、Pi CLI 或真实模型服务。
+前端用例的正式入口是仓库根目录的统一执行器：`make test-cases TEST_KIND=frontend`。一条文件对应一条
+Case（13 条 Vitest + 24 条 Playwright），dev server 由执行器的 `frontend-dev-server` 资源提供者启动，
+Playwright 不再自己启动它。
+
+- 单元测试（`tests/unit`）：`pnpm test`（`vp test run`），覆盖 `lingting-react-ui` 实际安装版本、依赖去重
+  配置的推导方式、脚本命令、导航元数据、API 客户端（成功、非成功状态码、非法 JSON、网络失败、
+  超时、取消、错误结构解析、路径不带开发地址）、连接文案与构建输出配置，以及需求工作台的接口路径与
+  请求体、长请求超时覆盖、错误分类、状态可用性、执行节点判定与 Revision 选择。
+- 浏览器测试（`tests/e2e`）：覆盖六个路由、根重定向、刷新后状态、导航切换、404、桌面与窄视口布局、
+  水平溢出与渲染错误，以及通过拦截 `/api/v1/health` 验证的已连接、未连接、503 与服务端错误说明；需求
+  工作台用例通过 `tests/e2e/planning-backend.ts` 的受控后端覆盖完整闭环、失败重试、`409`、网络中断、
+  历史会话恢复、放弃规划、未知 / 已确认状态与空状态，不调用真实模型。
+- 独立运行 `pnpm exec playwright test` 时需要自己先启动 dev server（`pnpm dev` 或 `make serve`），
+  正式验收走执行器。
+- 执行器运行时，截图、trace 与 HTML 报告写入注入的用例产物目录
+  （`.test-artifacts/<run-id>/cases/<case-id>/artifacts/`）；单独运行 `pnpm test` /
+  `pnpm exec playwright test` 时产物写入操作系统临时目录
+  `lingting-agent-flow-ui-tests/run-*`，并输出 `TEST_ARTIFACT_DIR=<绝对路径>`，测试结束后保留。
+- 测试默认不依赖 Go 后端、Docker、SSH、Pi CLI 或真实模型服务，也不访问本机真实配置。
 
 ## 测试并发与资源
 
-浏览器测试的资源开销来自**无头浏览器实例数**，而实例数等于 Playwright 的 worker 数。
-dev server 只有一份：`webServer` 在一次运行中只启动一个 `vp dev` 进程，全部 worker 共享同一个
-`baseURL`（这是 Playwright 的原生行为，不需要额外机制）。因此限制 worker 就是限制 CPU 峰值。
-
-| 项目 | 默认值 | 覆盖方式 |
-| ---- | ------ | -------- |
-| Playwright worker | 4 | `AGENTFLOW_TEST_PLAYWRIGHT_WORKERS` 或 `playwright test --workers=N` |
-| Vitest worker | 4 | `AGENTFLOW_TEST_VITEST_WORKERS` 或 `vp test run --maxWorkers N` |
-| 用例级完全并行 | 关闭（`fullyParallel: false`） | 不改：它与「一个 worker 一个浏览器」的资源模型冲突 |
-| 失败重试 | `retries: 0` | 不改：资源治理不引入自动重跑 |
-
-默认值、合法区间与校验逻辑集中在 `tests/internal/test-resource-policy.ts`，两个配置文件都从
-这里取值。worker 数只接受 1–8 的十进制整数，百分比、小数、0 与越界值都会直接报错中断，
-不会静默回退到更高并发。
-
-说明：
-
-- 这里没有进程级 CPU 配额（cgroup / Job Object 之类）。受支持的做法是降低 worker 数，
-  以及按需把并发压到 1。降低 worker 与顺序执行属于软限制，**不是** CPU 百分比上限。
-- `--workers=N` 的实际并发会取 `min(N, 并行测试文件数)`：单个 spec 文件在
-  `fullyParallel: false` 下只用一个 worker，需要多个文件才会用满默认并发。
-- 单文件运行时出现 `Running N tests using 1 worker` 属于预期行为。
-
-### 资源受限入口
-
-```bash
-pnpm test:unit:safe   # 单元测试，1 worker，不启动浏览器
-pnpm test:e2e:safe    # 浏览器测试，1 worker
-pnpm test:safe        # 顺序执行：单测 → E2E → 格式/lint/类型检查 → 构建
-pnpm test:all:safe    # 同上，通过 pnpm 子任务串联，便于逐段重跑
-pnpm check            # vp fmt && vp lint --fix && tsc --noEmit
-```
-
-各阶段是 `&&` 串联的，前一阶段失败即停止，退出码原样保留，不会把部分失败汇总成成功。
-原有的 `pnpm test` / `pnpm lint` / `pnpm build` / `pnpm exec playwright test` 语义保持不变，
-需要更高并发时仍可直接加参数。
+- 并发只由执行器的调度器决定：一条 Case 一次 CLI 调用，`playwright.config.ts` 固定 `workers: 1`、
+  `fullyParallel: false`、`retries: 0`，不再读取任何 worker 环境变量；Vitest 同样按文件调用。
+- 因此本工程不再有并发策略文件：`tests/internal/test-resource-policy.ts` 已随 R6 删除，worker 数与
+  `maxWorkers` 也不再由环境变量控制。需要更高并发时提高执行器的 `--parallel`（前端组建议 `4`）。
+- 浏览器实例数与 dev server 都是运行期资源：dev server 由 `frontend-dev-server` 提供者启动，释放后自证
+  进程、端口与 HTTP 三重消失；`browser` / `node-worker` 只分配会话目录并核验用例登记的 CLI 进程退出。
+- 单文件运行时出现 `Running N tests with 1 worker` 属于预期行为；`pnpm test:unit:safe`（`vp test run
+  --maxWorkers 4`）仍可用于本机单测，退出码原样保留，不会把部分失败汇总成成功。
 
 ### 诊断命令
 
 ```bash
-# 只跑单个测试文件（并发需求低，不会拉起多个浏览器）
+# 只跑单个测试文件（先自行启动 dev server：pnpm dev 或 make serve）
 pnpm exec playwright test tests/e2e/layout.spec.ts
 pnpm test tests/unit/api-client.test.ts
 
 # 只跑单个用例
 pnpm exec playwright test tests/e2e/layout.spec.ts -g "根重定向"
-pnpm test -t "Playwright 与 Vitest 默认并发都是 4"
+pnpm test -t "连接文案"
 
-# 临时把并发压到 1，排查资源竞争
-AGENTFLOW_TEST_PLAYWRIGHT_WORKERS=1 pnpm exec playwright test
-pnpm test:e2e:safe
-
-# 确认当前生效的并发与产物目录（开头会打印 PLAYWRIGHT_WORKERS= 与 TEST_ARTIFACT_DIR=）
+# 查看将执行哪些用例与产物目录（开头会打印 TEST_ARTIFACT_DIR=）
 pnpm exec playwright test --list
+
+# 正式验收走执行器：dev server 与并发都由执行器负责
+make test-cases TEST_KIND=frontend
+./bin/agentflow-test frontend/playwright-layout
 ```
 
 产物目录：`TEST_ARTIFACT_DIR` 指向 `<OS 临时目录>/lingting-agent-flow-ui-tests/run-<随机>`，

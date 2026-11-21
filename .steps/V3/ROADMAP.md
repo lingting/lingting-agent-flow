@@ -1,6 +1,6 @@
 # AgentFlow V3：统一测试执行器路线总规划
 
-**文档状态：** 主线规划。R0–R8 已完成，下一步是 R9（全量验收、文档同步与 V3 收口）。
+**文档状态：** 主线规划。R0–R9 已完成，V3 已收口（最终状态见 [../V3-final.md](../V3-final.md)）。
 **上游输入：** [审阅意见](TEST-RUNNER-REFACTOR-REVIEW.md)（P0/P1/P2 结论）、
 [R0 盘点与决策](R0/README.md)、[R1 接口与可运行骨架](R1/README.md)、
 [.plan/mian.md](../../.plan/main.md) 的「测试调整」。
@@ -160,6 +160,17 @@ R8 遗留（按归属交给后续阶段）：
 - `cmd/agentflow-test-inventory` 的扫描输入仍是已删除的 `tests/integration/**`、`tests/e2e/**`
   （与 R7 记录一致，R0 清单继续按冻结件使用）。
 
+R9 已收口：全量验收一次跑完（单元 16 包 1321 通过 / 7 跳过；普通 Case 312 条中 311 通过 + 1 跳过；
+真实设备 32 条中 31 通过 + 1 失败；两次运行零残留均 `passed`，产物分别在
+`.test-artifacts/20261121t093231z-fec6/` 与 `.test-artifacts/20261121t094125z-09d1/` 下互不覆盖）。
+覆盖对账以冻结清单 1707 为分母：范围 365、覆盖 316 + dropped 49、缺失 0、多余 0、退出码 0。
+文档同步完成（`docs/testing.md`、`docs/development.md`、`docs/workspace.md`、`README.md`、
+`.github/scripts/README.md`、`tests/README.md`、`lingting-agent-flow-ui/README.md`、`docs/runbook.md`、
+`docs/docker-compatibility.md`），产出口径以 [../V3-final.md](../V3-final.md) 为准。真实批次唯一失败
+`integration-remote-workflow/m6-requirement-sequential-tasks` 的根因（Agent 在容器内自行提交、代码保存
+记录 `no_changes` 而推送成功）与证据记入 [R9 §11.1](R9/README.md#111-全量运行)，按遗留事项待复跑，
+不改断言、不跳过。一次完整 CI 仍未在 GitHub Actions 上运行。
+
 ---
 
 ## 3. 已冻结决策
@@ -207,7 +218,7 @@ R2–R7 只改代码、用例资产与本目录内的阶段文档；`Makefile`�
 | R6 | 已完成 | 前端适配器：Vitest 13 + Playwright 24 接入执行器，dev server 改为共享资源，覆盖对账退出码 0 | [R6](R6/README.md) |
 | R7 | 已完成 | TestMain 与 `testkit` 最终核验收口、删除迁移遗留、真实设备零残留复核；1 条用例被外部环境阻塞已记录 | [R7](R7/README.md) |
 | R8 | 已完成 | Makefile / CI / 脚本收敛，非测试门禁保持可用；一次完整 CI 待推送确认 | [R8](R8/README.md) |
-| R9 | 待执行 | 全量验收、覆盖对账、文档同步与 V3 收口 | [R9](R9/README.md) |
+| R9 | 已完成 | 全量验收（单元 + 312 条普通 Case + 32 条真实 Case）、覆盖对账退出码 0、文档同步与 V3 收口；一次完整 CI 待推送确认 | [R9](R9/README.md) |
 
 依赖与硬门禁：
 
@@ -282,7 +293,7 @@ R2 ──> R3 ──> R4 ──> R4.5 ──> R5 ──> R7 ──> R9
 
 | 风险 | 处置 | 归属 |
 |---|---|---|
-| 无 `-race` 门禁 | 显式接受，R9 写入文档与风险清单；恢复路径见 §3.3 | R0/R9 |
+| 无 `-race` 门禁 | 显式接受，已登记到 [testing.md](../../docs/testing.md) §12 与 [V3-final.md](../V3-final.md) §6；恢复路径见 §3.3 | R0/R9（已完成） |
 | `tests/unit` 仍依赖 `go test` | 路径 C 的既定结果；报告层聚合，不改写断言 | R0 |
 | `t.Parallel()` 语义降级 | 1744 处统一映射为调度器属性；6 个 `sync.Once` 文件已逐个判定：R5 范围内 3 处均为 Case 内局部状态，另 3 处在 `tests/unit`（路径 C），结论见 R5 §5.4.4 | R5（已完成） |
 | Windows 进程树终止不可靠 | `taskkill /T /F` + 回收失败判 error，不用「已杀」冒充通过 | R1/R3 |
@@ -294,28 +305,29 @@ R2 ──> R3 ──> R4 ──> R4.5 ──> R5 ──> R7 ──> R9
 | 镜像构建属写入语义 | 构建产物走独立缓存通道，不与 `Destructive + Shared` 混用 | R2 |
 | 测试工作空间是保留产物而非泄漏 | 零残留核验排除 `TEST_ARTIFACT_DIR` 与 `.test-artifacts` | R2 |
 | 真实设备占用与残留 | 真实批次单独授权；运行前后各做一次快照。B3 已在真实设备跑完，容器与卷在运行前后一致，远程 per-case 目录按迁移前口径保留 | R5（已完成）/R7 |
-| 覆盖清单与实际注册漂移 | `--audit-coverage` 作为 R5/R9 的硬门禁；R5 收口时为 279 覆盖 + 49 dropped、缺失 0、退出码 0 | R5（已完成）/R9 |
+| 覆盖清单与实际注册漂移 | `--audit-coverage` 作为 R5/R9 的硬门禁；R9 复核：清单 1707 / 范围 365 / 覆盖 316 + dropped 49 / 缺失 0 / 多余 0 / 退出码 0 | R5（已完成）/R9（已完成） |
 | `service-process` 端口存在「探测空闲 → 服务监听」竞争窗口 | 就绪判定在超时内重试，窗口期失败判「没有就绪」 | R2 |
 | 远程用例漏声明 `ssh-host` 会让连接在终检里成为残留 | 有意保留：终检判 failed 并指出残留条目，强制声明依赖 | R2 |
 | 容器零残留核验是设备级的，同包并发会把别的用例的容器判成未登记 | 真实设备容器包整包串行（`remote/docker` 按 R5 D12 改为 `Parallel: false`），核验语义保持清单级；R7 D6 复核后 `remote/workflow` 解除串行——产品容器不匹配 testkit 测试前缀，不参与未登记判定 | R5（已完成）/R7 |
 | 需求删除后立即断言「拒绝重新开始」与后台收敛释放执行权竞态 | R5 D13：先只读等待执行权释放（上限 5 分钟）再断言，不放宽断言 | R5（已完成） |
-| 真实设备外部故障（GitHub HTTPS、镜像站 500、容器内模型 10 分钟超时） | 如实记为环境失败，不换本机替身、不放宽断言；`remote/workflow/m6-requirement-sequential-tasks` 待环境恢复后复跑一次 | R7（已完成）/R9 |
-| 中止运行不做零残留终检 | 编排进程被中止后残留需人工确认（R7 §4.4 事故记录），处置流程写入 `docs/runbook.md` | R9 |
+| 真实设备外部故障（GitHub HTTPS、镜像站 500、容器内模型 10 分钟超时） | 如实记为环境失败，不换本机替身、不放宽断言；R9 真实批次 31/32 通过，`m6-requirement-sequential-tasks` 仍失败（Agent 自行提交导致代码保存记录无 commit SHA），已登记为遗留待复跑 | R7（已完成）/R9（已登记） |
+| 中止运行不做零残留终检 | 编排进程被中止后残留需人工确认（R7 §4.4 事故记录），处置流程已写入 [runbook.md](../../docs/runbook.md) §8.2（含"基线差异只报告"） | R9（已完成） |
 
 ---
 
-## 9. 文档与 CI 同步清单（R8 / R9）
+## 9. 文档与 CI 同步清单（R8 / R9，均已完成）
 
-- R8：`Makefile` 测试目标（`test-ssh` / `test-e2e` 仍指向 R5 已删除的 `tests/integration/ssh`、
-  `tests/e2e`，必须与 §7 的替代关系一起收敛）、`.github/workflows/ci.yml` 测试相关 Job、
-  `.github/scripts/` 逐脚本归属；`run-frontend-tests.sh` 与 `ci.yml` 的 `ui-test` Job 改为
+- R8（已完成）：`Makefile` 测试目标（`test-ssh` / `test-e2e` 与 §7 的替代关系一起收敛）、
+  `.github/workflows/ci.yml` 测试相关 Job、`.github/scripts/` 逐脚本归属；`ui-test` Job 改为
   `agentflow-test --parallel 4 frontend`（R6 已移除 Playwright 的 `webServer`，脚本不能再独立起 dev server）；
-  `lingting-agent-flow-ui/package.json` 的 `test:e2e:safe` / `test:all:safe` 同步调整。
-- R9：`docs/testing.md`、`docs/development.md`（常用命令）、`docs/workspace.md`（新增目录与
-  已删除的 `tests/integration/**`、`tests/e2e/**` 路径）、`README.md`（索引与命令）、
-  `.github/scripts/README.md`、`docs/runbook.md`（若涉及测试排障）、`tests/README.md`（入口与目录说明）、
-  `lingting-agent-flow-ui/README.md`（仍引用 R6 删除的 `tests/internal/test-resource-policy.ts`，需改写并发与入口说明）。
-- 文档只描述已落地能力；R9 之前不得提前写入未实现命令。
+  `lingting-agent-flow-ui/package.json` 的 `test:e2e:safe` / `test:all:safe` 同步删除。
+- R9（已完成）：`docs/testing.md`、`docs/development.md`（常用命令）、`docs/workspace.md`（新增
+  `cmd/agentflow-test`、`internal/testrunner`、`tests/runner` 与已删除的 `tests/integration/**`、
+  `tests/e2e/**` 路径）、`README.md`（索引与命令）、`.github/scripts/README.md`、`docs/runbook.md`
+  （§8.2 测试运行中止后的设备残留）、`tests/README.md`（入口与目录说明）、
+  `lingting-agent-flow-ui/README.md`（改写并发与入口说明，删除 `tests/internal/test-resource-policy.ts`
+  引用）、`docs/docker-compatibility.md`（测试路径改为分组名）。
+- 文档只描述已落地能力：R9 同步后不再存在指向已删除目录、脚本或目标的现行描述。
 
 ---
 

@@ -1,152 +1,250 @@
 # 测试规范
 
-本文件是 AgentFlow 的测试规则：目录分层、独立入口、测试工作空间、真实外部依赖与结果报告。测试目录
-在仓库中的位置见 [workspace.md](workspace.md)；前端测试目录见 [frontend.md](frontend.md)；各测试套件的
-目录与操作细节见 [tests/README.md](../tests/README.md)。
+本文件是 AgentFlow 的测试规则：授权边界、两个执行入口、用例模型、并发与调度、资源与零残留、
+测试工作空间与产物、真实外部依赖、覆盖对账与结果报告。测试目录在仓库中的位置见
+[workspace.md](workspace.md)，用例包与操作细节见 [tests/README.md](../tests/README.md)，前端工程见
+[frontend.md](frontend.md)。执行器内部实现与冻结决策见 [`.steps/V3/`](../.steps/V3/)。
 
 ## 1. 授权与默认验证
 
 - 默认只做非测试验证：阅读代码、检查 `git diff`、`gofmt`、`go vet`、类型与引用检查。
 - 未经用户明确要求，不运行测试、不创建测试文件、不编写临时验证脚本，也不通过"测试后删除"的方式绕过
-  该限制。
+  该限制。授权按任务或阶段给出，范围是明确列出的命令与用例集合；范围外的一律不执行。
+- 授权范围内的运行必须如实报告通过、失败、跳过与未执行，并给出产物路径，不得只报通过数。
 - 数据库结构变更只追加 `internal/storage/sqlite/migrations/` 下的版本化脚本，不手写版本判断，也不为
   Goose 自身的迁移调度、版本表或 SQLite 事务编写重复实现的测试（见 `AGENTS.md` 的「数据库约束规范」）。
 
 ## 2. 目录
 
-- 所有测试代码与测试入口必须放在根目录 `tests/` 下，按 `unit/`、`integration/local/`、
-  `integration/ssh/`、`integration/remote/`、`e2e/` 分层。
-- 禁止在生产源码目录（`internal/`、`cmd/`）新增或保留测试文件。
-- `tests/integration/local/workflow/` 是应用层编排的集成测试目录：使用真实 SQLite 文件与真实
+```text
+tests/
+├── internal/testkit/       通用测试辅助：工作空间、日志、known_hosts 快照、容器核验与 testkit.Main
+├── unit/                   仍由 go test 执行的单元测试（16 个包）
+├── runner/                 Case 定义与注册表，由 agentflow-test 执行
+│   ├── registry/           用例包聚合入口（空导入）
+│   ├── integration/local/  本机集成用例（9 个分组）
+│   ├── integration/ssh/    真实 SSH 主机用例
+│   ├── integration/remote/ 真实远程 Docker / Agent / 代码保存 / 规划 / 工作流用例
+│   ├── e2e/cli/            CLI 端到端用例
+│   ├── frontend/           Vitest 与 Playwright 适配用例
+│   ├── selfcheck/          执行器自检：跳过、超时、迟到结果、取消
+│   ├── resourcecheck/      资源提供者自检：分配、释放、自证、故障注入
+│   ├── concurrencycheck/   调度场景：并发上限、容量、独占键、包级串行、取消
+│   ├── pilot/              R4 试点用例（真实服务进程）
+│   └── legacy/             R0 清单里显式 `dropped` 的条目及其理由
+└── config/                 真实外部依赖配置（示例文件入库，真实配置不入库）
+```
+
+- 所有测试代码与测试入口都必须放在根目录 `tests/` 下；禁止在生产源码目录（`internal/`、`cmd/`）新增
+  或保留测试文件。
+- `tests/runner/integration/local/workflow/` 是应用层编排的集成用例：使用真实 SQLite 文件与真实
   `app.TaskWorkflowService`，只把外部依赖（Agent 执行、容器核验、单步骤闭环）替换为受控替身。恢复类
   用例必须"关闭连接后用同一路径重新打开"来模拟进程退出，并只断言数据库里的持久化事实（任务状态、
   步骤、执行记录、会话、事件），不得以方法返回值代替持久化断言。
 - `tests/internal/testkit/` 只存放通用测试辅助代码，不存放产品实现，也不存放需要额外执行的验证脚本。
 
-## 3. 独立入口与并发
+## 3. 两个执行入口
 
-- 每个测试目录都是独立的 Go 测试包，可用 `go test` 直接执行；成功判定与退出码由 Go 测试框架负责，
-  不得把结果判断委托给额外的 Shell、Python 或日志解析脚本。
-- 每个测试入口必须自行完成初始化、执行被测操作、自动断言，并用非零退出码报告失败。
-- 新测试默认必须支持并发：无共享状态的用例使用 `t.Parallel()`，不得依赖固定执行顺序，不得依赖其他
-  测试预先创建的数据。
-- 例外：共用同一台真实设备的测试包必须保持包内串行（不使用 `t.Parallel()`），并在包注释写明原因。
-  典型情形是 `tests/integration/remote/workflow/`：它的用例共用同一台远程 Docker 与环境镜像标签，并行
-  运行时后完成的构建会把同一标签改指到另一个镜像，使先完成用例记录的镜像 ID 失效，随后"复用已有构建"
-  失败、任务启动反复失败并长期停在 `queued`。串行执行时同一次运行只构建一次，标签与记录始终一致。
-- 除上述例外，并发度由 `-p` 与 `-parallel` 控制，不得把无共享状态的用例强制串行化。
+| 范围 | 入口 | 本地命令 | CI Job |
+|---|---|---|---|
+| `tests/unit/**`（16 个包） | `go test` | `make test-unit` | `go-unit` |
+| 其余全部已注册 Case | `agentflow-test` | `make test-cases` / `make test-real` | `cases-local`、`cases-e2e`、`cases-selfcheck`、`ui-test`、`real-tests` |
 
-## 4. 测试工作空间
+- 集成测试、E2E 测试与前端浏览器测试只有 `agentflow-test` 一个入口，不得再用 `go test` 执行这些用例，
+  也不得用 `pnpm test:e2e:safe` 一类的平行入口启动 dev server。`tests/unit` 的用例仍由 `go test`
+  执行，其结论按 `go test` 自己的输出统计（路径 C 的既定结果，见 `.steps/V3/ROADMAP.md` §3.1）。
+- 前端单元测试 `pnpm test`（`vp test run`）保留为开发者本机入口，不参与 CI 门禁，也不替代执行器的
+  `frontend` 分组。
+- `bin/agentflow-test` 由 `make test-runner` 构建；worker 由同一二进制以 `--exec-case` 重新启动，因此
+  入口必须是最新构建，`make test-cases` / `make test-real` 会先构建再运行。
 
-- 每次测试入口启动时在 `os.TempDir()/lingting-agent-flow-tests/` 下创建随机根目录，每个用例使用独立
-  子目录，并输出绝对路径 `TEST_ARTIFACT_DIR`。
-- 数据库、WAL/SHM、Session、日志、配置与生成文件必须全部落在该工作空间内，不得写入真实项目目录、
-  用户默认数据目录或其他用例的工作空间。
-- 使用 `tests/internal/testkit` 提供的 `testkit.New(t)` 与 `testkit.Dir(t)`，不要用 `t.TempDir()`，
-  也不要用 `t.Setenv` 切换全局数据目录；路径通过结构体、构造参数或子进程独立环境变量传入。
-- 配置文件中的数据库与工作区路径必须是工作空间内的绝对路径。相对路径会按进程工作目录解析（`go test`
-  下即包目录），把 SQLite 文件写进仓库；配置模板中的路径一律使用占位符，由统一的辅助函数替换为绝对
-  路径，并保留一个断言绝对路径的回归用例。
+执行器的选择条件只有三种写法：分组名（如 `frontend`）、精确用例 ID（如
+`integration-local-scheduler/...` 的完整 ID）、以 `...` 结尾的前缀（如 `integration-local-...`）。
+没有排除语法，也没有 `--count`：重复运行即重新执行。
+
+## 4. 用例模型
+
+一条 Case 由 `internal/testrunner.Case` 描述，注册在 `tests/runner/registry/` 聚合的包里：
+
+| 字段 | 含义 |
+|---|---|
+| `ID` | 全局唯一标识 `<group>/<name>`，同时是产物目录名的一部分 |
+| `Group` | 选择与并发决策的分组，留空时取 ID 第一段 |
+| `Timeout` | 单条用例上限，零值使用运行级默认（10 分钟） |
+| `Package` | 来源 Go 测试包路径：串行作用域与包级串行判定按它进行 |
+| `LegacyName` / `LegacyID` | 对应 R0 冻结清单的条目，供覆盖对账定位 |
+| `Parallel` | 是否允许与其他用例并行；`false` 表示在串行作用域内独占 |
+| `RunnerInternal` | 执行器自检用例，不参与覆盖对账 |
+| `Resources` | 资源声明，由编排进程分配后以句柄注入 worker |
+| `Run` | 用例主体，只在 worker 子进程中执行 |
+
+- 每条 Case 在独立 worker 子进程中执行，独占 stdout/stderr：`panic`、`os.Exit` 与包级全局状态只影响
+  该条用例（见 §7 的产物布局）。
+- 迁移写法固定为 `func run<原函数名去掉 Test 前缀>`，`Register` 据此推导 `LegacyName`；一条源测试函数
+  内的多个 `t.Run` 子测试用 `Context.Run` 表达（单层、顺序执行），不得用 `testing.T`。
+- 用例的失败、跳过与超时必须通过 `Context` 表达，跳过必须带原因；不得把跳过写成通过。
+- 真实设备用例只声明本地独占资源与远程资源声明，不在用例里创建或清理共享资源（见 §6）。
+
+## 5. 并发与调度
+
+- 并发只由 `internal/testrunner/scheduler.go` 的调度器决定：`--parallel`（默认 8）是同时在飞的 worker
+  上限，用例无法通过代码自行扩大并发；`t.Parallel()` 不再决定并发，原有声明统一映射为
+  `Case.Parallel`。
+- 调度输入只有三类：资源容量（同类资源同时在用的上限）、独占键（同一键的用例不得并行）、包级串行
+  （`Case.Package` 相同的用例串行）。
+- `tests/unit/**` 仍由 `go test` 执行，其并发由 `-p` / `-parallel` 控制（`make test-unit` 跟随
+  `PARALLEL`）。
+- 前端浏览器的实际并发等于调度器派发的用例数：`playwright.config.ts` 固定 `workers: 1`，一条 Case
+  一次 CLI 调用，不再读取任何 worker 环境变量。
+
+## 6. 资源与零残留
+
+- 资源类型是冻结词汇表（`internal/testrunner/resource.go`）：`docker-daemon`、`remote-container`、
+  `remote-workspace`、`ssh-host`、`ssh-session`、`local-ssh-server`、`sqlite-db`、`local-port`、
+  `local-http-server`、`child-process`、`service-process`、`git-worktree`、`node-worker`、
+  `frontend-dev-server`、`browser`。
+- 作用域只有两种：`run-shared`（一次运行内同一声明只分配一次，多个用例复用）与 `case-exclusive`
+  （每个用例各分配一份，用完立即释放）。用例只消费 `handles.json` 里的序列化句柄，不自行创建或清理
+  共享资源。
+- 释放可重复调用，释放失败使该资源与整次运行都失败；跳过不等于通过，一次正常运行结束后
+  `residual_check.status` 不允许停留在未执行。
+- 零残留是两级核验：资源级在每个资源释放后自证消失（`docker ps -a`、远程目录、端口、SSH 会话计数
+  等）；运行级在编排进程退出前对全部提供者做一次快照比对，结论写入 `report.json` 的
+  `residual_check`（`passed` / `failed` / `not-applicable`）。残留或无法确认都按失败处理。
+- 测试工作空间（`TEST_ARTIFACT_DIR` 与 `.test-artifacts`）是保留产物，不参与残留判定。
+
+## 7. 测试工作空间与产物
+
+```text
+<artifact-root>/<run-id>/report.json
+<artifact-root>/<run-id>/cases/<case-id>/{stdout.log,stderr.log,result.json,artifacts/}
+<os.TempDir()>/lingting-agent-flow-tests/<run-id>/<case-id>/           用例工作空间
+<os.TempDir()>/lingting-agent-flow-tests/<run-id>/shard_<type>_<id>/   资源存放目录
+```
+
+- `<artifact-root>` 默认 `.test-artifacts`（`agentflow-test --artifact-dir`，Make 入口为
+  `TEST_ARTIFACT_ROOT`）；`<run-id>` 形如 `20260101t120000z-1a2b`，历史运行目录不会被覆盖，失败的运行
+  保留全部产物。
+- 用例的数据库、WAL/SHM、Session、日志、配置与生成文件必须落在该用例的工作空间内，不得写入真实项目
+  目录、用户默认数据目录或其他用例的工作空间。
+- 使用 `tests/internal/testkit` 提供的 `testkit.New(t)` 与 `testkit.Dir(t)`，不要用 `t.TempDir()`，也
+  不要用 `t.Setenv` 切换全局数据目录；路径通过结构体、构造参数或子进程独立环境变量传入。
+- 配置文件中的数据库与工作区路径必须是工作空间内的绝对路径：相对路径会按进程工作目录解析，把 SQLite
+  文件写进仓库。配置模板中的路径一律使用占位符，由统一的辅助函数替换为绝对路径。
 - 仓库忽略任意层级的 `.agentflow/` 目录，作为误用相对路径时的兜底；不得把运行期数据文件提交进版本库。
 - 测试结束禁止删除工作空间与测试产物：不调用 `os.RemoveAll` 删除测试根目录，不使用会在结束时自动清理
   目录的临时目录 API，也不在 `t.Cleanup` 中删除目录。允许关闭数据库连接、终止测试启动的子进程、关闭
   监听端口等运行时资源。
-- 每个测试包必须用 `testkit.Main` 作为统一入口（`os.Exit(testkit.Main(m))`），由它把本次运行的
-  完整输出写入 `<TEST_ARTIFACT_DIR>/test.log` 并在基目录记录
-  `latest-run.txt`，同时默认打开 `-test.v`。不得各包自行丢弃测试日志，应用服务日志统一用
-  `testkit.Logger` / `testkit.Slog` 构造。
+- `tests/unit/**` 的包仍用 `testkit.Main` 作为入口（`os.Exit(testkit.Main(m))`），由它把本次运行的完整
+  输出写入用例工作空间下的 `test.log`，并在基目录记录 `latest-run.txt`、默认打开 `-test.v`。应用服务
+  日志统一用 `testkit.Logger` / `testkit.Slog` 构造。
 
-## 5. 真实外部依赖
+## 8. 真实外部依赖
 
 真实测试的启用是**两层门禁**，两层都必须通过：
 
-1. **CI 授权门禁（只在 GitHub Actions 生效）**：`GITHUB_ACTIONS=true` 时，用例还要求
-   `AGENTFLOW_REAL_TESTS_GRANTED=true`（由授权判定 Job 依据 GitHub Repository Variable
+1. **CI 授权门禁（只在 GitHub Actions 生效）**：`GITHUB_ACTIONS=true` 时，用例要求
+   `AGENTFLOW_REAL_TESTS_GRANTED=true`（由 `real-tests-gate` Job 依据 GitHub Repository Variable
    `AGENTFLOW_REAL_TESTS` 与事件身份字段产出，规则只实现一次于 `internal/cigate`）。未获授权时以
-   `WARN [SKIP]` 跳过。该门禁由 `tests/internal/testkit` 的 `RequireRealTests` 统一实施，测试代码不读取
-   `AGENTFLOW_REAL_TESTS` 本身。
+   `WARN [SKIP]` 跳过。用例只读取这个标记，不读取 `AGENTFLOW_REAL_TESTS` 本身。
 2. **本机配置开关（任何环境都生效）**：`tests/config/*.yml` 中的 `pi.enable`、`ssh.enable` 与
    `docker.remote_enabled`；文件缺失、开关为 false 或目标字段不全时跳过并说明缺少哪一项。
 
-本机开发环境（没有 `GITHUB_ACTIONS` 标记）不经过第 1 层：`make test`（`go test ./tests/...`）在
-`tests/config` 已启用真实依赖时会真实连接测试设备；`make test-unit` / `make test-race` /
-`make test-local` 只跑不需要真实设备的分组。跳过只能来自"未获授权"或"未提供配置"，配置完整但连接、
-认证或主机密钥校验失败时必须让测试失败。
+- 执行器在编排进程里做**一次**真实依赖判定，结论通过 `real_tests` 字段与 worker 参数下发：`--real-tests`
+  取 `auto`（按两层门禁判定）、`on`（强制允许）、`off`（强制禁止）。普通门禁一律传 `off`，因此普通
+  门禁不可能选中或执行真实分组。
+- 本机开发环境（没有 `GITHUB_ACTIONS` 标记）不经过第 1 层：`tests/config` 已启用真实依赖时，
+  `make test-real` 会真实连接测试设备。跳过只能来自"未获授权"或"未提供配置"，配置完整但连接、认证或
+  主机密钥校验失败时必须让测试失败。
+- 真实分组共 32 条（`integration-ssh`、`integration-remote-*` 6 个分组），只能由 `make test-real`
+  （要求 `AGENTFLOW_REAL_TESTS_GRANTED=true`）或 CI 的 `real-tests` Job 触发，包之间固定
+  `--parallel 1` 串行。
+- 本机不执行 Pi：所有 Agent 调用都在容器内，测试不检查本机是否安装 `pi`，也不读取本机 Pi 可执行文件
+  路径；容器内 Pi 的可用性由 `tests/runner/integration/remote/agent/` 在容器内执行 `pi --version` 与
+  `pi --list-models` 确认。
+- 真实模型调用由 `tests/config/pi.yml` 的 `pi.enable` 显式开启（当前只作用于远程规划与工作流用例），
+  默认模型为 `group/free`；每次真实调用都必须显式传入模型，不得回退到 Pi CLI 配置中的默认付费模型。
+  模型在清单里挂在不含模型前缀的 provider 下时，用同文件的 `pi.provider` 补充 provider 前缀（由
+  `testkit.PiConfig.ResolvedModel` 统一组装，留空时原样使用模型标识）；容器内 Pi 的模型来自
+  `docker.yml` 的 `pi.*`。
+- 真实 SSH 目标统一来自 `tests/config/ssh.yml`（`ssh.host`、`ssh.user`、`ssh.port`、
+  `ssh.private_key_path`、`ssh.known_hosts`），由 `ssh.enable` 显式开启；测试配置禁止再通过
+  `AGENTFLOW_TEST_SSH_*` 等环境变量逐项读取。
+- `ssh.known_hosts` 留空时复用本机用户 OpenSSH 的 `~/.ssh/known_hosts` 与 `known_hosts2`，与产品默认
+  行为一致；显式填写但文件不可读时直接让测试失败，不得静默回落到空信任库。来源解析统一由
+  `tests/internal/testkit.KnownHostsSources` 提供。
+- 解析出的 known_hosts 来源先快照复制进用例工作空间，校验只读快照：产品与测试都不得写入用户真实
+  known_hosts。主机密钥未知的失败信息必须列出实际读取的路径与可用配置项，使"配置写错"与"连接层缺陷"
+  可以区分。禁止关闭主机密钥验证，禁止自动接受未知主机密钥。
+- 真实远程 Docker 用例要求 `docker.remote_enabled` 与 `ssh.enable` 同时启用，只操作带随机后缀、属于
+  本次运行的镜像标签、容器、卷与远程目录，禁止执行全局 prune。
+- 共用同一台设备的真实分组在包内保持串行（`remote/docker` 按 R5 D12 为 `Parallel: false`）：环境镜像
+  标签由环境、版本号与构建配置哈希共同决定，并行构建会把同一标签改指到不同镜像。`remote/workflow`
+  在 R7 D6 复核后解除整包串行，其资源、数据库、容器名与分支本就按用例隔离。
+- 用例超时用 `--timeout`（默认 10m）与 `Case.Timeout` 表达；真实套件自带分钟级预算，需要时按分组单独
+  放宽，超时仍按失败上报。
 
-- 本机不执行 Pi：所有 Agent 调用都在容器内，测试不检查本机是否安装 `pi`，也不读取本机 Pi
-  可执行文件路径；容器内 Pi 的可用性由 `tests/integration/remote/agent/` 在容器内执行
-  `pi --version` 与 `pi --list-models` 确认。
-- 真实模型调用由 `tests/config/pi.yml` 的 `pi.enable` 显式开启（当前只作用于
-  `tests/integration/remote/workflow`），默认模型为 `group/free`；每次真实调用都必须显式传入
-  模型，不得回退到 Pi CLI 配置中的默认付费模型。模型在清单里挂在不含模型前缀的 provider 下时，
-  用同文件的 `pi.provider` 补充 provider 前缀（由 `testkit.PiConfig.ResolvedModel` 统一组装，
-  留空时原样使用模型标识）；容器内 Pi 的模型来自 `docker.yml` 的 `pi.*`。
-- 真实 SSH 测试的目标统一来自 `tests/config/ssh.yml`（`ssh.host`、`ssh.user`、`ssh.port`、
-  `ssh.private_key_path`、`ssh.known_hosts`），并由 `ssh.enable` 显式开启；未启用时输出警告并跳过，
-  启用但必需目标缺失时输出警告并跳过，目标配置完整但连接、认证或主机密钥校验失败时必须让测试失败。
-  测试配置禁止再通过 `AGENTFLOW_TEST_SSH_*` 等环境变量逐项读取。
-- `ssh.known_hosts` 留空时，真实 SSH 测试必须复用本机用户 OpenSSH 的 `~/.ssh/known_hosts` 与
-  `known_hosts2`，与产品默认行为一致；显式填写但文件不可读时直接让测试失败，不得静默回落到空信任库。
-  来源解析统一由 `tests/internal/testkit` 的 `KnownHostsSources` 提供，各远程测试目录不得各自实现。
-- 解析出的 known_hosts 来源必须先快照复制进当前用例工作空间，校验只读快照：产品与测试都不得写入用户
-  真实 known_hosts。需要信任某主机时直接构造 known_hosts 文件，不得调用任何写入接口（产品侧已不再
-  提供）。
-- 主机密钥未知的失败信息必须列出实际读取的 known_hosts 路径与可用配置项，并提示用 OpenSSH 追加已核验
-  的密钥，使"配置写错"与"连接层缺陷"可以区分。
-- 禁止关闭 SSH 主机密钥验证来规避测试失败，禁止自动接受未知主机密钥。
-- 真实外部测试的远程操作只允许在随机生成的远程临时目录内进行。
-- SSH 连接层的测试放在 `tests/integration/local/ssh/`（进程内启动服务端、走真实握手与认证），不得访问外网
-  或依赖本机已安装的 SSH 服务。
-- 本机集成测试的 SSH/SFTP 服务端只能由测试代码在进程内启动，不得要求用户预先启动服务，也不得用
-  "配置解析正确"代替真实握手、认证与传输验证。测试用私钥统一由 `tests/internal/testkit` 的
-  `PrivateKeyPath` 生成，只生成无口令私钥。
-- 远程命令的取消与超时测试必须验证会话确实被关闭（例如断言服务端活动会话数归零），不能只验证本地
-  停止等待。
-- 真实远程 Docker 集成测试必须把 `tests/config/docker.yml` 的 `docker.remote_enabled` 设为 `true`
-  并同时启用 `ssh.enable`；未启用时输出 `WARN [SKIP]`，普通测试不得修改真实远程 Docker。
-- 真实远程 Docker 测试放在 `tests/integration/remote/docker/`，目标机器由 `tests/config/ssh.yml` 提供；
-  开关已启用但目标缺失时说明缺少的配置项并跳过，目标完整但认证失败、Docker 不可用或断言不成立时必须
-  让测试失败。
-- 真实远程 Docker 测试只允许操作带随机后缀、属于本次测试的镜像标签、容器与远程目录；禁止执行全局
-  `docker system prune`、`docker image prune`、`docker volume prune`。
-- 真实远程 Agent 测试放在 `tests/integration/remote/agent/`，同样要求 `docker.remote_enabled` 与
-  `ssh.enable` 都已启用；容器内 Pi CLI 是否可用必须通过容器内实际检查确认，不能依据本机是否安装 Pi
-  判断。测试镜像由该目录下的 `Dockerfile` 构建，基础镜像与 Pi CLI 版本都固定到具体版本。
-- 真实远程工作流测试放在 `tests/integration/remote/workflow/`，同样要求 `docker.remote_enabled` 与
-  `ssh.enable` 都已启用；只操作带随机后缀、属于本次测试的容器与远程目录。
-- 共用同一台设备的真实测试包内必须串行：这些用例的环境镜像标签由环境、版本号与构建配置哈希共同决定，
-  并行构建会把同一标签改指到不同镜像，使先完成的用例在"复用已有构建"时核验失败。包内串行由包注释声明，
-  包与包之间仍由 `.github/scripts/run-real-tests.sh` 以 `-p 1` 串行执行。
-- 真实规划运行时测试放在 `tests/integration/remote/planning/`，同样要求 `docker.remote_enabled`、
-  `ssh.enable` 与完整的 `docker.pi` 配置；它只使用生产服务装配（容器服务、规划运行时、规划 Agent、
-  会话协调器、当前存储与角色服务），不新增第二套容器 / Session / Pi Runner 实现。测试镜像
-  `tests/integration/remote/planning/Dockerfile` 只设置 `PI_CODING_AGENT_DIR=/tmp/pi-agent`：只读规划容器的
-  唯一可写目录是 `/tmp`，模型配置只在运行期写入容器内 tmpfs，不进入镜像层、日志或数据库。
-- 真实套件自带分钟级运行预算，`go test` 默认的 10 分钟上限会让它们必然超时；统一入口
-  `.github/scripts/run-real-tests.sh` 因此用 `--timeout`（默认 `90m`）显式设置 `go test -timeout`，
-  超时仍按失败上报。本机单独执行真实包时同样需要按需传入 `-timeout`。
+## 9. 覆盖对账
 
-## 6. 数据库与状态测试
+- 分母是 R0 冻结的 `.steps/V3/R0/legacy-cases.manifest.json`（1707 条），不再重新生成；`make inventory`
+  默认写 `.test-artifacts/inventory`，覆盖冻结基线必须显式传 `INVENTORY_DIR=.steps/V3/R0`。
+- `agentflow-test --audit-coverage [--audit-stage R5,R6] [--audit-json FILE]` 只读清单与注册表，不执行
+  用例：缺失条目、无法解释的多余注册与结构性问题都让退出码非零；条目只允许在 `tests/runner/legacy/`
+  显式登记 `dropped` 并给出理由。
+- 覆盖对账是 `go-inventory` Job 的硬门禁，也是集成与前端用例迁移的验收依据；当前结论见
+  [tests/README.md](../tests/README.md) 与 `.steps/V3/R9/README.md`。
 
-- 数据库相关测试集中在 `tests/unit/store/`：仓储读写、未知枚举值原样保留、逻辑删除、条件更新拒绝迟到
-  结果与并发写入；`tests/unit/store/migrations_test.go` 只确认全新数据库能完成初始迁移、重复打开不会重复
-  执行。`tests/integration/local/database/`（Schema 审计、旧库升级与数据保留）已删除：Schema 与旧库不兼容
-  行为没有自动化守点，新增迁移脚本需要人工核对。
-- 涉及跨实体状态更新时，必须通过 `storage.WithTx` 在单个事务内完成。
-- 测试不得读写用户真实配置、仓库或 `.agentflow/` 下的真实数据。
+## 10. 常用命令与 CI 对应
 
-## 7. 执行链路改动后的覆盖要求
+```bash
+make check                        # gofmt 检查 + go vet + go build，不执行任何测试
+make test                         # test-unit + test-cases（全部普通 Case）
+make test-unit                    # go test ./tests/unit/...
+make test-cases                   # 全部普通 Case（local + e2e + selfcheck + frontend）
+make test-cases TEST_KIND=local   # 只跑本机集成分组
+make test-cases TEST_KIND=e2e     # 只跑 CLI 端到端分组
+make test-cases TEST_KIND=selfcheck
+make test-cases TEST_KIND=frontend
+AGENTFLOW_REAL_TESTS_GRANTED=true make test-real   # 真实设备分组（需单独授权）
+./bin/agentflow-test --list                        # 列出已注册用例（不执行）
+./bin/agentflow-test --audit-coverage --audit-stage R5,R6
+```
 
-修改执行链路后至少覆盖：成功、非零退出，以及超时或取消导致的中断。执行结论必须由真实结果决定：
-`completed` 要求可核验的运行痕迹（完整 Session 或进程标识），没有运行痕迹的"成功"要按失败处理。
-并发重复请求只有在会造成同一任务重复执行时才需要相应保护与测试。
+| CI Job | 内容 | 本地等价入口 |
+|---|---|---|
+| `go-static` | 格式、静态检查与编译 | `make check` |
+| `go-inventory` | 分组核验 + 覆盖对账（均不执行用例） | `bash .github/scripts/go-test-groups.sh --check ...`、`--audit-coverage` |
+| `go-unit` | `./tests/unit/...` | `make test-unit` |
+| `cases-local` | 本机集成分组 | `make test-cases TEST_KIND=local` |
+| `cases-e2e` | CLI 端到端分组 | `make test-cases TEST_KIND=e2e` |
+| `cases-selfcheck` | 执行器与资源自检分组 | `make test-cases TEST_KIND=selfcheck` |
+| `ui-test` | 前端用例分组 + `pnpm check` / `pnpm build` / `make web-verify` | `make test-cases TEST_KIND=frontend` |
+| `real-tests-gate` | 只读判定真实测试是否授权 | 无本地等价入口 |
+| `real-tests` | 真实外部依赖分组（授权通过后） | `AGENTFLOW_REAL_TESTS_GRANTED=true make test-real` |
+| `ci-summary` | 汇总各 Job 结论 | 无（仅 CI） |
 
-修改任务领取或需求聚合删除路径后，还必须覆盖"已删除的任务不会被新的一次领取"。需求聚合删除只写
-`deleted_at`、不改任务状态，因此候选事实中的旧状态不足以发现删除；用例应断言数据库事实（是否写入
-`TaskClaimed` 事件、执行权是否残留、需求与任务的删除状态是否一致），而不是只看方法返回值。
+故障注入分组（`*-fault`，14 条）不进门禁：它们按设计注入失败并以非零退出码结束，需要时按
+`./bin/agentflow-test selfcheck-fault` 一类的选择条件单独执行。分组声明只有一个来源
+（`.github/scripts/go-test-groups.sh`），`--check` 直接对 `go list` 的测试包、执行器 `--list` 的注册表、
+Makefile 入口与消费脚本核验。
 
-## 8. 结果报告
+## 11. 结果报告
 
-- 运行任何测试前都必须先获得用户明确授权；运行后如实报告通过、失败、跳过与未执行的测试，不得把未执行、
-  被跳过或失败的测试报告为通过。
-- 测试产物路径（`TEST_ARTIFACT_DIR`）与远程测试资源位置必须在最终报告中列出。
+- 用例结论只有六种：`passed` / `failed` / `skipped` / `panic` / `timeout` / `error`。跳过必须带原因且
+  不计入通过；worker 没能产出可信结果（启动失败、异常退出、结果文件缺失）按 `error` 处理。
+- 统一报告是 `<artifact-root>/<run-id>/report.json`：选择条件、真实依赖授权结论、用例结论、资源结论、
+  零残留结论、并发与取消记录、退出码都在其中，路径可复现。
+- `make test-unit` 的结论来自 `go test`（顶层通过 / 失败 / 跳过的结论行），与 Case 报告的统计口径各自
+  独立，不混算。`report.json` 的跳过统计只读 `totals.skipped` 与每条 `skip_reason`。
+- 取消或超时会终止 worker 进程树（Windows 用 `taskkill /T /F`，回收失败判 `error`），迟到结果不得覆盖
+  已确认结论；被中止的编排进程不会执行零残留终检，残留需要人工核验（见 [runbook.md](runbook.md)）。
+
+## 12. 已接受的能力边界
+
+| 能力 | 结论 |
+|---|---|
+| `go test -race` | 本次重构不保留（R0 §2.3），`test-race` 目标与竞态 Job 已删除；恢复路径是 worker 的 `-race` 变体 + `--race` 选项，目前未实现 |
+| 覆盖率门禁 | 不新增（现状本来没有）；恢复路径同上 |
+| `tests/unit` 仍用 `go test` | 路径 C 的既定结果，不改写断言 |
+| `t.Parallel()` 等价语义 | 不保留：1744 处声明统一映射为调度器属性，并发由调度器决定 |
+| 中止运行后的零残留终检 | 不做：编排进程被中止时残留需人工确认 |

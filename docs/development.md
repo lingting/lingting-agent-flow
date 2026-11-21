@@ -82,12 +82,16 @@ go mod tidy
 make fmt          # gofmt -w cmd internal tests
 make fmt-check    # 列出未格式化的文件
 make vet          # go vet ./...
-make test         # go test ./tests/...
-make test-unit    # 快速单元测试
-make test-local   # 本机集成测试
-make test-ssh     # 真实 SSH 集成测试
-make test-e2e     # CLI 端到端测试
-make test-race    # 竞态检测（单元测试与 SSH 连接层）
+make test         # test-unit + test-cases（全部普通 Case）
+make test-unit    # 单元测试（go test ./tests/unit/...）
+make test-cases   # 全部普通 Case：local + e2e + selfcheck + frontend
+make test-cases TEST_KIND=local      # 只跑本机集成分组
+make test-cases TEST_KIND=e2e        # 只跑 CLI 端到端分组
+make test-cases TEST_KIND=selfcheck  # 执行器与资源自检分组
+make test-cases TEST_KIND=frontend   # 前端用例分组
+make test-real    # 真实设备分组（需要 AGENTFLOW_REAL_TESTS_GRANTED=true）
+make test-runner  # 只构建 bin/agentflow-test
+make inventory    # 盘点用例与资源（默认写 .test-artifacts/inventory）
 make build        # 构建 bin/agentflow（不重建前端）
 make release      # 单文件生产构建：前端构建 + Go 编译
 make run          # go run ./cmd/agentflow server
@@ -96,18 +100,21 @@ make serve        # 统一服务入口（API + 内嵌页面 + 后台服务）
 make check        # fmt-check + vet + build
 ```
 
-`make test`（`go test ./tests/...`）包含 `tests/integration/{ssh,remote}` 等真实依赖分组：本机是否真的
-连接真实设备由 `tests/config/*.yml` 的 `ssh.enable`、`docker.remote_enabled` 与 `pi.enable`（真实模型
-调用）决定（未启用时输出 `WARN [SKIP]`）；CI 中还会额外经过 `AGENTFLOW_REAL_TESTS` 授权门禁，且该
-门禁只在 `GITHUB_ACTIONS` 下生效（见 [testing.md](testing.md) §5）。只想跑不需要真实设备的分组时使用
-`make test-unit` / `make test-local` / `make test-race`。
+`make test` 由两部分组成：`tests/unit/**` 仍由 `go test` 执行，其余已注册 Case（集成、CLI E2E、
+执行器自检、前端）由统一执行器 `agentflow-test` 执行。真实设备分组不在 `make test` 内：它需要真实
+Pi、SSH 主机与远程 Docker，只能由 `make test-real` 在显式授权后运行（`tests/config/*.yml` 的
+`ssh.enable`、`docker.remote_enabled` 与 `pi.enable` 决定是否真的连设备，未启用时输出 `WARN [SKIP]`，
+CI 中还会额外经过 `AGENTFLOW_REAL_TESTS` 授权门禁）。`PARALLEL` 是唯一并发变量，同时作用于
+`go test` 与执行器 `--parallel`。规则细节见 [testing.md](testing.md)。
 
 不依赖 Make 时可以直接使用底层命令：
 
 ```bash
 gofmt -w cmd internal tests
 go vet ./...
-go test -count=1 ./tests/...
+go test -count=1 ./tests/unit/...
+go build -o bin/agentflow-test ./cmd/agentflow-test
+bin/agentflow-test integration-local-...
 go build -o bin/agentflow ./cmd/agentflow
 ```
 
@@ -125,8 +132,9 @@ pnpm dev                  # 开发服务器（vp dev），/api 代理到 Go 服�
 pnpm build                # 生产构建，产物写入 internal/webui/dist（含占位文件补回）
 pnpm build:assets         # 仅执行 vp build，不补回占位文件
 pnpm lint                 # 格式、lint 与类型检查
-pnpm test                 # 单元测试（vp test run）
-pnpm exec playwright test # 基础布局与连接状态浏览器测试
+pnpm test                 # 单元测试（vp test run；本机开发入口，不参与 CI 门禁）
+pnpm check                # vp fmt && vp lint --fix && tsc --noEmit
+pnpm exec playwright test # 单独跑浏览器用例：dev server 需自行启动（执行器的 frontend 分组会自动启动）
 ```
 
 服务侧命令在仓库根目录执行：

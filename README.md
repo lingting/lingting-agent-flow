@@ -11,6 +11,7 @@ AgentFlow 是一个本地优先的 AI 编码工作流编排器，使用 Go 实�
 接口形态与命令行都会继续变化，任何提前写出的使用步骤都会很快失效。
 
 已完成的进展与后续计划以 [`.steps/`](.steps) 为准，尤其是
+[`.steps/V3-final.md`](.steps/V3-final.md)（V3 最终状态：统一测试执行器）、
 [`.steps/V2-final.md`](.steps/V2-final.md)（V2 最终状态）与
 [`.steps/V1-final.md`](.steps/V1-final.md)（V1 最终状态）。
 
@@ -23,7 +24,7 @@ AgentFlow 是一个本地优先的 AI 编码工作流编排器，使用 Go 实�
 | [docs/architecture.md](docs/architecture.md) | 各条执行链路的边界、状态分层与数据事实 |
 | [docs/workspace.md](docs/workspace.md) | 仓库目录、包职责与依赖方向 |
 | [docs/development.md](docs/development.md) | 本地环境、常用命令、改动流程与提交约定 |
-| [docs/testing.md](docs/testing.md) | 测试目录、测试工作空间、真实依赖开关与结果报告 |
+| [docs/testing.md](docs/testing.md) | 测试授权、两个执行入口、并发与资源、零残留核验、覆盖对账与结果报告 |
 | [docs/ssh-hosts.md](docs/ssh-hosts.md) | SSH 连接层、执行节点环境预检与远程工作空间 |
 | [docs/http-api.md](docs/http-api.md) | HTTP 接口路径、请求边界与错误语义 |
 | [docs/cli.md](docs/cli.md) | CLI 命令索引与边界 |
@@ -40,7 +41,8 @@ AgentFlow 是一个本地优先的 AI 编码工作流编排器，使用 Go 实�
 |---|---|
 | [.steps/V1-final.md](.steps/V1-final.md) | V1 最终产品状态与遗留事项 |
 | [.steps/V2-final.md](.steps/V2-final.md) | V2 最终产品状态与遗留事项 |
-| [.steps/V3/](.steps/V3/) | V3 阶段文档（统一测试执行器重构审阅） |
+| [.steps/V3-final.md](.steps/V3-final.md) | V3 最终状态：统一测试执行器、已接受的能力回退与遗留事项 |
+| [.steps/V3/](.steps/V3/) | V3 阶段文档（路线总规划 R0–R9 与各阶段验收记录） |
 
 ## 许可证
 许可证将在首次公开发布前确定。

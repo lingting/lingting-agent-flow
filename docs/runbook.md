@@ -245,6 +245,24 @@ sqlite3 /restore/data/agentflow.db \
   `agentflow docker env build` 构建。构建配置完全不变时会复用既有版本，不会产生新版本号。
 - 禁止：手工改数据库里的 `image_id`、删除或重指镜像标签、用旧备份回填 `environment_versions`。
 
+### 8.2 测试运行中止后的设备残留
+
+真实测试（`make test-real`，或 CI 的 `real-tests` Job）会在测试设备上创建容器与卷。正常运行结束时执行器
+会做零残留终检并在 `report.json` 的 `residual_check` 给出结论；**编排进程被中止（Ctrl+C、超时杀进程、
+机器休眠）时不会执行这步终检**，设备上的测试容器需要人工确认：
+
+1. 先只读核对：`docker ps -a --filter name=<本次测试前缀>`，并用 `.test-artifacts/<run-id>/` 里的报告、
+   worker 日志与远程测试目录 `<远程 Home>/.lingting/agentflow-tests/<测试包>/<用例标识>` 对照本次运行
+   创建了什么。
+2. 只删除确认属于本次测试的容器与卷（名称带随机后缀、创建时间与运行时间吻合）；**禁止**执行
+   `docker system prune`、`docker image prune`、`docker volume prune`，也不要删除测试镜像与缓存卷。
+3. 状态无法确认时保留现场，不要删除：残留容器比"删错共享资源"代价低。
+
+测试运行前后的设备基线差异**只报告、不判失败**：运行前已存在、名称不匹配本次测试的容器与卷不属于
+本次残留，核验会输出 `WARN REMOTE_CONTAINER_BASELINE_GONE` / `REMOTE_CONTAINER_PREEXISTING`，结论仍以
+本次运行是否新增残留为准。看到这类 `WARN` 时按上一步对照清单判断，不要据此判定测试失败，也不要顺手
+清理与本项目无关的设备资源。
+
 ## 9. 日志与证据收集
 
 - 服务端日志是结构化文本，输出到标准错误流，级别由 `app.log_level` 控制；排查时临时切到

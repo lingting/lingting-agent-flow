@@ -9,12 +9,14 @@
 cmd/agentflow/            产品主程序入口（CLI 与服务启动）
 cmd/agentflow-ci/         CI 准入门禁程序
 cmd/agentflow-release/    发布制品构建程序
-internal/                 产品实现（见下节包职责）
+cmd/agentflow-test/       统一测试执行器入口（编排进程与 worker 同一二进制，开发工具）
+cmd/agentflow-test-inventory/  用例与资源盘点工具（V3 R0 冻结资产，开发工具）
+internal/                 产品实现与测试执行器实现（见下节包职责）
 lingting-agent-flow-ui/   React + TypeScript 前端（独立 pnpm 工程）
 configs/                  示例配置
 docs/                     工程文档
-tests/                    全部测试代码（见 testing.md）
-.steps/                   规划与阶段性成果文档（V1 收口、V2 收口、V3 规划）
+tests/                    全部测试代码：unit/ 由 go test 执行，runner/ 是 Case 定义与注册表
+.steps/                   规划与阶段性成果文档（V1 收口、V2 收口、V3 规划与收口）
 ```
 
 ## 2. 包职责
@@ -43,6 +45,8 @@ tests/                    全部测试代码（见 testing.md）
 | `internal/webui/` | 前端产物嵌入与静态资源服务 |
 | `internal/cigate/` | CI 准入门禁 |
 | `internal/release/` | 发布制品构建、清单、校验和与来源证明 |
+| `internal/testrunner/` | 统一测试执行器：Case 注册表、选择、调度、资源提供者、零残留核验、统一报告（开发工具，不被产品代码引用） |
+| `internal/caseinventory/` | 用例与资源盘点：`git ls-files` + Go AST 解析生成冻结清单与资源矩阵（开发工具） |
 
 前端目录内部分层见 [frontend.md](frontend.md)。
 
@@ -78,6 +82,10 @@ SQLite
 cmd/agentflow → cli / httpapi / server
 cmd/agentflow-ci → cigate
 cmd/agentflow-release → release
+cmd/agentflow-test → testrunner（tests/runner/registry 聚合用例包）
+cmd/agentflow-test-inventory → caseinventory
+testrunner → docker / sshclient / 仅 Go 标准库（资源提供者只用命令行与协议层，不经 app 层）
+tests/runner/** → testrunner / tests/internal/testkit / 被测产品包
 server → httpserver / app / lifecycle / config / storage
 httpserver → httpapi / webui / app
 cli / httpapi → app
