@@ -11,7 +11,7 @@ import (
 	"github.com/lingting/agentflow/internal/testrunner"
 )
 
-// 登记本包 14 条用例，顺序与源文件一致，便于与 R0 冻结清单逐条对账。
+// 登记本包 14 条用例，顺序与源文件一致，便于按包核对迁移数量。
 var (
 	_ = register("version-command", runVersionCommand)
 	_ = register("root-help", runRootHelp)
@@ -131,7 +131,7 @@ func runConfigValidateMissingFile(t *testrunner.Context) {
 // 原 TestAgentHelp 校验 agent 命令组与子命令出现在帮助中。
 //
 // 源用例同时要求帮助里出现 check；check 子命令已随 commit e36ecff 移除，该断言在迁移前
-// 就已经失效，这里只保留仍然存在的 run 断言（差异已登记在 .steps/V3/R5/README.md §5.2）。
+// 就已经失效，这里只保留仍然存在的 run 断言（差异见 V3 R5 §5.2）。
 func runAgentHelp(t *testrunner.Context) {
 	code, stdout, stderr := run(t, "agent", "--help")
 	if code != 0 {

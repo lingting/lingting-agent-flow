@@ -10,7 +10,7 @@
 //
 // 资源：R2 判定本包为「独享」。远程容器由用例创建并登记清理责任，用例结束时逐条删除、
 // 按真实远程 docker ps -a 清单核验零残留；用例不声明远程资源，偏差与依据见
-// .steps/V3/R5/README.md 的 B3 决策 D9。
+// V3 R5 的 B3 决策 D9。
 package codesaver
 
 import (

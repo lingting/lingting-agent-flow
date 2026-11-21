@@ -21,7 +21,7 @@
 #   --describe             打印两张分组清单（Markdown）。
 #
 # 环境变量（输入）:
-#   GITHUB_OUTPUT        可选。--check 通过时写出 coverage / package_total / case_total /
+#   GITHUB_OUTPUT        可选。--check 通过时写出 package_total / case_total /
 #                        groups_markdown（Markdown 表格，供 CI 汇总引用）。
 #   GITHUB_STEP_SUMMARY  可选。--check 与 --describe 追加摘要到该文件。
 #
@@ -489,7 +489,6 @@ run_check() {
 
     if [ -n "${GITHUB_OUTPUT:-}" ]; then
         {
-            echo "coverage=passed"
             echo "package_total=${package_total}"
             echo "case_total=${case_total}"
             echo "groups_markdown<<AGENTFLOW_GROUPS_MARKDOWN"

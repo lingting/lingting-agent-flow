@@ -23,7 +23,7 @@
 | 脚本 | 调用方 | 职责 | 参数 | 输出 | 退出码 |
 | --- | --- | --- | --- | --- | --- |
 | `check-go-static.sh` | `ci.yml` / `go-static` | `gofmt -l` 门禁、`go vet ./...`、`go build ./...` | 无 | 未格式化文件清单与失败注解 | 0 通过；1 格式 / 静态检查 / 编译失败；2 参数错误 |
-| `go-test-groups.sh` | `ci.yml` / `go-inventory`、`run-go-group-tests.sh`、`run-cases.sh` | 分组声明的唯一来源：Go 测试分组（只有 `unit`）+ 25 个 Case 分组的 kind，并用真实清单核验 | `--check [--declared-groups LIST] [--declared-case-kinds LIST]`、`--list-groups`、`--packages GROUP`、`--make-target GROUP`、`--case-selectors KIND`、`--describe` | 分组表格与核验结论；`GITHUB_OUTPUT`（`coverage` / `package_total` / `case_total` / `groups_markdown`） | 0 查询成功或核验通过；1 分组遗漏 / 重复 / 落空声明 / 与工作流、Makefile、注册表不一致；2 参数错误 |
+| `go-test-groups.sh` | `ci.yml` / `go-inventory`、`run-go-group-tests.sh`、`run-cases.sh` | 分组声明的唯一来源：Go 测试分组（只有 `unit`）+ 25 个 Case 分组的 kind，并用真实清单核验 | `--check [--declared-groups LIST] [--declared-case-kinds LIST]`、`--list-groups`、`--packages GROUP`、`--make-target GROUP`、`--case-selectors KIND`、`--describe` | 分组表格与核验结论；`GITHUB_OUTPUT`（`package_total` / `case_total` / `groups_markdown`） | 0 查询成功或核验通过；1 分组遗漏 / 重复 / 落空声明 / 与工作流、Makefile、注册表不一致；2 参数错误 |
 | `run-go-group-tests.sh` | `ci.yml` / `go-unit` | 执行仍由 `go test` 承担的分组（当前只有 `unit`），范围全部来自 `go-test-groups.sh`，拒绝 Case 分组 | `--group NAME`（必填）、`--artifact-dir DIR`（必填）、`--parallel N`（默认 4） | `DIR/<group>-output.log`、`DIR/<group>-summary.txt` 与 `GITHUB_STEP_SUMMARY`（耗时、包数量、顶层用例结论） | 0 通过；1 测试失败或分组不是 go test 分组；2 参数错误 |
 | `run-cases.sh` | `ci.yml` / `cases-local`、`cases-e2e`、`cases-selfcheck`、`ui-test`、`real-tests`；`Makefile` 的 `test-cases` / `test-real` | Case 执行的唯一入口：按 kind 展开选择条件、构建执行器、运行并渲染结论；`kind=real` 缺授权时直接失败 | `--kind normal\|local\|e2e\|selfcheck\|frontend\|real`（必填）、`--artifact-dir DIR`（必填）、`--parallel N`（默认 4）、`--timeout D`、`--bin PATH` | `DIR/<run-id>/report.json`、`DIR/cases-<kind>-output.log`、`DIR/cases-<kind>-summary.txt` 与 `GITHUB_STEP_SUMMARY` | 0 选定 Case 全部通过且零残留未失败；1 失败 / 零残留失败 / 无报告 / `real` 未授权；2 参数错误 |
 | `check-real-test-authorization.sh` | `ci.yml` / `real-tests-gate` | 把事件上下文交给 `cmd/agentflow-ci real-tests-gate`，判定规则只在 `internal/cigate` | 无（全部输入来自 `env:`） | `real_tests_enabled` / `mode` / `reason` 与判定摘要 | 0 判定完成（含拒绝）；1 写输出失败；2 参数错误 |
@@ -84,7 +84,7 @@ bash .github/scripts/resolve-release-version.sh --require-tag   # 需要 REF_TYP
 
 - 每个 Job 独享一台 4 vCPU Runner，`go test` 与执行器都只用 `--parallel 4`；
 - `cases-local`、`cases-e2e`、`cases-selfcheck`、`ui-test` 之间没有依赖，由 GitHub Actions 并行调度，
-  它们都依赖 `go-inventory`，分组核验或覆盖对账失败时不会跑一半测试；
+  它们都依赖 `go-inventory`，分组核验失败时不会跑一半测试；
 - 真实分组固定 `--parallel 1`：全部真实套件共用同一台远程机器与同一个 Docker Engine；
 - 共用同一台设备的真实分组在包内保持串行（`remote/docker`），前端 Playwright 固定 `workers: 1`：
   并发只由执行器调度器决定。
@@ -98,8 +98,8 @@ bash .github/scripts/resolve-release-version.sh --require-tag   # 需要 REF_TYP
 产物与耗时：
 
 - Case Job 只上传自己的 `<artifact-root>/<job>/<run-id>/`（`report.json`、worker 日志、
-  `cases/<case>/`）；`go-unit` 只上传 `*-output.log` 与 `*-summary.txt`；覆盖对账单独上传
-  `.test-artifacts/coverage`；上传步骤都 `continue-on-error`，产物问题不会覆盖测试结论；
+  `cases/<case>/`）；`go-unit` 只上传 `*-output.log` 与 `*-summary.txt`；
+  上传步骤都 `continue-on-error`，产物问题不会覆盖测试结论；
 - 测试工作空间落在 `TMPDIR`（`run-go-group-tests.sh` 把它指向工作区内的产物目录），
   数据库、Session 与临时私钥因此不进制品；
 - 跳过统计只读 `report.json` 的 `totals.skipped` 与 `skip_reason`（`run-cases.sh` 渲染）；

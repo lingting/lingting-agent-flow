@@ -16,7 +16,7 @@ const (
 	ResidualNotRun = "not-run"
 )
 
-// Report 是一次运行的统一报告，也是后续审计与覆盖对账的唯一输入。
+// Report 是一次运行的统一报告，也是运行结果的唯一事实来源。
 type Report struct {
 	SchemaVersion    string            `json:"schema_version"`
 	RunID            string            `json:"run_id"`

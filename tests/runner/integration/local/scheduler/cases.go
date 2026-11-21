@@ -1,7 +1,7 @@
 package scheduler
 
 // 本文件是试点包的用例清单：一条既有 func Test* 对应一条 Case，分组与顺序与
-// tests/integration/local/scheduler 下的源文件一致，便于与 R0 冻结清单逐条对账。
+// tests/integration/local/scheduler 下的源文件一致，便于按包核对迁移数量。
 //
 // 只有真正用到数据库的用例声明 sqlite-db：并发 Session 路径、归档不跨任务、并发工作区
 // 初始化这三条只使用用例工作空间。

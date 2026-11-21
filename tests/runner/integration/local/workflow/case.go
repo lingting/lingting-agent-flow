@@ -31,8 +31,8 @@ const (
 
 // register 登记一条用例。
 //
-// 用例主体命名为 func run<原函数名去掉 Test 前缀>，Register 据此推导来源测试函数名，
-// --audit-coverage 用它对账 R0 冻结清单。
+// 用例主体沿用来源测试函数的命名（func run<原函数名去掉 Test 前缀>），便于与原 go test
+// 用例对照；命名不参与注册校验，Package 只服务串行作用域与报告定位。
 func register(
 	name string,
 	run func(*testrunner.Context),

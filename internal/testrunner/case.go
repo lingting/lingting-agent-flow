@@ -8,9 +8,7 @@ package testrunner
 
 import (
 	"fmt"
-	"reflect"
 	"regexp"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -30,36 +28,17 @@ type Case struct {
 	Timeout time.Duration
 	// Package 是用例来源的 Go 测试包路径（例如 tests/integration/local/scheduler）。
 	//
-	// 迁移后的用例文件不在该目录下，但这里沿用来源包路径：R2 冻结的包级串行表与 R0
-	// 清单都按来源路径组织，迁移时不必改判定口径。
+	// 迁移后的用例文件不在该目录下，但这里沿用来源包路径：包级串行表按来源路径组织，
+	// 迁移时不必改判定口径。
 	//
 	// 它是串行作用域与包级串行声明的输入：非空时串行作用域取该包，R2 冻结的
 	// SerialPackageReason 按它判定整包串行；为空时串行作用域退化为 Group。
 	Package string
-	// LegacyName 是来源 go test 里对应的测试函数名（例如 TestSchedulerDispatchesInQueueOrder）。
-	//
-	// 覆盖对账（--audit-coverage）用它和 Package 一起定位 R0 冻结清单里的条目。留空时由
-	// Register 从用例主体的函数名推导：迁移写法冻结为主体命名为 func run<原函数名去掉 Test
-	// 前缀>，因此推导结果与源文件一致；推导失败则保持为空，对账会把它报成无法解释的条目。
-	LegacyName string
-	// LegacyID 是 R0 冻结清单里非 go test 条目（R6 前端）的清单 ID。
-	//
-	// 前端用例是一条文件一条 Case，清单条目的 ID 形如
-	// "playwright:lingting-agent-flow-ui/tests/e2e/layout.spec.ts"，无法用包路径加测试
-	// 函数名表达，因此对账直接按清单 ID 匹配。它和 LegacyName 互斥：设置后不再按
-	// Package + LegacyName 对账，也不再要求用例主体遵循 run<Test*> 命名。
-	LegacyID string
 	// Parallel 表示调度器允许该用例与其他用例并行。
 	//
 	// false 表示该用例在串行作用域内独占执行（对齐 go test 里未标记 t.Parallel 的用例）；
 	// 并发最终由调度器决定，用例无法自行扩大或缩小。
 	Parallel bool
-	// RunnerInternal 标记该用例不是从既有 go test 迁移而来（执行器与调度自检）。
-	//
-	// 这类用例只验证执行器自身语义，但仍可能声明 Package 以参与串行作用域判定（R3 的
-	// 调度自检就是这样）。覆盖对账把它排除在外：既不报成无法解释的条目，也不计入多余
-	// 条目；它本来就不属于 R0 冻结清单的任何一条。
-	RunnerInternal bool
 	// Resources 是用例需要的资源声明，由编排进程分配后以句柄形式注入 worker。
 	Resources []ResourceDecl
 	// Run 是用例主体，运行在 worker 子进程中；失败与跳过通过 Context 表达。
@@ -68,42 +47,6 @@ type Case struct {
 
 // caseIDPattern 约束用例 ID 的字符集：ID 同时是产物目录名的一部分。
 var caseIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9/_-]*$`)
-
-// legacyNamePattern 约束来源 go test 函数名：只接受 Test 开头的标识符。
-var legacyNamePattern = regexp.MustCompile(`^Test[A-Za-z0-9_]+$`)
-
-// legacyIDPattern 约束非 go test 条目的清单 ID：形如 "playwright:<文件路径>"。
-var legacyIDPattern = regexp.MustCompile(`^[a-z]+:[^\s]+$`)
-
-// legacyRunPrefix 与 legacyTestPrefix 是迁移写法的命名约定：用例主体写成
-// func run<原函数名去掉 Test 前缀>，Register 据此把 Case 与冻结清单里的条目对上。
-const (
-	legacyRunPrefix  = "run"
-	legacyTestPrefix = "Test"
-)
-
-// legacyNameOf 从用例主体的函数名推导来源 go test 函数名。
-//
-// 只识别冻结写法（func runXxx）；闭包、方法与不符合约定的命名都返回空，由对账报出来，
-// 不做任何猜测。
-func legacyNameOf(run func(c *Context)) string {
-	if run == nil {
-		return ""
-	}
-	function := runtime.FuncForPC(reflect.ValueOf(run).Pointer())
-	if function == nil {
-		return ""
-	}
-	name := function.Name()
-	if index := strings.LastIndexByte(name, '.'); index >= 0 {
-		name = name[index+1:]
-	}
-	suffix := strings.TrimPrefix(name, legacyRunPrefix)
-	if suffix == name || suffix == "" {
-		return ""
-	}
-	return legacyTestPrefix + suffix
-}
 
 // Validate 校验用例声明是否完整，不执行用例主体。
 func (c Case) Validate() error {
@@ -130,20 +73,6 @@ func (c Case) Validate() error {
 	}
 	if strings.ContainsAny(c.Package, " \t\r\n") {
 		return fmt.Errorf("用例 %q 的 Package %q 不能包含空白字符", c.ID, c.Package)
-	}
-	if c.LegacyName != "" && !legacyNamePattern.MatchString(c.LegacyName) {
-		return fmt.Errorf("用例 %q 的 LegacyName %q 不是 go test 测试函数名", c.ID, c.LegacyName)
-	}
-	if c.LegacyID != "" {
-		if c.LegacyName != "" {
-			return fmt.Errorf("用例 %q 同时声明了 LegacyID 与 LegacyName", c.ID)
-		}
-		if strings.ContainsAny(c.LegacyID, " \t\r\n") {
-			return fmt.Errorf("用例 %q 的 LegacyID %q 不能包含空白字符", c.ID, c.LegacyID)
-		}
-		if !legacyIDPattern.MatchString(c.LegacyID) {
-			return fmt.Errorf("用例 %q 的 LegacyID %q 不是清单条目的 ID 形态", c.ID, c.LegacyID)
-		}
 	}
 	seen := make(map[string]struct{}, len(c.Resources))
 	for _, decl := range c.Resources {
@@ -179,10 +108,6 @@ var (
 func Register(c Case) Case {
 	if c.Group == "" {
 		c.Group = groupOf(c.ID)
-	}
-	// 声明了 LegacyID 的用例（R6 前端）直接按清单 ID 对账，不再推导 go test 函数名。
-	if c.LegacyName == "" && c.LegacyID == "" {
-		c.LegacyName = legacyNameOf(c.Run)
 	}
 	registryMu.Lock()
 	defer registryMu.Unlock()

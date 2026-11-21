@@ -17,7 +17,7 @@ const (
 	vitestSuiteTimeout = 5 * time.Minute
 )
 
-// playwrightSpecs 是 tests/e2e 下的 24 个 spec，取值与 R0 冻结清单的 name 一致。
+// playwrightSpecs 是 tests/e2e 下的 24 个 spec，取值是去掉 .spec.ts 后缀的文件名。
 var playwrightSpecs = []string{
 	"api-connection",
 	"layout",
@@ -45,7 +45,7 @@ var playwrightSpecs = []string{
 	"tasks",
 }
 
-// vitestFiles 是 tests/unit 下的 13 个 Vitest 文件，取值与 R0 冻结清单的 name 一致。
+// vitestFiles 是 tests/unit 下的 13 个 Vitest 文件，取值是去掉 .test.ts 后缀的文件名。
 var vitestFiles = []string{
 	"planning",
 	"planning-confirm",
@@ -73,14 +73,12 @@ func init() {
 
 // registerPlaywright 登记一条 Playwright spec 用例。
 //
-// 前端条目在 R0 清单里以文件为单位，没有 go test 函数名，因此用 LegacyID 直接对账；
 // Package 记录来源文件，既是串行作用域（每个文件各自独立），也是报告里的来源位置。
 func registerPlaywright(name string) {
 	file := uiProjectDir + "/tests/e2e/" + name + ".spec.ts"
 	testrunner.Register(testrunner.Case{
 		ID:       caseGroup + "/playwright-" + name,
 		Package:  file,
-		LegacyID: "playwright:" + file,
 		Parallel: true,
 		Timeout:  playwrightSuiteTimeout,
 		Resources: []testrunner.ResourceDecl{
@@ -107,7 +105,6 @@ func registerVitest(name string) {
 	testrunner.Register(testrunner.Case{
 		ID:       caseGroup + "/vitest-" + name,
 		Package:  file,
-		LegacyID: "vitest:" + file,
 		Parallel: true,
 		Timeout:  vitestSuiteTimeout,
 		Resources: []testrunner.ResourceDecl{

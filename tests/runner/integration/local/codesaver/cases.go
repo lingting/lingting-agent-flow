@@ -16,7 +16,7 @@ import (
 	"github.com/lingting/agentflow/internal/testrunner"
 )
 
-// 登记本包 12 条用例，顺序与源文件一致，便于与 R0 冻结清单逐条对账。
+// 登记本包 12 条用例，顺序与源文件一致，便于按包核对迁移数量。
 var (
 	_ = register("save-commits-and-pushes-task-branch", runSaveCommitsAndPushesTaskBranch)
 	_ = register("save-no-changes-does-not-create-commit", runSaveNoChangesDoesNotCreateCommit)

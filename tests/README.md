@@ -12,11 +12,11 @@
 ```text
 tests/
 ├── internal/testkit/           通用测试辅助：工作空间、日志、known_hosts 快照、容器核验、testkit.Main
-├── unit/                       仍由 go test 执行（16 个包，1328 条顶层用例）
+├── unit/                       仍由 go test 执行（17 个包，1352 条顶层用例）
 │   ├── agent/ app/ cigate/ container/ domain/ environment/ execenv/ httpapi/
-│   ├── image/ lifecycle/ server/ source/ store/ testkit/
+│   ├── image/ lifecycle/ server/ source/ store/ testkit/ testrunner/
 │   └── ...
-├── runner/                     由 agentflow-test 执行（25 个分组，358 条 Case）
+├── runner/                     由 agentflow-test 执行（25 个分组，360 条 Case）
 │   ├── registry/               用例包聚合入口：新增用例包只需一行空导入
 │   ├── integration/local/      本机集成：codesaver、environment、execenv、scheduler、
 │   │                           session、source、ssh、validation、workflow
@@ -27,8 +27,7 @@ tests/
 │   ├── selfcheck/              执行器自检：跳过、超时、迟到结果、取消
 │   ├── resourcecheck/          资源提供者自检：分配、释放、自证、故障注入
 │   ├── concurrencycheck/       调度场景：并发上限、容量、独占键、包级串行、取消
-│   ├── pilot/                  R4 试点：真实服务进程的启动、就绪、取消与零残留
-│   └── legacy/                 R0 清单里显式 dropped 的条目与理由
+│   └── pilot/                  R4 试点：真实服务进程的启动、就绪、取消与零残留
 └── config/                     真实外部依赖配置（示例文件入库，真实配置不入库）
 ```
 
@@ -43,7 +42,7 @@ tests/
 # 单元测试：日常反馈，不访问真实模型与远程网络
 make test-unit
 
-# 全部普通 Case（local + e2e + selfcheck + frontend，共 312 条）
+# 全部普通 Case（local + e2e + selfcheck + frontend，共 314 条）
 make test-cases
 
 # 只跑一个 kind
@@ -63,8 +62,6 @@ AGENTFLOW_REAL_TESTS_GRANTED=true make test-real
 # 只列用例，不执行
 ./bin/agentflow-test --list
 
-# 覆盖对账（只读清单与注册表，不执行用例）
-./bin/agentflow-test --audit-coverage --audit-stage R5,R6
 
 # 真实测试授权判定（CI 使用同一入口；只读判定，不连接任何真实设备）
 go run ./cmd/agentflow-ci real-tests-gate \
@@ -107,8 +104,7 @@ testrunner.Register(testrunner.Case{
 })
 ```
 
-- `Run` 的命名约定是 `func run<intent>`；`Register` 从函数名推导来源测试函数（`LegacyName`），
-  覆盖对账据此与 R0 冻结清单对齐。前端用例改用 `LegacyID`（`playwright:<文件路径>`）。
+- `Run` 的命名约定是 `func run<intent>`（迁移来源与可读性约定，执行器不再按函数名对账）。
 - 源用例里的 `t.Run` 子测试用 `c.Run("名称", func(c *Context) {...})` 表达（单层顺序）；
   失败用 `c.Fatalf`，跳过用 `c.Skipf` 并给出原因。
 - 用例只声明资源，不自行创建或清理共享资源；句柄从 `c.Resource(name)` 读取（反序列化的
@@ -143,7 +139,7 @@ cat "$(go env TMPDIR 2>/dev/null || echo /tmp)/lingting-agent-flow-tests/latest-
 | CI Job | 覆盖范围 | 本地等价入口 |
 |---|---|---|
 | `go-static` | `gofmt -l cmd internal tests` 无输出、`go vet ./...`、`go build ./...` | `make check` |
-| `go-inventory` | 分组核验（`go list` 的测试包 + 执行器注册表 + Makefile 入口 + 消费脚本）与覆盖对账 | `bash .github/scripts/go-test-groups.sh --check --declared-groups unit --declared-case-kinds local,e2e,selfcheck,frontend`、`./bin/agentflow-test --audit-coverage --audit-stage R5,R6` |
+| `go-inventory` | 分组核验（`go list` 的测试包 + 执行器注册表 + Makefile 入口 + 消费脚本） | `bash .github/scripts/go-test-groups.sh --check --declared-groups unit --declared-case-kinds local,e2e,selfcheck,frontend` |
 | `go-unit` | `./tests/unit/...` | `make test-unit` |
 | `cases-local` | `local` 分组 | `make test-cases TEST_KIND=local` |
 | `cases-e2e` | `e2e` 分组 | `make test-cases TEST_KIND=e2e` |

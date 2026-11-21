@@ -3,7 +3,8 @@
 本文件是 AgentFlow 的测试规则：授权边界、两个执行入口、用例模型、并发与调度、资源与零残留、
 测试工作空间与产物、真实外部依赖、覆盖对账与结果报告。测试目录在仓库中的位置见
 [workspace.md](workspace.md)，用例包与操作细节见 [tests/README.md](../tests/README.md)，前端工程见
-[frontend.md](frontend.md)。执行器内部实现与冻结决策见 [`.steps/V3/`](../.steps/V3/)。
+[frontend.md](frontend.md)。执行器内部实现见 [internal/testrunner/](../internal/testrunner/)，
+冻结决策与已接受的回退见 [.steps/V3-final.md](../.steps/V3-final.md)。
 
 ## 1. 授权与默认验证
 
@@ -19,7 +20,7 @@
 ```text
 tests/
 ├── internal/testkit/       通用测试辅助：工作空间、日志、known_hosts 快照、容器核验与 testkit.Main
-├── unit/                   仍由 go test 执行的单元测试（16 个包）
+├── unit/                   仍由 go test 执行的单元测试（17 个包）
 ├── runner/                 Case 定义与注册表，由 agentflow-test 执行
 │   ├── registry/           用例包聚合入口（空导入）
 │   ├── integration/local/  本机集成用例（9 个分组）
@@ -30,8 +31,7 @@ tests/
 │   ├── selfcheck/          执行器自检：跳过、超时、迟到结果、取消
 │   ├── resourcecheck/      资源提供者自检：分配、释放、自证、故障注入
 │   ├── concurrencycheck/   调度场景：并发上限、容量、独占键、包级串行、取消
-│   ├── pilot/              R4 试点用例（真实服务进程）
-│   └── legacy/             R0 清单里显式 `dropped` 的条目及其理由
+│   └── pilot/              R4 试点用例（真实服务进程）
 └── config/                 真实外部依赖配置（示例文件入库，真实配置不入库）
 ```
 
@@ -47,12 +47,13 @@ tests/
 
 | 范围 | 入口 | 本地命令 | CI Job |
 |---|---|---|---|
-| `tests/unit/**`（16 个包） | `go test` | `make test-unit` | `go-unit` |
+| `tests/unit/**`（17 个包） | `go test` | `make test-unit` | `go-unit` |
 | 其余全部已注册 Case | `agentflow-test` | `make test-cases` / `make test-real` | `cases-local`、`cases-e2e`、`cases-selfcheck`、`ui-test`、`real-tests` |
 
 - 集成测试、E2E 测试与前端浏览器测试只有 `agentflow-test` 一个入口，不得再用 `go test` 执行这些用例，
   也不得用 `pnpm test:e2e:safe` 一类的平行入口启动 dev server。`tests/unit` 的用例仍由 `go test`
-  执行，其结论按 `go test` 自己的输出统计（路径 C 的既定结果，见 `.steps/V3/ROADMAP.md` §3.1）。
+  执行，其结论按 `go test` 自己的输出统计（路径 C 的既定结果，见
+  [.steps/V3-final.md](../.steps/V3-final.md)）。
 - 前端单元测试 `pnpm test`（`vp test run`）保留为开发者本机入口，不参与 CI 门禁，也不替代执行器的
   `frontend` 分组。
 - `bin/agentflow-test` 由 `make test-runner` 构建；worker 由同一二进制以 `--exec-case` 重新启动，因此
@@ -76,16 +77,14 @@ tests/
 | `Group` | 选择与并发决策的分组，留空时取 ID 第一段 |
 | `Timeout` | 单条用例上限，零值使用运行级默认（10 分钟） |
 | `Package` | 来源 Go 测试包路径：串行作用域与包级串行判定按它进行 |
-| `LegacyName` / `LegacyID` | 对应 R0 冻结清单的条目，供覆盖对账定位 |
 | `Parallel` | 是否允许与其他用例并行；`false` 表示在串行作用域内独占 |
-| `RunnerInternal` | 执行器自检用例，不参与覆盖对账 |
 | `Resources` | 资源声明，由编排进程分配后以句柄注入 worker |
 | `Run` | 用例主体，只在 worker 子进程中执行 |
 
 - 每条 Case 在独立 worker 子进程中执行，独占 stdout/stderr：`panic`、`os.Exit` 与包级全局状态只影响
   该条用例（见 §7 的产物布局）。
-- 迁移写法固定为 `func run<原函数名去掉 Test 前缀>`，`Register` 据此推导 `LegacyName`；一条源测试函数
-  内的多个 `t.Run` 子测试用 `Context.Run` 表达（单层、顺序执行），不得用 `testing.T`。
+- 迁移写法固定为 `func run<原函数名去掉 Test 前缀>`；一条源测试函数内的多个 `t.Run` 子测试用
+  `Context.Run` 表达（单层、顺序执行），不得用 `testing.T`。
 - 用例的失败、跳过与超时必须通过 `Context` 表达，跳过必须带原因；不得把跳过写成通过。
 - 真实设备用例只声明本地独占资源与远程资源声明，不在用例里创建或清理共享资源（见 §6）。
 
@@ -188,15 +187,11 @@ tests/
 - 用例超时用 `--timeout`（默认 10m）与 `Case.Timeout` 表达；真实套件自带分钟级预算，需要时按分组单独
   放宽，超时仍按失败上报。
 
-## 9. 覆盖对账
+## 9. 覆盖对账（已移除）
 
-- 分母是 R0 冻结的 `.steps/V3/R0/legacy-cases.manifest.json`（1707 条），不再重新生成；`make inventory`
-  默认写 `.test-artifacts/inventory`，覆盖冻结基线必须显式传 `INVENTORY_DIR=.steps/V3/R0`。
-- `agentflow-test --audit-coverage [--audit-stage R5,R6] [--audit-json FILE]` 只读清单与注册表，不执行
-  用例：缺失条目、无法解释的多余注册与结构性问题都让退出码非零；条目只允许在 `tests/runner/legacy/`
-  显式登记 `dropped` 并给出理由。
-- 覆盖对账是 `go-inventory` Job 的硬门禁，也是集成与前端用例迁移的验收依据；当前结论见
-  [tests/README.md](../tests/README.md) 与 `.steps/V3/R9/README.md`。
+V3 的覆盖对账以 R0 冻结清单为分母核验“迁移没有静默丢用例”。清单、`--audit-*` 参数、`dropped` 登记与
+盘点工具已在 V4 R0 一并删除：仓库内不再保存历史用例分母，`go-inventory` Job 只做测试分组核验。
+V4 的 unit 迁移不再用清单对账，改为按包逐条迁移并在批次文档中登记（见 `.steps/V4/ROADMAP.md`）。
 
 ## 10. 常用命令与 CI 对应
 
@@ -211,13 +206,12 @@ make test-cases TEST_KIND=selfcheck
 make test-cases TEST_KIND=frontend
 AGENTFLOW_REAL_TESTS_GRANTED=true make test-real   # 真实设备分组（需单独授权）
 ./bin/agentflow-test --list                        # 列出已注册用例（不执行）
-./bin/agentflow-test --audit-coverage --audit-stage R5,R6
 ```
 
 | CI Job | 内容 | 本地等价入口 |
 |---|---|---|
 | `go-static` | 格式、静态检查与编译 | `make check` |
-| `go-inventory` | 分组核验 + 覆盖对账（均不执行用例） | `bash .github/scripts/go-test-groups.sh --check ...`、`--audit-coverage` |
+| `go-inventory` | 测试分组核验（不执行用例） | `bash .github/scripts/go-test-groups.sh --check ...` |
 | `go-unit` | `./tests/unit/...` | `make test-unit` |
 | `cases-local` | 本机集成分组 | `make test-cases TEST_KIND=local` |
 | `cases-e2e` | CLI 端到端分组 | `make test-cases TEST_KIND=e2e` |

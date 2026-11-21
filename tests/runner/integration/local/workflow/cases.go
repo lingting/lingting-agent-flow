@@ -1,12 +1,12 @@
-// 本文件登记 tests/integration/local/workflow 的 49 条用例，顺序与源文件一致，
-// 便于与 R0 冻结清单逐条对账。
+// 本文件登记 tests/integration/local/workflow 的 49 条用例，顺序与源文件一致，便于按包核对
+// 迁移数量。
 //
 // 用例主体在 cases_*.go 里，共用现场在 fixture_*.go 里；每条用例都打开自己的 SQLite
 // 数据库，因此全部声明 sqlite-db，路径只从注入句柄读取；表驱动的多场景用例按场景份数
 // 各声明一份（见 §5 多场景说明）。
 //
-// 依赖本机真实 Git 的 32 条用例（e2e_* 与 repair_budget_*）已按确认移除，理由登记在
-// tests/runner/legacy；它们在本包里不再有用例主体与现场。
+// 依赖本机真实 Git 的 32 条用例（e2e_* 与 repair_budget_*）已按确认移除，理由见 Git 历史；
+// 它们在本包里不再有用例主体与现场。
 package workflow
 
 var (

@@ -11,7 +11,6 @@
 #   GO_STATIC_RESULT / GO_STATIC_STEP             go-static 的 Job 结论与检查步骤结论
 #   GO_INVENTORY_RESULT                           go-inventory 的 Job 结论
 #   GO_INVENTORY_GROUPS_STEP                      分组核验步骤结论
-#   GO_INVENTORY_AUDIT_STEP                       覆盖对账步骤结论
 #   GO_INVENTORY_PACKAGES / GO_INVENTORY_CASES    测试包数与 Case 分组数
 #   GO_GROUPS_SUMMARY                             分组清单表格（Markdown）
 #   GO_UNIT_RESULT / GO_UNIT_STEP                 go test 单元分组的 Job 与测试步骤结论
@@ -26,7 +25,7 @@
 #   GITHUB_STEP_SUMMARY                           可选；未设置时只写到报告文件与控制台
 #
 # 输出:
-#   报告文件（Markdown）与控制台：逐 Job 结论表、测试分组与覆盖对账、真实测试授权说明。
+#   报告文件（Markdown）与控制台：逐 Job 结论表、测试分组核验、真实测试授权说明。
 #   GITHUB_STEP_SUMMARY: 同一份报告。
 #   不写 GITHUB_OUTPUT：结论由退出码表达。
 #
@@ -85,7 +84,7 @@ failed=0
 # 不会被 bash 识别为 heredoc 终止行。
 for row in \
     "go-static|${GO_STATIC_RESULT:-}|${GO_STATIC_STEP:-}|-" \
-    "go-inventory|${GO_INVENTORY_RESULT:-}|${GO_INVENTORY_AUDIT_STEP:-}|${GO_INVENTORY_GROUPS_STEP:-}" \
+    "go-inventory|${GO_INVENTORY_RESULT:-}|${GO_INVENTORY_GROUPS_STEP:-}|-" \
     "go-unit|${GO_UNIT_RESULT:-}|${GO_UNIT_STEP:-}|-" \
     "cases-local|${CASES_LOCAL_RESULT:-}|${CASES_LOCAL_STEP:-}|-" \
     "cases-e2e|${CASES_E2E_RESULT:-}|${CASES_E2E_STEP:-}|-" \
@@ -101,7 +100,7 @@ for row in \
             ;;
         failure)
             if [ "$tests" = "failure" ]; then
-                verdict="失败：测试或对账步骤失败"
+                verdict="失败：测试步骤失败"
             elif [ "$prepare" = "failure" ]; then
                 verdict="失败：环境准备失败，测试未执行"
             elif [ "$tests" = "skipped" ] || [ -z "$tests" ]; then
@@ -132,14 +131,13 @@ if [ -n "${UI_TEST_GATES:-}" ]; then
     echo "| ui-test 非测试门禁 | ${UI_TEST_GATES} | $([ "$UI_TEST_GATES" = "success" ] && echo "成功" || echo "失败：前端格式 / lint / 类型 / 构建门禁未通过") |" >> "$report_path"
 fi
 
-# 测试分组与覆盖对账：结论来自 go-inventory 的结构化输出，不重新解析测试日志。
+# 测试分组核验：结论来自 go-inventory 的结构化输出，不重新解析测试日志。
 if [ -n "${GO_INVENTORY_PACKAGES:-}" ] || [ -n "${GO_GROUPS_SUMMARY:-}" ]; then
     {
         echo
-        echo "### 测试分组与覆盖对账"
+        echo "### 测试分组核验"
         echo
         echo "- 分组核验步骤：${GO_INVENTORY_GROUPS_STEP:-（未提供）}"
-        echo "- 覆盖对账步骤：${GO_INVENTORY_AUDIT_STEP:-（未提供）}"
         echo "- go test 测试包：${GO_INVENTORY_PACKAGES:-（未提供）}；Case 分组：${GO_INVENTORY_CASES:-（未提供）}"
         if [ -n "${GO_GROUPS_SUMMARY:-}" ]; then
             echo

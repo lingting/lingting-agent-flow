@@ -23,7 +23,6 @@ import (
 	_ "github.com/lingting/agentflow/tests/runner/integration/remote/planning"
 	_ "github.com/lingting/agentflow/tests/runner/integration/remote/workflow"
 	_ "github.com/lingting/agentflow/tests/runner/integration/ssh"
-	_ "github.com/lingting/agentflow/tests/runner/legacy"
 	_ "github.com/lingting/agentflow/tests/runner/pilot"
 	_ "github.com/lingting/agentflow/tests/runner/resourcecheck"
 	_ "github.com/lingting/agentflow/tests/runner/selfcheck"

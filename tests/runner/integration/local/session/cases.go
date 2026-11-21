@@ -1,5 +1,5 @@
 // 本文件登记 tests/integration/local/session 的 7 条用例，顺序与源文件一致，
-// 便于与 R0 冻结清单逐条对账。
+// 便于按包核对迁移数量。
 //
 // 用例主体在 cases_session.go 里；本包不分配编排进程资源，因此没有资源声明。
 package session

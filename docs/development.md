@@ -91,7 +91,6 @@ make test-cases TEST_KIND=selfcheck  # 执行器与资源自检分组
 make test-cases TEST_KIND=frontend   # 前端用例分组
 make test-real    # 真实设备分组（需要 AGENTFLOW_REAL_TESTS_GRANTED=true）
 make test-runner  # 只构建 bin/agentflow-test
-make inventory    # 盘点用例与资源（默认写 .test-artifacts/inventory）
 make build        # 构建 bin/agentflow（不重建前端）
 make release      # 单文件生产构建：前端构建 + Go 编译
 make run          # go run ./cmd/agentflow server

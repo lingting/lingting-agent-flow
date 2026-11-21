@@ -9,7 +9,7 @@
 //
 // 资源：R2 判定本包为「共享 ssh-host + 独享 ssh-session」。迁移后用例自己用 testkit
 // 建立连接（配置与 known_hosts 快照都在用例侧），不声明远程资源，因此编排进程不额外
-// 持有一份连接；偏差与依据见 .steps/V3/R5/README.md 的 B3 决策 D9。
+// 持有一份连接；偏差与依据见 V3 R5 的 B3 决策 D9。
 package ssh
 
 import (

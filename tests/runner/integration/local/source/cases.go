@@ -16,7 +16,7 @@ import (
 	"github.com/lingting/agentflow/tests/internal/testkit"
 )
 
-// 登记本包 6 条用例，顺序与源文件一致，便于与 R0 冻结清单逐条对账。
+// 登记本包 6 条用例，顺序与源文件一致，便于按包核对迁移数量。
 var (
 	_ = register("fetch-with-local-path", runFetchWithLocalPath)
 	_ = register("fetch-base-branch-missing", runFetchBaseBranchMissing)

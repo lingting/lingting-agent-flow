@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check vet inventory test test-unit test-cases test-real test-runner build release release-dist release-verify release-notes run web-install web-build web-dev web-verify serve clean check
+.PHONY: fmt fmt-check vet test test-unit test-cases test-real test-runner build release release-dist release-verify release-notes run web-install web-build web-dev web-verify serve clean check
 
 VERSION ?= dev
 # 开发构建使用短提交便于阅读；正式发布制品中的提交由 cmd/agentflow-release 写入完整 SHA。
@@ -28,9 +28,6 @@ TEST_CASES_PREREQUISITES := test-runner
 else
 TEST_CASES_PREREQUISITES := build test-runner
 endif
-# inventory 默认写到可写目录：R0 的 legacy-cases.manifest.json 是冻结基线，
-# 不得被默认目标覆盖，需要覆盖时必须显式传入 INVENTORY_DIR=.steps/V3/R0。
-INVENTORY_DIR ?= $(TEST_ARTIFACT_ROOT)/inventory
 # 前端构建工具链版本：记进制品的版本元数据，正式版本必须能取到真实版本。
 NODE_VERSION ?= $(shell node --version 2>/dev/null)
 PNPM_VERSION ?= $(shell pnpm --version 2>/dev/null)
@@ -48,10 +45,6 @@ fmt-check:
 
 vet:
 	go vet ./...
-
-# inventory 重新生成 V3 R0 的用例清单与资源矩阵：只读盘点，不运行任何测试。
-inventory:
-	go run ./cmd/agentflow-test-inventory -out "$(INVENTORY_DIR)"
 
 # test 是本地全量入口：单元用 go test，其余已注册的普通 Case 用统一执行器。
 # 真实设备分组（test-real）与故障注入分组不在 test 范围内：前者需要单独授权，

@@ -12,8 +12,8 @@ import (
 // ResourceContract 是一种资源类型的冻结契约（V3 R2 §5）。
 //
 // 契约同时约束两侧：声明 Spec 允许出现哪些创建参数，句柄 payload 必须给出哪些键。
-// 新增键必须同时改契约与 .steps/V3/R2/README.md，不允许提供者自行扩展 payload 或让
-// 用例传入契约外的 Spec。
+// 新增键必须同时改契约与全部提供者，不允许提供者自行扩展 payload 或让用例传入契约外的
+// Spec。
 type ResourceContract struct {
 	// Type 是契约对应的资源类型。
 	Type string
@@ -29,7 +29,7 @@ type ResourceContract struct {
 	Fingerprint string
 }
 
-// resourceContracts 是 15 种资源类型的冻结契约，顺序与 R0 词汇表一致（pi-cli 已移除）。
+// resourceContracts 是 15 种资源类型的冻结契约；对外暴露时按类型名排序（pi-cli 已移除）。
 var resourceContracts = []ResourceContract{
 	{
 		Type:        ResourceLocalPort,

@@ -9,8 +9,8 @@ const (
 	caseGroup = "integration-local-scheduler"
 	// packagePath 是本包用例的来源 go test 包，也是串行作用域的判定输入。
 	//
-	// 迁移后用例文件不在该目录下，但 Package 沿用来源包路径：R2 冻结的包级串行表与
-	// R0 清单都按来源路径组织，R5 迁移时不必改判定口径。
+	// 迁移后用例文件不在该目录下，但 Package 沿用来源包路径：R2 冻结的包级串行表按来源
+	// 路径组织，R5 迁移时不必改判定口径。
 	packagePath = "tests/integration/local/scheduler"
 	// databaseName 是用例内数据库资源的声明名。
 	databaseName = "db"

@@ -4,8 +4,8 @@
 // 迁移写法（本阶段冻结，R5 照此批量执行）：
 //
 //   - 一条既有 func Test* 对应一条 Case，ID 为
-//     "integration-local-scheduler/<原用例名转 kebab-case>"，顺序与源文件一致，便于与
-//     R0 冻结清单逐条对账；
+//     "integration-local-scheduler/<原用例名转 kebab-case>"，顺序与源文件一致，便于按包
+//     核对迁移数量；
 //   - 用例主体写成 func run*(t *testrunner.Context)，参数名沿用 t，使主体与源文件逐行
 //     对应；t 提供与 testing.T 同名的 Helper/Logf/Errorf/Fatalf/Fatal/Skipf/Skip/
 //     Cleanup，辅助函数签名也统一收它，因此断言与语句不需要改写；

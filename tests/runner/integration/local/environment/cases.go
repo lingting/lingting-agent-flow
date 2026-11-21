@@ -1,5 +1,5 @@
 // 本文件登记 tests/integration/local/environment 的 7 条用例，顺序与源文件一致，
-// 便于与 R0 冻结清单逐条对账。
+// 便于按包核对迁移数量。
 //
 // 用例主体在 cases_environment.go 与 cases_host_gate.go 里；只有真正打开数据库的用例
 // 声明 sqlite-db，纯文件替身与纯判定入口的用例不声明资源。

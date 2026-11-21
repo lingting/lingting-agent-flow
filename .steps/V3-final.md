@@ -1,9 +1,13 @@
 # AgentFlow V3 最终工程状态
 
+> **阶段文档状态**：V3 阶段文档（`.steps/V3/**`）与 R0 冻结件（用例清单、资源矩阵）已随
+> `.steps/V4/R0` 的删除动作移除；本文保留正文与结论，原文中指向阶段文档的链接已改为纯文本，
+> 需要细节时用 Git 历史（被删提交之前可查）。
 > **文档状态**：V3 收口文档。
 > **核实基线**：commit `172c6a3`（R8 收口）的工作区代码、`Makefile`、`.github/workflows/ci.yml`、
 > `.github/scripts/`、`tests/` 结构与 R9 的全量验收运行产物（`.test-artifacts/`）。
 > **补遗（2026-11-21 之后）**：收口提交 `465b8bb` 已推送并触发首次完整 CI，结论为失败（CI #60）；
+> R10 分三轮修复后 CI #63（`8a214ad`）全绿，最终结论见 [§8.7](#87-r10-收尾ci-63-全绿)；
 > 本文 §2.8、§5、§7 的"一次完整 CI 尚未运行"等表述由 [§8 补遗](#8-补遗2026-11-21-之后的验收勘误) 纠正，
 > 历史结论原样保留，不重写。
 > **使用规则**：本文只记录最终状态，不记录逐步开发过程。凡写"已交付"的能力，都能在代码、命令或
@@ -157,7 +161,7 @@ AGENTFLOW_REAL_TESTS_GRANTED=true make test-real      # 真实分组（32 条，
 |---|---|---|
 | 分组核验 | `go-test-groups.sh --check --declared-groups unit --declared-case-kinds local,e2e,selfcheck,frontend` | 16 个测试包与 25 个 Case 分组全部分类，无遗漏、无重复、无落空声明 |
 | 非测试门禁 | `make check` | gofmt / vet / build 通过，未执行测试 |
-| 单元 | `make test-unit` | 16 个包全部 ok：顶层通过 1321 / 失败 0 / 跳过 7（既有 Windows 符号链接权限跳过；`grep -c '^--- PASS'` 只因 `testkit.Main` 的 stdout 重定向少算 7 条，见 [R9 §11.1](V3/R9/README.md#111-全量运行)） |
+| 单元 | `make test-unit` | 16 个包全部 ok：顶层通过 1321 / 失败 0 / 跳过 7（既有 Windows 符号链接权限跳过；`grep -c '^--- PASS'` 只因 `testkit.Main` 的 stdout 重定向少算 7 条，见 R9 §11.1） |
 | 普通 Case | `make test-cases`（normal，`PARALLEL=4`） | 312 条：通过 311 + 跳过 1（`selfcheck/skip`，带原因）；零残留 `passed`；退出码 0 |
 | 覆盖对账 | `--audit-coverage --audit-stage R5,R6` | 清单 1707 / 范围 365 / 覆盖 316 / dropped 49 / 缺失 0 / 多余 0；退出码 0 |
 | 真实设备 | `AGENTFLOW_REAL_TESTS_GRANTED=true make test-real` | 32 条：通过 31 + 失败 1（`m6-requirement-sequential-tasks`，根因见 §5.1）；零残留 `passed` |
@@ -200,7 +204,7 @@ true）：`AGENTFLOW_REAL_TESTS_GRANTED=true make test-real`（`--parallel 1`，
 | `t.Parallel()` 等价语义 | 不保留：1744 处统一映射为调度器属性 | — |
 | 中止运行后的零残留终检 | 不做：需人工确认，处置流程写入 `docs/runbook.md` §8.2 | — |
 
-其余登记在 [ROADMAP §8](V3/ROADMAP.md#8-风险登记) 的风险（Windows 进程树终止、包级串行误配、前端
+其余登记在 ROADMAP §8 的风险（Windows 进程树终止、包级串行误配、前端
 UI 时序抖动、镜像标签被并行构建改指、真实设备外部故障）在阶段内均已按"如实失败或跳过、不伪造通过"
 处置。
 
@@ -253,7 +257,8 @@ UI 时序抖动、镜像标签被并行构建改指、真实设备外部故障�
 | `frontend/playwright-task-containers`、`frontend/playwright-task-create-project-inheritance` | 未决 | 失败 trace、截图与 JSON 报告在 `ui-test` artifact 内；产品行为、fixture 污染、UI 时序与 CI 资源压力四类原因都未排除 |
 | `pilot/server-shutdown` | 已确诊 | `bin/agentflow` 未构建：`Makefile` 的 `test-cases` 与 CI 的 `cases-selfcheck` 都只构建 `bin/agentflow-test`；资源分配失败被记为 `error` 而不是跳过 |
 
-三项的处置计划、授权边界与验收条件见 [`.steps/V3/R10/README.md`](V3/R10/README.md)。
+三项的处置计划、授权边界与验收条件见 `.steps/V3/R10/README.md`；三项的最终定级
+与收尾运行见 [§8.7](#87-r10-收尾ci-63-全绿)。
 
 ### 8.3 对 §7 第 3 条的勘误：陈旧的是阶段映射，不是扫描输入
 
@@ -279,8 +284,11 @@ UI 时序抖动、镜像标签被并行构建改指、真实设备外部故障�
 - `.github/workflows/ci.yml`：`cases-selfcheck` Job 在「执行执行器自检用例」之前增加 `make build`。
 - 用例与断言未改动，缺失二进制仍按 `error` 记录，不会被改判为跳过。
 
-该缺口的运行结论（`pilot/server-shutdown` 报告为 `passed`）仍待一次真实运行与完整 CI，见
-[`.steps/V3/R10/README.md`](V3/R10/README.md) §9。
+该缺口的运行结论已由两次运行给出：#61 的「构建被测服务二进制」「核验被测服务二进制」两步 `success`
+但用例仍失败，二分出第二个缺陷（非 Windows 平台拿不到非子进程的退出码，用例只按日志标记判定优雅关闭）；
+`ba9a9f7` 新增 `waitProcessGone`（轮询进程存活、超时按失败处理）后，#62 与 #63 的「执行器自检用例」
+均为 `success`，`pilot/server-shutdown` 转为通过，用例、断言与跳过策略未改。详见
+`.steps/V3/R10/README.md` §3.6 与 §4.3。
 
 ### 8.6 R10 对并发删除用例的定级与处置
 
@@ -292,5 +300,30 @@ UI 时序抖动、镜像标签被并行构建改指、真实设备外部故障�
 断言前 `waitFor` 轮询 `scheduler.ActiveDispatches() == 0`，等待之后**保留**原硬断言并打印全部仍被持有的
 任务标识；产品代码、断言语义与用例选择范围均未改动，也没有引入 `sleep`、重试或跳过。
 
-该定级的运行验证（连续通过、以及人为构造残留现场仍失败）待一次授权的运行，见
-[`.steps/V3/R10/README.md`](V3/R10/README.md) §5 C1。
+该定级的运行验证由完整 CI 承担：#61 / #62 / #63 的「本机集成用例」分组都是 `success`。原口径的
+"`--parallel 4` 下连续 3 次本机运行"未执行，"人为构造残留现场仍失败"只做了代码层核对（等待条件之外
+保留硬断言，等待失败时打印残留集合），未构造现场。详见
+`.steps/V3/R10/README.md` §5 C1 与 §9。
+
+### 8.7 R10 收尾：CI #63 全绿
+
+补遗发布后 R10 又经过两次修复提交，第三次完整 CI 通过。三条 run 的结论都可用公开 API 读到：
+
+| run | run id | `head_sha` | 结论 | 说明 |
+|---|---|---|---|---|
+| #61 | `44904862833` | `7caea1f` | failure | 本机集成用例转绿（C1）；自检与前端仍失败 |
+| #62 | `44907315090` | `ba9a9f7` | failure | 自检转绿（`waitProcessGone`）；前端仍失败 |
+| #63 | `44911970464` | `8a214ad` | **success** | 全部 Job 成功；`ui-test` 门禁步骤成功 |
+
+因此 §8.1 的"首次完整 CI 失败"只对 #60 成立：**当前 CI 基线是全绿**，`CI 汇总` 成功，只有
+`真实外部依赖测试` 因未授权 `skipped`。三个失败的最终定级：
+
+| 失败 | 定级 | 落地 |
+|---|---|---|
+| 并发删除用例 | 用例观察点错误 | 只改等待条件（轮询 `ActiveDispatches()`），断言与产品代码未动 |
+| `pilot/server-shutdown` | 环境准备缺口 + 非 Windows 平台的退出观察缺陷 | CI 前置构建 `bin/agentflow`；用例改为等待 PID 消失 |
+| 两条 Playwright | 执行器 dev server 资源生命周期缺陷（不是 UI 产品行为） | 监听进程纳入句柄，`Release` 一并回收并等待端口关闭 |
+
+未达成的原口径写在 `.steps/V3/R10/README.md` §9：artifact 内容始终未取回（未认证下载
+`401`），C1 的"连续 3 次本机运行"与 D1 的"两次独立运行结论一致"未执行，结论改由三次完整 CI 承担。
+§7 第 1 条与 §2.8、§5 的"未执行"口径就此闭合。

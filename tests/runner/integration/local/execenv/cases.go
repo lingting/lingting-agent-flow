@@ -1,5 +1,5 @@
 // 本文件登记 tests/integration/local/execenv 的 28 条用例，顺序与源文件一致，
-// 便于与 R0 冻结清单逐条对账。
+// 便于按包核对迁移数量。
 //
 // 用例主体在 cases_execenv.go 与 cases_docker.go 里；本包的容器、镜像与 SSH 全部是
 // 受控替身，不占用编排进程资源，因此没有资源声明。

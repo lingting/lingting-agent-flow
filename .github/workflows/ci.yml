@@ -2,8 +2,7 @@
 #
 # 必需 Job（任一非成功，ci-summary 一律失败，不会把门禁报告为通过）：
 # - go-static        ：Go 格式、静态检查与编译，最先失败以获得最快反馈
-# - go-inventory     ：测试分组核验（go test 包与已注册 Case 分组）与覆盖对账，两步都是
-#                      静态核对，不执行任何用例
+# - go-inventory     ：测试分组核验（go test 包与已注册 Case 分组），静态核对，不执行任何用例
 # - go-unit          ：`./tests/unit/...`，仍由 `go test` 执行
 # - cases-local      ：本机集成用例（统一执行器，`integration-local-*`）
 # - cases-e2e        ：CLI 端到端用例（统一执行器，`e2e-cli`）
@@ -105,16 +104,14 @@ jobs:
         id: static
         run: bash .github/scripts/check-go-static.sh
 
-  # 测试分组核验与覆盖对账都是静态门禁：普通测试 Job 全部依赖本 Job。分组遗漏、Case 分组
-  # 未归类、声明落空、分组已定义却没有 Job 执行、Makefile 入口与分组清单不一致时本 Job 失败；
-  # 覆盖对账只读 R0 冻结清单与用例注册表，发现缺失条目或多出注册时同样失败。
+  # 测试分组核验是静态门禁：普通测试 Job 全部依赖本 Job。分组遗漏、Case 分组未归类、
+  # 声明落空、分组已定义却没有 Job 执行、Makefile 入口与分组清单不一致时本 Job 失败。
   go-inventory:
-    name: 测试分组核验与覆盖对账
+    name: 测试分组核验
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
       groups: ${{ steps.groups.outcome }}
-      coverage: ${{ steps.coverage.outcome }}
       package_total: ${{ steps.groups.outputs.package_total }}
       case_total: ${{ steps.groups.outputs.case_total }}
       groups_markdown: ${{ steps.groups.outputs.groups_markdown }}
@@ -135,21 +132,6 @@ jobs:
       - name: 核验测试分组覆盖
         id: groups
         run: bash .github/scripts/go-test-groups.sh --check --declared-groups unit --declared-case-kinds local,e2e,selfcheck,frontend
-      # 覆盖对账只读冻结清单与注册表：缺失条目、无法解释的多余注册与结构性问题都让门禁失败；
-      # 显式声明 dropped 的条目按理由通过（R5 §4.1）。
-      - name: 覆盖对账（静态，不执行用例）
-        id: coverage
-        run: |
-          go run ./cmd/agentflow-test --audit-coverage --audit-stage R5,R6 --audit-json "$TEST_ARTIFACT_ROOT/coverage/audit.json"
-      - name: 上传覆盖对账结果
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: coverage-audit-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ github.workspace }}/.test-artifacts/coverage
-          if-no-files-found: warn
-          retention-days: 7
 
   go-unit:
     name: Go 单元测试
@@ -517,7 +499,6 @@ jobs:
           GO_STATIC_STEP: ${{ needs.go-static.outputs.static }}
           GO_INVENTORY_RESULT: ${{ needs.go-inventory.result }}
           GO_INVENTORY_GROUPS_STEP: ${{ needs.go-inventory.outputs.groups }}
-          GO_INVENTORY_AUDIT_STEP: ${{ needs.go-inventory.outputs.coverage }}
           GO_INVENTORY_PACKAGES: ${{ needs.go-inventory.outputs.package_total }}
           GO_INVENTORY_CASES: ${{ needs.go-inventory.outputs.case_total }}
           GO_GROUPS_SUMMARY: ${{ needs.go-inventory.outputs.groups_markdown }}
