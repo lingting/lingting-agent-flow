@@ -79,7 +79,12 @@ func runServerShutdown(c *testrunner.Context) {
 	shutdownMS := time.Since(stopAt).Milliseconds()
 	switch {
 	case errors.Is(exitErr, errExitCodeUnsupported):
-		c.Warnf("当前平台（%s）无法读取非子进程的退出码，优雅关闭以服务日志标记为准", runtime.GOOS)
+		c.Warnf(
+			"当前平台（%s）无法读取非子进程的退出码，改为等待进程退出并以服务日志与端口核验优雅关闭",
+			runtime.GOOS,
+		)
+		waitProcessGone(c, pid, serverShutdownWindow)
+		c.Logf("服务进程 %d 已退出，关闭耗时 %dms（退出码由服务日志标记核验）", pid, shutdownMS)
 	case exitErr != nil:
 		c.Fatalf("等待服务进程退出失败: %v", exitErr)
 	case exitCode != 0:

@@ -3,10 +3,23 @@
 package testrunner
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
 	"syscall"
 )
+
+// listenerPattern 匹配 ss -p 输出里的 "pid=<进程号>" 片段。
+var listenerPattern = regexp.MustCompile(`pid=(\d+)`)
 
 // processGroupAttr 让 worker 成为独立进程组，便于按组终止整棵进程树。
 func processGroupAttr() *syscall.SysProcAttr {
@@ -32,25 +45,143 @@ func InterruptProcess(pid int) error {
 	return nil
 }
 
-// killProcessTree 终止 worker 进程组，覆盖用例启动的所有子进程。
+// killProcessTree 终止 pid 及其整棵进程树，覆盖该进程启动的所有子进程。
 func killProcessTree(pid int) error {
+	_, err := terminateProcessTree(pid)
+	return err
+}
+
+// terminateProcessTree 终止 pid 及其整棵进程树，并返回终止前采集到的进程信息。
+//
+// 只按进程组发信号不够：树里的后代可能把自己放进新的进程组，组信号因此漏掉真正监听
+// 端口的进程。采集必须在终止之前完成——根进程一退出，父子链就断了，只剩进程组还能
+// 说明谁与它同属一棵树。终止顺序从叶到根，最后再补一次组信号，覆盖采集之后新生的后代。
+func terminateProcessTree(pid int) ([]processInfo, error) {
 	if pid <= 0 {
-		return nil
+		return nil, nil
+	}
+	members, err := processTreeMembers(pid)
+	if err != nil {
+		return nil, fmt.Errorf("采集进程 %d 的进程树失败: %w", pid, err)
+	}
+	var killErr error
+	for index := len(members) - 1; index >= 0; index-- {
+		if err := killProcess(members[index].PID); err != nil {
+			killErr = errors.Join(killErr, err)
+		}
 	}
 	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return fmt.Errorf("终止 worker 进程组失败: %w", err)
+		killErr = errors.Join(killErr, fmt.Errorf("终止进程组 %d 失败: %w", pid, err))
+	}
+	if killErr != nil {
+		return members, fmt.Errorf("终止进程树失败: %w", killErr)
+	}
+	return members, nil
+}
+
+// killProcess 向单个进程投递 SIGKILL，进程已退出不算失败。
+func killProcess(pid int) error {
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("终止进程 %d 失败: %w", pid, err)
 	}
 	return nil
+}
+
+// processTreeMembers 返回 pid 及其整棵进程树：父子链可达的后代与同一进程组的成员。
+//
+// 两种来源都要：后代可能自行创建新进程组，从而躲开按组投递的信号；启动器也可能先于
+// 后代退出，使父子链断开，此时只剩进程组还能说明它们同属一棵树。
+func processTreeMembers(pid int) ([]processInfo, error) {
+	if pid <= 0 {
+		return nil, nil
+	}
+	all, err := listProcesses()
+	if err != nil {
+		return nil, err
+	}
+	byPID := make(map[int]processInfo, len(all))
+	children := make(map[int][]int, len(all))
+	for _, info := range all {
+		byPID[info.PID] = info
+		children[info.PPID] = append(children[info.PPID], info.PID)
+	}
+	collected := make(map[int]struct{})
+	if _, exists := byPID[pid]; exists {
+		collected[pid] = struct{}{}
+	}
+	for queue := []int{pid}; len(queue) > 0; queue = queue[1:] {
+		for _, child := range children[queue[0]] {
+			if _, seen := collected[child]; seen {
+				continue
+			}
+			collected[child] = struct{}{}
+			queue = append(queue, child)
+		}
+	}
+	for _, info := range all {
+		if info.PGID == pid {
+			collected[info.PID] = struct{}{}
+		}
+	}
+	members := make([]processInfo, 0, len(collected))
+	for id := range collected {
+		if info, exists := byPID[id]; exists {
+			members = append(members, info)
+		}
+	}
+	sort.Slice(members, func(i, j int) bool { return members[i].PID < members[j].PID })
+	return members, nil
+}
+
+// listProcesses 用 ps 列出全部进程的父子关系、进程组与状态。
+//
+// 用 ps 而不是直接读 /proc：Linux 之外的类 Unix 平台没有 /proc，ps 的输出格式在这些
+// 平台上一致。列顺序与解析必须一起改。
+func listProcesses() ([]processInfo, error) {
+	output, err := exec.Command("ps", "-A", "-o", "pid=,ppid=,pgid=,stat=,args=").Output()
+	if err != nil {
+		return nil, fmt.Errorf("列举进程失败: %w", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	infos := make([]processInfo, 0, len(lines))
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		pid, pidErr := strconv.Atoi(fields[0])
+		ppid, ppidErr := strconv.Atoi(fields[1])
+		pgid, pgidErr := strconv.Atoi(fields[2])
+		if pidErr != nil || ppidErr != nil || pgidErr != nil {
+			continue
+		}
+		infos = append(infos, processInfo{
+			PID:  pid,
+			PPID: ppid,
+			PGID: pgid,
+			Stat: fields[3],
+			Args: strings.Join(fields[4:], " "),
+		})
+	}
+	return infos, nil
 }
 
 // processAlive 报告指定进程号是否仍然存在。
 //
 // 用 signal 0 探测进程存在性：ESRCH 表示已退出，EPERM 表示进程存在但当前用户无权发信号。
+// 已经结束、只等父进程回收的进程（zombie）不再执行代码也不再持有端口，按已退出处理。
 func processAlive(pid int) (bool, error) {
 	if pid <= 0 {
 		return false, nil
 	}
-	err := syscall.Kill(pid, 0)
+	zombie, err := processZombie(pid)
+	if err != nil {
+		return false, err
+	}
+	if zombie {
+		return false, nil
+	}
+	err = syscall.Kill(pid, 0)
 	switch {
 	case err == nil:
 		return true, nil
@@ -61,4 +192,108 @@ func processAlive(pid int) (bool, error) {
 	default:
 		return false, fmt.Errorf("查询进程 %d 失败: %w", pid, err)
 	}
+}
+
+// processZombie 报告进程是否已经结束、只等父进程回收。
+//
+// 只有 Linux 的 /proc 提供这个状态；其它平台读不到该文件时返回 false，由 signal 0 判定。
+func processZombie(pid int) (bool, error) {
+	content, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("读取进程 %d 的状态失败: %w", pid, err)
+	}
+	// stat 的第二个字段是括号里的命令名，它可能含空格与括号，因此从最后一个右括号之后取状态。
+	text := string(content)
+	closing := strings.LastIndex(text, ")")
+	if closing < 0 || closing+2 >= len(text) {
+		return false, nil
+	}
+	return text[closing+2] == 'Z', nil
+}
+
+// describePortOccupied 在端口自证失败后补充占用该端口的进程信息。
+//
+// 自证结论不因诊断而改变：端口仍然可以连接就是释放失败，诊断只负责说明是谁占着它。
+func describePortOccupied(ctx context.Context, cause error, address string) error {
+	listeners, err := listenerProcesses(ctx, address)
+	if err != nil {
+		return fmt.Errorf("%w（无法定位监听进程：%v）", cause, err)
+	}
+	if len(listeners) == 0 {
+		return fmt.Errorf("%w（没有查到监听该端口的进程）", cause)
+	}
+	return fmt.Errorf("%w（监听进程：%s）", cause, describeProcesses(listeners))
+}
+
+// listenerProcesses 返回监听指定地址所在端口的进程，只用于失败诊断。
+func listenerProcesses(ctx context.Context, address string) ([]processInfo, error) {
+	_, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, fmt.Errorf("解析监听地址 %q 失败: %w", address, err)
+	}
+	pids, err := listenerPIDs(ctx, port)
+	if err != nil {
+		return nil, err
+	}
+	if len(pids) == 0 {
+		return nil, nil
+	}
+	all, err := listProcesses()
+	if err != nil {
+		return nil, err
+	}
+	byPID := make(map[int]processInfo, len(all))
+	for _, info := range all {
+		byPID[info.PID] = info
+	}
+	listeners := make([]processInfo, 0, len(pids))
+	for _, pid := range pids {
+		info, exists := byPID[pid]
+		if !exists {
+			info = processInfo{PID: pid}
+		}
+		listeners = append(listeners, info)
+	}
+	return listeners, nil
+}
+
+// listenerPIDs 查询监听指定端口的进程号：Linux 用 ss，macOS 用 lsof。
+//
+// 没有匹配项按"没有监听进程"处理：ss 返回空输出，lsof 返回非零退出码且同样没有输出。
+func listenerPIDs(ctx context.Context, port string) ([]int, error) {
+	commandCtx, cancel := context.WithTimeout(ctx, resourceProbeTimeout)
+	defer cancel()
+	var command *exec.Cmd
+	switch runtime.GOOS {
+	case "linux":
+		command = exec.CommandContext(commandCtx, "ss", "-H", "-ltnp", "sport = :"+port)
+	case "darwin":
+		command = exec.CommandContext(commandCtx, "lsof", "-nP", "-t", "-iTCP:"+port, "-sTCP:LISTEN")
+	default:
+		return nil, fmt.Errorf("平台 %s 没有提供端口监听进程查询", runtime.GOOS)
+	}
+	output, err := command.Output()
+	var exitErr *exec.ExitError
+	if err != nil && !(errors.As(err, &exitErr) && len(output) == 0) {
+		return nil, fmt.Errorf("查询端口 %s 的监听进程失败: %w", port, err)
+	}
+	text := string(output)
+	pids := make([]int, 0, 2)
+	if runtime.GOOS == "linux" {
+		for _, match := range listenerPattern.FindAllStringSubmatch(text, -1) {
+			if pid, parseErr := strconv.Atoi(match[1]); parseErr == nil {
+				pids = append(pids, pid)
+			}
+		}
+		return pids, nil
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if pid, parseErr := strconv.Atoi(strings.TrimSpace(line)); parseErr == nil {
+			pids = append(pids, pid)
+		}
+	}
+	return pids, nil
 }

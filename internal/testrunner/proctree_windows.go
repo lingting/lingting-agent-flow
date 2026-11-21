@@ -3,6 +3,7 @@
 package testrunner
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -70,6 +71,21 @@ func killProcessTree(pid int) error {
 		err,
 		strings.TrimSpace(string(output)),
 	)
+}
+
+// terminateProcessTree 用 taskkill /T /F 终止整棵进程树。
+//
+// 返回值为空：Windows 没有与 ps 等价的父子关系查询，回收结果由启动器自身的 Wait 与
+// 端口自证确认，不在这里假装采集到了进程清单。
+func terminateProcessTree(pid int) ([]processInfo, error) {
+	return nil, killProcessTree(pid)
+}
+
+// describePortOccupied 在端口自证失败后补充占用该端口的进程信息。
+//
+// Windows 的进程树回收由 taskkill /T /F 覆盖，这里不额外调用 netstat，失败原因保持端口探测原文。
+func describePortOccupied(ctx context.Context, cause error, address string) error {
+	return cause
 }
 
 // processAlive 报告指定进程号是否仍然存在。

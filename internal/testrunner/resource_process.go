@@ -23,6 +23,80 @@ const processStartupWindow = 300 * time.Millisecond
 // processStopTimeout 是终止资源子进程后的回收等待上限。
 const processStopTimeout = 10 * time.Second
 
+// processGonePollInterval 是等待进程消失的轮询间隔：进程一消失立即返回，不做固定休眠。
+const processGonePollInterval = 50 * time.Millisecond
+
+// processInfo 是一条进程观测信息，用于定位进程树与端口的残留占用者。
+type processInfo struct {
+	PID  int
+	PPID int
+	PGID int
+	Stat string
+	Args string
+}
+
+// String 返回便于写入失败原因的一行进程描述。
+func (info processInfo) String() string {
+	return fmt.Sprintf(
+		"pid=%d ppid=%d pgid=%d 状态=%s 命令行=%s",
+		info.PID,
+		info.PPID,
+		info.PGID,
+		info.Stat,
+		info.Args,
+	)
+}
+
+// describeProcesses 把进程观测信息拼成一行，供失败原因与日志使用。
+func describeProcesses(infos []processInfo) string {
+	if len(infos) == 0 {
+		return "无"
+	}
+	parts := make([]string, 0, len(infos))
+	for _, info := range infos {
+		parts = append(parts, info.String())
+	}
+	return strings.Join(parts, "；")
+}
+
+// waitProcessesGone 在限时内等待这些进程全部从进程表中消失。
+//
+// 采信"已退出"必须有观测依据：轮询到 PID 不再存在才算回收完成，固定休眠或只看启动器
+// 的 Wait 返回值都会把仍在运行的子孙进程当成已回收。
+func waitProcessesGone(ctx context.Context, members []processInfo, timeout time.Duration) error {
+	if len(members) == 0 {
+		return nil
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		surviving := make([]processInfo, 0, len(members))
+		for _, member := range members {
+			alive, err := processAlive(member.PID)
+			if err != nil {
+				return fmt.Errorf("查询进程 %d 失败: %w", member.PID, err)
+			}
+			if alive {
+				surviving = append(surviving, member)
+			}
+		}
+		if len(surviving) == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s 内仍未退出：%s", timeout, describeProcesses(surviving))
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf(
+				"等待进程退出时上下文已结束（未退出：%s）: %w",
+				describeProcesses(surviving),
+				ctx.Err(),
+			)
+		case <-time.After(processGonePollInterval):
+		}
+	}
+}
+
 // HoldFlag 是常驻子进程的内部参数，只供 child-process 的默认子进程使用。
 const HoldFlag = "--hold"
 
@@ -121,32 +195,26 @@ func (p *managedProcess) pid() int {
 	return p.cmd.Process.Pid
 }
 
-// alive 报告子进程是否仍在运行。
-func (p *managedProcess) alive() bool {
-	select {
-	case <-p.done:
-		return false
-	default:
-		return true
-	}
-}
-
 // stop 终止整棵进程树并等待回收，可重复调用。
+//
+// 启动器退出不代表它派生的进程退出：后代可能在新进程组里继续监听端口。因此不因启动器
+// 已经结束就跳过回收，终止前采集到的进程必须全部消失才算完成。
 func (p *managedProcess) stop(ctx context.Context) error {
-	if !p.alive() {
-		return nil
-	}
-	if err := killProcessTree(p.pid()); err != nil {
+	members, err := terminateProcessTree(p.pid())
+	if err != nil {
 		return err
 	}
 	select {
 	case <-p.done:
-		return nil
 	case <-time.After(processStopTimeout):
 		return fmt.Errorf("终止资源 %q 的进程树后 %s 内仍未回收", p.name, processStopTimeout)
 	case <-ctx.Done():
 		return fmt.Errorf("等待资源 %q 的进程退出时上下文已结束: %w", p.name, ctx.Err())
 	}
+	if err := waitProcessesGone(ctx, members, processStopTimeout); err != nil {
+		return fmt.Errorf("资源 %q 的进程树没有完整回收: %w", p.name, err)
+	}
+	return nil
 }
 
 // ProcessAlive 报告指定进程号是否仍然存在。
@@ -160,14 +228,15 @@ func ProcessAlive(pid int) (bool, error) {
 // KillProcessTree 终止指定进程的整棵进程树，可重复调用。
 //
 // 用例主体启动的前端 CLI（pnpm → node → 浏览器）同样按进程树回收：只杀直接子进程会留下
-// 浏览器与 Vitest fork，终检会把它们当成残留。
+// 浏览器与 Vitest fork，终检会把它们当成残留；类 Unix 上还会先采集父子链与进程组，
+// 把自行更换进程组的后代一并列入终止目标。
 func KillProcessTree(pid int) error {
 	return killProcessTree(pid)
 }
 
 // CommandProcessGroup 返回让外部 CLI 成为独立进程组的启动属性。
 //
-// 独立进程组是 KillProcessTree 的前提：Windows 用 taskkill /T，类 Unix 系统按 -pid 发信号。
+// 独立进程组是 KillProcessTree 的依据之一：Windows 用 taskkill /T，类 Unix 系统按进程树与 -pid 发信号。
 func CommandProcessGroup() *syscall.SysProcAttr {
 	return managedProcessGroupAttr()
 }

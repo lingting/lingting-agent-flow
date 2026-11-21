@@ -219,7 +219,7 @@ func (p *FrontendDevServerProvider) Verify(ctx context.Context, handle Handle) e
 	}
 	address := strings.TrimPrefix(strings.TrimPrefix(baseURL, "http://"), "https://")
 	if err := verifyPortClosed(ctx, address); err != nil {
-		return err
+		return describePortOccupied(ctx, err, address)
 	}
 	if err := verifyHTTPGone(ctx, baseURL); err != nil {
 		return err
