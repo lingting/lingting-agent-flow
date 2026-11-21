@@ -3,6 +3,9 @@
 > **文档状态**：V3 收口文档。
 > **核实基线**：commit `172c6a3`（R8 收口）的工作区代码、`Makefile`、`.github/workflows/ci.yml`、
 > `.github/scripts/`、`tests/` 结构与 R9 的全量验收运行产物（`.test-artifacts/`）。
+> **补遗（2026-11-21 之后）**：收口提交 `465b8bb` 已推送并触发首次完整 CI，结论为失败（CI #60）；
+> 本文 §2.8、§5、§7 的"一次完整 CI 尚未运行"等表述由 [§8 补遗](#8-补遗2026-11-21-之后的验收勘误) 纠正，
+> 历史结论原样保留，不重写。
 > **使用规则**：本文只记录最终状态，不记录逐步开发过程。凡写"已交付"的能力，都能在代码、命令或
 > 报告字段中指向具体位置；证据不足的条目不写成已完成，一律列入 §6 遗留事项。
 
@@ -207,9 +210,11 @@ UI 时序抖动、镜像标签被并行构建改指、真实设备外部故障�
 
 1. **一次完整 CI 尚未在 GitHub Actions 上运行**：R9 只在本机逐项验证了与 Job 一一对应的入口。首次
    推送后需要确认 Job 依赖、产物上传与 `ci-summary` 结论。
+   **（已被 §8 补遗纠正：首次完整 CI 已运行，即 CI #60，结论为失败。）**
 2. **race 与覆盖率能力缺失**：见 §6；恢复需要新立项，不在 V3 范围。
 3. **`cmd/agentflow-test-inventory` 的扫描输入仍是已删除的 `tests/integration/**`、`tests/e2e/**`**：
    R0 清单继续按冻结件使用，重新生成清单前必须先改输入。
+   **（已被 §8 补遗纠正：扫描框架已是通用的 `git ls-files`，陈旧的是阶段映射，不是扫描输入。）**
 4. **`integration-remote-workflow/m6-requirement-sequential-tasks` 仍失败，需复跑**：R9 真实批次里该用例
    因"Agent 在容器内自行提交、工作区干净"导致代码保存记录没有 commit SHA（详见 §5.1）。它是模型输出
    相关的既有不确定性，需要环境与模型稳定后再跑一次；不改断言、不跳过。
@@ -217,3 +222,50 @@ UI 时序抖动、镜像标签被并行构建改指、真实设备外部故障�
    镜像源可用；外部故障如实记为环境失败，不换本机替身、不放宽断言。
 6. **Schema 审计与发布制品没有自动化守点**：迁移脚本的约束与制品布局靠人工核对与发布流程本身校验。
 7. **脚本行为没有契约测试**：`.github/scripts/` 的解释器调用方式、文档头部与退出码只能人工核对。
+
+---
+
+## 8. 补遗：2026-11-21 之后的验收勘误
+
+本节只追加事实，不重写 §1–§7 的历史结论。凡与上文冲突处，以本节为准。
+
+### 8.1 首次完整 CI 已经运行，结论为失败
+
+| 项 | 事实 |
+|---|---|
+| 运行 | CI #60，run id `44895723793`，`event=push`，`run_attempt=1` |
+| 提交 | `head_sha 465b8bb64c57bb3bc19f89de638a834727cfb438`（`:memo: v3 全量验收`），与本地 HEAD 一致 |
+| 时间 | 2026-11-21T10:43:55Z 起，10:53:30Z 结束，结论 `failure` |
+| 通过 | Go 格式与静态检查、测试分组核验与覆盖对账、真实测试授权判断、Go 单元测试、CLI 端到端用例 |
+| 跳过 | 真实外部依赖测试（未授权） |
+| 失败 | 本机集成用例（job `136821043451`）、前端用例与门禁（`136821043487`）、执行器自检用例（`136821043518`） |
+| 产物 | `cases-local-44895723793-1`（14703776654）、`cases-selfcheck-44895723793-1`（14703558834）、`ui-test-44895723793-1`（14704331582）、`coverage-audit-44895723793-1`（14703931751） |
+| 取证限制 | 未认证下载 artifact 返回 `401`；本次核对只能读到 job / step 元数据与注解，artifact 内容未取回 |
+
+因此 §2.8 的"一次完整 CI 待推送确认"、§7 第 1 条与 §5 的"未执行"口径都需要按上表理解：
+**入口与 Job 依赖已被真实运行验证，但三个 Job 的失败尚未定级。**
+
+### 8.2 三个失败的当前状态
+
+| 失败 | 结论状态 | 说明 |
+|---|---|---|
+| `integration-local-scheduler/concurrent-delete-and-scheduler-scan-keep-facts` | 未决 | 用例等待 `Scan` / `Delete` 返回，断言"分派结束后不得残留执行权"；产品侧执行权释放发生在 `go s.run(grant)` 协程内，`Scan` 返回不是收敛点。是"用例观察点"还是"产品残留路径"需要 `report.json` 与用例日志定级 |
+| `frontend/playwright-task-containers`、`frontend/playwright-task-create-project-inheritance` | 未决 | 失败 trace、截图与 JSON 报告在 `ui-test` artifact 内；产品行为、fixture 污染、UI 时序与 CI 资源压力四类原因都未排除 |
+| `pilot/server-shutdown` | 已确诊 | `bin/agentflow` 未构建：`Makefile` 的 `test-cases` 与 CI 的 `cases-selfcheck` 都只构建 `bin/agentflow-test`；资源分配失败被记为 `error` 而不是跳过 |
+
+三项的处置计划、授权边界与验收条件见 [`.steps/V3/R10/README.md`](V3/R10/README.md)。
+
+### 8.3 对 §7 第 3 条的勘误：陈旧的是阶段映射，不是扫描输入
+
+`internal/caseinventory` 的 `scanGoSources` 已经用 `git ls-files` 枚举全部已跟踪 `.go` 文件，
+`tests/` 前缀或 `_test.go` 后缀才纳入，不按 `tests/integration/**`、`tests/e2e/**` 过滤。
+仍然陈旧的是阶段分类：`stageForGo`（`inventory.go`）与 `isIntegrationOrE2E`（`resources.go`）
+按这两个已删除目录的前缀判定 R5。当前 HEAD 重新生成清单会得到"R5 范围 0 条、全部 `keep-go-test`"，
+因此冻结清单必须继续只读使用；改动阶段映射属于后续立项，不在 V3 与 R10 内。
+
+### 8.4 不因补遗而改变的结论
+
+- §6 的已接受回退（`go test -race`、覆盖率、unit 仍用 `go test`、`t.Parallel()` 语义降级、
+  中止后不做零残留终检）全部保持。
+- §5.1 的真实设备失败（`m6-requirement-sequential-tasks`）仍如实记为失败，仍需复跑。
+- R0 冻结清单（1707 条）与 R5/R6 的覆盖结论（316 + dropped 49、缺失 0、多余 0）不变。

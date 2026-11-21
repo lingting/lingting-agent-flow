@@ -1,6 +1,8 @@
 # AgentFlow V3：统一测试执行器路线总规划
 
 **文档状态：** 主线规划。R0–R9 已完成，V3 已收口（最终状态见 [../V3-final.md](../V3-final.md)）。
+R10 是收口之后新增的遗留治理阶段，状态见 §4 与 §12；测试目录收敛、unit 迁移与并发额度
+属于 [V4](../V4/ROADMAP.md)，不在本文件范围内。
 **上游输入：** [审阅意见](TEST-RUNNER-REFACTOR-REVIEW.md)（P0/P1/P2 结论）、
 [R0 盘点与决策](R0/README.md)、[R1 接口与可运行骨架](R1/README.md)、
 [.plan/mian.md](../../.plan/main.md) 的「测试调整」。
@@ -32,8 +34,14 @@ agentflow-test（编排进程）
 
 ## 2. 基线（R0 盘点 + R1 落地）
 
-R0 冻结的规模基线（AST 口径）。清单按冻结件使用：`make inventory` 的扫描输入是 R5 已删除的
-`tests/integration/**` 与 `tests/e2e/**`，重新生成清单前必须先改它的输入。
+R0 冻结的规模基线（AST 口径）。清单按冻结件使用，不再重新生成。
+
+> **勘误（R10 复核，2026-11-21）：** 上句原文写作"`make inventory` 的扫描输入是 R5 已删除的
+> `tests/integration/**` 与 `tests/e2e/**`，重新生成清单前必须先改它的输入"。该表述已过期：
+> `internal/caseinventory` 的扫描已改为 `git ls-files` 通用枚举，不再按这两个目录过滤；
+> 真正陈旧的只是**阶段映射**（`stageForGo` 与 `isIntegrationOrE2E` 仍按这两个前缀判定 R5），
+> 因此当前 HEAD 重新生成清单会得到"R5 范围 0 条"。结论不变：清单仍按冻结件使用，
+> 改阶段映射另需立项，详见 [R10 §4.4](R10/README.md#44-inventory-旧路径结论的纠正)。
 
 | 项 | 数量 |
 |---|---:|
@@ -219,6 +227,7 @@ R2–R7 只改代码、用例资产与本目录内的阶段文档；`Makefile`�
 | R7 | 已完成 | TestMain 与 `testkit` 最终核验收口、删除迁移遗留、真实设备零残留复核；1 条用例被外部环境阻塞已记录 | [R7](R7/README.md) |
 | R8 | 已完成 | Makefile / CI / 脚本收敛，非测试门禁保持可用；一次完整 CI 待推送确认 | [R8](R8/README.md) |
 | R9 | 已完成 | 全量验收（单元 + 312 条普通 Case + 32 条真实 Case）、覆盖对账退出码 0、文档同步与 V3 收口；一次完整 CI 待推送确认 | [R9](R9/README.md) |
+| R10 | 未开始 | 收口后的遗留治理：CI #60 三个失败的取证与定级、`pilot` 缺 `bin/agentflow` 的环境修复、文档勘误；不做目录收敛与 unit 迁移 | [R10](R10/README.md) |
 
 依赖与硬门禁：
 
@@ -233,7 +242,10 @@ R2 ──> R3 ──> R4 ──> R4.5 ──> R5 ──> R7 ──> R9
 - R3 的 9 个调度场景未通过，不得进入 R4。
 - R4.5 试点结论未确认，不得开始 R5 的批量迁移。
 - R5、R6、R7 与 R8 已完成，可以进入 R9（R8 的门禁收敛跑在 R5 迁移后的用例包、R6 的前端用例包与
+- R5、R6、R7 与 R8 已完成，可以进入 R9（R8 的门禁收敛跑在 R5 迁移后的用例包、R6 的前端用例包与
   收口后的入口上；R8 遗留的一次完整 CI 运行在 R9 的验收里推送确认）。
+- R9 已完成，但首次完整 CI（#60）在 GitHub Actions 上失败，因此 V3 的"完整 CI 待推送确认"一项
+  由 R10 承接；R10 的结论是 V3 收口的最后一块证据，也是 V4 完整验收的 CI 基线。
 
 ---
 
@@ -346,3 +358,30 @@ V2 已收口（[../V2-final.md](../V2-final.md)）。V3 是 V2 之后的独立�
 3. 发现需求与冻结决策冲突时停止实现，向用户反馈后等待回复，不自行扩大范围。
 4. 阶段完成后：更新本文 §4 状态、该阶段 README 的状态与验收记录，并把新事实补进 §2 与 §8。
 5. 任一阶段不得跨阶段顺手清理其他阶段的遗留；R7 与 R8 是唯一的集中清理点。
+
+---
+
+## 12. R10：收口后的遗留治理（新增）
+
+R9 收口时"一次完整 CI 尚未运行"。该运行已经发生并失败：CI #60（run `44895723793`，
+`head_sha 465b8bb`）有三个 Job 失败——本机集成 1 条、前端 2 条 Playwright、
+执行器自检 `pilot/server-shutdown`。R10 是承接这三项与文档勘误的阶段，详细计划见 [R10/README.md](R10/README.md)。
+
+### 12.1 R10 的三个失败（事实与状态）
+
+| 失败 | 已核实内容 | 状态 |
+|---|---|---|
+| `integration-local-scheduler/concurrent-delete-and-scheduler-scan-keep-facts` | 用例等待的是 `Scan` 与 `Delete` 返回，断言的是"分派结束后不得残留执行权"；`Scan` 在 `go s.run(grant)` 之后即返回，释放发生在该协程内 | 未决（需 artifact 证据） |
+| `frontend/playwright-task-containers`、`frontend/playwright-task-create-project-inheritance` | Playwright 配置已启用 `trace: retain-on-failure` 与失败截图，证据在 `ui-test` artifact 内 | 未决（需 artifact 证据） |
+| `pilot/server-shutdown` | 确定的环境准备缺口：`Makefile` 的 `test-cases` 与 CI 的 `cases-selfcheck` 都不构建 `bin/agentflow`，而用例把它当 `service-process` 的 `binary`；资源分配失败被记为 `error`（不是跳过） | 已确诊，待修 |
+
+### 12.2 R10 的边界
+
+- 只清理 V3 收口后暴露的缺陷、CI 环境准备与文档勘误；不改测试体系结构。
+- 不恢复 race/覆盖率，不迁移 `tests/unit`，不搬目录，不改调度额度模型。
+- 不放宽断言、不加重试、不把失败改判为跳过；最终结论只来自一次完整 CI。
+
+### 12.3 与 V4 的关系
+
+目录收敛（`tests/testkit`、`tests/*`）、unit 迁移到统一入口、包级上限与命名并发池属于
+[V4](../V4/ROADMAP.md)。V4 R0 会重新盘点当前 HEAD，R10 的结论是 V4 完整验收的 CI 基线。
