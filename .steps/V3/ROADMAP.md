@@ -1,6 +1,6 @@
 # AgentFlow V3：统一测试执行器路线总规划
 
-**文档状态：** 主线规划。R0–R7 已完成，下一步是 R8（Makefile / CI / 脚本收敛）。
+**文档状态：** 主线规划。R0–R8 已完成，下一步是 R9（全量验收、文档同步与 V3 收口）。
 **上游输入：** [审阅意见](TEST-RUNNER-REFACTOR-REVIEW.md)（P0/P1/P2 结论）、
 [R0 盘点与决策](R0/README.md)、[R1 接口与可运行骨架](R1/README.md)、
 [.plan/mian.md](../../.plan/main.md) 的「测试调整」。
@@ -134,6 +134,32 @@ R7 遗留（按归属交给后续阶段）：
 - `cmd/agentflow-test-inventory` 的扫描输入仍是已删除的 `tests/integration/**`、`tests/e2e/**`；
   R0 清单继续按冻结件使用。
 
+R8 已收口：`Makefile` 的测试目标收敛为 `test-unit`（仍是 `go test`）与 `test-cases`（统一执行器，
+`TEST_KIND` 取 `normal`/`local`/`e2e`/`selfcheck`/`frontend`），真实分组走 `test-real` 且要求显式
+授权；`test` 改为 `test-unit` + `test-cases`，`test-ssh` / `test-e2e` / `test-race` 与 CI 的竞态
+Job 一并删除。分组声明只剩一个来源：`go-test-groups.sh` 同时声明 go test 分组（只有 `unit`）与
+25 个 Case 分组的 kind（local / e2e / selfcheck / frontend / real / fault），`--check` 直接对
+`go list` 的 16 个测试包、执行器 `--list` 的注册表、Makefile 入口与消费脚本核验。CI 收敛为
+`go-static`、`go-inventory`（分组核验 + `--audit-coverage --audit-stage R5,R6`）、`go-unit`、
+`cases-local`、`cases-e2e`、`cases-selfcheck`、`ui-test`、`real-tests-gate`、`real-tests`、`ci-summary`；
+Case Job 只上传自己的 `<artifact-root>/<job>/<run-id>/`，跳过与零残留结论只读 `report.json`。
+`.github/scripts` 从 19 个脚本收敛到 13 个：新增 `run-cases.sh` 作为 Case 唯一入口，删除
+`run-real-tests.sh` / `run-go-race-tests.sh` / `run-frontend-tests.sh` / `summarize-real-tests.sh` /
+`summarize-test-skips.sh` / `collect-test-artifacts.sh` / `prepare-real-tests-config.py`，最后一项的
+职责收回到执行器的 `--prepare-real-config`。本机验收：`make check` 通过；单元 16 包 1322 通过 /
+7 跳过；selfcheck 28 条（27 通过 + 1 跳过）、e2e-cli 64 条、本机集成 183 条、frontend 37 条全部
+通过且零残留 `passed`；覆盖对账 316 覆盖 + 49 dropped、缺失 0、多余 0。`make inventory` 默认写
+`.test-artifacts/inventory`，不再覆盖冻结基线。阶段内冻结 D1–D9。
+
+R8 遗留（按归属交给后续阶段）：
+
+- 一次完整 CI 尚未运行：需要推送分支触发（本阶段只在本机逐项验证了与 Job 一一对应的入口）。
+- `docs/testing.md`、`tests/README.md`、`docs/development.md`、`README.md`、
+  `lingting-agent-flow-ui/README.md` 与 `.github/scripts/README.md` 仍引用 R8 删除的脚本、
+  `pnpm test:e2e:safe` / `test:all:safe` 与 `tests/integration/**`、`tests/e2e/**` 路径，文档同步归 R9。
+- `cmd/agentflow-test-inventory` 的扫描输入仍是已删除的 `tests/integration/**`、`tests/e2e/**`
+  （与 R7 记录一致，R0 清单继续按冻结件使用）。
+
 ---
 
 ## 3. 已冻结决策
@@ -180,7 +206,7 @@ R2–R7 只改代码、用例资产与本目录内的阶段文档；`Makefile`�
 | R5 | 已完成 | 迁移 18 个包 / 328 个集成与 E2E 用例，覆盖对账可执行，真实依赖包在真实设备上跑完 | [R5](R5/README.md) |
 | R6 | 已完成 | 前端适配器：Vitest 13 + Playwright 24 接入执行器，dev server 改为共享资源，覆盖对账退出码 0 | [R6](R6/README.md) |
 | R7 | 已完成 | TestMain 与 `testkit` 最终核验收口、删除迁移遗留、真实设备零残留复核；1 条用例被外部环境阻塞已记录 | [R7](R7/README.md) |
-| R8 | 待执行 | Makefile / CI / 脚本收敛，非测试门禁保持可用 | [R8](R8/README.md) |
+| R8 | 已完成 | Makefile / CI / 脚本收敛，非测试门禁保持可用；一次完整 CI 待推送确认 | [R8](R8/README.md) |
 | R9 | 待执行 | 全量验收、覆盖对账、文档同步与 V3 收口 | [R9](R9/README.md) |
 
 依赖与硬门禁：
@@ -195,9 +221,8 @@ R2 ──> R3 ──> R4 ──> R4.5 ──> R5 ──> R7 ──> R9
   包级串行声明。
 - R3 的 9 个调度场景未通过，不得进入 R4。
 - R4.5 试点结论未确认，不得开始 R5 的批量迁移。
-- R5、R6 与 R7 已完成，可以进入 R8（R7 的 `testkit` 收口跑在 R5 迁移后的用例包与 R6 的前端用例包上，
-  R8 的门禁收敛需要前端适配器与收口后的入口都已就位）。
-- R8 未完成，不得进入 R9（R9 的验收必须跑在收敛后的门禁上）。
+- R5、R6、R7 与 R8 已完成，可以进入 R9（R8 的门禁收敛跑在 R5 迁移后的用例包、R6 的前端用例包与
+  收口后的入口上；R8 遗留的一次完整 CI 运行在 R9 的验收里推送确认）。
 
 ---
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# 用途: CI 门禁汇总。结论只来自 Job 与步骤的结构化结果（needs.*.result 与
+# 用途: CI 门禁汇总（V3 R8）。结论只来自 Job 与步骤的结构化结果（needs.*.result 与
 #       steps.*.outcome），不对测试日志做字符串搜索冒充判定。
 #
 # 参数:
@@ -8,20 +8,25 @@
 #                       （未设置 RUNNER_TEMP 时退到系统临时目录）。
 #
 # 环境变量（输入，全部是 GitHub Actions 的结构化结论）:
-#   GO_STATIC_RESULT / GO_STATIC_STEP     go-static 的 Job 结论与检查步骤结论
-#   GO_INVENTORY_RESULT / GO_INVENTORY_STEP        go-inventory 的 Job 结论与分组核验步骤结论
-#   GO_INVENTORY_COVERAGE / GO_INVENTORY_PACKAGES  分组核验结论与测试包总数
-#   GO_GROUPS_SUMMARY                              go-inventory 输出的分组清单表格（Markdown）
-#   GO_UNIT_RESULT / GO_UNIT_STEP                  go-unit 的 Job 结论与测试步骤结论
-#   GO_E2E_RESULT / GO_E2E_PREPARE / GO_E2E_STEP   go-e2e 的 Job、环境准备与测试步骤结论
-#   GO_RACE_RESULT / GO_RACE_STEP
-#   UI_TEST_RESULT / UI_TEST_PREPARE / UI_TEST_STEP
+#   GO_STATIC_RESULT / GO_STATIC_STEP             go-static 的 Job 结论与检查步骤结论
+#   GO_INVENTORY_RESULT                           go-inventory 的 Job 结论
+#   GO_INVENTORY_GROUPS_STEP                      分组核验步骤结论
+#   GO_INVENTORY_AUDIT_STEP                       覆盖对账步骤结论
+#   GO_INVENTORY_PACKAGES / GO_INVENTORY_CASES    测试包数与 Case 分组数
+#   GO_GROUPS_SUMMARY                             分组清单表格（Markdown）
+#   GO_UNIT_RESULT / GO_UNIT_STEP                 go test 单元分组的 Job 与测试步骤结论
+#   CASES_LOCAL_RESULT / CASES_LOCAL_STEP         本机集成 Case 执行结论
+#   CASES_E2E_RESULT / CASES_E2E_STEP             CLI 端到端 Case 执行结论
+#   CASES_SELFCHECK_RESULT / CASES_SELFCHECK_STEP 执行器自检 Case 执行结论
+#   UI_TEST_RESULT / UI_TEST_PREPARE / UI_TEST_STEP / UI_TEST_GATES
+#                                                 前端环境准备、Case 执行与非测试门禁结论
 #   REAL_GATE_RESULT / REAL_GATE_MODE / REAL_GATE_ENABLED / REAL_GATE_REASON
-#   REAL_TESTS_RESULT                     真实测试 Job 结论
-#   GITHUB_STEP_SUMMARY                   可选；未设置时只写到报告文件与控制台
+#                                                 真实测试授权判断结论
+#   REAL_TESTS_RESULT                             真实外部依赖测试 Job 结论
+#   GITHUB_STEP_SUMMARY                           可选；未设置时只写到报告文件与控制台
 #
 # 输出:
-#   报告文件（Markdown）与控制台：逐 Job 结论表、真实测试授权说明。
+#   报告文件（Markdown）与控制台：逐 Job 结论表、测试分组与覆盖对账、真实测试授权说明。
 #   GITHUB_STEP_SUMMARY: 同一份报告。
 #   不写 GITHUB_OUTPUT：结论由退出码表达。
 #
@@ -80,10 +85,11 @@ failed=0
 # 不会被 bash 识别为 heredoc 终止行。
 for row in \
     "go-static|${GO_STATIC_RESULT:-}|${GO_STATIC_STEP:-}|-" \
-    "go-inventory|${GO_INVENTORY_RESULT:-}|${GO_INVENTORY_STEP:-}|-" \
+    "go-inventory|${GO_INVENTORY_RESULT:-}|${GO_INVENTORY_AUDIT_STEP:-}|${GO_INVENTORY_GROUPS_STEP:-}" \
     "go-unit|${GO_UNIT_RESULT:-}|${GO_UNIT_STEP:-}|-" \
-    "go-e2e|${GO_E2E_RESULT:-}|${GO_E2E_STEP:-}|${GO_E2E_PREPARE:-}" \
-    "go-race|${GO_RACE_RESULT:-}|${GO_RACE_STEP:-}|-" \
+    "cases-local|${CASES_LOCAL_RESULT:-}|${CASES_LOCAL_STEP:-}|-" \
+    "cases-e2e|${CASES_E2E_RESULT:-}|${CASES_E2E_STEP:-}|-" \
+    "cases-selfcheck|${CASES_SELFCHECK_RESULT:-}|${CASES_SELFCHECK_STEP:-}|-" \
     "ui-test|${UI_TEST_RESULT:-}|${UI_TEST_STEP:-}|${UI_TEST_PREPARE:-}"; do
     IFS='|' read -r job result tests prepare <<< "$row"
     if [ -z "$job" ]; then
@@ -95,7 +101,7 @@ for row in \
             ;;
         failure)
             if [ "$tests" = "failure" ]; then
-                verdict="失败：测试步骤失败"
+                verdict="失败：测试或对账步骤失败"
             elif [ "$prepare" = "failure" ]; then
                 verdict="失败：环境准备失败，测试未执行"
             elif [ "$tests" = "skipped" ] || [ -z "$tests" ]; then
@@ -121,13 +127,20 @@ for row in \
     echo "| ${job} | ${result:-（空）} | ${verdict} |" >> "$report_path"
 done
 
-# Go 测试分组：清单与核验结论来自 go-inventory 的结构化输出，不重新解析测试日志。
-if [ -n "${GO_INVENTORY_COVERAGE:-}" ] || [ -n "${GO_GROUPS_SUMMARY:-}" ]; then
+# 前端非测试门禁（格式、lint、类型检查与生产构建）与 Case 执行是两件事，单独列出。
+if [ -n "${UI_TEST_GATES:-}" ]; then
+    echo "| ui-test 非测试门禁 | ${UI_TEST_GATES} | $([ "$UI_TEST_GATES" = "success" ] && echo "成功" || echo "失败：前端格式 / lint / 类型 / 构建门禁未通过") |" >> "$report_path"
+fi
+
+# 测试分组与覆盖对账：结论来自 go-inventory 的结构化输出，不重新解析测试日志。
+if [ -n "${GO_INVENTORY_PACKAGES:-}" ] || [ -n "${GO_GROUPS_SUMMARY:-}" ]; then
     {
         echo
-        echo "### Go 测试分组"
+        echo "### 测试分组与覆盖对账"
         echo
-        echo "- 分组核验：${GO_INVENTORY_COVERAGE:-（未提供）}（测试包总数 ${GO_INVENTORY_PACKAGES:-（未提供）}）"
+        echo "- 分组核验步骤：${GO_INVENTORY_GROUPS_STEP:-（未提供）}"
+        echo "- 覆盖对账步骤：${GO_INVENTORY_AUDIT_STEP:-（未提供）}"
+        echo "- go test 测试包：${GO_INVENTORY_PACKAGES:-（未提供）}；Case 分组：${GO_INVENTORY_CASES:-（未提供）}"
         if [ -n "${GO_GROUPS_SUMMARY:-}" ]; then
             echo
             printf '%s\n' "$GO_GROUPS_SUMMARY"
@@ -176,8 +189,9 @@ echo "| real-tests | ${REAL_TESTS_RESULT:-（空）} | ${real_verdict} |" >> "$r
     echo "真实测试授权：模式 \`${REAL_GATE_MODE:-（空）}\`，结论 enabled=${REAL_GATE_ENABLED:-false}。"
     echo "判定原因：${REAL_GATE_REASON:-（空）}。"
     echo
-    echo "外部依赖用例（真实 Pi / SSH / 远程 Docker）在未获授权时输出 WARN \[SKIP\] 并跳过；"
-    echo "跳过与未执行都不计为通过，跳过原因见对应 Job 产物中的 test.log。"
+    echo "真实外部依赖用例只在 real-tests Job 内执行；未获授权时该 Job 不执行，"
+    echo "未执行的用例不计为通过。每个 Case Job 的通过数、跳过数与零残留结论以产物目录里的"
+    echo "\`report.json\` 为准，跳过原因见同一份报告，不解析日志文本。"
 } >> "$report_path"
 
 cat "$report_path"

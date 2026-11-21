@@ -7,7 +7,7 @@
 #
 # 阶段与门禁（任何一步不是 success，都不会创建 Release）：
 #   1. resolve  校验标签格式与提交 SHA；
-#   2. ci       复用 ci.yml 全量门禁（Go 全量测试、竞态、前端单元与 E2E、lint / 类型 / 构建）；
+#   2. ci       复用 ci.yml 全量门禁（Go 单元测试、集成 / E2E / 前端用例、lint / 类型 / 构建）；
 #   3. build    复用 release.yml 构建五个平台制品、SHA256SUMS 与 release-manifest.json，
 #               并在目标平台原生 Runner 上跑运行冒烟；
 #   4. publish  核验制品 → 生成 GitHub OIDC 来源证明 → 创建草稿 Release → 上传 →

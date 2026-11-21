@@ -1,7 +1,8 @@
 // Command agentflow-test 是 AgentFlow 统一测试执行器的命令行入口。
 //
 // 普通调用是编排进程：选择用例、分配资源、启动 worker 并写出统一报告。--exec-case 是
-// worker 内部入口，由编排进程启动，不供人工日常使用。
+// worker 内部入口，由编排进程启动，不供人工日常使用；--prepare-real-config 是 CI 的
+// 真实测试配置准备入口（V3 R8），只生成配置后退出，不执行任何用例。
 package main
 
 import (
@@ -81,8 +82,16 @@ func run(args []string) int {
 		false,
 		"仅自检用：为已定型的 timeout / error 用例写出伪造的迟到结果文件",
 	)
+	prepareRealConfig := flags.Bool(
+		"prepare-real-config",
+		false,
+		"在仓库根目录执行：按 CI 环境变量生成 tests/config/*.yml 后退出，不执行用例",
+	)
 	if err := flags.Parse(args); err != nil {
 		return exitUsage
+	}
+	if *prepareRealConfig {
+		return runPrepareRealConfig(os.Stdout, os.Stderr)
 	}
 	if *hold {
 		return runHold()

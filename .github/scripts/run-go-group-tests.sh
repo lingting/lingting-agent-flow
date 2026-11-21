@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# 用途: 执行一个普通 Go 测试分组（unit / e2e）。分组归属、Makefile 入口与包模式
-#       全部来自 go-test-groups.sh，本脚本不重复定义测试范围；真实外部依赖分组在这里被
-#       明确拒绝，避免普通 CI 无意执行真实设备测试。
+# 用途: 执行仍由 `go test` 承担的 Go 测试分组（V3 R8 之后只有 unit）。分组归属、Makefile
+#       入口与包模式全部来自 go-test-groups.sh，本脚本不重复定义测试范围，也不认识任何
+#       直接执行的 Case 分组（它们由 run-cases.sh 经统一执行器运行）。
 #
 # 参数:
-#   --group NAME        必填。普通分组名（unit / e2e），由 go-test-groups.sh 定义。
+#   --group NAME        必填。Go 测试分组名（由 go-test-groups.sh 定义，当前只有 unit）。
 #   --artifact-dir DIR  必填。测试产物目录；同时作为 TMPDIR，使 testkit 生成的随机工作空间
 #                       与 test.log 落在可上传的位置。
 #   --parallel N        可选，默认 4。作为 Makefile 的 PARALLEL（go test 的 -p / -parallel）。
@@ -20,7 +20,7 @@
 #
 # 退出码:
 #   0  该分组的测试全部通过
-#   1  测试失败或该分组不是普通分组
+#   1  测试失败或该分组不是 go test 分组
 #   2  参数缺失或非法
 #
 # 副作用: 创建并写入 --artifact-dir 下的文件；不修改仓库内容，不访问真实外部设备。
@@ -28,7 +28,7 @@ set -euo pipefail
 
 usage() {
     echo "用法: run-go-group-tests.sh --group NAME --artifact-dir DIR [--parallel N]"
-    echo "  执行 go-test-groups.sh 中定义的普通测试分组，并把日志与摘要写入 --artifact-dir。"
+    echo "  执行 go-test-groups.sh 中定义的 go test 分组，并把日志与摘要写入 --artifact-dir。"
 }
 
 artifact_dir=""
@@ -93,16 +93,10 @@ repo_root="$(cd "$script_dir/../.." && pwd)"
 groups_script="$script_dir/go-test-groups.sh"
 
 # 分组归属只从清单解析：这里既不列举目录，也不认识任何具体测试包。
-normal_groups="$(bash "$groups_script" --list normal)"
-real_groups="$(bash "$groups_script" --list real)"
-if ! grep -qx "$group" <<< "$real_groups"; then
-    if ! grep -qx "$group" <<< "$normal_groups"; then
-        echo "错误: 未知分组 ${group}，普通分组只有: $(tr '\n' ' ' <<< "$normal_groups")" >&2
-        exit 2
-    fi
-else
-    echo "错误: 分组 ${group} 属于真实外部依赖测试，必须由 run-real-tests.sh 在授权后执行" >&2
-    exit 1
+go_groups="$(bash "$groups_script" --list-groups)"
+if ! grep -qx "$group" <<< "$go_groups"; then
+    echo "错误: 未知 Go 测试分组 ${group}，可选: $(tr '\n' ' ' <<< "$go_groups")" >&2
+    exit 2
 fi
 
 make_target="$(bash "$groups_script" --make-target "$group")"
@@ -111,7 +105,6 @@ if [ "${#patterns[@]}" -eq 0 ]; then
     echo "错误: 分组 ${group} 没有解析到任何包模式" >&2
     exit 1
 fi
-
 
 mkdir -p "$artifact_dir"
 artifact_dir="$(cd "$artifact_dir" && pwd)"

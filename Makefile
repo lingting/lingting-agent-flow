@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check vet inventory test test-unit test-ssh test-e2e test-race build release release-dist release-verify release-notes run web-install web-build web-dev web-verify serve clean check
+.PHONY: fmt fmt-check vet inventory test test-unit test-cases test-real test-runner build release release-dist release-verify release-notes run web-install web-build web-dev web-verify serve clean check
 
 VERSION ?= dev
 # 开发构建使用短提交便于阅读；正式发布制品中的提交由 cmd/agentflow-release 写入完整 SHA。
@@ -12,6 +12,16 @@ RELEASE_DIR ?= dist/release
 RELEASE_NOTES ?= dist/RELEASE_NOTES.md
 RELEASE_PLATFORMS ?=
 PARALLEL ?= 8
+# 统一测试执行器：集成、E2E 与前端用例都经由它执行，tests/unit 仍由 go test 执行（V3 R8）。
+TEST_RUNNER := bin/agentflow-test
+# 执行器产物根目录：每次运行落在 <根目录>/<run-id>/，报告与用例日志都在其中。
+TEST_ARTIFACT_ROOT ?= .test-artifacts
+# test-cases 的选择集合：normal 为全部普通 Case；也可以只跑一个 kind
+# （local / e2e / selfcheck / frontend）。真实设备分组用 test-real。
+TEST_KIND ?= normal
+# inventory 默认写到可写目录：R0 的 legacy-cases.manifest.json 是冻结基线，
+# 不得被默认目标覆盖，需要覆盖时必须显式传入 INVENTORY_DIR=.steps/V3/R0。
+INVENTORY_DIR ?= $(TEST_ARTIFACT_ROOT)/inventory
 # 前端构建工具链版本：记进制品的版本元数据，正式版本必须能取到真实版本。
 NODE_VERSION ?= $(shell node --version 2>/dev/null)
 PNPM_VERSION ?= $(shell pnpm --version 2>/dev/null)
@@ -32,29 +42,29 @@ vet:
 
 # inventory 重新生成 V3 R0 的用例清单与资源矩阵：只读盘点，不运行任何测试。
 inventory:
-	go run ./cmd/agentflow-test-inventory -out .steps/V3/R0
+	go run ./cmd/agentflow-test-inventory -out "$(INVENTORY_DIR)"
 
-test:
-	go test -count=1 -v -p $(PARALLEL) -parallel $(PARALLEL) ./tests/...
+# test 是本地全量入口：单元用 go test，其余已注册的普通 Case 用统一执行器。
+# 真实设备分组（test-real）与故障注入分组不在 test 范围内：前者需要单独授权，
+# 后者按设计注入失败并以非零退出码结束。
+test: test-unit test-cases
 
 test-unit:
 	go test -count=1 -v -p $(PARALLEL) -parallel $(PARALLEL) ./tests/unit/...
 
+# test-runner 构建统一测试执行器：worker 由该二进制重新启动自身，每次都要是最新构建。
+test-runner:
+	go build -o $(TEST_RUNNER) ./cmd/agentflow-test
 
-test-ssh:
-	go test -count=1 -v ./tests/integration/ssh/...
+# test-cases 通过执行器运行 Case；选择条件由 .github/scripts/go-test-groups.sh 提供，
+# 本地入口与 CI Job 共用同一份分组声明，不在 Makefile 里另写一份分组清单。
+test-cases: test-runner
+	bash .github/scripts/run-cases.sh --kind "$(TEST_KIND)" --artifact-dir "$(TEST_ARTIFACT_ROOT)" --parallel "$(PARALLEL)"
 
-test-e2e:
-	go test -count=1 -v ./tests/e2e/...
-
-
-# 并行度跟随 PARALLEL：竞态检测比普通测试更吃内存与 CPU，并行度过高会把 SQLite 迁移与
-# 连接建立推到超时（在 18 核机器上以默认 NumCPU 并行会稳定失败），因此显式声明而不是
-# 让 go test 按机器核数自行决定。
-test-race:
-	go test -race -count=1 -p $(PARALLEL) -parallel $(PARALLEL) ./tests/unit/...
-	go test -race -count=1 -p $(PARALLEL) -parallel $(PARALLEL) ./tests/integration/local/ssh/...
-
+# test-real 运行真实设备分组：run-cases.sh 要求显式授权（AGENTFLOW_REAL_TESTS_GRANTED=true），
+# 未授权时直接失败，不会静默跳过或回退到本机替身。
+test-real: test-runner
+	bash .github/scripts/run-cases.sh --kind real --artifact-dir "$(TEST_ARTIFACT_ROOT)" --parallel 1
 # web-install 按锁文件安装前端依赖，保证与 pnpm-lock.yaml 一致。
 web-install:
 	cd lingting-agent-flow-ui && pnpm install --frozen-lockfile

@@ -10,10 +10,7 @@
     "lint": "vp fmt && vp lint --fix && tsc --noEmit",
     "check": "vp fmt && vp lint --fix && tsc --noEmit",
     "test": "vp test run",
-    "test:unit:safe": "vp test run --maxWorkers 4",
-    "test:e2e:safe": "playwright test --workers=4",
-    "test:safe": "vp test run --maxWorkers 4 && playwright test --workers=4 && vp fmt && vp lint --fix && tsc --noEmit && node scripts/build-webui.mjs",
-    "test:all:safe": "pnpm test:unit:safe && pnpm test:e2e:safe && pnpm check && pnpm build"
+    "test:unit:safe": "vp test run --maxWorkers 4"
   },
   "dependencies": {
     "@ant-design/cssinjs": "^2.1.2",
