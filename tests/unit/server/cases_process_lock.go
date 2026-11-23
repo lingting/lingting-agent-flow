@@ -1,9 +1,15 @@
-// Package server_test 验证服务端进程锁的真实操作系统语义。
+// Package server 是 V4 R6 的 unit 迁移包：把 tests/unit/server 的既有单元用例迁到统一
+// 测试执行器。
+//
+// 本包验证服务端进程锁的真实操作系统语义与启动恢复顺序。
 //
 // 用例直接操作锁文件与两个独立锁实例：断言的是"两个进程不可能同时持有同一个锁文件"，
 // 而不是进程内 Mutex 的行为。数据库路径的符号链接别名必须收敛到同一个锁身份，否则两份
 // 服务端会各自取得一把锁、却打开同一个 SQLite 文件。
-package server_test
+//
+// 命名：本包是被测包 internal/server 的用例包，包名与被测包相同（Go 允许，正文里的
+// server.X 专指 internal/server）。
+package server
 
 import (
 	"context"
@@ -17,12 +23,12 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
-	"testing"
 
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/config"
 	"github.com/lingting/agentflow/internal/server"
 	"github.com/lingting/agentflow/internal/storage"
+	"github.com/lingting/agentflow/internal/testrunner"
 	"github.com/lingting/agentflow/tests/testkit"
 )
 
@@ -31,14 +37,8 @@ import (
 // Go 只在 Windows 版 syscall 中提供该常量名，这里按数值判断，使本文件保持跨平台编译。
 const windowsErrorPrivilegeNotHeld = syscall.Errno(1314)
 
-// TestMain 把本次运行的完整测试输出写入本次运行根目录下的 test.log。
-func TestMain(m *testing.M) {
-	os.Exit(testkit.Main(m))
-}
-
-// TestProcessLockRejectsSecondInstance 验证同一数据库路径只允许一个锁实例。
-func TestProcessLockRejectsSecondInstance(t *testing.T) {
-	t.Parallel()
+// 原 TestProcessLockRejectsSecondInstance 验证同一数据库路径只允许一个锁实例。
+func runProcessLockRejectsSecondInstance(t *testrunner.Context) {
 	databasePath := filepath.Join(testkit.Dir(t), "data", "agentflow.db")
 
 	first, err := server.NewProcessLock(databasePath)
@@ -85,9 +85,8 @@ func TestProcessLockRejectsSecondInstance(t *testing.T) {
 	}
 }
 
-// TestServerLockPathIsStableForSameDatabase 验证冗余路径段收敛到同一个锁文件。
-func TestServerLockPathIsStableForSameDatabase(t *testing.T) {
-	t.Parallel()
+// 原 TestServerLockPathIsStableForSameDatabase 验证冗余路径段收敛到同一个锁文件。
+func runServerLockPathIsStableForSameDatabase(t *testrunner.Context) {
 	databasePath := filepath.Join(testkit.Dir(t), "agentflow.db")
 	absolute, err := server.ServerLockPath(databasePath)
 	if err != nil {
@@ -108,8 +107,10 @@ func TestServerLockPathIsStableForSameDatabase(t *testing.T) {
 	}
 }
 
-// TestServerLockPathMatchesRelativePath 验证相对路径与绝对路径得到同一个锁身份。
-func TestServerLockPathMatchesRelativePath(t *testing.T) {
+// 原 TestServerLockPathMatchesRelativePath 验证相对路径与绝对路径得到同一个锁身份。
+//
+// 源用例没有 t.Parallel()：它切换进程工作目录，按串行条目登记。
+func runServerLockPathMatchesRelativePath(t *testrunner.Context) {
 	workspace := testkit.Dir(t)
 	absolute, err := server.ServerLockPath(filepath.Join(workspace, "agentflow.db"))
 	if err != nil {
@@ -117,7 +118,7 @@ func TestServerLockPathMatchesRelativePath(t *testing.T) {
 	}
 
 	// 切换到工作目录之后再以相对路径计算：两种表达式必须指向同一个数据库与同一个锁文件。
-	t.Chdir(workspace)
+	chdir(t, workspace)
 	relative, err := server.ServerLockPath(filepath.Join(".", "agentflow.db"))
 	if err != nil {
 		t.Fatalf("计算相对路径锁文件失败: %v", err)
@@ -127,9 +128,8 @@ func TestServerLockPathMatchesRelativePath(t *testing.T) {
 	}
 }
 
-// TestProcessLockUnifiesDatabaseSymlinkAlias 验证数据库文件本身是符号链接时的锁身份。
-func TestProcessLockUnifiesDatabaseSymlinkAlias(t *testing.T) {
-	t.Parallel()
+// 原 TestProcessLockUnifiesDatabaseSymlinkAlias 验证数据库文件本身是符号链接时的锁身份。
+func runProcessLockUnifiesDatabaseSymlinkAlias(t *testrunner.Context) {
 	workspace := testkit.Dir(t)
 	realPath := filepath.Join(workspace, "real.db")
 	if err := os.WriteFile(realPath, nil, 0o600); err != nil {
@@ -167,9 +167,8 @@ func TestProcessLockUnifiesDatabaseSymlinkAlias(t *testing.T) {
 	}
 }
 
-// TestProcessLockUnifiesParentDirectorySymlinkAlias 验证父目录符号链接与尚未创建路径段的锁身份。
-func TestProcessLockUnifiesParentDirectorySymlinkAlias(t *testing.T) {
-	t.Parallel()
+// 原 TestProcessLockUnifiesParentDirectorySymlinkAlias 验证父目录符号链接与尚未创建路径段的锁身份。
+func runProcessLockUnifiesParentDirectorySymlinkAlias(t *testrunner.Context) {
 	workspace := testkit.Dir(t)
 	realDir := filepath.Join(workspace, "real")
 	if err := os.MkdirAll(realDir, 0o750); err != nil {
@@ -217,9 +216,8 @@ func TestProcessLockUnifiesParentDirectorySymlinkAlias(t *testing.T) {
 	}
 }
 
-// TestProcessLockRejectsDanglingDatabaseSymlink 验证悬空数据库符号链接失败关闭。
-func TestProcessLockRejectsDanglingDatabaseSymlink(t *testing.T) {
-	t.Parallel()
+// 原 TestProcessLockRejectsDanglingDatabaseSymlink 验证悬空数据库符号链接失败关闭。
+func runProcessLockRejectsDanglingDatabaseSymlink(t *testrunner.Context) {
 	workspace := testkit.Dir(t)
 	danglingPath := filepath.Join(workspace, "dangling.db")
 	createPathAlias(t, filepath.Join(workspace, "missing", "agentflow.db"), danglingPath)
@@ -236,11 +234,10 @@ func TestProcessLockRejectsDanglingDatabaseSymlink(t *testing.T) {
 	}
 }
 
-// TestProcessLockRejectsVanishedAliasTarget 验证父目录别名指向已消失目录时失败关闭。
+// 原 TestProcessLockRejectsVanishedAliasTarget 验证父目录别名指向已消失目录时失败关闭。
 //
 // 它覆盖与悬空文件符号链接相同的失败语义，并且在缺少符号链接权限的环境里仍然可执行。
-func TestProcessLockRejectsVanishedAliasTarget(t *testing.T) {
-	t.Parallel()
+func runProcessLockRejectsVanishedAliasTarget(t *testrunner.Context) {
 	workspace := testkit.Dir(t)
 	vanishingDir := filepath.Join(workspace, "vanishing")
 	if err := os.MkdirAll(vanishingDir, 0o750); err != nil {
@@ -261,9 +258,8 @@ func TestProcessLockRejectsVanishedAliasTarget(t *testing.T) {
 	}
 }
 
-// TestServerRunRejectsSymlinkAliasConflict 验证符号链接别名不能绕过进程锁。
-func TestServerRunRejectsSymlinkAliasConflict(t *testing.T) {
-	t.Parallel()
+// 原 TestServerRunRejectsSymlinkAliasConflict 验证符号链接别名不能绕过进程锁。
+func runServerRunRejectsSymlinkAliasConflict(t *testrunner.Context) {
 	workspace := testkit.Dir(t)
 	realPath := filepath.Join(workspace, "real.db")
 	if err := os.WriteFile(realPath, nil, 0o600); err != nil {
@@ -299,9 +295,8 @@ func TestServerRunRejectsSymlinkAliasConflict(t *testing.T) {
 	}
 }
 
-// TestServerRunUsesNormalizedDatabasePath 验证 Server 用规范化路径打开数据库。
-func TestServerRunUsesNormalizedDatabasePath(t *testing.T) {
-	t.Parallel()
+// 原 TestServerRunUsesNormalizedDatabasePath 验证 Server 用规范化路径打开数据库。
+func runServerRunUsesNormalizedDatabasePath(t *testrunner.Context) {
 	workspace := testkit.Dir(t)
 	realDir := filepath.Join(workspace, "real")
 	if err := os.MkdirAll(realDir, 0o750); err != nil {
@@ -337,9 +332,8 @@ func TestServerRunUsesNormalizedDatabasePath(t *testing.T) {
 	}
 }
 
-// TestServerRunDoesNotStartWhenLockHeld 验证锁被占用时不会进入 Server 启动流程。
-func TestServerRunDoesNotStartWhenLockHeld(t *testing.T) {
-	t.Parallel()
+// 原 TestServerRunDoesNotStartWhenLockHeld 验证锁被占用时不会进入 Server 启动流程。
+func runServerRunDoesNotStartWhenLockHeld(t *testrunner.Context) {
 	databasePath := filepath.Join(testkit.Dir(t), "agentflow.db")
 	holder, err := server.NewProcessLock(databasePath)
 	if err != nil {
@@ -376,9 +370,8 @@ func TestServerRunDoesNotStartWhenLockHeld(t *testing.T) {
 	}
 }
 
-// TestServerRunRejectsDanglingDatabaseSymlink 验证悬空符号链接时 Server 失败关闭。
-func TestServerRunRejectsDanglingDatabaseSymlink(t *testing.T) {
-	t.Parallel()
+// 原 TestServerRunRejectsDanglingDatabaseSymlink 验证悬空符号链接时 Server 失败关闭。
+func runServerRunRejectsDanglingDatabaseSymlink(t *testrunner.Context) {
 	workspace := testkit.Dir(t)
 	danglingPath := filepath.Join(workspace, "dangling.db")
 	createPathAlias(t, filepath.Join(workspace, "missing", "agentflow.db"), danglingPath)
@@ -397,9 +390,8 @@ func TestServerRunRejectsDanglingDatabaseSymlink(t *testing.T) {
 	}
 }
 
-// TestServerRunReleasesLockWhenStartupFails 验证启动失败后锁被释放。
-func TestServerRunReleasesLockWhenStartupFails(t *testing.T) {
-	t.Parallel()
+// 原 TestServerRunReleasesLockWhenStartupFails 验证启动失败后锁被释放。
+func runServerRunReleasesLockWhenStartupFails(t *testrunner.Context) {
 	databasePath := filepath.Join(testkit.Dir(t), "agentflow.db")
 	instance := newTestServer(t, func(context.Context, *config.Config) (storage.Store, error) {
 		return nil, errors.New("数据库不可用")
@@ -425,7 +417,7 @@ func TestServerRunReleasesLockWhenStartupFails(t *testing.T) {
 }
 
 // newTestServer 构造只注入数据库打开替身的服务实例。
-func newTestServer(t *testing.T, openStore server.StoreOpener) *server.Server {
+func newTestServer(t *testrunner.Context, openStore server.StoreOpener) *server.Server {
 	t.Helper()
 	instance, err := server.New(server.Options{
 		Logger:     discardLogger(),
@@ -449,7 +441,7 @@ func newConfigLoader(databasePath string) server.ConfigLoader {
 //
 // 只有当前环境确实不能创建符号链接（例如未开启开发模式的 Windows、缺少相应权限）时才
 // 跳过并记录原因；支持符号链接的环境必须实际执行用例。
-func createPathAlias(t *testing.T, target, link string) {
+func createPathAlias(t *testrunner.Context, target, link string) {
 	t.Helper()
 	if err := os.Symlink(target, link); err != nil {
 		if symlinkUnavailable(err) {
@@ -477,4 +469,24 @@ func symlinkUnavailable(err error) bool {
 // discardLogger 返回一个不输出任何内容的日志器。
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// chdir 切换进程工作目录，并在用例结束时切回原目录。
+//
+// 统一执行器不提供 testing.T.Chdir（ROADMAP §9.2）：worker 在用例之间按 W3 重置工作目录，
+// 这里再补一次用例内的恢复，同一 worker 的后一条用例因此不会继承被切换过的目录。
+func chdir(t *testrunner.Context, dir string) {
+	t.Helper()
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("读取当前工作目录失败: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("切换到工作目录 %s 失败: %v", dir, err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previous); err != nil {
+			t.Errorf("恢复工作目录失败: %v", err)
+		}
+	})
 }

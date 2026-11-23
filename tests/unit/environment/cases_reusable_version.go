@@ -1,16 +1,16 @@
-package environment_test
+package environment
 
 import (
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
+	"github.com/lingting/agentflow/internal/testrunner"
 )
 
 // reusableVersion 构造一个指定构建状态的环境版本，用于复用判定。
 func reusableVersion(
-	t *testing.T,
+	t *testrunner.Context,
 	number int,
 	status domain.BuildStatus,
 	dockerfileHash string,
@@ -45,12 +45,11 @@ func reusableVersion(
 	return version
 }
 
-// TestFindReusableVersionRequiresIdenticalContent 验证版本复用条件。
+// 原 TestFindReusableVersionRequiresIdenticalContent 验证版本复用条件。
 //
 // 重复提交相同内容时必须复用既有成功版本，不产生重复版本号；只要 Dockerfile、构建
 // 上下文、父基础版本或构建状态有一项不同，就必须创建新版本。
-func TestFindReusableVersionRequiresIdenticalContent(t *testing.T) {
-	t.Parallel()
+func runFindReusableVersionRequiresIdenticalContent(t *testrunner.Context) {
 	hashA := strings.Repeat("a", 64)
 	hashB := strings.Repeat("b", 64)
 	parent := domain.FormatVersionLabel(1)
@@ -121,9 +120,8 @@ func TestFindReusableVersionRequiresIdenticalContent(t *testing.T) {
 	}
 }
 
-// TestFindReusableVersionIgnoresNonSucceededRecords 验证未构建成功的版本永不复用。
-func TestFindReusableVersionIgnoresNonSucceededRecords(t *testing.T) {
-	t.Parallel()
+// 原 TestFindReusableVersionIgnoresNonSucceededRecords 验证未构建成功的版本永不复用。
+func runFindReusableVersionIgnoresNonSucceededRecords(t *testrunner.Context) {
 	hash := strings.Repeat("c", 64)
 	parent := domain.FormatVersionLabel(1)
 	versions := []domain.EnvironmentVersion{
@@ -136,12 +134,11 @@ func TestFindReusableVersionIgnoresNonSucceededRecords(t *testing.T) {
 	}
 }
 
-// TestMarkUncertainKeepsVersionUnusable 验证"结果不确定"状态的语义。
+// 原 TestMarkUncertainKeepsVersionUnusable 验证"结果不确定"状态的语义。
 //
 // uncertain 与 failed 不同：它表示无法判断镜像是否已生成，因此只清除可用标记，
 // 不写构建时间，并保留可诊断原因。
-func TestMarkUncertainKeepsVersionUnusable(t *testing.T) {
-	t.Parallel()
+func runMarkUncertainKeepsVersionUnusable(t *testrunner.Context) {
 	version := reusableVersion(
 		t,
 		1,

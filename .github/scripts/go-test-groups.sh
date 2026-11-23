@@ -103,8 +103,17 @@ selfcheck|resourcecheck
 selfcheck|concurrencycheck
 selfcheck|pilot
 frontend|frontend
+unit|unit-app-planningagent
+unit|unit-app-planninganalysis
+unit|unit-cigate
+unit|unit-environment
 unit|unit-execenv
+unit|unit-image
 unit|unit-lifecycle
+unit|unit-server
+unit|unit-source
+unit|unit-testkit
+unit|unit-testrunner
 real|integration-ssh
 real|integration-remote-...
 fault|selfcheck-fault

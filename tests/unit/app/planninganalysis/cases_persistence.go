@@ -1,4 +1,4 @@
-package planninganalysis_test
+package planninganalysis
 
 import (
 	"context"
@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage"
+	"github.com/lingting/agentflow/internal/testrunner"
 )
 
 // 持久化失败与重试语义的用例。
@@ -118,7 +118,7 @@ func (t rejectReleaseTx) ReleasePlanningAnalysis(
 
 // analysisServiceWithStore 用给定存储构造分析服务并套在既有现场上。
 func analysisServiceWithStore(
-	t *testing.T,
+	t *testrunner.Context,
 	base *analysisFixture,
 	store storage.Store,
 ) *analysisFixture {
@@ -136,7 +136,7 @@ func analysisServiceWithStore(
 }
 
 // assertNoSuccessArtifacts 断言本轮没有留下任何成功产物。
-func assertNoSuccessArtifacts(t *testing.T, f *analysisFixture, sessionID domain.ID) {
+func assertNoSuccessArtifacts(t *testrunner.Context, f *analysisFixture, sessionID domain.ID) {
 	t.Helper()
 	if revisions := f.revisions(t, sessionID); len(revisions) != 0 {
 		t.Fatalf("持久化失败仍留下版本: %d", len(revisions))
@@ -147,9 +147,8 @@ func assertNoSuccessArtifacts(t *testing.T, f *analysisFixture, sessionID domain
 	}
 }
 
-// TestAnalyzeRollsBackWhenStageMessageNotPersisted 验证任一角色消息写入失败都整体回滚。
-func TestAnalyzeRollsBackWhenStageMessageNotPersisted(t *testing.T) {
-	t.Parallel()
+// 原 TestAnalyzeRollsBackWhenStageMessageNotPersisted 验证任一角色消息写入失败都整体回滚。
+func runAnalyzeRollsBackWhenStageMessageNotPersisted(t *testrunner.Context) {
 	cases := []struct {
 		name   string
 		sender domain.PlanningSenderType
@@ -159,8 +158,7 @@ func TestAnalyzeRollsBackWhenStageMessageNotPersisted(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		testCase := testCase
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
+		t.Run(testCase.name, func(t *testrunner.Context) {
 			base := newAnalysisFixture(t, analysisFixtureOptions{})
 			f := analysisServiceWithStore(t, base, txHookStore{
 				Store: base.db,
@@ -189,9 +187,8 @@ func TestAnalyzeRollsBackWhenStageMessageNotPersisted(t *testing.T) {
 	}
 }
 
-// TestAnalyzeRollsBackWhenStatusUpdateConflicts 验证状态条件更新失败时整体回滚。
-func TestAnalyzeRollsBackWhenStatusUpdateConflicts(t *testing.T) {
-	t.Parallel()
+// 原 TestAnalyzeRollsBackWhenStatusUpdateConflicts 验证状态条件更新失败时整体回滚。
+func runAnalyzeRollsBackWhenStatusUpdateConflicts(t *testrunner.Context) {
 	base := newAnalysisFixture(t, analysisFixtureOptions{})
 	f := analysisServiceWithStore(t, base, txHookStore{
 		Store: base.db,
@@ -215,9 +212,8 @@ func TestAnalyzeRollsBackWhenStatusUpdateConflicts(t *testing.T) {
 	assertClaimReleased(t, f, session.ID)
 }
 
-// TestAnalyzeRollsBackWhenClaimNotReleased 验证占用释放失败时成功路径整体回滚。
-func TestAnalyzeRollsBackWhenClaimNotReleased(t *testing.T) {
-	t.Parallel()
+// 原 TestAnalyzeRollsBackWhenClaimNotReleased 验证占用释放失败时成功路径整体回滚。
+func runAnalyzeRollsBackWhenClaimNotReleased(t *testrunner.Context) {
 	base := newAnalysisFixture(t, analysisFixtureOptions{})
 	remaining := int32(1)
 	f := analysisServiceWithStore(t, base, txHookStore{
@@ -242,9 +238,8 @@ func TestAnalyzeRollsBackWhenClaimNotReleased(t *testing.T) {
 	assertClaimReleased(t, f, session.ID)
 }
 
-// TestAnalyzeReportsNotPersistedWhenFailureRecordFails 验证失败记录写不成时不虚报失败。
-func TestAnalyzeReportsNotPersistedWhenFailureRecordFails(t *testing.T) {
-	t.Parallel()
+// 原 TestAnalyzeReportsNotPersistedWhenFailureRecordFails 验证失败记录写不成时不虚报失败。
+func runAnalyzeReportsNotPersistedWhenFailureRecordFails(t *testrunner.Context) {
 	base := newAnalysisFixture(t, analysisFixtureOptions{})
 	f := analysisServiceWithStore(t, base, txHookStore{
 		Store:      base.db,
@@ -274,12 +269,11 @@ func TestAnalyzeReportsNotPersistedWhenFailureRecordFails(t *testing.T) {
 	assertClaimReleased(t, f, session.ID)
 }
 
-// TestRetryAnalysisRecoversClaimlessAnalyzingSession 验证无占用的 analyzing 可以重试。
+// 原 TestRetryAnalysisRecoversClaimlessAnalyzingSession 验证无占用的 analyzing 可以重试。
 //
 // 提交消息之后、抢占执行权之前进程退出会留下这个现场：它没有执行者，状态却仍是
 // analyzing，因此必须能通过显式重试恢复，同时不能重复追加用户消息。
-func TestRetryAnalysisRecoversClaimlessAnalyzingSession(t *testing.T) {
-	t.Parallel()
+func runRetryAnalysisRecoversClaimlessAnalyzingSession(t *testrunner.Context) {
 	agentPort := newFakeAnalysisAgent()
 	f := newAnalysisFixture(t, analysisFixtureOptions{agent: agentPort})
 	session := f.analyzingSession(t)
@@ -324,9 +318,8 @@ func TestRetryAnalysisRecoversClaimlessAnalyzingSession(t *testing.T) {
 	assertClaimReleased(t, f, session.ID)
 }
 
-// TestRetryAnalysisRejectsActiveSession 验证不处于失败或无占用 analyzing 的会话不能重试。
-func TestRetryAnalysisRejectsActiveSession(t *testing.T) {
-	t.Parallel()
+// 原 TestRetryAnalysisRejectsActiveSession 验证不处于失败或无占用 analyzing 的会话不能重试。
+func runRetryAnalysisRejectsActiveSession(t *testrunner.Context) {
 	f := newAnalysisFixture(t, analysisFixtureOptions{})
 	session, err := f.sessions.Create(f.ctx, app.CreatePlanningSessionRequest{ProjectID: f.project.ID})
 	if err != nil {

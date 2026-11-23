@@ -1,14 +1,14 @@
-package environment_test
+package environment
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
+	"github.com/lingting/agentflow/internal/testrunner"
 )
 
 // hashOf 返回测试用内容的 SHA-256 摘要。
@@ -18,7 +18,7 @@ func hashOf(content string) string {
 }
 
 // newVersion 构造一个合法的环境版本，供多个用例复用。
-func newVersion(t *testing.T, ref domain.EnvironmentRef, number int) domain.EnvironmentVersion {
+func newVersion(t *testrunner.Context, ref domain.EnvironmentRef, number int) domain.EnvironmentVersion {
 	t.Helper()
 	version := domain.EnvironmentVersion{
 		HostID:           "host-1",
@@ -41,8 +41,7 @@ func newVersion(t *testing.T, ref domain.EnvironmentRef, number int) domain.Envi
 	return version
 }
 
-func TestNewEnvironmentRef(t *testing.T) {
-	t.Parallel()
+func runNewEnvironmentRef(t *testrunner.Context) {
 	base, err := domain.NewEnvironmentRef(domain.EnvironmentTypeBase, "")
 	if err != nil {
 		t.Fatalf("基础环境引用应当合法: %v", err)
@@ -74,8 +73,7 @@ func TestNewEnvironmentRef(t *testing.T) {
 	}
 }
 
-func TestVersionLabelFormatting(t *testing.T) {
-	t.Parallel()
+func runVersionLabelFormatting(t *testrunner.Context) {
 	if got := domain.FormatVersionLabel(1); got != "v0001" {
 		t.Fatalf("版本标签格式不符: %s", got)
 	}
@@ -96,8 +94,7 @@ func TestVersionLabelFormatting(t *testing.T) {
 	}
 }
 
-func TestNextVersionNumberIsMonotonic(t *testing.T) {
-	t.Parallel()
+func runNextVersionNumberIsMonotonic(t *testrunner.Context) {
 	next, err := domain.NextVersionNumber(nil)
 	if err != nil {
 		t.Fatalf("空历史应当返回第一个版本号: %v", err)
@@ -125,8 +122,7 @@ func TestNextVersionNumberIsMonotonic(t *testing.T) {
 	}
 }
 
-func TestEnvironmentVersionValidation(t *testing.T) {
-	t.Parallel()
+func runEnvironmentVersionValidation(t *testrunner.Context) {
 	baseRef, err := domain.NewEnvironmentRef(domain.EnvironmentTypeBase, "")
 	if err != nil {
 		t.Fatalf("构造基础环境引用失败: %v", err)
@@ -163,8 +159,7 @@ func TestEnvironmentVersionValidation(t *testing.T) {
 	}
 }
 
-func TestVersionBuildTransitions(t *testing.T) {
-	t.Parallel()
+func runVersionBuildTransitions(t *testrunner.Context) {
 	baseRef, err := domain.NewEnvironmentRef(domain.EnvironmentTypeBase, "")
 	if err != nil {
 		t.Fatalf("构造基础环境引用失败: %v", err)
@@ -198,8 +193,7 @@ func TestVersionBuildTransitions(t *testing.T) {
 	}
 }
 
-func TestVersionFailureKeepsVersionUnusable(t *testing.T) {
-	t.Parallel()
+func runVersionFailureKeepsVersionUnusable(t *testrunner.Context) {
 	baseRef, err := domain.NewEnvironmentRef(domain.EnvironmentTypeBase, "")
 	if err != nil {
 		t.Fatalf("构造基础环境引用失败: %v", err)
@@ -225,8 +219,7 @@ func TestVersionFailureKeepsVersionUnusable(t *testing.T) {
 	}
 }
 
-func TestValidateImageRefRejectsLatest(t *testing.T) {
-	t.Parallel()
+func runValidateImageRefRejectsLatest(t *testrunner.Context) {
 	for _, valid := range []string{
 		"agentflow-base:v0001-0123456789ab",
 		"agentflow-language-go:v0002-abcdefabcdef",
@@ -250,8 +243,7 @@ func TestValidateImageRefRejectsLatest(t *testing.T) {
 	}
 }
 
-func TestValidateImageID(t *testing.T) {
-	t.Parallel()
+func runValidateImageID(t *testrunner.Context) {
 	if err := domain.ValidateImageID("sha256:" + strings.Repeat("f", 64)); err != nil {
 		t.Fatalf("合法镜像 ID 校验失败: %v", err)
 	}

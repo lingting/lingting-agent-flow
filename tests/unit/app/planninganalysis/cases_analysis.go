@@ -1,11 +1,10 @@
-package planninganalysis_test
+package planninganalysis
 
 import (
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/agent"
@@ -13,6 +12,7 @@ import (
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
+	"github.com/lingting/agentflow/internal/testrunner"
 )
 
 // 两阶段分析编排用例。
@@ -20,9 +20,8 @@ import (
 // 每个断言都重新从存储读取记录：占用释放、事务边界与回滚的实际效果只能由数据库状态
 // 证明，不能用服务返回值代替。全部用例使用 Fake Agent，不依赖真实模型或外部网络。
 
-// TestAnalyzeProducesSingleRevision 验证两个阶段成功时只产生一个完整 Revision。
-func TestAnalyzeProducesSingleRevision(t *testing.T) {
-	t.Parallel()
+// 原 TestAnalyzeProducesSingleRevision 验证两个阶段成功时只产生一个完整 Revision。
+func runAnalyzeProducesSingleRevision(t *testrunner.Context) {
 	f := newAnalysisFixture(t, analysisFixtureOptions{})
 	session := f.analyzingSession(t)
 
@@ -102,12 +101,11 @@ func TestAnalyzeProducesSingleRevision(t *testing.T) {
 	}
 }
 
-// TestAnalyzeKeepsRoleSessionsDistinct 验证两个角色各自使用独立的 Pi Session 绑定。
+// 原 TestAnalyzeKeepsRoleSessionsDistinct 验证两个角色各自使用独立的 Pi Session 绑定。
 //
 // 两个阶段共用同一份 Pi 会话会让规划师读到分析师的中间对话，因此角色会话标识必须成对
 // 保存且互不相同；分析结果如实回传这两个标识，不合并、不互相替代。
-func TestAnalyzeKeepsRoleSessionsDistinct(t *testing.T) {
-	t.Parallel()
+func runAnalyzeKeepsRoleSessionsDistinct(t *testrunner.Context) {
 	f := newAnalysisFixture(t, analysisFixtureOptions{})
 	session := f.analyzingSession(t)
 	const analystSession = "planning-analyst-session"
@@ -143,9 +141,8 @@ func TestAnalyzeKeepsRoleSessionsDistinct(t *testing.T) {
 	}
 }
 
-// TestAnalyzeSkipsPlannerWhenAnalystUnusable 验证分析师阶段不可用时不会调用规划师。
-func TestAnalyzeSkipsPlannerWhenAnalystUnusable(t *testing.T) {
-	t.Parallel()
+// 原 TestAnalyzeSkipsPlannerWhenAnalystUnusable 验证分析师阶段不可用时不会调用规划师。
+func runAnalyzeSkipsPlannerWhenAnalystUnusable(t *testrunner.Context) {
 	cases := []struct {
 		name  string
 		setup func(agentPort *fakeAnalysisAgent)
@@ -185,8 +182,7 @@ func TestAnalyzeSkipsPlannerWhenAnalystUnusable(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		testCase := testCase
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
+		t.Run(testCase.name, func(t *testrunner.Context) {
 			agentPort := newFakeAnalysisAgent()
 			f := newAnalysisFixture(t, analysisFixtureOptions{agent: agentPort})
 			session := f.analyzingSession(t)
@@ -222,9 +218,8 @@ func TestAnalyzeSkipsPlannerWhenAnalystUnusable(t *testing.T) {
 	}
 }
 
-// TestAnalyzeFailsWithoutRevisionWhenPlannerUnusable 验证规划师阶段失败时不产生版本。
-func TestAnalyzeFailsWithoutRevisionWhenPlannerUnusable(t *testing.T) {
-	t.Parallel()
+// 原 TestAnalyzeFailsWithoutRevisionWhenPlannerUnusable 验证规划师阶段失败时不产生版本。
+func runAnalyzeFailsWithoutRevisionWhenPlannerUnusable(t *testrunner.Context) {
 	cases := []struct {
 		name  string
 		setup func(agentPort *fakeAnalysisAgent)
@@ -275,8 +270,7 @@ func TestAnalyzeFailsWithoutRevisionWhenPlannerUnusable(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		testCase := testCase
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
+		t.Run(testCase.name, func(t *testrunner.Context) {
 			agentPort := newFakeAnalysisAgent()
 			f := newAnalysisFixture(t, analysisFixtureOptions{agent: agentPort})
 			session := f.analyzingSession(t)
@@ -305,9 +299,8 @@ func TestAnalyzeFailsWithoutRevisionWhenPlannerUnusable(t *testing.T) {
 	}
 }
 
-// TestAnalyzeRejectsConcurrentRunOnSameSession 验证同一会话的并发分析只有一个能开始。
-func TestAnalyzeRejectsConcurrentRunOnSameSession(t *testing.T) {
-	t.Parallel()
+// 原 TestAnalyzeRejectsConcurrentRunOnSameSession 验证同一会话的并发分析只有一个能开始。
+func runAnalyzeRejectsConcurrentRunOnSameSession(t *testrunner.Context) {
 	agentPort := newFakeAnalysisAgent()
 	f := newAnalysisFixture(t, analysisFixtureOptions{agent: agentPort, holdAgent: true})
 	session := f.analyzingSession(t)
@@ -339,9 +332,8 @@ func TestAnalyzeRejectsConcurrentRunOnSameSession(t *testing.T) {
 	}
 }
 
-// TestAnalyzeIsolatesDifferentSessions 验证不同会话可以并发分析。
-func TestAnalyzeIsolatesDifferentSessions(t *testing.T) {
-	t.Parallel()
+// 原 TestAnalyzeIsolatesDifferentSessions 验证不同会话可以并发分析。
+func runAnalyzeIsolatesDifferentSessions(t *testrunner.Context) {
 	agentPort := newFakeAnalysisAgent()
 	f := newAnalysisFixture(t, analysisFixtureOptions{agent: agentPort, holdAgent: true})
 	first := f.analyzingSession(t)
@@ -373,9 +365,8 @@ func TestAnalyzeIsolatesDifferentSessions(t *testing.T) {
 	}
 }
 
-// TestAnalyzeRetryAfterFailure 验证失败之后可以显式重试并成功。
-func TestAnalyzeRetryAfterFailure(t *testing.T) {
-	t.Parallel()
+// 原 TestAnalyzeRetryAfterFailure 验证失败之后可以显式重试并成功。
+func runAnalyzeRetryAfterFailure(t *testrunner.Context) {
 	agentPort := newFakeAnalysisAgent()
 	f := newAnalysisFixture(t, analysisFixtureOptions{agent: agentPort})
 	session := f.analyzingSession(t)
@@ -418,13 +409,12 @@ func TestAnalyzeRetryAfterFailure(t *testing.T) {
 	}
 }
 
-// TestAnalyzeRecordsFailureWhenRevisionNotPersisted 验证版本写入失败不留半成品。
+// 原 TestAnalyzeRecordsFailureWhenRevisionNotPersisted 验证版本写入失败不留半成品。
 //
 // 持久化事务失败之后必须留下可解释的失败结论：会话收敛为 failed 并写入失败摘要，
 // 占用被释放，显式重试能够产生新一轮 Revision。把会话留在 analyzing 既不能重试，
 // 也无法解释发生了什么。
-func TestAnalyzeRecordsFailureWhenRevisionNotPersisted(t *testing.T) {
-	t.Parallel()
+func runAnalyzeRecordsFailureWhenRevisionNotPersisted(t *testrunner.Context) {
 	agentPort := newFakeAnalysisAgent()
 	base := newAnalysisFixture(t, analysisFixtureOptions{agent: agentPort})
 	f := newAnalysisFixtureOver(t, base)
@@ -487,9 +477,8 @@ func TestAnalyzeRecordsFailureWhenRevisionNotPersisted(t *testing.T) {
 	}
 }
 
-// TestAnalyzeResultSurvivesRestart 验证进程重启后会话与版本仍可读取并解析。
-func TestAnalyzeResultSurvivesRestart(t *testing.T) {
-	t.Parallel()
+// 原 TestAnalyzeResultSurvivesRestart 验证进程重启后会话与版本仍可读取并解析。
+func runAnalyzeResultSurvivesRestart(t *testrunner.Context) {
 	f := newAnalysisFixture(t, analysisFixtureOptions{})
 	session := f.analyzingSession(t)
 	created, err := f.analysis.Analyze(f.ctx, app.RunPlanningAnalysisRequest{
@@ -536,9 +525,8 @@ func TestAnalyzeResultSurvivesRestart(t *testing.T) {
 	}
 }
 
-// TestAnalyzeCreatesNoFormalEntities 验证规划阶段不创建正式 Requirement / Task / Step。
-func TestAnalyzeCreatesNoFormalEntities(t *testing.T) {
-	t.Parallel()
+// 原 TestAnalyzeCreatesNoFormalEntities 验证规划阶段不创建正式 Requirement / Task / Step。
+func runAnalyzeCreatesNoFormalEntities(t *testrunner.Context) {
 	f := newAnalysisFixture(t, analysisFixtureOptions{})
 	session := f.analyzingSession(t)
 	if _, err := f.analysis.Analyze(f.ctx, app.RunPlanningAnalysisRequest{
@@ -553,14 +541,16 @@ func TestAnalyzeCreatesNoFormalEntities(t *testing.T) {
 	}
 }
 
-// TestAnalyzeLeavesProjectFilesUntouched 验证分析过程不修改项目工作区文件。
+// 原 TestAnalyzeLeavesProjectFilesUntouched 验证分析过程不修改项目工作区文件。
 //
 // 编排服务没有任何写工作区的能力：它只提交提示词并读取数据库。用例仍对一个真实目录做
 // 前后快照，作为"不会顺带改动项目文件"的回归守点。
-func TestAnalyzeLeavesProjectFilesUntouched(t *testing.T) {
-	t.Parallel()
+func runAnalyzeLeavesProjectFilesUntouched(t *testrunner.Context) {
 	f := newAnalysisFixture(t, analysisFixtureOptions{})
-	workspace := t.TempDir()
+	workspace, err := t.TempDir()
+	if err != nil {
+		t.Fatalf("创建用例临时目录失败: %v", err)
+	}
 	marker := filepath.Join(workspace, "README.md")
 	if err := os.WriteFile(marker, []byte("项目内容\n"), 0o600); err != nil {
 		t.Fatalf("写入项目文件失败: %v", err)
@@ -579,7 +569,7 @@ func TestAnalyzeLeavesProjectFilesUntouched(t *testing.T) {
 }
 
 // snapshotDirectory 返回目录项与文件内容的稳定快照。
-func snapshotDirectory(t *testing.T, dir string) string {
+func snapshotDirectory(t *testrunner.Context, dir string) string {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -602,9 +592,8 @@ func snapshotDirectory(t *testing.T, dir string) string {
 	return builder.String()
 }
 
-// TestAnalyzeWithUnknownSessionReportsNotFound 验证未知会话被报告为不存在。
-func TestAnalyzeWithUnknownSessionReportsNotFound(t *testing.T) {
-	t.Parallel()
+// 原 TestAnalyzeWithUnknownSessionReportsNotFound 验证未知会话被报告为不存在。
+func runAnalyzeWithUnknownSessionReportsNotFound(t *testrunner.Context) {
 	f := newAnalysisFixture(t, analysisFixtureOptions{})
 	_, err := f.analysis.Analyze(f.ctx, app.RunPlanningAnalysisRequest{
 		PlanningSessionID: domain.NewID().String(),
@@ -617,9 +606,8 @@ func TestAnalyzeWithUnknownSessionReportsNotFound(t *testing.T) {
 	}
 }
 
-// TestAnalyzeRequiresAnalyzingSession 验证未开始分析的会话不会被占用。
-func TestAnalyzeRequiresAnalyzingSession(t *testing.T) {
-	t.Parallel()
+// 原 TestAnalyzeRequiresAnalyzingSession 验证未开始分析的会话不会被占用。
+func runAnalyzeRequiresAnalyzingSession(t *testrunner.Context) {
 	f := newAnalysisFixture(t, analysisFixtureOptions{})
 	session, err := f.sessions.Create(f.ctx, app.CreatePlanningSessionRequest{ProjectID: f.project.ID})
 	if err != nil {

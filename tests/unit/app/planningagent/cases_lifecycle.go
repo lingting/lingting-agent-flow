@@ -1,18 +1,17 @@
-package planningagent_test
+package planningagent
 
 import (
 	"context"
 	"errors"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/app"
+	"github.com/lingting/agentflow/internal/testrunner"
 )
 
-// TestPlanningAgentServiceRejectsCallBeforeStart 校验未启动时规划调用被拒绝。
-func TestPlanningAgentServiceRejectsCallBeforeStart(t *testing.T) {
-	t.Parallel()
+// 原 TestPlanningAgentServiceRejectsCallBeforeStart 校验未启动时规划调用被拒绝。
+func runPlanningAgentServiceRejectsCallBeforeStart(t *testrunner.Context) {
 	fixture := newPlanningFixture(t, fixtureOptions{start: false})
 	_, err := fixture.service.RunRole(context.Background(), fixture.request(0))
 	if !errors.Is(err, app.ErrPlanningAgentNotStarted) {
@@ -23,9 +22,8 @@ func TestPlanningAgentServiceRejectsCallBeforeStart(t *testing.T) {
 	}
 }
 
-// TestPlanningAgentServiceRunsRoleAfterStart 校验启动后调用能进入执行阶段。
-func TestPlanningAgentServiceRunsRoleAfterStart(t *testing.T) {
-	t.Parallel()
+// 原 TestPlanningAgentServiceRunsRoleAfterStart 校验启动后调用能进入执行阶段。
+func runPlanningAgentServiceRunsRoleAfterStart(t *testrunner.Context) {
 	fixture := newPlanningFixture(t, fixtureOptions{start: true})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := fixture.call(ctx, 0)
@@ -50,9 +48,8 @@ func TestPlanningAgentServiceRunsRoleAfterStart(t *testing.T) {
 	}
 }
 
-// TestPlanningAgentServiceRejectsCallAfterStop 校验停止完成后规划调用被拒绝。
-func TestPlanningAgentServiceRejectsCallAfterStop(t *testing.T) {
-	t.Parallel()
+// 原 TestPlanningAgentServiceRejectsCallAfterStop 校验停止完成后规划调用被拒绝。
+func runPlanningAgentServiceRejectsCallAfterStop(t *testrunner.Context) {
 	fixture := newPlanningFixture(t, fixtureOptions{start: true})
 	if err := fixture.stop(t); err != nil {
 		t.Fatalf("停止规划 Agent 服务失败: %v", err)
@@ -66,9 +63,8 @@ func TestPlanningAgentServiceRejectsCallAfterStop(t *testing.T) {
 	}
 }
 
-// TestPlanningAgentServiceStopCancelsInflightCall 校验在途调用收到停止取消并完成收敛。
-func TestPlanningAgentServiceStopCancelsInflightCall(t *testing.T) {
-	t.Parallel()
+// 原 TestPlanningAgentServiceStopCancelsInflightCall 校验在途调用收到停止取消并完成收敛。
+func runPlanningAgentServiceStopCancelsInflightCall(t *testrunner.Context) {
 	fixture := newPlanningFixture(t, fixtureOptions{start: true})
 	done := fixture.call(context.Background(), 0)
 	fixture.port.waitEntered(t, 1)
@@ -88,9 +84,8 @@ func TestPlanningAgentServiceStopCancelsInflightCall(t *testing.T) {
 	}
 }
 
-// TestPlanningAgentServiceStopWaitsForConvergence 校验停止等待调用完整收敛后才返回。
-func TestPlanningAgentServiceStopWaitsForConvergence(t *testing.T) {
-	t.Parallel()
+// 原 TestPlanningAgentServiceStopWaitsForConvergence 校验停止等待调用完整收敛后才返回。
+func runPlanningAgentServiceStopWaitsForConvergence(t *testrunner.Context) {
 	hold := 200 * time.Millisecond
 	fixture := newPlanningFixture(t, fixtureOptions{start: true, hold: hold})
 	done := fixture.call(context.Background(), 0)
@@ -111,9 +106,8 @@ func TestPlanningAgentServiceStopWaitsForConvergence(t *testing.T) {
 	}
 }
 
-// TestPlanningAgentServiceStopWaitsForMultipleCalls 校验停止会取消并等待全部在途调用。
-func TestPlanningAgentServiceStopWaitsForMultipleCalls(t *testing.T) {
-	t.Parallel()
+// 原 TestPlanningAgentServiceStopWaitsForMultipleCalls 校验停止会取消并等待全部在途调用。
+func runPlanningAgentServiceStopWaitsForMultipleCalls(t *testrunner.Context) {
 	fixture := newPlanningFixture(t, fixtureOptions{sessions: 3, start: true})
 	done := make([]<-chan error, 3)
 	for index := 0; index < 3; index++ {
@@ -139,9 +133,8 @@ func TestPlanningAgentServiceStopWaitsForMultipleCalls(t *testing.T) {
 	}
 }
 
-// TestPlanningAgentServiceAdmissionStopsAtBoundary 校验停止边界之后不再接受新调用。
-func TestPlanningAgentServiceAdmissionStopsAtBoundary(t *testing.T) {
-	t.Parallel()
+// 原 TestPlanningAgentServiceAdmissionStopsAtBoundary 校验停止边界之后不再接受新调用。
+func runPlanningAgentServiceAdmissionStopsAtBoundary(t *testrunner.Context) {
 	fixture := newPlanningFixture(t, fixtureOptions{start: true})
 	const workers = 6
 	stopDone := make(chan struct{})
@@ -199,9 +192,8 @@ func TestPlanningAgentServiceAdmissionStopsAtBoundary(t *testing.T) {
 	}
 }
 
-// TestPlanningAgentServiceConcurrentStopIsSafe 校验并发停止不会重复收敛或破坏状态。
-func TestPlanningAgentServiceConcurrentStopIsSafe(t *testing.T) {
-	t.Parallel()
+// 原 TestPlanningAgentServiceConcurrentStopIsSafe 校验并发停止不会重复收敛或破坏状态。
+func runPlanningAgentServiceConcurrentStopIsSafe(t *testrunner.Context) {
 	fixture := newPlanningFixture(t, fixtureOptions{sessions: 2, start: true})
 	done := make([]<-chan error, 2)
 	for index := 0; index < 2; index++ {
@@ -244,9 +236,8 @@ func TestPlanningAgentServiceConcurrentStopIsSafe(t *testing.T) {
 	}
 }
 
-// TestPlanningAgentServiceStopReportsTimeout 校验停止超时返回真实错误而不是成功。
-func TestPlanningAgentServiceStopReportsTimeout(t *testing.T) {
-	t.Parallel()
+// 原 TestPlanningAgentServiceStopReportsTimeout 校验停止超时返回真实错误而不是成功。
+func runPlanningAgentServiceStopReportsTimeout(t *testrunner.Context) {
 	fixture := newPlanningFixture(t, fixtureOptions{start: true, ignoreCancel: true})
 	done := fixture.call(context.Background(), 0)
 	fixture.port.waitEntered(t, 1)

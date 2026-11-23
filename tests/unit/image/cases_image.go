@@ -1,14 +1,14 @@
-package image_test
+package image
 
 import (
 	"os"
 	"path/filepath"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
+	"github.com/lingting/agentflow/internal/testrunner"
 	"github.com/lingting/agentflow/tests/testkit"
 )
 
@@ -19,7 +19,7 @@ const (
 )
 
 // newBaseVersion 构造一个基础环境版本。
-func newBaseVersion(t *testing.T) domain.EnvironmentVersion {
+func newBaseVersion(t *testrunner.Context) domain.EnvironmentVersion {
 	t.Helper()
 	ref, err := domain.NewEnvironmentRef(domain.EnvironmentTypeBase, "")
 	if err != nil {
@@ -38,8 +38,7 @@ func newBaseVersion(t *testing.T) domain.EnvironmentVersion {
 	}
 }
 
-func TestContextHashIsDeterministic(t *testing.T) {
-	t.Parallel()
+func runContextHashIsDeterministic(t *testrunner.Context) {
 	files := []docker.ContextFile{
 		{RelativePath: "Dockerfile", Content: []byte("FROM debian:12.7-slim\n"), Mode: 0o644},
 		{RelativePath: "scripts/setup.sh", Content: []byte("echo setup\n"), Mode: 0o755},
@@ -80,8 +79,7 @@ func TestContextHashIsDeterministic(t *testing.T) {
 	}
 }
 
-func TestContextRejectsUnsafePaths(t *testing.T) {
-	t.Parallel()
+func runContextRejectsUnsafePaths(t *testrunner.Context) {
 	for _, invalid := range []string{
 		"",
 		"/etc/passwd",
@@ -107,8 +105,7 @@ func TestContextRejectsUnsafePaths(t *testing.T) {
 	}
 }
 
-func TestContextRejectsSensitiveContent(t *testing.T) {
-	t.Parallel()
+func runContextRejectsSensitiveContent(t *testrunner.Context) {
 	if err := docker.ValidateContent("Dockerfile", []byte("-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n")); err == nil {
 		t.Fatal("包含私钥的上下文应当被拒绝")
 	}
@@ -123,8 +120,7 @@ func TestContextRejectsSensitiveContent(t *testing.T) {
 	}
 }
 
-func TestReadContextDirectorySkipsTemporaryFiles(t *testing.T) {
-	t.Parallel()
+func runReadContextDirectorySkipsTemporaryFiles(t *testrunner.Context) {
 	root := testkit.Dir(t)
 	if err := os.WriteFile(filepath.Join(root, "Dockerfile"), []byte("FROM debian:12.7-slim\n"), 0o644); err != nil {
 		t.Fatalf("写入测试文件失败: %v", err)
@@ -152,8 +148,7 @@ func TestReadContextDirectorySkipsTemporaryFiles(t *testing.T) {
 	}
 }
 
-func TestBuildConfigHashCoversAllInputs(t *testing.T) {
-	t.Parallel()
+func runBuildConfigHashCoversAllInputs(t *testrunner.Context) {
 	version := newBaseVersion(t)
 	base := docker.BuildConfigHash(version, "")
 	if base != docker.BuildConfigHash(version, "") {
@@ -178,8 +173,7 @@ func TestBuildConfigHashCoversAllInputs(t *testing.T) {
 	}
 }
 
-func TestImageRefForIsTraceable(t *testing.T) {
-	t.Parallel()
+func runImageRefForIsTraceable(t *testrunner.Context) {
 	version := newBaseVersion(t)
 	ref, err := docker.ImageRefFor(version)
 	if err != nil {
@@ -199,8 +193,7 @@ func TestImageRefForIsTraceable(t *testing.T) {
 	}
 }
 
-func TestValidateDockerfile(t *testing.T) {
-	t.Parallel()
+func runValidateDockerfile(t *testrunner.Context) {
 	if err := docker.ValidateDockerfile([]byte(docker.DefaultBaseDockerfile)); err != nil {
 		t.Fatalf("默认基础 Dockerfile 应当通过校验: %v", err)
 	}
@@ -226,8 +219,7 @@ func TestValidateDockerfile(t *testing.T) {
 	}
 }
 
-func TestDefaultBaseDockerfileHasNoLatestOrSecrets(t *testing.T) {
-	t.Parallel()
+func runDefaultBaseDockerfileHasNoLatestOrSecrets(t *testrunner.Context) {
 	content := docker.DefaultBaseDockerfile
 	if strings.Contains(content, ":latest") {
 		t.Fatal("默认基础 Dockerfile 不得使用 latest 标签")
@@ -242,8 +234,7 @@ func TestDefaultBaseDockerfileHasNoLatestOrSecrets(t *testing.T) {
 	}
 }
 
-func TestLanguageTemplateLookup(t *testing.T) {
-	t.Parallel()
+func runLanguageTemplateLookup(t *testrunner.Context) {
 	for _, name := range []string{"node", "python", "go"} {
 		template, err := docker.LanguageTemplateFor(name)
 		if err != nil {
@@ -263,14 +254,13 @@ func TestLanguageTemplateLookup(t *testing.T) {
 	}
 }
 
-// TestDefaultBaseDockerfileMapsGitHubToPort443 验证基础镜像内置 GitHub 的 443 接入点配置。
+// 原 TestDefaultBaseDockerfileMapsGitHubToPort443 验证基础镜像内置 GitHub 的 443 接入点配置。
 //
 // 该配置在"22 端口可达"与"22 端口不可达"两类环境下都成立：ssh.github.com:443 是
 // GitHub 官方支持的等价接入点，直连 22 可用的环境使用它同样正常。因此它属于基础镜像
 // 的合理默认值，而不是特定环境的临时补丁——缺失时容器内 Git 会在受限网络中因为
 // `kex_exchange_identification: Connection closed by remote host` 无法 Clone/Push。
-func TestDefaultBaseDockerfileMapsGitHubToPort443(t *testing.T) {
-	t.Parallel()
+func runDefaultBaseDockerfileMapsGitHubToPort443(t *testrunner.Context) {
 	content := docker.DefaultBaseDockerfile
 	for _, expected := range []string{
 		"Host github.com",

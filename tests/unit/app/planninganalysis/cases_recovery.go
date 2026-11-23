@@ -1,14 +1,14 @@
-package planninganalysis_test
+package planninganalysis
 
 import (
 	"context"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage"
+	"github.com/lingting/agentflow/internal/testrunner"
 )
 
 // 服务端启动时的分析占用恢复用例。
@@ -17,7 +17,7 @@ import (
 // 的唯一持久化证据，没有占用就不能推断进程中断。全部断言以数据库读回的事实为准。
 
 // startRecovery 在既有现场上执行一次启动恢复。
-func startRecovery(t *testing.T, f *analysisFixture, store app.PlanningAnalysisRecoveryStore) {
+func startRecovery(t *testrunner.Context, f *analysisFixture, store app.PlanningAnalysisRecoveryStore) {
 	t.Helper()
 	recovery, err := app.NewPlanningAnalysisRecoveryService(
 		app.PlanningAnalysisRecoveryOptions{Store: store},
@@ -31,7 +31,7 @@ func startRecovery(t *testing.T, f *analysisFixture, store app.PlanningAnalysisR
 }
 
 // claimAnalysis 为 analyzing 会话写入一条分析占用并返回占用标识。
-func claimAnalysis(t *testing.T, f *analysisFixture, sessionID domain.ID) string {
+func claimAnalysis(t *testrunner.Context, f *analysisFixture, sessionID domain.ID) string {
 	t.Helper()
 	claimID := domain.NewID().String()
 	if err := f.db.ClaimPlanningAnalysis(f.ctx, sessionID, claimID, time.Now().UTC()); err != nil {
@@ -40,9 +40,8 @@ func claimAnalysis(t *testing.T, f *analysisFixture, sessionID domain.ID) string
 	return claimID
 }
 
-// TestPlanningAnalysisRecoveryConvergesInterruptedClaim 验证遗留占用被收敛为失败。
-func TestPlanningAnalysisRecoveryConvergesInterruptedClaim(t *testing.T) {
-	t.Parallel()
+// 原 TestPlanningAnalysisRecoveryConvergesInterruptedClaim 验证遗留占用被收敛为失败。
+func runPlanningAnalysisRecoveryConvergesInterruptedClaim(t *testrunner.Context) {
 	f := newAnalysisFixture(t, analysisFixtureOptions{})
 	session := f.analyzingSession(t)
 	claimAnalysis(t, f, session.ID)
@@ -76,12 +75,11 @@ func TestPlanningAnalysisRecoveryConvergesInterruptedClaim(t *testing.T) {
 	}
 }
 
-// TestPlanningAnalysisRecoveryLeavesClaimlessAnalyzingUntouched 验证无占用的 analyzing 不动。
+// 原 TestPlanningAnalysisRecoveryLeavesClaimlessAnalyzingUntouched 验证无占用的 analyzing 不动。
 //
 // 提交消息之后、抢占执行权之前进程退出会留下这个现场：它可能只是"用户已经提交需求，
 // 还没触发分析"，因此不能直接判定为进程中断。
-func TestPlanningAnalysisRecoveryLeavesClaimlessAnalyzingUntouched(t *testing.T) {
-	t.Parallel()
+func runPlanningAnalysisRecoveryLeavesClaimlessAnalyzingUntouched(t *testrunner.Context) {
 	f := newAnalysisFixture(t, analysisFixtureOptions{})
 	session := f.analyzingSession(t)
 
@@ -96,9 +94,8 @@ func TestPlanningAnalysisRecoveryLeavesClaimlessAnalyzingUntouched(t *testing.T)
 	}
 }
 
-// TestPlanningAnalysisRecoverySkipsNonAnalyzingSession 验证非 analyzing 会话不被覆盖。
-func TestPlanningAnalysisRecoverySkipsNonAnalyzingSession(t *testing.T) {
-	t.Parallel()
+// 原 TestPlanningAnalysisRecoverySkipsNonAnalyzingSession 验证非 analyzing 会话不被覆盖。
+func runPlanningAnalysisRecoverySkipsNonAnalyzingSession(t *testrunner.Context) {
 	f := newAnalysisFixture(t, analysisFixtureOptions{})
 	session := f.analyzingSession(t)
 	claimID := claimAnalysis(t, f, session.ID)
@@ -157,9 +154,8 @@ func (s *staleClaimStore) ListPlanningAnalysisClaims(
 	return claims, nil
 }
 
-// TestPlanningAnalysisRecoverySkipsClaimTakenByAnotherExecutor 验证并发占用不被覆盖。
-func TestPlanningAnalysisRecoverySkipsClaimTakenByAnotherExecutor(t *testing.T) {
-	t.Parallel()
+// 原 TestPlanningAnalysisRecoverySkipsClaimTakenByAnotherExecutor 验证并发占用不被覆盖。
+func runPlanningAnalysisRecoverySkipsClaimTakenByAnotherExecutor(t *testrunner.Context) {
 	f := newAnalysisFixture(t, analysisFixtureOptions{})
 	session := f.analyzingSession(t)
 	claimAnalysis(t, f, session.ID)
@@ -177,9 +173,8 @@ func TestPlanningAnalysisRecoverySkipsClaimTakenByAnotherExecutor(t *testing.T) 
 	assertClaimHeld(t, f, session.ID, replacement)
 }
 
-// TestPlanningAnalysisRecoveryIsIdempotent 验证重复执行恢复不会再改动任何会话。
-func TestPlanningAnalysisRecoveryIsIdempotent(t *testing.T) {
-	t.Parallel()
+// 原 TestPlanningAnalysisRecoveryIsIdempotent 验证重复执行恢复不会再改动任何会话。
+func runPlanningAnalysisRecoveryIsIdempotent(t *testrunner.Context) {
 	f := newAnalysisFixture(t, analysisFixtureOptions{})
 	session := f.analyzingSession(t)
 	claimAnalysis(t, f, session.ID)

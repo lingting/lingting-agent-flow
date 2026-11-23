@@ -1,9 +1,8 @@
-package testrunner_test
+package testrunner
 
 import (
 	"runtime"
 	"slices"
-	"testing"
 
 	"github.com/lingting/agentflow/internal/testrunner"
 )
@@ -51,11 +50,11 @@ func pidlessFixture() string {
 	}
 }
 
-// TestParseListenerOutput 守住监听查询输出的解析边界。
-func TestParseListenerOutput(t *testing.T) {
+// 原 TestParseListenerOutput 守住监听查询输出的解析边界。
+func runParseListenerOutput(t *testrunner.Context) {
 	output, expected := listenerOutputFixture()
 
-	t.Run("解析出全部监听进程号", func(t *testing.T) {
+	t.Run("解析出全部监听进程号", func(t *testrunner.Context) {
 		pids, err := testrunner.ParseListenerOutput(output, listenerQueryPort)
 		if err != nil {
 			t.Fatalf("解析监听查询输出失败: %v", err)
@@ -65,7 +64,7 @@ func TestParseListenerOutput(t *testing.T) {
 		}
 	})
 
-	t.Run("其它端口不匹配", func(t *testing.T) {
+	t.Run("其它端口不匹配", func(t *testrunner.Context) {
 		pids, err := testrunner.ParseListenerOutput(output, listenerQueryPort+1)
 		if err != nil {
 			t.Fatalf("没有该端口的监听项不应报错: %v", err)
@@ -75,7 +74,7 @@ func TestParseListenerOutput(t *testing.T) {
 		}
 	})
 
-	t.Run("空输出按没有监听项处理", func(t *testing.T) {
+	t.Run("空输出按没有监听项处理", func(t *testrunner.Context) {
 		pids, err := testrunner.ParseListenerOutput("", listenerQueryPort)
 		if err != nil {
 			t.Fatalf("空输出不应报错: %v", err)
@@ -85,7 +84,7 @@ func TestParseListenerOutput(t *testing.T) {
 		}
 	})
 
-	t.Run("匹配到监听项却没有进程号按矛盾报错", func(t *testing.T) {
+	t.Run("匹配到监听项却没有进程号按矛盾报错", func(t *testrunner.Context) {
 		pids, err := testrunner.ParseListenerOutput(pidlessFixture(), listenerQueryPort)
 		if err == nil {
 			t.Fatalf("端口 %d 已匹配到监听项却解析出 %v，必须报矛盾而不是空集合", listenerQueryPort, pids)

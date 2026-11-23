@@ -1,4 +1,4 @@
-package cigate_test
+package cigate
 
 import (
 	"context"
@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"testing"
 
 	"github.com/lingting/agentflow/internal/cigate"
+	"github.com/lingting/agentflow/internal/testrunner"
 )
 
 // fakeChecker 是可控的仓库权限检查器替身。
@@ -50,9 +50,8 @@ func writeChecker(writable ...string) *fakeChecker {
 	return &fakeChecker{permissions: permissions}
 }
 
-// TestParseMode 校验授权模式解析只接受约定的小写取值。
-func TestParseMode(t *testing.T) {
-	t.Parallel()
+// 原 TestParseMode 校验授权模式解析只接受约定的小写取值。
+func runParseMode(t *testrunner.Context) {
 	cases := []struct {
 		name string
 		raw  string
@@ -74,8 +73,7 @@ func TestParseMode(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		testCase := testCase
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
+		t.Run(testCase.name, func(t *testrunner.Context) {
 			if got := cigate.ParseMode(testCase.raw); got != testCase.want {
 				t.Fatalf("ParseMode(%q) = %q，期望 %q", testCase.raw, got, testCase.want)
 			}
@@ -83,9 +81,8 @@ func TestParseMode(t *testing.T) {
 	}
 }
 
-// TestParseEvent 校验只识别明确支持的事件类型。
-func TestParseEvent(t *testing.T) {
-	t.Parallel()
+// 原 TestParseEvent 校验只识别明确支持的事件类型。
+func runParseEvent(t *testrunner.Context) {
 	cases := []struct {
 		raw  string
 		want cigate.Event
@@ -105,9 +102,8 @@ func TestParseEvent(t *testing.T) {
 	}
 }
 
-// TestDecidePush 覆盖 push 事件的身份判定矩阵。
-func TestDecidePush(t *testing.T) {
-	t.Parallel()
+// 原 TestDecidePush 覆盖 push 事件的身份判定矩阵。
+func runDecidePush(t *testrunner.Context) {
 	cases := []struct {
 		name  string
 		mode  string
@@ -157,8 +153,7 @@ func TestDecidePush(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		testCase := testCase
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
+		t.Run(testCase.name, func(t *testrunner.Context) {
 			checker := writeChecker("someone")
 			decision := cigate.Decide(context.Background(), cigate.Input{
 				Mode:            testCase.mode,
@@ -182,11 +177,9 @@ func TestDecidePush(t *testing.T) {
 	}
 }
 
-// TestDecidePushCollaboratorUsesPermissionCheck 校验 collaborator 模式的 Push 判定。
-func TestDecidePushCollaboratorUsesPermissionCheck(t *testing.T) {
-	t.Parallel()
-	t.Run("有写权限的协作者被允许", func(t *testing.T) {
-		t.Parallel()
+// 原 TestDecidePushCollaboratorUsesPermissionCheck 校验 collaborator 模式的 Push 判定。
+func runDecidePushCollaboratorUsesPermissionCheck(t *testrunner.Context) {
+	t.Run("有写权限的协作者被允许", func(t *testrunner.Context) {
 		checker := writeChecker("writer")
 		decision := cigate.Decide(context.Background(), cigate.Input{
 			Mode:            "collaborator",
@@ -201,8 +194,7 @@ func TestDecidePushCollaboratorUsesPermissionCheck(t *testing.T) {
 			t.Fatalf("应只查询推送者权限，实际 %v", logins)
 		}
 	})
-	t.Run("无写权限的用户被拒绝", func(t *testing.T) {
-		t.Parallel()
+	t.Run("无写权限的用户被拒绝", func(t *testrunner.Context) {
 		checker := writeChecker()
 		decision := cigate.Decide(context.Background(), cigate.Input{
 			Mode:            "collaborator",
@@ -214,8 +206,7 @@ func TestDecidePushCollaboratorUsesPermissionCheck(t *testing.T) {
 			t.Fatalf("只读用户 Push 不应被允许: %s", decision.Reason)
 		}
 	})
-	t.Run("权限查询失败按拒绝处理", func(t *testing.T) {
-		t.Parallel()
+	t.Run("权限查询失败按拒绝处理", func(t *testrunner.Context) {
 		checker := &fakeChecker{err: errors.New("接口不可用")}
 		decision := cigate.Decide(context.Background(), cigate.Input{
 			Mode:            "collaborator",
@@ -230,8 +221,7 @@ func TestDecidePushCollaboratorUsesPermissionCheck(t *testing.T) {
 			t.Fatalf("拒绝原因应说明查询失败: %s", decision.Reason)
 		}
 	})
-	t.Run("缺少权限检查器按拒绝处理", func(t *testing.T) {
-		t.Parallel()
+	t.Run("缺少权限检查器按拒绝处理", func(t *testrunner.Context) {
 		decision := cigate.Decide(context.Background(), cigate.Input{
 			Mode:            "collaborator",
 			Event:           "push",
@@ -244,9 +234,8 @@ func TestDecidePushCollaboratorUsesPermissionCheck(t *testing.T) {
 	})
 }
 
-// TestDecidePullRequest 覆盖 PR 作者关系的判定矩阵。
-func TestDecidePullRequest(t *testing.T) {
-	t.Parallel()
+// 原 TestDecidePullRequest 覆盖 PR 作者关系的判定矩阵。
+func runDecidePullRequest(t *testrunner.Context) {
 	cases := []struct {
 		name        string
 		mode        string
@@ -285,8 +274,7 @@ func TestDecidePullRequest(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		testCase := testCase
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
+		t.Run(testCase.name, func(t *testrunner.Context) {
 			checker := writeChecker("actor")
 			decision := cigate.Decide(context.Background(), cigate.Input{
 				Mode:              testCase.mode,
@@ -307,11 +295,9 @@ func TestDecidePullRequest(t *testing.T) {
 	}
 }
 
-// TestDecidePullRequestIgnoresActor 校验 PR 判定只看作者关系，不看事件触发者。
-func TestDecidePullRequestIgnoresActor(t *testing.T) {
-	t.Parallel()
-	t.Run("非所有者触发但作者是所有者", func(t *testing.T) {
-		t.Parallel()
+// 原 TestDecidePullRequestIgnoresActor 校验 PR 判定只看作者关系，不看事件触发者。
+func runDecidePullRequestIgnoresActor(t *testrunner.Context) {
+	t.Run("非所有者触发但作者是所有者", func(t *testrunner.Context) {
 		decision := cigate.Decide(context.Background(), cigate.Input{
 			Mode:              "self",
 			Event:             "pull_request",
@@ -324,8 +310,7 @@ func TestDecidePullRequestIgnoresActor(t *testing.T) {
 			t.Fatalf("PR 判定不应取决于触发者: %s", decision.Reason)
 		}
 	})
-	t.Run("所有者触发但作者是历史贡献者", func(t *testing.T) {
-		t.Parallel()
+	t.Run("所有者触发但作者是历史贡献者", func(t *testrunner.Context) {
 		decision := cigate.Decide(context.Background(), cigate.Input{
 			Mode:              "self",
 			Event:             "pull_request",
@@ -340,14 +325,12 @@ func TestDecidePullRequestIgnoresActor(t *testing.T) {
 	})
 }
 
-// TestDecideIdentityMissing 校验任何模式下身份字段缺失都被拒绝。
-func TestDecideIdentityMissing(t *testing.T) {
-	t.Parallel()
+// 原 TestDecideIdentityMissing 校验任何模式下身份字段缺失都被拒绝。
+func runDecideIdentityMissing(t *testrunner.Context) {
 	modes := []string{"self", "collaborator", "all"}
 	for _, mode := range modes {
 		mode := mode
-		t.Run(mode+" 模式 Push 缺少发起者", func(t *testing.T) {
-			t.Parallel()
+		t.Run(mode+" 模式 Push 缺少发起者", func(t *testrunner.Context) {
 			decision := cigate.Decide(context.Background(), cigate.Input{
 				Mode:            mode,
 				Event:           "push",
@@ -358,8 +341,7 @@ func TestDecideIdentityMissing(t *testing.T) {
 				t.Fatalf("缺少 Push 发起者时不得放行: %s", decision.Reason)
 			}
 		})
-		t.Run(mode+" 模式 Push 缺少仓库所有者", func(t *testing.T) {
-			t.Parallel()
+		t.Run(mode+" 模式 Push 缺少仓库所有者", func(t *testrunner.Context) {
 			decision := cigate.Decide(context.Background(), cigate.Input{
 				Mode:  mode,
 				Event: "push",
@@ -372,8 +354,7 @@ func TestDecideIdentityMissing(t *testing.T) {
 				t.Fatalf("缺少仓库所有者时不得放行: %s", decision.Reason)
 			}
 		})
-		t.Run(mode+" 模式 PR 缺少作者关系", func(t *testing.T) {
-			t.Parallel()
+		t.Run(mode+" 模式 PR 缺少作者关系", func(t *testrunner.Context) {
 			decision := cigate.Decide(context.Background(), cigate.Input{
 				Mode:              mode,
 				Event:             "pull_request",
@@ -388,9 +369,8 @@ func TestDecideIdentityMissing(t *testing.T) {
 	}
 }
 
-// TestDecideUnsupportedEvents 校验不受支持的事件类型不获得授权。
-func TestDecideUnsupportedEvents(t *testing.T) {
-	t.Parallel()
+// 原 TestDecideUnsupportedEvents 校验不受支持的事件类型不获得授权。
+func runDecideUnsupportedEvents(t *testrunner.Context) {
 	events := []string{
 		"workflow_call",
 		"workflow_dispatch",
@@ -400,8 +380,7 @@ func TestDecideUnsupportedEvents(t *testing.T) {
 	}
 	for _, event := range events {
 		event := event
-		t.Run(fmt.Sprintf("事件 %q", event), func(t *testing.T) {
-			t.Parallel()
+		t.Run(fmt.Sprintf("事件 %q", event), func(t *testrunner.Context) {
 			decision := cigate.Decide(context.Background(), cigate.Input{
 				Mode:              "all",
 				Event:             event,
@@ -417,9 +396,8 @@ func TestDecideUnsupportedEvents(t *testing.T) {
 	}
 }
 
-// TestDecisionReasonIsSingleLine 校验判定原因可直接写入 CI 输出文件。
-func TestDecisionReasonIsSingleLine(t *testing.T) {
-	t.Parallel()
+// 原 TestDecisionReasonIsSingleLine 校验判定原因可直接写入 CI 输出文件。
+func runDecisionReasonIsSingleLine(t *testrunner.Context) {
 	inputs := []cigate.Input{
 		{Mode: "", Event: "push", Actor: "a", RepositoryOwner: "b"},
 		{Mode: "self", Event: "push", Actor: "a", RepositoryOwner: "b"},

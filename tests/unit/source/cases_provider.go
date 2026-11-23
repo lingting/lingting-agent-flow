@@ -1,20 +1,20 @@
-// Package source_unit 提供 Git Clone 代码来源的单元测试。
+// 本文件提供 Git Clone 代码来源的单元用例。
 //
 // 这里使用可替换的容器执行器与容器核验器替身：命令构造、参数转义、错误分类与
 // 分支初始化策略都经过真实代码路径，但不需要 SSH 连接、Docker Engine 或 Git。
-package source_unit
+package source
 
 import (
 	"context"
 	"errors"
 	"strings"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/source"
+	"github.com/lingting/agentflow/internal/testrunner"
 	"github.com/lingting/agentflow/tests/testkit"
 )
 
@@ -139,7 +139,7 @@ func newContainer() domain.Container {
 }
 
 // newProvider 构造使用替身的代码来源。
-func newProvider(t *testing.T, executor *fakeExecutor, guard *fakeGuard) *source.Provider {
+func newProvider(t *testrunner.Context, executor *fakeExecutor, guard *fakeGuard) *source.Provider {
 	t.Helper()
 	provider, err := source.NewProvider(source.Options{
 		Executor:     executor,
@@ -219,9 +219,8 @@ func taskResponder(
 	}
 }
 
-// TestRepositoryURLEscaping 验证仓库地址与目录以独立参数传递，不会被拼进 shell 字符串。
-func TestRepositoryURLEscaping(t *testing.T) {
-	t.Parallel()
+// 原 TestRepositoryURLEscaping 验证仓库地址与目录以独立参数传递，不会被拼进 shell 字符串。
+func runRepositoryURLEscaping(t *testrunner.Context) {
 	executor := &fakeExecutor{responder: standardResponder("origin/main", []string{"main"}, false)}
 	provider := newProvider(t, executor, &fakeGuard{container: newContainer()})
 	if _, err := provider.Fetch(context.Background(), source.Request{
@@ -265,9 +264,8 @@ func TestRepositoryURLEscaping(t *testing.T) {
 	}
 }
 
-// TestInvalidRepositoryURL 验证非法仓库地址在容器操作之前就被拒绝。
-func TestInvalidRepositoryURL(t *testing.T) {
-	t.Parallel()
+// 原 TestInvalidRepositoryURL 验证非法仓库地址在容器操作之前就被拒绝。
+func runInvalidRepositoryURL(t *testrunner.Context) {
 	cases := []struct {
 		name string
 		url  string
@@ -280,8 +278,7 @@ func TestInvalidRepositoryURL(t *testing.T) {
 	}
 	for _, item := range cases {
 		item := item
-		t.Run(item.name, func(t *testing.T) {
-			t.Parallel()
+		t.Run(item.name, func(t *testrunner.Context) {
 			executor := &fakeExecutor{}
 			provider := newProvider(t, executor, &fakeGuard{container: newContainer()})
 			_, err := provider.Fetch(context.Background(), source.Request{
@@ -302,14 +299,12 @@ func TestInvalidRepositoryURL(t *testing.T) {
 	}
 }
 
-// TestInvalidTaskID 验证非法任务标识在容器操作之前就被拒绝。
-func TestInvalidTaskID(t *testing.T) {
-	t.Parallel()
+// 原 TestInvalidTaskID 验证非法任务标识在容器操作之前就被拒绝。
+func runInvalidTaskID(t *testrunner.Context) {
 	cases := []string{"", "Task-1", "../escape", "task 1", "-task"}
 	for _, taskID := range cases {
 		taskID := taskID
-		t.Run(taskID, func(t *testing.T) {
-			t.Parallel()
+		t.Run(taskID, func(t *testrunner.Context) {
 			executor := &fakeExecutor{}
 			provider := newProvider(t, executor, &fakeGuard{container: newContainer()})
 			_, err := provider.Fetch(context.Background(), source.Request{
@@ -330,9 +325,8 @@ func TestInvalidTaskID(t *testing.T) {
 	}
 }
 
-// TestContainerGuardErrors 验证容器核验失败的错误分类。
-func TestContainerGuardErrors(t *testing.T) {
-	t.Parallel()
+// 原 TestContainerGuardErrors 验证容器核验失败的错误分类。
+func runContainerGuardErrors(t *testrunner.Context) {
 	cases := []struct {
 		name string
 		err  error
@@ -356,8 +350,7 @@ func TestContainerGuardErrors(t *testing.T) {
 	}
 	for _, item := range cases {
 		item := item
-		t.Run(item.name, func(t *testing.T) {
-			t.Parallel()
+		t.Run(item.name, func(t *testrunner.Context) {
 			executor := &fakeExecutor{}
 			provider := newProvider(t, executor, &fakeGuard{err: item.err})
 			_, err := provider.Fetch(context.Background(), source.Request{
@@ -375,9 +368,8 @@ func TestContainerGuardErrors(t *testing.T) {
 	}
 }
 
-// TestDetachedContainerRejected 验证已脱离管理的容器不会被自动接管。
-func TestDetachedContainerRejected(t *testing.T) {
-	t.Parallel()
+// 原 TestDetachedContainerRejected 验证已脱离管理的容器不会被自动接管。
+func runDetachedContainerRejected(t *testrunner.Context) {
 	container := newContainer()
 	container.Detached = true
 	container.State = domain.ContainerStateDetached
@@ -396,9 +388,8 @@ func TestDetachedContainerRejected(t *testing.T) {
 	}
 }
 
-// TestGitUnavailable 验证容器内缺少 Git 时的错误分类。
-func TestGitUnavailable(t *testing.T) {
-	t.Parallel()
+// 原 TestGitUnavailable 验证容器内缺少 Git 时的错误分类。
+func runGitUnavailable(t *testrunner.Context) {
 	executor := &fakeExecutor{responder: func(command []string) (docker.CommandResult, error) {
 		if strings.Join(command, " ") == "git --version" {
 			return exitCode(127, "sh: git: command not found\n"), nil
@@ -421,9 +412,8 @@ func TestGitUnavailable(t *testing.T) {
 	}
 }
 
-// TestTargetDirNotEmpty 验证目标目录非空时失败且不删除目录内容。
-func TestTargetDirNotEmpty(t *testing.T) {
-	t.Parallel()
+// 原 TestTargetDirNotEmpty 验证目标目录非空时失败且不删除目录内容。
+func runTargetDirNotEmpty(t *testrunner.Context) {
 	executor := &fakeExecutor{responder: func(command []string) (docker.CommandResult, error) {
 		joined := strings.Join(command, " ")
 		switch {
@@ -457,9 +447,8 @@ func TestTargetDirNotEmpty(t *testing.T) {
 	}
 }
 
-// TestBaseBranchSelectionPriority 验证基础分支识别优先级。
-func TestBaseBranchSelectionPriority(t *testing.T) {
-	t.Parallel()
+// 原 TestBaseBranchSelectionPriority 验证基础分支识别优先级。
+func runBaseBranchSelectionPriority(t *testrunner.Context) {
 	cases := []struct {
 		name       string
 		originHead string
@@ -491,8 +480,7 @@ func TestBaseBranchSelectionPriority(t *testing.T) {
 	}
 	for _, item := range cases {
 		item := item
-		t.Run(item.name, func(t *testing.T) {
-			t.Parallel()
+		t.Run(item.name, func(t *testrunner.Context) {
 			executor := &fakeExecutor{
 				responder: standardResponder(item.originHead, item.branches, false),
 			}
@@ -515,9 +503,8 @@ func TestBaseBranchSelectionPriority(t *testing.T) {
 	}
 }
 
-// TestBaseBranchUnrecognized 验证无法识别基础分支时返回明确错误。
-func TestBaseBranchUnrecognized(t *testing.T) {
-	t.Parallel()
+// 原 TestBaseBranchUnrecognized 验证无法识别基础分支时返回明确错误。
+func runBaseBranchUnrecognized(t *testrunner.Context) {
 	executor := &fakeExecutor{responder: standardResponder("", []string{"develop"}, false)}
 	provider := newProvider(t, executor, &fakeGuard{container: newContainer()})
 	_, err := provider.Fetch(context.Background(), source.Request{
@@ -533,9 +520,8 @@ func TestBaseBranchUnrecognized(t *testing.T) {
 	}
 }
 
-// TestExplicitBaseBranch 验证显式基础分支优先于自动识别。
-func TestExplicitBaseBranch(t *testing.T) {
-	t.Parallel()
+// 原 TestExplicitBaseBranch 验证显式基础分支优先于自动识别。
+func runExplicitBaseBranch(t *testrunner.Context) {
 	executor := &fakeExecutor{responder: standardResponder("origin/main", []string{"main", "release"}, false)}
 	provider := newProvider(t, executor, &fakeGuard{container: newContainer()})
 	result, err := provider.Fetch(context.Background(), source.Request{
@@ -555,9 +541,8 @@ func TestExplicitBaseBranch(t *testing.T) {
 	}
 }
 
-// TestExplicitBaseBranchMissing 验证显式基础分支不存在时失败。
-func TestExplicitBaseBranchMissing(t *testing.T) {
-	t.Parallel()
+// 原 TestExplicitBaseBranchMissing 验证显式基础分支不存在时失败。
+func runExplicitBaseBranchMissing(t *testrunner.Context) {
 	executor := &fakeExecutor{responder: standardResponder("origin/main", []string{"main"}, false)}
 	provider := newProvider(t, executor, &fakeGuard{container: newContainer()})
 	_, err := provider.Fetch(context.Background(), source.Request{
@@ -571,9 +556,8 @@ func TestExplicitBaseBranchMissing(t *testing.T) {
 	}
 }
 
-// TestCreateTaskBranch 验证任务分支名与创建参数。
-func TestCreateTaskBranch(t *testing.T) {
-	t.Parallel()
+// 原 TestCreateTaskBranch 验证任务分支名与创建参数。
+func runCreateTaskBranch(t *testrunner.Context) {
 	executor := &fakeExecutor{responder: standardResponder("origin/main", []string{"main"}, false)}
 	provider := newProvider(t, executor, &fakeGuard{container: newContainer()})
 	result, err := provider.Fetch(context.Background(), source.Request{
@@ -604,9 +588,8 @@ func TestCreateTaskBranch(t *testing.T) {
 	}
 }
 
-// TestRemoteTaskBranchExists 验证远程已存在任务分支时检出该分支。
-func TestRemoteTaskBranchExists(t *testing.T) {
-	t.Parallel()
+// 原 TestRemoteTaskBranchExists 验证远程已存在任务分支时检出该分支。
+func runRemoteTaskBranchExists(t *testrunner.Context) {
 	executor := &fakeExecutor{responder: standardResponder("origin/main", []string{"main"}, true)}
 	provider := newProvider(t, executor, &fakeGuard{container: newContainer()})
 	result, err := provider.Fetch(context.Background(), source.Request{
@@ -628,9 +611,8 @@ func TestRemoteTaskBranchExists(t *testing.T) {
 	}
 }
 
-// TestCloneFailureClassification 验证 Clone 失败的错误分类。
-func TestCloneFailureClassification(t *testing.T) {
-	t.Parallel()
+// 原 TestCloneFailureClassification 验证 Clone 失败的错误分类。
+func runCloneFailureClassification(t *testrunner.Context) {
 	cases := []struct {
 		name   string
 		stderr string
@@ -654,8 +636,7 @@ func TestCloneFailureClassification(t *testing.T) {
 	}
 	for _, item := range cases {
 		item := item
-		t.Run(item.name, func(t *testing.T) {
-			t.Parallel()
+		t.Run(item.name, func(t *testrunner.Context) {
 			base := standardResponder("origin/main", []string{"main"}, false)
 			executor := &fakeExecutor{responder: func(command []string) (docker.CommandResult, error) {
 				if containsArg(command, "clone") {
@@ -682,9 +663,8 @@ func TestCloneFailureClassification(t *testing.T) {
 	}
 }
 
-// TestCloneCancelledAndTimeout 验证取消与超时的错误分类。
-func TestCloneCancelledAndTimeout(t *testing.T) {
-	t.Parallel()
+// 原 TestCloneCancelledAndTimeout 验证取消与超时的错误分类。
+func runCloneCancelledAndTimeout(t *testrunner.Context) {
 	cases := []struct {
 		name   string
 		result docker.CommandResult
@@ -714,8 +694,7 @@ func TestCloneCancelledAndTimeout(t *testing.T) {
 	}
 	for _, item := range cases {
 		item := item
-		t.Run(item.name, func(t *testing.T) {
-			t.Parallel()
+		t.Run(item.name, func(t *testrunner.Context) {
 			base := standardResponder("origin/main", []string{"main"}, false)
 			executor := &fakeExecutor{responder: func(command []string) (docker.CommandResult, error) {
 				if containsArg(command, "clone") {
@@ -736,9 +715,8 @@ func TestCloneCancelledAndTimeout(t *testing.T) {
 	}
 }
 
-// TestUncertainResultClassification 验证结果不确定时返回可诊断类别。
-func TestUncertainResultClassification(t *testing.T) {
-	t.Parallel()
+// 原 TestUncertainResultClassification 验证结果不确定时返回可诊断类别。
+func runUncertainResultClassification(t *testrunner.Context) {
 	base := standardResponder("origin/main", []string{"main"}, false)
 	executor := &fakeExecutor{responder: func(command []string) (docker.CommandResult, error) {
 		if containsArg(command, "clone") {
@@ -761,9 +739,8 @@ func TestUncertainResultClassification(t *testing.T) {
 	}
 }
 
-// TestBranchInitFailure 验证 Clone 成功但分支初始化失败时整体失败。
-func TestBranchInitFailure(t *testing.T) {
-	t.Parallel()
+// 原 TestBranchInitFailure 验证 Clone 成功但分支初始化失败时整体失败。
+func runBranchInitFailure(t *testrunner.Context) {
 	base := standardResponder("origin/main", []string{"main"}, false)
 	executor := &fakeExecutor{responder: func(command []string) (docker.CommandResult, error) {
 		if containsArg(command, "checkout") {
@@ -792,9 +769,8 @@ func TestBranchInitFailure(t *testing.T) {
 	}
 }
 
-// TestWorktreeVerificationFailure 验证工作区校验失败时整体失败。
-func TestWorktreeVerificationFailure(t *testing.T) {
-	t.Parallel()
+// 原 TestWorktreeVerificationFailure 验证工作区校验失败时整体失败。
+func runWorktreeVerificationFailure(t *testrunner.Context) {
 	base := standardResponder("origin/main", []string{"main"}, false)
 	executor := &fakeExecutor{responder: func(command []string) (docker.CommandResult, error) {
 		if strings.HasPrefix(strings.Join(command, " "), "sh -c test -d ") {
@@ -813,9 +789,8 @@ func TestWorktreeVerificationFailure(t *testing.T) {
 	}
 }
 
-// TestBranchMismatchDetected 验证当前分支与约定任务分支不一致时失败。
-func TestBranchMismatchDetected(t *testing.T) {
-	t.Parallel()
+// 原 TestBranchMismatchDetected 验证当前分支与约定任务分支不一致时失败。
+func runBranchMismatchDetected(t *testrunner.Context) {
 	base := standardResponder("origin/main", []string{"main"}, false)
 	executor := &fakeExecutor{responder: func(command []string) (docker.CommandResult, error) {
 		if containsArg(command, "--abbrev-ref") {
@@ -834,9 +809,8 @@ func TestBranchMismatchDetected(t *testing.T) {
 	}
 }
 
-// TestConcurrentFetchesUseDistinctWorkDirs 验证并发调用不会共用目标目录。
-func TestConcurrentFetchesUseDistinctWorkDirs(t *testing.T) {
-	t.Parallel()
+// 原 TestConcurrentFetchesUseDistinctWorkDirs 验证并发调用不会共用目标目录。
+func runConcurrentFetchesUseDistinctWorkDirs(t *testrunner.Context) {
 	root := testkit.New(t)
 	type outcome struct {
 		result source.Result
@@ -885,9 +859,8 @@ func TestConcurrentFetchesUseDistinctWorkDirs(t *testing.T) {
 	_ = root
 }
 
-// TestCancelledContextRejected 验证调用前取消直接返回取消状态。
-func TestCancelledContextRejected(t *testing.T) {
-	t.Parallel()
+// 原 TestCancelledContextRejected 验证调用前取消直接返回取消状态。
+func runCancelledContextRejected(t *testrunner.Context) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	executor := &fakeExecutor{}

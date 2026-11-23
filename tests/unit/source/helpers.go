@@ -1,4 +1,4 @@
-package source_unit
+package source
 
 import "github.com/lingting/agentflow/internal/sshclient"
 

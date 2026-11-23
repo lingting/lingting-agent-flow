@@ -1,11 +1,11 @@
-package planninganalysis_test
+// 本文件提供 tests/unit/app/planninganalysis 的测试现场：项目、规划会话与两阶段角色替身。
+package planninganalysis
 
 import (
 	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/agent"
@@ -13,6 +13,7 @@ import (
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
+	"github.com/lingting/agentflow/internal/testrunner"
 	"github.com/lingting/agentflow/tests/testkit"
 )
 
@@ -180,7 +181,7 @@ func (f *fakeAnalysisAgent) roleTypes() []string {
 }
 
 // requestAt 返回第 index 次调用收到的请求。
-func (f *fakeAnalysisAgent) requestAt(t *testing.T, index int) app.RunPlanningRoleRequest {
+func (f *fakeAnalysisAgent) requestAt(t *testrunner.Context, index int) app.RunPlanningRoleRequest {
 	t.Helper()
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -191,7 +192,7 @@ func (f *fakeAnalysisAgent) requestAt(t *testing.T, index int) app.RunPlanningRo
 }
 
 // waitEntered 等待指定数量进入 RunRole 的调用。
-func (f *fakeAnalysisAgent) waitEntered(t *testing.T, count int) {
+func (f *fakeAnalysisAgent) waitEntered(t *testrunner.Context, count int) {
 	t.Helper()
 	for index := 0; index < count; index++ {
 		select {
@@ -244,7 +245,7 @@ type analysisFixtureOptions struct {
 }
 
 // newAnalysisFixture 在测试工作空间中准备项目与两阶段分析服务。
-func newAnalysisFixture(t *testing.T, options analysisFixtureOptions) *analysisFixture {
+func newAnalysisFixture(t *testrunner.Context, options analysisFixtureOptions) *analysisFixture {
 	t.Helper()
 	workspace := testkit.New(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -309,7 +310,7 @@ func newAnalysisFixture(t *testing.T, options analysisFixtureOptions) *analysisF
 }
 
 // analyzingSession 创建一个已提交需求并进入 analyzing 的规划会话。
-func (f *analysisFixture) analyzingSession(t *testing.T) domain.PlanningSession {
+func (f *analysisFixture) analyzingSession(t *testrunner.Context) domain.PlanningSession {
 	t.Helper()
 	session, err := f.sessions.Create(f.ctx, app.CreatePlanningSessionRequest{ProjectID: f.project.ID})
 	if err != nil {
@@ -328,7 +329,7 @@ func (f *analysisFixture) analyzingSession(t *testing.T) domain.PlanningSession 
 }
 
 // loadSession 重新读取规划会话的持久化事实。
-func (f *analysisFixture) loadSession(t *testing.T, sessionID domain.ID) domain.PlanningSession {
+func (f *analysisFixture) loadSession(t *testrunner.Context, sessionID domain.ID) domain.PlanningSession {
 	t.Helper()
 	session, err := f.db.GetPlanningSession(f.ctx, sessionID)
 	if err != nil {
@@ -338,7 +339,7 @@ func (f *analysisFixture) loadSession(t *testing.T, sessionID domain.ID) domain.
 }
 
 // revisions 返回会话已持久化的全部方案版本。
-func (f *analysisFixture) revisions(t *testing.T, sessionID domain.ID) []domain.PlanningRevision {
+func (f *analysisFixture) revisions(t *testrunner.Context, sessionID domain.ID) []domain.PlanningRevision {
 	t.Helper()
 	revisions, err := f.db.ListPlanningRevisions(f.ctx, sessionID)
 	if err != nil {
@@ -348,7 +349,7 @@ func (f *analysisFixture) revisions(t *testing.T, sessionID domain.ID) []domain.
 }
 
 // messages 返回会话已持久化的全部消息。
-func (f *analysisFixture) messages(t *testing.T, sessionID domain.ID) []domain.PlanningMessage {
+func (f *analysisFixture) messages(t *testrunner.Context, sessionID domain.ID) []domain.PlanningMessage {
 	t.Helper()
 	messages, err := f.db.ListPlanningMessages(f.ctx, sessionID)
 	if err != nil {
@@ -358,7 +359,7 @@ func (f *analysisFixture) messages(t *testing.T, sessionID domain.ID) []domain.P
 }
 
 // countRows 统计指定表的行数，用于核验"没有创建正式实体"。
-func (f *analysisFixture) countRows(t *testing.T, table string) int {
+func (f *analysisFixture) countRows(t *testrunner.Context, table string) int {
 	t.Helper()
 	raw := testkit.OpenSQLite(t, f.db.Path())
 	var count int
@@ -404,7 +405,7 @@ func (t failingRevisionTx) AppendPlanningRevision(
 //
 // 数据库、会话服务与角色替身都与 base 共用：失败注入只改一处写入，事务边界、回滚与
 // 条件更新仍然由真实 SQLite 执行。
-func newAnalysisFixtureOver(t *testing.T, base *analysisFixture) *analysisFixture {
+func newAnalysisFixtureOver(t *testrunner.Context, base *analysisFixture) *analysisFixture {
 	t.Helper()
 	return &analysisFixture{
 		db:       base.db,
@@ -421,7 +422,7 @@ func newAnalysisFixtureOver(t *testing.T, base *analysisFixture) *analysisFixtur
 //
 // 它直接读占用表而不是尝试抢占：失败会话不允许抢占，"没有占用"只能用占用记录本身
 // 证明。
-func assertClaimReleased(t *testing.T, f *analysisFixture, sessionID domain.ID) {
+func assertClaimReleased(t *testrunner.Context, f *analysisFixture, sessionID domain.ID) {
 	t.Helper()
 	claims, err := f.db.ListPlanningAnalysisClaims(f.ctx)
 	if err != nil {
@@ -435,7 +436,7 @@ func assertClaimReleased(t *testing.T, f *analysisFixture, sessionID domain.ID) 
 }
 
 // assertClaimHeld 断言会话仍被指定标识的占用持有。
-func assertClaimHeld(t *testing.T, f *analysisFixture, sessionID domain.ID, claimID string) {
+func assertClaimHeld(t *testrunner.Context, f *analysisFixture, sessionID domain.ID, claimID string) {
 	t.Helper()
 	claims, err := f.db.ListPlanningAnalysisClaims(f.ctx)
 	if err != nil {

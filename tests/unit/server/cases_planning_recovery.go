@@ -1,9 +1,9 @@
-// Package server_test 中的本文件验证服务端启动时的规划分析占用恢复。
+// 本文件验证服务端启动时的规划分析占用恢复。
 //
 // 用例跑的是真实的 Server.Run：取得进程锁 → 打开数据库 → 启动后台服务（含占用恢复）
 // → 建立 HTTP 监听。断言因此能证明"恢复发生在 HTTP 开始接收请求之前"，而不是只证明
 // 恢复函数本身可用。
-package server_test
+package server
 
 import (
 	"context"
@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/app"
@@ -22,6 +21,7 @@ import (
 	"github.com/lingting/agentflow/internal/server"
 	"github.com/lingting/agentflow/internal/storage"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
+	"github.com/lingting/agentflow/internal/testrunner"
 	"github.com/lingting/agentflow/tests/testkit"
 )
 
@@ -30,7 +30,7 @@ const ephemeralListenAddress = "127.0.0.1:0"
 
 // interruptedPlanningSession 在数据库里留下"进程中断"的现场：analyzing + 分析占用。
 func interruptedPlanningSession(
-	t *testing.T,
+	t *testrunner.Context,
 	ctx context.Context,
 	databasePath string,
 ) domain.PlanningSession {
@@ -80,7 +80,7 @@ func interruptedPlanningSession(
 
 // startServerWithDatabase 启动一个只绑定测试数据库的服务实例。
 func startServerWithDatabase(
-	t *testing.T,
+	t *testrunner.Context,
 	ctx context.Context,
 	databasePath string,
 ) (*server.Server, context.CancelFunc, <-chan error) {
@@ -122,9 +122,8 @@ func startServerWithDatabase(
 	return instance, cancel, done
 }
 
-// TestServerRunRecoversInterruptedPlanningAnalysis 验证启动恢复先于 HTTP 对外服务。
-func TestServerRunRecoversInterruptedPlanningAnalysis(t *testing.T) {
-	t.Parallel()
+// 原 TestServerRunRecoversInterruptedPlanningAnalysis 验证启动恢复先于 HTTP 对外服务。
+func runServerRunRecoversInterruptedPlanningAnalysis(t *testrunner.Context) {
 	workspace := testkit.Dir(t)
 	databasePath := filepath.Join(workspace, "data", "agentflow.db")
 	seedCtx, cancelSeed := context.WithTimeout(context.Background(), 60*time.Second)

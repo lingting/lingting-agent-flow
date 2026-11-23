@@ -1,17 +1,18 @@
-package planningagent_test
+// 本文件提供 tests/unit/app/planningagent 的测试现场：会话、容器记录、角色配置与容器替身。
+package planningagent
 
 import (
 	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
+	"github.com/lingting/agentflow/internal/testrunner"
 	"github.com/lingting/agentflow/tests/testkit"
 )
 
@@ -66,7 +67,7 @@ type fixtureOptions struct {
 }
 
 // newPlanningFixture 在测试工作空间中准备规划会话并构造规划 Agent 服务。
-func newPlanningFixture(t *testing.T, options fixtureOptions) *planningFixture {
+func newPlanningFixture(t *testrunner.Context, options fixtureOptions) *planningFixture {
 	t.Helper()
 	if options.sessions <= 0 {
 		options.sessions = 1
@@ -230,7 +231,7 @@ func (f *planningFixture) request(index int) app.RunPlanningRoleRequest {
 }
 
 // stop 在限定时间内停止服务并返回错误。
-func (f *planningFixture) stop(t *testing.T) error {
+func (f *planningFixture) stop(t *testrunner.Context) error {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -248,7 +249,7 @@ func (f *planningFixture) call(ctx context.Context, index int) <-chan error {
 }
 
 // waitCall 等待一次后台调用结束并返回其错误。
-func waitCall(t *testing.T, done <-chan error) error {
+func waitCall(t *testrunner.Context, done <-chan error) error {
 	t.Helper()
 	select {
 	case err := <-done:
@@ -370,7 +371,7 @@ func (f *fakeContainerPort) RunAgent(
 }
 
 // waitEntered 等待指定数量的调用进入 RunAgent。
-func (f *fakeContainerPort) waitEntered(t *testing.T, count int) {
+func (f *fakeContainerPort) waitEntered(t *testrunner.Context, count int) {
 	t.Helper()
 	for index := 0; index < count; index++ {
 		select {
@@ -392,7 +393,7 @@ func (f *fakeContainerPort) finishCount() int {
 }
 
 // requestAt 返回第 index 次调用收到的请求。
-func (f *fakeContainerPort) requestAt(t *testing.T, index int) app.ContainerAgentRequest {
+func (f *fakeContainerPort) requestAt(t *testrunner.Context, index int) app.ContainerAgentRequest {
 	t.Helper()
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -403,7 +404,7 @@ func (f *fakeContainerPort) requestAt(t *testing.T, index int) app.ContainerAgen
 }
 
 // contextAt 返回第 index 次调用收到的上下文。
-func (f *fakeContainerPort) contextAt(t *testing.T, index int) context.Context {
+func (f *fakeContainerPort) contextAt(t *testrunner.Context, index int) context.Context {
 	t.Helper()
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -422,7 +423,7 @@ func (f *fakeContainerPort) releaseAll() {
 //
 // 返回的 archiving 在进入归档阶段时收到信号，调用 closeArchive 之后 RunAgent 才真正返回。
 // 用例据此断言：Pi 已被取消、但归档尚未完成时，会话登记仍然被持有，RunRole 也没有返回。
-func (f *fakeContainerPort) holdArchive(t *testing.T) (<-chan struct{}, func()) {
+func (f *fakeContainerPort) holdArchive(t *testrunner.Context) (<-chan struct{}, func()) {
 	t.Helper()
 	archiving := make(chan struct{}, 1)
 	archiveRelease := make(chan struct{})
