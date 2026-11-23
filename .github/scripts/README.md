@@ -83,12 +83,12 @@ bash .github/scripts/resolve-release-version.sh --require-tag   # 需要 REF_TYP
 
 并行与资源上限：
 
-- 每个 Job 独享一台 4 vCPU Runner，执行器只用 `--parallel 4`；
-- `cases-unit`、`cases-local`、`cases-e2e`、`cases-selfcheck`、`ui-test` 之间没有依赖，由 GitHub Actions 并行调度，
-  它们都依赖 `go-inventory`，分组核验失败时不会跑一半测试；
+- 每个 Runner 独享一台 4 vCPU Runner，执行器只用 `--parallel 4`；
+- `cases-unit`、`cases-local`、`cases-e2e`、`cases-selfcheck`、前端 9 个 `ui-test` matrix 分片与 `ui-gates`
+  之间没有依赖，由 GitHub Actions 并行调度；它们都依赖 `go-inventory`，分组核验失败时不会运行测试；
+- 前端 matrix 使用 `fail-fast: false`，一个领域失败不会取消其余分片；`ci-summary` 等待 matrix 全部结束并检查聚合结果；
 - 真实分组固定 `--parallel 1`：全部真实套件共用同一台远程机器与同一个 Docker Engine；
-- 共用同一台设备的真实分组在包内保持串行（`remote/docker`），前端 Playwright 固定 `workers: 1`：
-  并发只由执行器调度器决定。
+- 共用同一台设备的真实分组在包内保持串行（`remote/docker`）；前端 Playwright 固定 `workers: 1`，每个领域内部的 Case 并发由执行器 `--parallel 4` 控制。
 
 缓存策略（集中在 `ci.yml` 的 `actions/setup-go` 步骤，不额外引入缓存系统）：
 

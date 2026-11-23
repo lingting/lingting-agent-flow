@@ -278,9 +278,9 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-  # 前端用例由统一执行器运行：dev server 由 frontend-dev-server 提供者启动，端口由 OS 分配；
-  # 格式、lint、类型检查与生产构建属于非测试门禁，单独成步骤，不参与用例统计。
-  # 前端按领域拆成 9 个独立 Runner：每个分片仍经统一执行器执行 Case，且各自提供隔离的 dev server。
+  # 每个前端领域分片在自己的 Runner 中运行统一执行器；该 Runner 内的 Playwright 用例共享 dev server，
+  # Runner 之间不共享进程、端口或浏览器会话。格式、lint、类型检查与生产构建由并行的 ui-gates Job 负责。
+  # 前端按领域拆成 9 个独立 Runner；每个分片仍经统一执行器执行 Case。
   # fail-fast=false 保证单个领域失败不会取消其它领域，ci-summary 会检查整个 matrix 的聚合结论。
   ui-test:
     name: 前端用例（${{ matrix.domain }}）
