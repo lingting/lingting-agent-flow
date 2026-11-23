@@ -1,0 +1,320 @@
+package sqlite
+
+import (
+	"errors"
+	"time"
+
+	"github.com/lingting/agentflow/internal/domain"
+	"github.com/lingting/agentflow/internal/storage"
+	"github.com/lingting/agentflow/internal/testrunner"
+	"github.com/lingting/agentflow/tests/testkit"
+)
+
+func runCreateAndGetAttempt(t *testrunner.Context) {
+	db := newTestDB(t)
+	ctx := testContext(t)
+	built := newFixture(t, db)
+
+	loaded, err := db.GetAttempt(ctx, built.attempt.ID)
+	if err != nil {
+		t.Fatalf("读取执行尝试失败: %v", err)
+	}
+	if loaded.StepID != built.step.ID {
+		t.Fatalf("步骤归属不符: %s", loaded.StepID)
+	}
+	if loaded.AttemptNumber != 1 {
+		t.Fatalf("尝试序号不符: %d", loaded.AttemptNumber)
+	}
+	if loaded.Status != domain.AttemptStatusRunning {
+		t.Fatalf("初始状态不符: %s", loaded.Status)
+	}
+	if loaded.FailureSummary != "" || loaded.FinishedAt != nil {
+		t.Fatalf("未结束的尝试不应有失败摘要与结束时间: %+v", loaded)
+	}
+	if !loaded.StartedAt.Equal(built.attempt.StartedAt) ||
+		!loaded.CreatedAt.Equal(built.attempt.CreatedAt) {
+		t.Fatalf("时间戳未按毫秒精度保存: %+v", loaded)
+	}
+}
+
+func runMultipleAttemptsPerStepKeepHistory(t *testrunner.Context) {
+	db := newTestDB(t)
+	ctx := testContext(t)
+	built := newFixture(t, db)
+
+	second := mustAttempt(t, db, built.step, 2)
+	if err := built.attempt.Fail("第一次失败", time.Now().UTC()); err != nil {
+		t.Fatalf("标记失败失败: %v", err)
+	}
+	if err := db.UpdateAttempt(ctx, built.attempt); err != nil {
+		t.Fatalf("更新执行尝试失败: %v", err)
+	}
+
+	attempts, err := db.ListAttemptsByStep(ctx, built.step.ID)
+	if err != nil {
+		t.Fatalf("查询执行尝试失败: %v", err)
+	}
+	if len(attempts) != 2 {
+		t.Fatalf("尝试数量不符: %d", len(attempts))
+	}
+	if attempts[0].ID != built.attempt.ID || attempts[1].ID != second.ID {
+		t.Fatalf("尝试顺序不符: %+v", attempts)
+	}
+	if attempts[0].Status != domain.AttemptStatusFailed {
+		t.Fatalf("第一次尝试状态不符: %s", attempts[0].Status)
+	}
+	if attempts[0].FailureSummary != "第一次失败" {
+		t.Fatalf("失败摘要未保存: %q", attempts[0].FailureSummary)
+	}
+	if attempts[0].FinishedAt == nil {
+		t.Fatal("已失败的尝试应当有结束时间")
+	}
+	if attempts[1].Status != domain.AttemptStatusRunning {
+		t.Fatalf("第二次尝试应当仍在运行: %s", attempts[1].Status)
+	}
+}
+
+func runDuplicateAttemptNumberIsRejected(t *testrunner.Context) {
+	db := newTestDB(t)
+	ctx := testContext(t)
+	built := newFixture(t, db)
+	duplicate, err := domain.NewAttempt(built.step.TaskID, built.step.ID, 1, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("构造执行尝试失败: %v", err)
+	}
+	if err := db.CreateAttempt(ctx, duplicate); !errors.Is(err, storage.ErrConflict) {
+		t.Fatalf("重复尝试序号应当返回冲突，实际: %v", err)
+	}
+	if _, err := db.GetAttempt(ctx, built.attempt.ID); err != nil {
+		t.Fatalf("原有尝试不应被覆盖: %v", err)
+	}
+}
+
+func runAttemptRequiresPositiveNumber(t *testrunner.Context) {
+	db := newTestDB(t)
+	built := newFixture(t, db)
+	if _, err := domain.NewAttempt(built.step.TaskID, built.step.ID, 0, time.Now().UTC()); err == nil {
+		t.Fatal("尝试序号必须大于 0")
+	}
+}
+
+func runNextAttemptNumber(t *testrunner.Context) {
+	db := newTestDB(t)
+	ctx := testContext(t)
+	built := newFixture(t, db)
+
+	next, err := db.NextAttemptNumber(ctx, built.step.ID)
+	if err != nil {
+		t.Fatalf("查询下一尝试序号失败: %v", err)
+	}
+	if next != 2 {
+		t.Fatalf("下一尝试序号不符: %d", next)
+	}
+	mustAttempt(t, db, built.step, 2)
+	next, err = db.NextAttemptNumber(ctx, built.step.ID)
+	if err != nil {
+		t.Fatalf("查询下一尝试序号失败: %v", err)
+	}
+	if next != 3 {
+		t.Fatalf("下一尝试序号不符: %d", next)
+	}
+}
+
+func runNextAttemptNumberOnEmptyStep(t *testrunner.Context) {
+	db := newTestDB(t)
+	ctx := testContext(t)
+	requirement := mustRequirement(t, db)
+	role := mustRole(t, db, domain.RoleTypeDeveloper, "开发工程师")
+	task := mustTask(t, db, requirement.ID)
+	step := mustStep(t, db, task, role, 1)
+
+	next, err := db.NextAttemptNumber(ctx, step.ID)
+	if err != nil {
+		t.Fatalf("查询下一尝试序号失败: %v", err)
+	}
+	if next != 1 {
+		t.Fatalf("空步骤的下一尝试序号应为 1，实际: %d", next)
+	}
+}
+
+func runAttemptInterruptedStatusPersists(t *testrunner.Context) {
+	db := newTestDB(t)
+	ctx := testContext(t)
+	built := newFixture(t, db)
+	attempt := built.attempt
+	if err := attempt.Interrupt("进程异常退出", time.Now().UTC()); err != nil {
+		t.Fatalf("标记中断失败: %v", err)
+	}
+	if err := db.UpdateAttempt(ctx, attempt); err != nil {
+		t.Fatalf("更新执行尝试失败: %v", err)
+	}
+	loaded, err := db.GetAttempt(ctx, attempt.ID)
+	if err != nil {
+		t.Fatalf("读取执行尝试失败: %v", err)
+	}
+	if loaded.Status != domain.AttemptStatusInterrupted {
+		t.Fatalf("中断状态未持久化: %s", loaded.Status)
+	}
+	if loaded.FailureSummary != "进程异常退出" {
+		t.Fatalf("中断摘要未持久化: %q", loaded.FailureSummary)
+	}
+}
+
+func runAttemptAcceptsUnknownStatusAtDatabaseLevel(t *testrunner.Context) {
+	db := newTestDB(t)
+	built := newFixture(t, db)
+	// 数据库不再限制 status / verification_verdict 的取值集合。
+	testkit.MustExec(
+		t,
+		rawDB(t, db),
+		`UPDATE attempts SET status = 'awaiting_retry', verification_verdict = 'unknown_v2' WHERE id = ?`,
+		built.attempt.ID.String(),
+	)
+	loaded, err := db.GetAttempt(testContext(t), built.attempt.ID)
+	if err != nil {
+		t.Fatalf("读取执行尝试失败: %v", err)
+	}
+	if loaded.Status != domain.AttemptStatus("awaiting_retry") {
+		t.Fatalf("未知状态应当原样保留，实际: %s", loaded.Status)
+	}
+	if loaded.VerificationVerdict != domain.VerificationVerdict("unknown_v2") {
+		t.Fatalf("未知判定应当原样保留，实际: %s", loaded.VerificationVerdict)
+	}
+	// 业务状态机仍然拒绝不合法的迁移。
+	if err := loaded.Complete(time.Now().UTC()); err == nil {
+		t.Fatal("状态机应当拒绝未知状态的迁移")
+	}
+}
+
+func runAttemptAllowsOrphanStepID(t *testrunner.Context) {
+	db := newTestDB(t)
+	// 数据库不声明外键，step_id 只是普通文本，允许保存孤立标识。
+	attempt, err := domain.NewAttempt(domain.NewID(), domain.NewID(), 1, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("构造执行尝试失败: %v", err)
+	}
+	if err := db.CreateAttempt(testContext(t), attempt); err != nil {
+		t.Fatalf("孤立步骤标识应当允许保存，实际: %v", err)
+	}
+	loaded, err := db.GetAttempt(testContext(t), attempt.ID)
+	if err != nil {
+		t.Fatalf("读取执行尝试失败: %v", err)
+	}
+	if loaded.StepID != attempt.StepID {
+		t.Fatalf("孤立标识应当原样保留: %s", loaded.StepID)
+	}
+}
+
+func runGetAttemptNotFound(t *testrunner.Context) {
+	db := newTestDB(t)
+	if _, err := db.GetAttempt(testContext(t), domain.NewID()); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("应当返回记录不存在，实际: %v", err)
+	}
+}
+
+func runDeleteStepKeepsAttemptHistory(t *testrunner.Context) {
+	db := newTestDB(t)
+	ctx := testContext(t)
+	built := newFixture(t, db)
+	// 数据库不声明外键：删除步骤不会级联删除尝试记录，也不会被阻止。
+	testkit.MustExec(t, rawDB(t, db), `DELETE FROM steps WHERE id = ?`, built.step.ID.String())
+	if _, err := db.GetStep(ctx, built.step.ID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("步骤应当已删除，实际: %v", err)
+	}
+	attempt, err := db.GetAttempt(ctx, built.attempt.ID)
+	if err != nil {
+		t.Fatalf("尝试历史不应因步骤删除而丢失: %v", err)
+	}
+	if attempt.StepID != built.step.ID {
+		t.Fatalf("尝试应保留原步骤标识: %s", attempt.StepID)
+	}
+}
+
+// TestAttemptGitStateRoundTrip 验证 Git 工作区状态快照可以完整往返。
+func runAttemptGitStateRoundTrip(t *testrunner.Context) {
+	db := newTestDB(t)
+	ctx := testContext(t)
+	built := newFixture(t, db)
+
+	before := domain.GitWorktreeState{
+		StatusRead: true,
+		Branch:     "agent/task-1",
+		Head:       "1111111111111111111111111111111111111111",
+	}
+	after := domain.GitWorktreeState{
+		StatusRead: true,
+		Branch:     "agent/task-1",
+		Head:       "2222222222222222222222222222222222222222",
+		Dirty:      true,
+		Modified:   2,
+		Added:      1,
+	}
+	if err := built.attempt.SetGitBefore(before); err != nil {
+		t.Fatalf("记录执行前状态失败: %v", err)
+	}
+	if err := built.attempt.SetGitAfter(after); err != nil {
+		t.Fatalf("记录执行后状态失败: %v", err)
+	}
+	if err := db.UpdateAttempt(ctx, built.attempt); err != nil {
+		t.Fatalf("更新执行尝试失败: %v", err)
+	}
+	loaded, err := db.GetAttempt(ctx, built.attempt.ID)
+	if err != nil {
+		t.Fatalf("读取执行尝试失败: %v", err)
+	}
+	if loaded.GitBranch != after.Branch {
+		t.Fatalf("分支未保存: %s", loaded.GitBranch)
+	}
+	if loaded.GitBefore == nil || loaded.GitBefore.Head != before.Head {
+		t.Fatalf("执行前状态未保存: %+v", loaded.GitBefore)
+	}
+	if loaded.GitAfter == nil || !loaded.GitAfter.Dirty || loaded.GitAfter.Modified != 2 {
+		t.Fatalf("执行后状态未保存: %+v", loaded.GitAfter)
+	}
+}
+
+// TestAttemptWithoutGitStateKeepsNull 验证未采集时快照保持为空而不是空结构。
+func runAttemptWithoutGitStateKeepsNull(t *testrunner.Context) {
+	db := newTestDB(t)
+	ctx := testContext(t)
+	built := newFixture(t, db)
+
+	loaded, err := db.GetAttempt(ctx, built.attempt.ID)
+	if err != nil {
+		t.Fatalf("读取执行尝试失败: %v", err)
+	}
+	if loaded.GitBefore != nil || loaded.GitAfter != nil {
+		t.Fatalf("未采集时不应有快照: %+v / %+v", loaded.GitBefore, loaded.GitAfter)
+	}
+	if loaded.GitBranch != "" {
+		t.Fatalf("未采集时不应有分支: %s", loaded.GitBranch)
+	}
+}
+
+// TestAttemptGitStateFailedReadIsPreserved 验证采集失败的状态被如实保留。
+func runAttemptGitStateFailedReadIsPreserved(t *testrunner.Context) {
+	db := newTestDB(t)
+	ctx := testContext(t)
+	built := newFixture(t, db)
+
+	failed := domain.GitWorktreeState{StatusRead: false, StatusError: "git 命令失败"}
+	if err := built.attempt.SetGitAfter(failed); err != nil {
+		t.Fatalf("记录采集失败状态失败: %v", err)
+	}
+	if err := db.UpdateAttempt(ctx, built.attempt); err != nil {
+		t.Fatalf("更新执行尝试失败: %v", err)
+	}
+	loaded, err := db.GetAttempt(ctx, built.attempt.ID)
+	if err != nil {
+		t.Fatalf("读取执行尝试失败: %v", err)
+	}
+	if loaded.GitAfter == nil {
+		t.Fatal("采集失败的状态必须保留")
+	}
+	if loaded.GitAfter.StatusRead {
+		t.Fatal("采集失败不能被写成读取成功")
+	}
+	if loaded.GitAfter.StatusError == "" {
+		t.Fatal("采集失败必须保留原因")
+	}
+}
