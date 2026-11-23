@@ -104,6 +104,7 @@ selfcheck|concurrencycheck
 selfcheck|pilot
 frontend|frontend
 unit|unit-agent
+unit|unit-app
 unit|unit-app-planningagent
 unit|unit-app-planninganalysis
 unit|unit-cigate
@@ -111,6 +112,7 @@ unit|unit-container
 unit|unit-domain
 unit|unit-environment
 unit|unit-execenv
+unit|unit-httpapi
 unit|unit-image
 unit|unit-lifecycle
 unit|unit-server

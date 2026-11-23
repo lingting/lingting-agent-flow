@@ -7,6 +7,7 @@ package testkit
 import (
 	"io"
 	"log/slog"
+	"os"
 
 	"github.com/lingting/agentflow/internal/logging"
 )
@@ -26,10 +27,12 @@ func Slog() *slog.Logger {
 
 // logWriter 返回当前测试运行的日志写入目标。
 //
-// 尚未初始化（没有通过 Main 启动）时退回标准输出，避免日志静默丢失。
+// 尚未初始化（没有通过 Main 启动）时退回当前标准输出，避免日志静默丢失。这里必须动态
+// 读取 os.Stdout：统一测试执行器在每条用例执行期间把标准输出指向该用例的产物日志，用例
+// 结束后指向空设备；写成包初始化时捕获的标准输出会把日志灌进 worker 的控制通道。
 func logWriter() io.Writer {
 	if runLogSink != nil {
 		return runLogSink
 	}
-	return consoleOutput
+	return os.Stdout
 }
