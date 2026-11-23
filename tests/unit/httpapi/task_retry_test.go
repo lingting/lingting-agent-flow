@@ -18,7 +18,7 @@ import (
 	"github.com/lingting/agentflow/internal/httpapi"
 	"github.com/lingting/agentflow/internal/logging"
 	"github.com/lingting/agentflow/internal/storage"
-	"github.com/lingting/agentflow/tests/internal/testkit"
+	"github.com/lingting/agentflow/tests/testkit"
 )
 
 // retryAPITaskStore 是重试接口路径上的存储替身。

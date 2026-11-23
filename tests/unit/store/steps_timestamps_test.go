@@ -9,7 +9,7 @@ import (
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
-	"github.com/lingting/agentflow/tests/internal/testkit"
+	"github.com/lingting/agentflow/tests/testkit"
 )
 
 // TestStepTimestampsStartEmpty 校验新建步骤在数据库中的起止时间为空。

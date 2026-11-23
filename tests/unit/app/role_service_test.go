@@ -9,7 +9,7 @@ import (
 	"github.com/lingting/agentflow/internal/app"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
-	"github.com/lingting/agentflow/tests/internal/testkit"
+	"github.com/lingting/agentflow/tests/testkit"
 )
 
 // roleFixture 是角色配置服务的测试环境：数据库里已经有四个固定角色。

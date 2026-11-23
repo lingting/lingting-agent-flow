@@ -18,7 +18,7 @@ import (
 	"github.com/lingting/agentflow/internal/agent"
 	"github.com/lingting/agentflow/internal/agent/pi"
 	"github.com/lingting/agentflow/internal/domain"
-	"github.com/lingting/agentflow/tests/internal/testkit"
+	"github.com/lingting/agentflow/tests/testkit"
 )
 
 // 测试使用的固定值。

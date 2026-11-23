@@ -9,7 +9,7 @@ import (
 	"github.com/lingting/agentflow/internal/docker"
 )
 
-// testContainerPrefix 是测试容器名称的统一前缀，与 tests/internal/testkit 的识别规则一致。
+// testContainerPrefix 是测试容器名称的统一前缀，与 tests/testkit 的识别规则一致。
 const testContainerPrefix = "agentflow-test-"
 
 // DockerDaemonProvider 分配一台远程主机上的 Docker 命令入口（run-shared）。

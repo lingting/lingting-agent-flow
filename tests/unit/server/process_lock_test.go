@@ -23,7 +23,7 @@ import (
 	"github.com/lingting/agentflow/internal/config"
 	"github.com/lingting/agentflow/internal/server"
 	"github.com/lingting/agentflow/internal/storage"
-	"github.com/lingting/agentflow/tests/internal/testkit"
+	"github.com/lingting/agentflow/tests/testkit"
 )
 
 // windowsErrorPrivilegeNotHeld 是 Windows 上"缺少创建符号链接所需权限"的错误码。

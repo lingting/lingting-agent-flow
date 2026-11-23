@@ -12,7 +12,7 @@ import (
 	"github.com/lingting/agentflow/internal/docker"
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/logging"
-	"github.com/lingting/agentflow/tests/internal/testkit"
+	"github.com/lingting/agentflow/tests/testkit"
 )
 
 // TestClassifyContainerObservationStatusMatrix 校验观测结论只对确认运行中与确认未运行给出肯定结论。

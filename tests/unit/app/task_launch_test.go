@@ -16,7 +16,7 @@ import (
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/execenv"
 	"github.com/lingting/agentflow/internal/storage"
-	"github.com/lingting/agentflow/tests/internal/testkit"
+	"github.com/lingting/agentflow/tests/testkit"
 )
 
 // launchTaskStore 是任务、步骤与执行记录的受控替身。

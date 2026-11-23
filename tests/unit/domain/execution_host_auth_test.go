@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
-	"github.com/lingting/agentflow/tests/internal/testkit"
+	"github.com/lingting/agentflow/tests/testkit"
 )
 
 // TestNewExecutionHostRequiresPrivateKey 验证认证方式固定为私钥且必须给出私钥路径。

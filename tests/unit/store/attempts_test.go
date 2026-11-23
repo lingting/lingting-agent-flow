@@ -2,7 +2,7 @@ package sqlite_test
 
 import (
 	"errors"
-	"github.com/lingting/agentflow/tests/internal/testkit"
+	"github.com/lingting/agentflow/tests/testkit"
 	"testing"
 	"time"
 

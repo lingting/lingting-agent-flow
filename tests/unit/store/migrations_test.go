@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/lingting/agentflow/internal/storage/sqlite"
-	"github.com/lingting/agentflow/tests/internal/testkit"
+	"github.com/lingting/agentflow/tests/testkit"
 )
 
 // TestMigrationsBootstrap 确认全新数据库由版本化迁移脚本初始化，重复打开不会重复执行。

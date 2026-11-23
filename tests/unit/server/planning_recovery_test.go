@@ -22,7 +22,7 @@ import (
 	"github.com/lingting/agentflow/internal/server"
 	"github.com/lingting/agentflow/internal/storage"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
-	"github.com/lingting/agentflow/tests/internal/testkit"
+	"github.com/lingting/agentflow/tests/testkit"
 )
 
 // ephemeralListenAddress 是测试使用的监听地址：端口 0 由系统分配。

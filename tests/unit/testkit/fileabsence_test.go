@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lingting/agentflow/tests/internal/testkit"
+	"github.com/lingting/agentflow/tests/testkit"
 )
 
 // TestClassifyFileAbsence 守住容器内 `test -e` 探针的退出码语义。

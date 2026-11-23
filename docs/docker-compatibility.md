@@ -175,9 +175,9 @@ AgentFlow 会把它作为明确失败上报。不修改远端用户的 Shell 配
 
 - **单元测试**（不依赖真实 Docker）：`tests/unit/container/` 覆盖命令构造、参数安全边界与结果解析；
   `tests/unit/environment/` 与 `tests/unit/image/` 覆盖镜像引用、构建上下文与 Dockerfile 校验。
-- **本机集成测试**：`integration-local-validation` 分组（`tests/runner/integration/local/validation/`）
+- **本机集成测试**：`integration-local-validation` 分组（`tests/integration/local/validation/`）
   覆盖验证执行与检查结论。
-- **真实远程测试**（需真实 Docker）：`integration-remote-docker` 分组（`tests/runner/integration/remote/docker/`
+- **真实远程测试**（需真实 Docker）：`integration-remote-docker` 分组（`tests/integration/remote/docker/`
   等目录），通过
   `tests/config/docker.yml` 的 `docker.remote_enabled`（同时需 `tests/config/ssh.yml` 的 `ssh.enable`）
   显式启用。目标环境版本低于基线时预检必然失败，这属于环境不满足基线，不是代码缺陷；必须如实报告，

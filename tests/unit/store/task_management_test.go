@@ -7,7 +7,7 @@ import (
 
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/storage"
-	"github.com/lingting/agentflow/tests/internal/testkit"
+	"github.com/lingting/agentflow/tests/testkit"
 )
 
 // TestListTaskPageReturnsTotalAndSlice 校验分页查询返回总数与当前页记录。

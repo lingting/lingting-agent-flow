@@ -19,29 +19,28 @@
 
 ```text
 tests/
-├── internal/testkit/       通用测试辅助：工作空间、日志、known_hosts 快照、容器核验与 testkit.Main
+├── testkit/                通用测试辅助：工作空间、日志、known_hosts 快照、容器核验与 testkit.Main
 ├── unit/                   仍由 go test 执行的单元测试（17 个包）
-├── runner/                 Case 定义与注册表，由 agentflow-test 执行
-│   ├── registry/           用例包聚合入口（空导入）
-│   ├── integration/local/  本机集成用例（9 个分组）
-│   ├── integration/ssh/    真实 SSH 主机用例
-│   ├── integration/remote/ 真实远程 Docker / Agent / 代码保存 / 规划 / 工作流用例
-│   ├── e2e/cli/            CLI 端到端用例
-│   ├── frontend/           Vitest 与 Playwright 适配用例
-│   ├── selfcheck/          执行器自检：跳过、超时、迟到结果、取消
-│   ├── resourcecheck/      资源提供者自检：分配、释放、自证、故障注入
-│   ├── concurrencycheck/   调度场景与 worker 池：并发上限、容量、独占键、包级串行、额度、复用、独占、取消
-│   └── pilot/              R4 试点用例（真实服务进程）
+├── registry/               用例包聚合入口（空导入）
+├── integration/local/      本机集成用例（9 个分组）
+├── integration/ssh/        真实 SSH 主机用例
+├── integration/remote/     真实远程 Docker / Agent / 代码保存 / 规划 / 工作流用例
+├── e2e/cli/                CLI 端到端用例
+├── frontend/               Vitest 与 Playwright 适配用例
+├── selfcheck/              执行器自检：跳过、超时、迟到结果、取消
+├── resourcecheck/          资源提供者自检：分配、释放、自证、故障注入
+├── concurrencycheck/       调度场景与 worker 池：并发上限、容量、独占键、包级串行、额度、复用、独占、取消
+├── pilot/                  R4 试点用例（真实服务进程）
 └── config/                 真实外部依赖配置（示例文件入库，真实配置不入库）
 ```
 
 - 所有测试代码与测试入口都必须放在根目录 `tests/` 下；禁止在生产源码目录（`internal/`、`cmd/`）新增
   或保留测试文件。
-- `tests/runner/integration/local/workflow/` 是应用层编排的集成用例：使用真实 SQLite 文件与真实
+- `tests/integration/local/workflow/` 是应用层编排的集成用例：使用真实 SQLite 文件与真实
   `app.TaskWorkflowService`，只把外部依赖（Agent 执行、容器核验、单步骤闭环）替换为受控替身。恢复类
   用例必须"关闭连接后用同一路径重新打开"来模拟进程退出，并只断言数据库里的持久化事实（任务状态、
   步骤、执行记录、会话、事件），不得以方法返回值代替持久化断言。
-- `tests/internal/testkit/` 只存放通用测试辅助代码，不存放产品实现，也不存放需要额外执行的验证脚本。
+- `tests/testkit/` 只存放通用测试辅助代码，不存放产品实现，也不存放需要额外执行的验证脚本。
 
 ## 3. 两个执行入口
 
@@ -70,7 +69,7 @@ tests/
 
 ## 4. 用例模型
 
-一条 Case 由 `internal/testrunner.Case` 描述，注册在 `tests/runner/registry/` 聚合的包里：
+一条 Case 由 `internal/testrunner.Case` 描述，注册在 `tests/registry/` 聚合的包里：
 
 | 字段 | 含义 |
 |---|---|
@@ -142,7 +141,7 @@ tests/
   保留全部产物。
 - 用例的数据库、WAL/SHM、Session、日志、配置与生成文件必须落在该用例的工作空间内，不得写入真实项目
   目录、用户默认数据目录或其他用例的工作空间。
-- 使用 `tests/internal/testkit` 提供的 `testkit.New(t)` 与 `testkit.Dir(t)`，不要用 `t.TempDir()`，也
+- 使用 `tests/testkit` 提供的 `testkit.New(t)` 与 `testkit.Dir(t)`，不要用 `t.TempDir()`，也
   不要用 `t.Setenv` 切换全局数据目录；路径通过结构体、构造参数或子进程独立环境变量传入。
 - 配置文件中的数据库与工作区路径必须是工作空间内的绝对路径：相对路径会按进程工作目录解析，把 SQLite
   文件写进仓库。配置模板中的路径一律使用占位符，由统一的辅助函数替换为绝对路径。
@@ -175,7 +174,7 @@ tests/
   （要求 `AGENTFLOW_REAL_TESTS_GRANTED=true`）或 CI 的 `real-tests` Job 触发，包之间固定
   `--parallel 1` 串行。
 - 本机不执行 Pi：所有 Agent 调用都在容器内，测试不检查本机是否安装 `pi`，也不读取本机 Pi 可执行文件
-  路径；容器内 Pi 的可用性由 `tests/runner/integration/remote/agent/` 在容器内执行 `pi --version` 与
+  路径；容器内 Pi 的可用性由 `tests/integration/remote/agent/` 在容器内执行 `pi --version` 与
   `pi --list-models` 确认。
 - 真实模型调用由 `tests/config/pi.yml` 的 `pi.enable` 显式开启（当前只作用于远程规划与工作流用例），
   默认模型为 `group/free`；每次真实调用都必须显式传入模型，不得回退到 Pi CLI 配置中的默认付费模型。
@@ -187,7 +186,7 @@ tests/
   `AGENTFLOW_TEST_SSH_*` 等环境变量逐项读取。
 - `ssh.known_hosts` 留空时复用本机用户 OpenSSH 的 `~/.ssh/known_hosts` 与 `known_hosts2`，与产品默认
   行为一致；显式填写但文件不可读时直接让测试失败，不得静默回落到空信任库。来源解析统一由
-  `tests/internal/testkit.KnownHostsSources` 提供。
+  `tests/testkit.KnownHostsSources` 提供。
 - 解析出的 known_hosts 来源先快照复制进用例工作空间，校验只读快照：产品与测试都不得写入用户真实
   known_hosts。主机密钥未知的失败信息必须列出实际读取的路径与可用配置项，使"配置写错"与"连接层缺陷"
   可以区分。禁止关闭主机密钥验证，禁止自动接受未知主机密钥。

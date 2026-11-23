@@ -12,7 +12,7 @@ const (
 	RealTestsOff  = "off"
 )
 
-// 与 tests/internal/testkit 保持同一组环境变量，避免测试侧出现第二套门禁。
+// 与 tests/testkit 保持同一组环境变量，避免测试侧出现第二套门禁。
 const (
 	// CIMarkerEnv 是 CI 平台自动注入的标记。
 	CIMarkerEnv = "GITHUB_ACTIONS"

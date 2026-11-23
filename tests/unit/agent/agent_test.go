@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/lingting/agentflow/internal/agent"
-	"github.com/lingting/agentflow/tests/internal/testkit"
+	"github.com/lingting/agentflow/tests/testkit"
 )
 
 // TestNewEventEncodesPayload 验证事件负载被编码为 JSON 并保留会话标识。

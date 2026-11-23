@@ -1,7 +1,7 @@
 # AgentFlow V4：测试体系收敛、并发额度与批量执行
 
-**文档状态：** 主线规划。R0–R3 已完成（盘点、决策冻结、覆盖对账废弃、残留引用清理与基线复验、并发额度内核与报告 v2、
-worker 池与批量执行），R4–R9 未开始。本文是阶段划分与设计口径的唯一来源；每个阶段的执行清单与验收探针在 `.steps/V4/R*/README.md`。
+**文档状态：** 主线规划。R0–R4 已完成（盘点、决策冻结、覆盖对账废弃、残留引用清理与基线复验、并发额度内核与报告 v2、
+worker 池与批量执行、目录收敛），R5–R9 未开始。本文是阶段划分与设计口径的唯一来源；每个阶段的执行清单与验收探针在 `.steps/V4/R*/README.md`。
 **上游输入：** [V3 收口文档](../V3-final.md)、[测试规范](../../docs/testing.md)、
 [R0 盘点与决策冻结](R0/README.md)。
 **适用范围：** 只重组测试代码位置、测试执行入口、测试并发模型与 worker 执行模型；不改产品行为、不改
@@ -132,7 +132,7 @@ agentflow-test（编排进程）
 | R1 | 已完成（完整 CI 待补） | 清理残留引用、复验门禁、固定 CI 基线 | [R1](R1/README.md) |
 | R2 | 已完成 | 并发额度内核：包级上限 + 命名池 + 报告 v2 | [R2](R2/README.md) |
 | R3 | 已完成 | worker 池与批量执行：拉取、复用、独占声明、优先级 | [R3](R3/README.md) |
-| R4 | 未开始 | 目录收敛：`tests/testkit` 与 `tests/*` | [R4](R4/README.md) |
+| R4 | 已完成 | 目录收敛：`tests/testkit` 与 `tests/*` | [R4](R4/README.md) |
 | R5 | 未开始 | unit 迁移试点：`execenv` + `lifecycle` 共 28 条 | [R5](R5/README.md) |
 | R6 | 未开始 | unit 批量迁移 A：9 个中小包 110 条 | [R6](R6/README.md) |
 | R7 | 未开始 | unit 批量迁移 B：`domain`/`container`/`agent` 316 条 | [R7](R7/README.md) |

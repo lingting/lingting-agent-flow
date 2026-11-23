@@ -14,7 +14,7 @@ internal/                 产品实现与测试执行器实现（见下节包职
 lingting-agent-flow-ui/   React + TypeScript 前端（独立 pnpm 工程）
 configs/                  示例配置
 docs/                     工程文档
-tests/                    全部测试代码：unit/ 由 go test 执行，runner/ 是 Case 定义与注册表
+tests/                    全部测试代码：unit/ 由 go test 执行，其余目录是 Case 定义与注册表
 .steps/                   规划与阶段性成果文档（V1–V3 收口、V4 阶段规划）
 ```
 
@@ -80,9 +80,9 @@ SQLite
 cmd/agentflow → cli / httpapi / server
 cmd/agentflow-ci → cigate
 cmd/agentflow-release → release
-cmd/agentflow-test → testrunner（tests/runner/registry 聚合用例包）
+cmd/agentflow-test → testrunner（tests/registry 聚合用例包）
 testrunner → docker / sshclient / 仅 Go 标准库（资源提供者只用命令行与协议层，不经 app 层）
-tests/runner/** → testrunner / tests/internal/testkit / 被测产品包
+tests/** → testrunner / tests/testkit / 被测产品包
 server → httpserver / app / lifecycle / config / storage
 httpserver → httpapi / webui / app
 cli / httpapi → app

@@ -21,7 +21,7 @@ import (
 	"github.com/lingting/agentflow/internal/testrunner"
 
 	// 空导入聚合用例包：新增用例包只需修改 registry 一处。
-	_ "github.com/lingting/agentflow/tests/runner/registry"
+	_ "github.com/lingting/agentflow/tests/registry"
 )
 
 // exitUsage 表示命令行用法错误；与用例失败（1）区分开，便于 CI 判定。

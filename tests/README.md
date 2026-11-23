@@ -11,23 +11,23 @@
 
 ```text
 tests/
-├── internal/testkit/           通用测试辅助：工作空间、日志、known_hosts 快照、容器核验、testkit.Main
+├── testkit/                    通用测试辅助：工作空间、日志、known_hosts 快照、容器核验、testkit.Main
 ├── unit/                       仍由 go test 执行（17 个包，1352 条顶层用例）
 │   ├── agent/ app/ cigate/ container/ domain/ environment/ execenv/ httpapi/
 │   ├── image/ lifecycle/ server/ source/ store/ testkit/ testrunner/
 │   └── ...
-├── runner/                     由 agentflow-test 执行（25 个分组，360 条 Case）
-│   ├── registry/               用例包聚合入口：新增用例包只需一行空导入
-│   ├── integration/local/      本机集成：codesaver、environment、execenv、scheduler、
-│   │                           session、source、ssh、validation、workflow
-│   ├── integration/ssh/        真实 SSH 主机
-│   ├── integration/remote/     真实远程 Docker / Agent / 代码保存 / 规划 / 工作流
-│   ├── e2e/cli/                CLI 端到端
-│   ├── frontend/               Vitest 13 + Playwright 24（一文件一条 Case）
-│   ├── selfcheck/              执行器自检：跳过、超时、迟到结果、取消
-│   ├── resourcecheck/          资源提供者自检：分配、释放、自证、故障注入
-│   ├── concurrencycheck/       调度场景：并发上限、容量、独占键、包级串行、取消
-│   └── pilot/                  R4 试点：真实服务进程的启动、就绪、取消与零残留
+├── registry/                   用例包聚合入口：新增用例包只需一行空导入；由 agentflow-test 执行
+│                               （25 个分组，403 条 Case）
+├── integration/local/          本机集成：codesaver、environment、execenv、scheduler、
+│                               session、source、ssh、validation、workflow
+├── integration/ssh/            真实 SSH 主机
+├── integration/remote/         真实远程 Docker / Agent / 代码保存 / 规划 / 工作流
+├── e2e/cli/                    CLI 端到端
+├── frontend/                   Vitest 13 + Playwright 24（一文件一条 Case）
+├── selfcheck/                  执行器自检：跳过、超时、迟到结果、取消
+├── resourcecheck/              资源提供者自检：分配、释放、自证、故障注入
+├── concurrencycheck/           调度场景：并发上限、容量、独占键、包级串行、取消
+├── pilot/                      R4 试点：真实服务进程的启动、就绪、取消与零残留
 └── config/                     真实外部依赖配置（示例文件入库，真实配置不入库）
 ```
 
@@ -101,7 +101,7 @@ go run ./cmd/agentflow-ci real-tests-gate \
 ```go
 testrunner.Register(testrunner.Case{
 	ID:         "integration-local-scheduler/queue-order",
-	Package:    "tests/runner/integration/local/scheduler",
+	Package:    "tests/integration/local/scheduler",
 	Parallel:   true,
 	Resources:  []testrunner.ResourceDecl{...},
 	Run:        func(c *testrunner.Context) { ... },
@@ -164,8 +164,8 @@ Case Job 只上传自己的 `<artifact-root>/<job>/<run-id>/`；跳过与零残�
 
 | 目录 | 内容 | 外部依赖 |
 |---|---|---|
-| `tests/runner/integration/local/ssh/` | 本机真实 SSH 握手与主机密钥校验、私钥认证、远程命令执行与取消、SFTP 传输、并发会话隔离 | 无（测试内启动服务端） |
-| `tests/runner/integration/ssh/` | 真实远程 Linux 机器上的认证、命令状态、超时、SFTP 与工作空间 | `tests/config/ssh.yml` 的 SSH 目标 |
+| `tests/integration/local/ssh/` | 本机真实 SSH 握手与主机密钥校验、私钥认证、远程命令执行与取消、SFTP 传输、并发会话隔离 | 无（测试内启动服务端） |
+| `tests/integration/ssh/` | 真实远程 Linux 机器上的认证、命令状态、超时、SFTP 与工作空间 | `tests/config/ssh.yml` 的 SSH 目标 |
 
 本机集成用例使用 `golang.org/x/crypto/ssh` 启动真实的服务端进程内实例，并配合
 `github.com/pkg/sftp` 的服务端实现，因此主机密钥校验、私钥认证、SFTP 上传下载与远程命令执行都
@@ -181,7 +181,8 @@ Case Job 只上传自己的 `<artifact-root>/<job>/<run-id>/`；跳过与零残�
 逐类型重试只针对主机密钥类失败（未知、已变化、已吊销、无共同算法）；TCP 不可达、超时、取消与认证
 失败会立即返回，避免换类型掩盖真实原因。
 
-测试覆盖：`tests/runner/integration/local/ssh/dialer_test.go` 与 `hostkey_port_test.go` 验证未知主机
+测试覆盖：`tests/integration/local/ssh/`（源 `dialer_test.go` 与 `hostkey_port_test.go`，已迁为
+`cases_connection.go`）验证未知主机
 密钥被拒绝、已信任主机密钥可完成私钥认证、主机密钥变化被拒绝，以及带端口与哈希主机名的记录形式。
 
 ## 远程执行测试分层
@@ -225,7 +226,7 @@ Case Job 只上传自己的 `<artifact-root>/<job>/<run-id>/`；跳过与零残�
 ### 远程真实测试目录与容器零残留
 
 - 远程主机上的测试资源统一位于 `<远程 Home>/.lingting/agentflow-tests/<测试包>/<用例标识>`，由
-  `tests/internal/testkit` 的 `RemoteTestRoot` / `ResolveRemoteTestRoot` 统一解析与创建。
+  `tests/testkit` 的 `RemoteTestRoot` / `ResolveRemoteTestRoot` 统一解析与创建。
 - 每个测试容器都必须在**创建之前**登记清理责任（`testkit.ContainerRun.Track`），取得真实 Docker ID
   后立即补写；创建失败、启动失败与后续步骤失败都不允许失去清理能力。
 - 清理必须核验真实状态（`testkit.CleanupContainer`）：删除前核验所有权（不符时禁止删除），删除后
@@ -254,7 +255,7 @@ Pi Runner 或 Session 管理实现。
 | `TestRemotePlanningRestartingObservation` | 用一次性容器尝试观察真实 `restarting`；`dead` / `removing` 未制造时如实报告未观测 |
 | `TestRemotePlanningPreconditions` | 记录 Docker CLI / Engine / API 版本、测试镜像、容器内 Pi 与 Git 版本、模型标识与测试仓库分支 |
 
-测试镜像 `tests/runner/integration/remote/planning/Dockerfile`（`agentflow-test-planning:1.0.0`）在通用
+测试镜像 `tests/integration/remote/planning/Dockerfile`（`agentflow-test-planning:1.0.0`）在通用
 测试镜像之上只设置 `PI_CODING_AGENT_DIR=/tmp/pi-agent`：规划容器 rootfs 只读，唯一可写目录是 `/tmp`
 （tmpfs），模型接入配置由测试在运行期写入该目录，容器删除后随之消失。
 
@@ -317,7 +318,7 @@ Pi Runner 或 Session 管理实现。
 cp tests/config/example.ssh.yml tests/config/ssh.yml   # 填写内容并把 ssh.enable 设为 true
 ```
 
-known_hosts 来源由 `tests/internal/testkit` 的 `KnownHostsSources` 统一解析：显式配置时优先，文件
+known_hosts 来源由 `tests/testkit` 的 `KnownHostsSources` 统一解析：显式配置时优先，文件
 不可读时直接让测试失败；未配置时复用本机用户 OpenSSH 的 known_hosts。解析结果先快照复制进当前用例
 工作空间，校验只读快照，因此不会读取或修改用户真实配置。产品侧 known_hosts 全程只读，测试遵守同一
 边界。

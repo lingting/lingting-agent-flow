@@ -15,7 +15,7 @@ import (
 	"github.com/lingting/agentflow/internal/httpapi"
 	"github.com/lingting/agentflow/internal/logging"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
-	"github.com/lingting/agentflow/tests/internal/testkit"
+	"github.com/lingting/agentflow/tests/testkit"
 )
 
 // 规划接口的协议测试只覆盖协议转换与前置检查：成功路径上的远端核验由真实环境验收
