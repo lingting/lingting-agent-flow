@@ -1,6 +1,7 @@
 # V4 R3：worker 池与批量执行
 
-**状态：** 未开始。
+**状态：** 已完成（2026-11-23）。worker 池、拉取式派发、独占用例、优先级与报告 `workers` 分节均已落地，
+验收记录见 §9。
 **上游文档：** [V4 路线总规划](../ROADMAP.md)、[R0 冻结决策 D-10](../R0/README.md)、[R2 额度内核](../R2/README.md)。
 **下游关系：** 改变"一条 Case 一个 worker 进程"的模型，是 unit 迁移（R5–R7）的性能前提；目录收敛在
 [R4](../R4/README.md)。
@@ -92,3 +93,78 @@ worker，并在该用例结束后退出**。
 ## 8. 不做的事
 
 不改资源词汇表与作用域语义、不改 `Case` 既有字段语义、不引入第三方调度/并发库、不搬目录、不迁移 unit 用例。
+
+---
+
+## 9. 验收记录（2026-11-23）
+
+### 9.1 落点
+
+| 文件 | 改动 |
+|---|---|
+| `internal/testrunner/workerprotocol.go`（新增） | 控制协议：stdin 一行指令（`run` / `shutdown`），stdout 一行事件（`ready` / `started` / `done` / `shutdown` / `invalid`） |
+| `internal/testrunner/workerloop.go`（新增） | worker 侧：顺序领取用例；每 Case 重置工作目录、环境变量与标准流（W3）；结论仍只来自结果文件（W5） |
+| `internal/testrunner/workersession.go`（新增） | 编排侧的一条常驻 worker：启动与就绪、派发与等待、超时/取消终止、协议污染判定、自行退出 |
+| `internal/testrunner/workerpool.go`（新增） | 槽位与 worker 池：复用选择、独占用例使用的一次性 worker、序号分配、收尾 |
+| `internal/testrunner/dispatch.go`（新增） | 派发循环：独占段 + 可复用段、W4 保留槽位、派发与完成记账、取消与未派发收口 |
+| `internal/testrunner/scheduler.go` | 移除"一 Case 一进程"的 `startCase` 与旧 `runSchedule`；保留额度状态、`planCase` 与报告条目 |
+| `internal/testrunner/orchestrator.go` | `runCase` 经 worker 池执行并回传 worker 观测事实；`OnCaseStart` 取代 spawn 回调；时长改用用例自身区间 |
+| `internal/testrunner/workerproc.go` | 一次性 worker 保留（独占用例与单条调试）；新增 `Spawned` 观测与 `--worker-id` 透传 |
+| `internal/testrunner/case.go` | 新增 `Case.DedicatedWorker` 与字段说明；包注释改为 worker 池口径 |
+| `internal/testrunner/context.go`、`worker.go` | `Context.WorkerID()` 与 `WorkerRequest.WorkerID` |
+| `internal/testrunner/report.go`、`result.go` | 顶层 `workers` 分节（`total` / `reuse` / `restarts` / `isolated_cases`）与每条 Case 的 `worker_id`；终端摘要增加 worker 池行 |
+| `internal/testrunner/workspace.go` | `<run-id>/workers/` 目录与 `WorkerLogRoot` |
+| `cmd/agentflow-test/main.go` | `--exec-worker` / `--worker-id`；`--list` 新增 `DEDICATED` 列 |
+| `tests/runner/concurrencycheck/worker.go`（新增） | 复用 6 条、独占 2 条、状态隔离 2 条 |
+| `tests/runner/concurrencycheck/fault.go` | worker 崩溃与伴随用例（场景 17） |
+| `docs/testing.md`、`tests/README.md` | 执行入口、用例模型、worker 池、产物布局与报告字段同步；分组条数按实测订正 |
+
+### 9.2 实现决定
+
+- **`--exec-case` 保留**：它是独占用例的执行方式，也是单条调试入口，不是"过渡适配器"，不引入任何
+  `go test` 路径；常驻 worker 用新增的 `--exec-worker`。
+- **不引入 `--workers`**：槽位数等于 `--parallel`，进程只在第一次派发时启动，之后在用例之间保留复用。
+  独立的池大小会让"并发上限"与"进程数"两套口径并存，收益不足。
+- **独占用例用一次性 worker**：执行完即退出、永不复用（W2）；槽位上原有的常驻进程保持空闲，继续服务
+  下一条可复用用例。
+- **报告顶层 `workers` 分节**：`total + reuse` 等于进入过 worker 进程的用例条数；
+  `concurrency.worker_launches` 保留并与 `workers.total` 一致。
+- **`restarts` 口径**：只统计没有按协议收尾的进程（用例内 `os.Exit`、控制通道被污染、派发前已退出）。
+  编排进程主动终止的超时与取消不计入——它们已经由该用例的 `timeout` / `error` 结论表达。
+- **W4 保留槽位**：可复用队列非空且已有用例在跑时，独占派发不得拿走最后一个空闲槽位；`inFlight == 0`
+  时不受该限制，避免 `--parallel 1` 下把本可派发的用例判成不可满足（I7）。
+- **取消没有反向通道**：worker 只在用例之间读指令，"先投递取消 → 宽限 → 终止进程树"仍按宽限 + 终止
+  实现；被终止的 worker 不复用，也不计 `restarts`。
+- **协议污染不猜测**：控制通道出现无法解析的一行即判该 worker 失效（当前用例记 `error`）。用例输出
+  正常不会进入控制通道：worker 启动后标准流指向空设备，每条用例再指向自己的日志文件，迟到的日志同样
+  落在空设备上。
+
+### 9.3 探针结果
+
+| 探针 | 命令 | 结果 |
+|---|---|---|
+| 复用（W1/W6） | `./bin/agentflow-test --parallel 2 --artifact-dir .test-artifacts/r3-reuse concurrencycheck/worker-reuse-...` | 6/6 `passed`；`workers` = `total 2` / `reuse 4` / `restarts 0` / `isolated_cases 0`；`worker_id` 只取 1、2；每条 `duration_ms` 为 250（不是进程存活时长） |
+| 独占 + 优先级（W2/W4） | `./bin/agentflow-test --parallel 4 --artifact-dir .test-artifacts/r3-dedicated concurrencycheck/worker-dedicated-... concurrencycheck/worker-reuse-...` | 8/8 `passed`；`workers` = `6 / 2 / 0 / 2`；按 `dispatch_at` 排序，两条独占用例最先派发且 `worker_id` 各只出现一次；同一轮还有 2 条可复用用例在跑 |
+| 状态隔离（W3） | `./bin/agentflow-test --parallel 1 --artifact-dir .test-artifacts/r3-bleed concurrencycheck/worker-bleed-...` | 2/2 `passed`；`workers` = `1 / 1 / 0 / 0`；两条用例 `worker_id` 都是 1（同一进程），后一条确认环境变量与工作目录已被重置 |
+| 崩溃与结果归属（W5/W6） | `./bin/agentflow-test --parallel 2 --artifact-dir .test-artifacts/r3-crash concurrencycheck-fault/worker-crash concurrencycheck-fault/worker-crash-companion` | 崩溃用例 `error`（`worker 未写出结果文件（退出码 3）`），伴随用例 `passed`；`workers` = `2 / 0 / 1 / 0`；运行退出码 1 |
+| 整组回归（含 R2 额度） | `./bin/agentflow-test --parallel 8 --artifact-dir .test-artifacts/r3-concurrency concurrencycheck` | 58/58 `passed`；`max_in_flight` 8；`workers` = `10 / 48 / 0 / 2`；包额度 `limit 2 / peak 2`、两个池 `limit 3 / peak 3` 与 R2 一致；零残留 `passed` |
+| selfcheck 分组 | `./bin/agentflow-test --parallel 4 --artifact-dir .test-artifacts/r3-selfcheck selfcheck` | 3 条：2 `passed` + 1 `skipped`（带原因）；`workers` = `1 / 2 / 0 / 0`；零残留 `passed` |
+| 超时 / panic / 迟到结果 / 崩溃 | `./bin/agentflow-test --parallel 4 --artifact-dir .test-artifacts/r3-fault2 --selfcheck-late-result concurrencycheck-fault/panic concurrencycheck-fault/panic-companion concurrencycheck-fault/timeout concurrencycheck-fault/timeout-companion concurrencycheck-fault/late-result concurrencycheck-fault/worker-crash concurrencycheck-fault/worker-crash-companion` | panic 1 / timeout 2 / error 1 / passed 3；迟到结果没有改写已定型的 `timeout` 结论（只进用例 `warnings`）；`workers` = `4 / 3 / 1 / 0`；退出码 1；无残留进程 |
+| 取消注入（I8） | `./bin/agentflow-test --parallel 4 --artifact-dir .test-artifacts/r3-fault --selfcheck-cancel-on concurrencycheck-fault/cancel-a --selfcheck-late-result concurrencycheck-fault concurrencycheck-fault/worker-crash` | 取消记录（在跑 4 / 未派发 6），其余 6 条如实记 `error` 并注明未派发；退出码 1；零残留 `passed` |
+| 确定性（W7） | `./bin/agentflow-test --parallel 1 --artifact-dir .test-artifacts/r3-seq1 concurrencycheck/worker-reuse-... concurrencycheck/worker-dedicated-... concurrencycheck/worker-bleed-...`（连跑两次） | 两次运行派发顺序完全一致：独占段（`worker-dedicated-a`、`worker-dedicated-b`）先派发，可复用段按 ID 升序（`worker-bleed-a`、`worker-bleed-b`、`worker-reuse-01…06`）；`worker_id` 分配同样一致（独占用例各得一个新进程，其余 8 条共用 1 个常驻进程） |
+| 静态门禁 | `make check`、`go vet ./...`、`go-test-groups.sh --check --declared-groups unit --declared-case-kinds local,e2e,selfcheck,frontend`、`./bin/agentflow-test --list` | 全部通过；`--list` 403 条 Case / 25 个分组 |
+
+### 9.4 口径与遗留
+
+- `--list` 由 391 条增至 403 条（本阶段新增 12 条自检）。R5–R8 登记的 `--list` 目标（498 / 814 / 1712）
+  是在 360 基线上算出的，收口时按实测顺延，不作为本阶段的偏差。
+- unit 试点的进程启动开销对比数据按 §5 在 R5 采集并写回 R5 文档；本阶段给出可对比的基线：同一
+  `concurrencycheck` 分组 58 条用例只启动 10 个进程、`reuse 48`（`total + reuse` 等于用例条数），
+  R2 记录里的 `worker_launches 48`（48 条用例 48 个进程）是旧模型口径。
+- 复用 worker 中的"包级可变状态"不在 W3 重置范围内（与 `go test` 同包共用进程的情况一致），由 R5–R8
+  逐包登记；用例需要独占时可以声明 `DedicatedWorker`。
+- worker 自身的标准错误落在 `<run-id>/workers/<worker-序号>/stderr.log`；用例日志仍在各自产物目录，两者
+  不混写。
+- 本阶段未运行的授权外分组：`resourcecheck`、`pilot`、`real`（按 R3 §6 不在授权范围），R5 试点时按 R5
+  的授权运行。
+- 待办（需推送授权）：一次完整 CI 复核，确认 `cases-*` 与 `ui-test` Job 在 worker 池下全绿。

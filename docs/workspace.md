@@ -44,7 +44,7 @@ tests/                    全部测试代码：unit/ 由 go test 执行，runner
 | `internal/webui/` | 前端产物嵌入与静态资源服务 |
 | `internal/cigate/` | CI 准入门禁 |
 | `internal/release/` | 发布制品构建、清单、校验和与来源证明 |
-| `internal/testrunner/` | 统一测试执行器：Case 注册表、选择、调度、资源提供者、零残留核验、统一报告（开发工具，不被产品代码引用） |
+| `internal/testrunner/` | 统一测试执行器：Case 注册表、选择、调度（worker 池与并发额度）、资源提供者、零残留核验、统一报告（开发工具，不被产品代码引用） |
 
 前端目录内部分层见 [frontend.md](frontend.md)。
 

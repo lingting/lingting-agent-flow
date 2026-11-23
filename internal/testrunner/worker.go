@@ -24,6 +24,8 @@ type WorkerRequest struct {
 	Timeout         time.Duration
 	RealTests       bool
 	RealTestsReason string
+	// WorkerID 是编排进程分配的 worker 序号；单条模式（--exec-case）为 0。
+	WorkerID int
 }
 
 // ExecuteWorker 在 worker 子进程中执行单个用例并写出结果文件。

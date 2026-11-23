@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"time"
 )
 
@@ -14,7 +15,9 @@ const DefaultWorkerGrace = 10 * time.Second
 
 // workerInvocation 是一次 worker 子进程的启动参数。
 type workerInvocation struct {
-	Executable      string
+	Executable string
+	// WorkerID 是编排进程分配给这条一次性 worker 的序号，写进用例上下文供观测。
+	WorkerID        int
 	Case            Case
 	Timeout         time.Duration
 	Grace           time.Duration
@@ -25,8 +28,8 @@ type workerInvocation struct {
 	LogPaths        ArtifactPaths
 	RealTests       bool
 	RealTestsReason string
-	// OnSpawn 在 worker 进程真正启动后回调，空值表示不关心。
-	OnSpawn func()
+	// OnStart 在用例真正开始执行后回调（一次性 worker 是进程启动之后），空值表示不关心。
+	OnStart func()
 }
 
 // workerObservation 是编排进程对 worker 的原始观测，尚不包含资源释放结论。
@@ -40,6 +43,16 @@ type workerObservation struct {
 	Result     CaseResult
 	HasResult  bool
 	ReadError  error
+	// WorkerID 是执行该用例的 worker 序号；0 表示这次执行没有进入 worker 进程。
+	WorkerID int
+	// Spawned 表示这次执行新启动了 worker 进程。
+	Spawned bool
+	// Reused 表示这次执行复用了已经跑过用例的 worker 进程。
+	Reused bool
+	// Isolated 表示这次执行使用了独占用例的一次性 worker。
+	Isolated bool
+	// Restarted 表示该 worker 进程没有按协议收尾（崩溃、被污染或派发前已退出）。
+	Restarted bool
 }
 
 // runWorkerProcess 启动 worker、采集其独占输出，并在超时或取消后终止整棵进程树。
@@ -67,6 +80,9 @@ func runWorkerProcess(ctx context.Context, inv workerInvocation) (workerObservat
 		"--real-tests-grant", grantArgument(inv.RealTests),
 		"--real-tests-reason", singleLine(inv.RealTestsReason),
 	}
+	if inv.WorkerID > 0 {
+		arguments = append(arguments, "--worker-id", strconv.Itoa(inv.WorkerID))
+	}
 	if inv.HandlePath != "" {
 		arguments = append(arguments, "--handles", inv.HandlePath)
 	}
@@ -80,8 +96,9 @@ func runWorkerProcess(ctx context.Context, inv workerInvocation) (workerObservat
 	if err := command.Start(); err != nil {
 		return observation, fmt.Errorf("启动 worker 失败: %w", err)
 	}
-	if inv.OnSpawn != nil {
-		inv.OnSpawn()
+	observation.Spawned = true
+	if inv.OnStart != nil {
+		inv.OnStart()
 	}
 	wait := make(chan error, 1)
 	go func() {

@@ -1,6 +1,7 @@
 package concurrencycheck
 
 import (
+	"os"
 	"time"
 
 	"github.com/lingting/agentflow/internal/testrunner"
@@ -102,5 +103,27 @@ var LateResultCase = testrunner.Register(testrunner.Case{
 	Run: func(c *testrunner.Context) {
 		c.Logf("用例 %s 故意超时，用于验证迟到结果无法改写结论", c.Name())
 		time.Sleep(30 * time.Second)
+	},
+})
+
+// 场景 17：worker 崩溃。
+//
+// 用例在 worker 内直接 os.Exit：worker 进程立刻消失，这条用例没有结果文件，编排进程必须
+// 记 error 并继续派发后面的用例，同时把这次非预期结束计入 workers.restarts（W5 / W6）。
+var WorkerCrash = testrunner.Register(testrunner.Case{
+	ID:       "concurrencycheck-fault/worker-crash",
+	Parallel: true,
+	Run: func(c *testrunner.Context) {
+		c.Logf("用例 %s 即将直接结束 worker %d 进程", c.Name(), c.WorkerID())
+		os.Exit(3)
+	},
+})
+
+// WorkerCrashCompanion 在崩溃用例之后照常完成：崩溃只影响它自己那次执行。
+var WorkerCrashCompanion = testrunner.Register(testrunner.Case{
+	ID:       "concurrencycheck-fault/worker-crash-companion",
+	Parallel: true,
+	Run: func(c *testrunner.Context) {
+		c.Logf("用例 %s 在 worker 崩溃场景中照常完成（worker %d）", c.Name(), c.WorkerID())
 	},
 })

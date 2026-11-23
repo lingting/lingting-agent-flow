@@ -30,7 +30,7 @@ tests/
 │   ├── frontend/           Vitest 与 Playwright 适配用例
 │   ├── selfcheck/          执行器自检：跳过、超时、迟到结果、取消
 │   ├── resourcecheck/      资源提供者自检：分配、释放、自证、故障注入
-│   ├── concurrencycheck/   调度场景：并发上限、容量、独占键、包级串行、取消
+│   ├── concurrencycheck/   调度场景与 worker 池：并发上限、容量、独占键、包级串行、额度、复用、独占、取消
 │   └── pilot/              R4 试点用例（真实服务进程）
 └── config/                 真实外部依赖配置（示例文件入库，真实配置不入库）
 ```
@@ -56,8 +56,9 @@ tests/
   [.steps/V3-final.md](../.steps/V3-final.md)）。
 - 前端单元测试 `pnpm test`（`vp test run`）保留为开发者本机入口，不参与 CI 门禁，也不替代执行器的
   `frontend` 分组。
-- `bin/agentflow-test` 由 `make test-runner` 构建；worker 由同一二进制以 `--exec-case` 重新启动，因此
-  入口必须是最新构建，`make test-cases` / `make test-real` 会先构建再运行。
+- `bin/agentflow-test` 由 `make test-runner` 构建；worker 由同一二进制启动，因此入口必须是最新构建，
+  `make test-cases` / `make test-real` 会先构建再运行。worker 有两种启动方式：常驻 worker
+  （`--exec-worker`，由编排进程复用执行多条用例）与一次性 worker（`--exec-case`，独占用例与单条调试）。
 - `pilot` 试点用例把 `<repo>/bin/agentflow` 声明为 `service-process` 的可执行文件，因此
   `TEST_KIND` 为 `normal`、`selfcheck` 或 `fault` 时 `make test-cases` 会先 `make build` 再运行；
   其它 kind 只构建 `bin/agentflow-test`。CI 的 `cases-selfcheck` Job 有同一条前置，缺少该二进制时
@@ -78,11 +79,15 @@ tests/
 | `Timeout` | 单条用例上限，零值使用运行级默认（10 分钟） |
 | `Package` | 来源 Go 测试包路径：串行作用域与包级串行判定按它进行 |
 | `Parallel` | 是否允许与其他用例并行；`false` 表示在串行作用域内独占 |
+| `DedicatedWorker` | 是否必须独占一个全新的 worker 进程；默认 `false`，由常驻 worker 复用执行 |
+| `Concurrency` | 并发额度声明：包级上限与参与的命名并发池 |
 | `Resources` | 资源声明，由编排进程分配后以句柄注入 worker |
 | `Run` | 用例主体，只在 worker 子进程中执行 |
 
-- 每条 Case 在独立 worker 子进程中执行，独占 stdout/stderr：`panic`、`os.Exit` 与包级全局状态只影响
-  该条用例（见 §7 的产物布局）。
+- 一条 Case 独占"一次执行"：默认由常驻 worker 顺序执行多条用例，用例之间重置工作目录、环境变量与
+  日志文件（包级变量由用例自己或 `DedicatedWorker` 处理）；`DedicatedWorker` 用例使用全新的一次性
+  worker 并在结束后退出。因此 `panic`、`os.Exit` 只影响该条用例的那次执行，stdout/stderr 仍按用例
+  分流到各自产物目录（见 §7 的产物布局）。
 - 迁移写法固定为 `func run<原函数名去掉 Test 前缀>`；一条源测试函数内的多个 `t.Run` 子测试用
   `Context.Run` 表达（单层、顺序执行），不得用 `testing.T`。
 - 用例的失败、跳过与超时必须通过 `Context` 表达，跳过必须带原因；不得把跳过写成通过。
@@ -93,8 +98,14 @@ tests/
 - 并发只由 `internal/testrunner/scheduler.go` 的调度器决定：`--parallel`（默认 8）是同时在飞的 worker
   上限，用例无法通过代码自行扩大并发；`t.Parallel()` 不再决定并发，原有声明统一映射为
   `Case.Parallel`。
-- 调度输入只有三类：资源容量（同类资源同时在用的上限）、独占键（同一键的用例不得并行）、包级串行
-  （`Case.Package` 相同的用例串行）。
+- 调度输入是五类约束：全局 `--parallel`、资源容量（同类资源同时在用的上限）、独占键（同一键的用例
+  不得并行）、包级串行（`Case.Package` 相同的用例串行）、并发额度（包级上限 `--package-limit` 与命名池
+  `--pool name=limit`）。
+- worker 池：`--parallel` 同时也是槽位数，一个槽位对应一条常驻 worker 进程，进程在用例之间保留并复用，
+  空闲槽位优先复用已有进程；`DedicatedWorker` 用例由槽位临时启动一次性 worker，执行完即退出，不复用。
+  独占段（`DedicatedWorker`）优先派发，但可复用队列非空时独占派发不得拿走最后一个空闲槽位。派发顺序只
+  由 ID 升序与当前占用决定，同一输入两次运行一致。
+- 用例不再自行创建 worker：`--exec-worker` 与 `--exec-case` 都是编排进程的内部入口。
 - `tests/unit/**` 仍由 `go test` 执行，其并发由 `-p` / `-parallel` 控制（`make test-unit` 跟随
   `PARALLEL`）。
 - 前端浏览器的实际并发等于调度器派发的用例数：`playwright.config.ts` 固定 `workers: 1`，一条 Case
@@ -121,6 +132,7 @@ tests/
 ```text
 <artifact-root>/<run-id>/report.json
 <artifact-root>/<run-id>/cases/<case-id>/{stdout.log,stderr.log,result.json,artifacts/}
+<artifact-root>/<run-id>/workers/<worker-序号>/stderr.log  常驻 worker 自身的标准错误（用例输出不在这里）
 <os.TempDir()>/lingting-agent-flow-tests/<run-id>/<case-id>/           用例工作空间
 <os.TempDir()>/lingting-agent-flow-tests/<run-id>/shard_<type>_<id>/   资源存放目录
 ```
@@ -231,7 +243,8 @@ Makefile 入口与消费脚本核验。
 - 用例结论只有六种：`passed` / `failed` / `skipped` / `panic` / `timeout` / `error`。跳过必须带原因且
   不计入通过；worker 没能产出可信结果（启动失败、异常退出、结果文件缺失）按 `error` 处理。
 - 统一报告是 `<artifact-root>/<run-id>/report.json`：选择条件、真实依赖授权结论、用例结论、资源结论、
-  零残留结论、并发与取消记录、退出码都在其中，路径可复现。
+  零残留结论、并发与取消记录、worker 池观测（`workers`：`total` / `reuse` / `restarts` /
+  `isolated_cases`）、每条用例的 `worker_id` 与退出码都在其中，路径可复现。
 - `make test-unit` 的结论来自 `go test`（顶层通过 / 失败 / 跳过的结论行），与 Case 报告的统计口径各自
   独立，不混算。`report.json` 的跳过统计只读 `totals.skipped` 与每条 `skip_reason`。
 - 取消或超时会终止 worker 进程树（Windows 用 `taskkill /T /F`，回收失败判 `error`），迟到结果不得覆盖

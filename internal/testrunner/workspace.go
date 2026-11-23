@@ -59,12 +59,23 @@ func (l RunLayout) CreateRunDir() error {
 	if err := os.MkdirAll(l.CasesDir(), 0o750); err != nil {
 		return fmt.Errorf("创建运行目录失败: %w", err)
 	}
+	if err := os.MkdirAll(l.WorkerLogRoot(), 0o750); err != nil {
+		return fmt.Errorf("创建 worker 日志目录失败: %w", err)
+	}
 	return nil
 }
 
 // CasesDir 返回用例产物目录。
 func (l RunLayout) CasesDir() string {
 	return filepath.Join(l.RunDir, "cases")
+}
+
+// WorkerLogRoot 返回常驻 worker 自身日志的根目录（<run-id>/workers/<worker-序号>/）。
+//
+// 用例的标准输出与标准错误写在各自产物目录里；这里只承载 worker 进程级输出，例如 Go
+// 运行时 panic 栈，用于定位"worker 为什么在用例中途消失"。
+func (l RunLayout) WorkerLogRoot() string {
+	return filepath.Join(l.RunDir, "workers")
 }
 
 // ReportPath 返回统一报告的默认位置。

@@ -152,6 +152,7 @@ func Run(ctx context.Context, opts RunOptions) (Report, error) {
 	report.Cases = scheduled.Cases
 	report.Concurrency = scheduled.Concurrency
 	report.Cancellation = scheduled.Cancellation
+	report.Workers = scheduled.Workers
 	for _, result := range report.Cases {
 		if caseAllocated(result) {
 			residual.markAllocated()
@@ -186,12 +187,18 @@ type runCaseOptions struct {
 	Grace          time.Duration
 	RunID          string
 	RealTests      RealTestsDecision
-	// OnWorkerSpawn 在 worker 真正启动后回调，用于观测启动次数与触发取消自检。
-	OnWorkerSpawn func(caseID string)
+	// OnCaseStart 在用例真正开始执行后回调，用于触发取消自检。
+	OnCaseStart func(caseID string)
 }
 
-// runCase 分配资源、启动 worker 并汇总单条用例结论。
-func runCase(ctx context.Context, opts runCaseOptions) CaseResult {
+// runCase 分配资源、经由 worker 池执行用例并汇总单条用例结论。
+//
+// 返回值包含用例结论与 worker 池观测事实：后者只进入报告统计，不影响结论。
+func runCase(
+	ctx context.Context,
+	opts runCaseOptions,
+	executor *pooledExecutor,
+) (CaseResult, caseObservation) {
 	c := opts.Case
 	// 释放与自证不能被取消中断：取消路径同样必须先回收已分配的资源，再写报告。
 	cleanupCtx := context.WithoutCancel(ctx)
@@ -199,13 +206,13 @@ func runCase(ctx context.Context, opts runCaseOptions) CaseResult {
 	result := CaseResult{ID: c.ID, Group: c.Group, Status: StatusError, Artifacts: paths}
 	if err := opts.Layout.CreateCaseDir(paths); err != nil {
 		result.Message = err.Error()
-		return result
+		return result, caseObservation{}
 	}
 	// 用例工作空间在分配资源之前就建好：服务的子进程要在这里落配置、数据库与输出。
 	workspaceDir, err := opts.Layout.CreateCaseWorkspace(c.ID)
 	if err != nil {
 		result.Message = err.Error()
-		return result
+		return result, caseObservation{}
 	}
 	handles, resources, err := acquireCaseResources(withCaseWorkspace(ctx, workspaceDir), opts)
 	result.Resources = resources
@@ -214,11 +221,11 @@ func runCase(ctx context.Context, opts runCaseOptions) CaseResult {
 			// 取消发生在分配资源期间：结论统一按取消口径记录，具体失败原因留在日志里。
 			result.Message = caseCancelledMessage
 			releaseExclusive(cleanupCtx, opts.Providers, handles, result.Resources)
-			return result
+			return result, caseObservation{}
 		}
 		result.Message = err.Error()
 		releaseExclusive(cleanupCtx, opts.Providers, handles, result.Resources)
-		return result
+		return result, caseObservation{}
 	}
 	timeout := c.Timeout
 	if timeout <= 0 {
@@ -231,34 +238,41 @@ func runCase(ctx context.Context, opts runCaseOptions) CaseResult {
 		if err := WriteHandleFile(handlePath, file); err != nil {
 			result.Message = err.Error()
 			releaseExclusive(cleanupCtx, opts.Providers, handles, result.Resources)
-			return result
+			return result, caseObservation{}
 		}
 	}
-	observation, err := runWorkerProcess(ctx, workerInvocation{
+	observation, err := executor.execute(ctx, workerInvocation{
 		Executable:      opts.Executable,
 		Case:            c,
 		Timeout:         timeout,
 		Grace:           opts.Grace,
 		HandlePath:      handlePath,
 		ResultPath:      paths.Result,
-		OnSpawn:         spawnObserver(opts.OnWorkerSpawn, c.ID),
+		OnStart:         startObserver(opts.OnCaseStart, c.ID),
 		ArtifactDir:     paths.ArtifactDir,
 		WorkspaceDir:    workspaceDir,
 		LogPaths:        paths,
 		RealTests:       opts.RealTests.Allowed,
 		RealTestsReason: opts.RealTests.Reason,
-	})
+	}, c.DedicatedWorker)
+	facts := caseObservation{
+		Launched:  observation.Spawned,
+		Reused:    observation.Reused,
+		Isolated:  observation.Isolated,
+		Restarted: observation.Restarted,
+	}
+	result.WorkerID = observation.WorkerID
 	if err != nil {
 		result.Message = err.Error()
 	} else {
 		applyObservation(&result, observation)
 	}
 	releaseExclusive(cleanupCtx, opts.Providers, handles, result.Resources)
-	return result
+	return result, facts
 }
 
-// spawnObserver 把用例的 worker 启动事件转成回调；没有回调时返回 nil，不产生额外开销。
-func spawnObserver(observer func(caseID string), caseID string) func() {
+// startObserver 把用例的开始事件转成回调；没有回调时返回 nil，不产生额外开销。
+func startObserver(observer func(caseID string), caseID string) func() {
 	if observer == nil {
 		return nil
 	}
@@ -268,9 +282,12 @@ func spawnObserver(observer func(caseID string), caseID string) func() {
 // applyObservation 把 worker 观测结果写入用例结论；没有可信结果时如实标为异常。
 func applyObservation(result *CaseResult, observation workerObservation) {
 	result.ExitCode = observation.ExitCode
+	// 复用 worker 时进程启动远早于本次用例：时长以 worker 自己测到的用例区间为准，
+	// 只有拿不到结果文件时才退化为"进程启动到结束"的区间。
 	result.DurationMS = durationMS(observation.SpawnAt, observation.FinishedAt)
 	if observation.HasResult {
 		result.Timings = observation.Result.Timings
+		result.DurationMS = observation.Result.DurationMS
 	}
 	result.Timings.WorkerSpawnAt = observation.SpawnAt
 	switch {

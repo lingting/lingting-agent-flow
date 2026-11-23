@@ -1,15 +1,17 @@
 package testrunner
 
 import (
-	"context"
 	"fmt"
-	"io"
-	"runtime/debug"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"time"
 )
+
+// 本文件是调度决策的判定层：把用例声明翻译成约束（`planCase`）、判定当前状态能否派发
+// （`admits` / `fits`）并记账占用与释放，同时保存每个包与每个命名池的观测数据。
+//
+// 派发循环、两段队列与 worker 池的交接在 dispatch.go（V4 R3）；槽位与 worker 生命周期在
+// workerpool.go。
 
 // DefaultParallel 是同时在飞的 worker 上限（V3 R3 D1 冻结）。
 //
@@ -23,201 +25,8 @@ type scheduleOutcome struct {
 	Cases        []CaseResult
 	Concurrency  ConcurrencyReport
 	Cancellation CancellationRecord
-}
-
-// caseCompletion 是一条用例执行完成后的回传。
-type caseCompletion struct {
-	index       int
-	reservation reservation
-	result      CaseResult
-}
-
-// runSchedule 按调度决策执行全部用例。
-//
-// 派发是单线程的确定性扫描：每一步按 ID 升序检查待派发用例，满足全部约束就立即派发，被某个
-// 额度挡住的用例不阻塞后面的用例（I6），因此同一批输入的结论与串行执行一致，只有完成顺序会
-// 随并发变化。取消时停止派发、等待在跑 worker 结束，并把从未派发的用例如实记为 error。
-func runSchedule(
-	ctx context.Context,
-	template runCaseOptions,
-	cases []Case,
-	parallel int,
-	limits ConcurrencyLimits,
-	cancelOn string,
-	output io.Writer,
-) scheduleOutcome {
-	startedAt := time.Now()
-	outcome := scheduleOutcome{
-		Cases:       make([]CaseResult, len(cases)),
-		Concurrency: ConcurrencyReport{ParallelLimit: parallel},
-	}
-	dispatchedAt := make([]time.Time, len(cases))
-	// blockedAt 记录用例第一次没能被派发的时刻：排队时长按它计入该用例所属额度（I9）。
-	blockedAt := make([]time.Time, len(cases))
-
-	runCtx, cancelRun := context.WithCancel(ctx)
-	defer cancelRun()
-
-	state := newScheduleState(limits)
-	for _, warning := range limits.Warnings() {
-		fmt.Fprintf(output, "WARN: %s\n", warning)
-	}
-	pending := make([]int, len(cases))
-	for index := range pending {
-		pending[index] = index
-	}
-	done := make(chan caseCompletion, len(cases))
-	finished := 0
-	cancelling := false
-	injectedCancel := ""
-	spawned := make(chan string, len(cases))
-	var launches atomic.Int64
-	// 启动事件既用于统计 worker 启动次数，也用于在指定用例真正跑起来之后再触发取消。
-	template.OnWorkerSpawn = func(caseID string) {
-		launches.Add(1)
-		spawned <- caseID
-	}
-
-	for {
-		if !cancelling && runCtx.Err() != nil {
-			cancelling = true
-			outcome.Cancellation = CancellationRecord{
-				Cancelled: true,
-				Reason:    cancellationReason(injectedCancel),
-				At:        time.Now(),
-			}
-			fmt.Fprintf(output, "取消：%s，停止派发并终止在跑 worker\n", outcome.Cancellation.Reason)
-		}
-		if !cancelling {
-			kept := make([]int, 0, len(pending))
-			for _, index := range pending {
-				if state.inFlight >= parallel {
-					// 全局槽位满与额度满都是"被挡住"：排队时长按第一次被挡住的时刻计入额度（I9）。
-					if blockedAt[index].IsZero() {
-						blockedAt[index] = time.Now()
-					}
-					kept = append(kept, index)
-					continue
-				}
-				c := cases[index]
-				requirement := planCase(c, state)
-				if requirement.impossible != nil {
-					result := unexecutedCaseResult(template.Layout, c, requirement.impossible.Error())
-					result.Timings.DispatchAt = time.Now()
-					outcome.Cases[index] = result
-					state.recordQuotaUndispatched(requirement, requirement.impossible.Error())
-					continue
-				}
-				if !state.admits(requirement) {
-					if blockedAt[index].IsZero() {
-						blockedAt[index] = time.Now()
-					}
-					kept = append(kept, index)
-					continue
-				}
-				reserved := state.reserve(requirement)
-				state.recordQuotaQueueWait(reserved, blockedAt[index], time.Now())
-				if state.inFlight > outcome.Concurrency.MaxInFlight {
-					outcome.Concurrency.MaxInFlight = state.inFlight
-				}
-				dispatchedAt[index] = time.Now()
-				options := template
-				options.Case = c
-				go startCase(runCtx, options, index, reserved, done)
-			}
-			pending = kept
-		}
-
-		if state.inFlight == 0 {
-			// 队列里剩下的用例本轮无法执行：取消后不再派发，其余情况说明约束已不可能满足。
-			for _, index := range pending {
-				c := cases[index]
-				requirement := planCase(c, state)
-				reason := caseUndispatchedMessage
-				if !cancelling {
-					reason = "调度器无法在剩余容量内派发该用例，未执行"
-					if blockers := state.quotaBlockers(requirement); len(blockers) > 0 {
-						reason += "：" + strings.Join(blockers, "；")
-					}
-				}
-				outcome.Cases[index] = unexecutedCaseResult(template.Layout, c, reason)
-				state.recordQuotaUndispatched(requirement, reason)
-				if cancelling {
-					outcome.Cancellation.UndispatchedCases++
-				}
-			}
-			pending = nil
-			break
-		}
-
-		select {
-		case completion := <-done:
-			state.release(completion.reservation)
-			state.recordQuotaCompletion(completion.reservation)
-			result := completion.result
-			result.Timings.QueueEnterAt = startedAt
-			result.Timings.DispatchAt = dispatchedAt[completion.index]
-			outcome.Cases[completion.index] = result
-			finished++
-			queued := durationMS(startedAt, dispatchedAt[completion.index])
-			outcome.Concurrency.QueuedTotalMS += queued
-			if queued > outcome.Concurrency.QueuedMaxMS {
-				outcome.Concurrency.QueuedMaxMS = queued
-			}
-			if result.Message == caseCancelledMessage {
-				outcome.Cancellation.CancelledCases++
-			}
-			fmt.Fprintf(
-				output,
-				"[%d/%d] %-7s %s (%dms)\n",
-				finished,
-				len(cases),
-				strings.ToUpper(result.Status),
-				result.ID,
-				result.DurationMS,
-			)
-		case caseID := <-spawned:
-			if cancelOn != "" && caseID == cancelOn && !cancelling {
-				// 自检注入：命名用例的 worker 真正跑起来之后才取消，覆盖"在跑被终止"的路径。
-				injectedCancel = fmt.Sprintf("自检注入：用例 %q 的 worker 启动后取消运行", caseID)
-				cancelRun()
-			}
-		case <-runCtx.Done():
-			// 下一轮开头记录取消原因并停止派发；在跑用例由自己的取消分支收尾。
-		}
-	}
-	outcome.Concurrency.WorkerLaunches = int(launches.Load())
-	outcome.Concurrency.Package = state.quotaReports(quotaKindPackage)
-	outcome.Concurrency.Quotas = state.quotaReports(quotaKindPool)
-	outcome.Concurrency.Warnings = limits.Warnings()
-	return outcome
-}
-
-// startCase 在独立 goroutine 里执行一条用例，完成后把结论与占用份额交回调度器。
-//
-// 编排进程侧的 panic 必须转成用例级 error：调度器崩溃会让整次运行无法解释。
-func startCase(
-	ctx context.Context,
-	options runCaseOptions,
-	index int,
-	reserved reservation,
-	done chan<- caseCompletion,
-) {
-	completion := caseCompletion{index: index, reservation: reserved}
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			completion.result = CaseResult{
-				ID:         options.Case.ID,
-				Group:      options.Case.Group,
-				Status:     StatusError,
-				Message:    fmt.Sprintf("编排进程执行用例时 panic: %v", recovered),
-				StackTrace: string(debug.Stack()),
-				Artifacts:  options.Layout.CaseArtifactPaths(options.Case.ID),
-			}
-		}
-		done <- completion
-	}()
-	completion.result = runCase(ctx, options)
+	// Workers 是 worker 池的观测结论（V4 R3 / D-08）。
+	Workers WorkerPoolReport
 }
 
 // unexecutedCaseResult 为没有真正执行过的用例给出如实结论：未执行永远不是通过。

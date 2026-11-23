@@ -28,6 +28,8 @@ type Report struct {
 	DefaultTimeoutMS int64             `json:"default_timeout_ms"`
 	RealTests        RealTestsDecision `json:"real_tests"`
 	Totals           Totals            `json:"totals"`
+	// Workers 是 worker 池的观测结论（V4 R3 / D-08）。
+	Workers WorkerPoolReport `json:"workers"`
 	// Concurrency 是整次运行的并发观测（V3 R3 §4.6）。
 	Concurrency ConcurrencyReport `json:"concurrency"`
 	// Cancellation 是运行级取消结论；未取消时 cancelled 为 false。
@@ -87,6 +89,23 @@ type Totals struct {
 	Errors   int `json:"errors"`
 }
 
+// WorkerPoolReport 是 worker 池的观测结论（V4 R3 / D-08）。
+//
+// 计数口径：total 是本次运行启动的 worker 进程数，reuse 是"复用了已经跑过用例的进程"的
+// 执行次数，因此 total + reuse 等于进入过 worker 进程的用例条数；restarts 是没有按协议
+// 收尾的进程（用例里 os.Exit、控制通道被污染、派发前已退出），编排进程主动终止的超时与
+// 取消不计入其中；isolated_cases 是使用一次性 worker 的用案件数。
+type WorkerPoolReport struct {
+	// Total 是本次运行启动的 worker 进程数。
+	Total int `json:"total"`
+	// Reuse 是复用已有 worker 进程执行的用例数。
+	Reuse int `json:"reuse"`
+	// Restarts 是没有按协议收尾的 worker 进程数。
+	Restarts int `json:"restarts"`
+	// IsolatedCases 是使用一次性 worker 执行的独占用例数。
+	IsolatedCases int `json:"isolated_cases"`
+}
+
 // ConcurrencyReport 是整次运行的并发观测：上限、峰值、排队与 worker 启动次数。
 //
 // 判断并发是否真的发生不能只看耗时：parallel_limit 是调度器的硬上限，max_in_flight 是
@@ -96,7 +115,7 @@ type ConcurrencyReport struct {
 	ParallelLimit int `json:"parallel_limit"`
 	// MaxInFlight 是本次运行观测到的最大在飞用例数。
 	MaxInFlight int `json:"max_in_flight"`
-	// WorkerLaunches 是本次运行启动的 worker 进程数。
+	// WorkerLaunches 是本次运行启动的 worker 进程数，与 workers.total 一致。
 	WorkerLaunches int `json:"worker_launches"`
 	// QueuedTotalMS 是全部用例排队时长之和。
 	QueuedTotalMS int64 `json:"queued_ms_total"`
@@ -211,6 +230,14 @@ func (r Report) Summary() string {
 		r.Concurrency.QueuedTotalMS,
 		r.Concurrency.QueuedMaxMS,
 		r.Concurrency.WorkerLaunches,
+	)
+	fmt.Fprintf(
+		&builder,
+		"worker 池：进程 %d / 复用 %d / 重启 %d / 独占 %d\n",
+		r.Workers.Total,
+		r.Workers.Reuse,
+		r.Workers.Restarts,
+		r.Workers.IsolatedCases,
 	)
 	writeQuotaLines(&builder, "包", r.Concurrency.Package)
 	writeQuotaLines(&builder, "池", r.Concurrency.Quotas)

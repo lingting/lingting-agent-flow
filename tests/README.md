@@ -72,7 +72,11 @@ go run ./cmd/agentflow-ci real-tests-gate \
 - 集成、E2E 与前端浏览器用例不得再用 `go test` 执行；它们只有 `agentflow-test` 一个入口。
 - 前端单元测试 `pnpm test`（`vp test run`）是本机开发入口，不参与 CI 门禁。
 - 执行器是 `cmd/agentflow-test`，`make test-runner` 负责构建 `bin/agentflow-test`；worker 由同一
-  二进制以 `--exec-case` 重启自身，因此入口必须是最新构建。
+  二进制启动（常驻 `--exec-worker` 复用执行多条用例，一次性 `--exec-case` 给独占用例与单条调试），因此
+  入口必须是最新构建。
+- worker 池：`--parallel` 同时是槽位上限，一个槽位一条常驻 worker 进程，用例之间复用；声明
+  `DedicatedWorker` 的用例使用全新一次性 worker。报告里的 `workers` 分节记录 `total` / `reuse` /
+  `restarts` / `isolated_cases`，每条用例带 `worker_id`。
 - 选择条件只有三种写法：分组名、精确用例 ID、以 `...` 结尾的前缀；没有排除语法与 `--count`。
 
 ## 分组一览
@@ -83,10 +87,10 @@ go run ./cmd/agentflow-ci real-tests-gate \
 |---|---:|---|---:|
 | `local` | 9 | `integration-local-codesaver`(12)、`environment`(7)、`execenv`(28)、`scheduler`(41)、`session`(7)、`source`(6)、`ssh`(22)、`validation`(11)、`workflow`(49) | 183 |
 | `e2e` | 1 | `e2e-cli` | 64 |
-| `selfcheck` | 4 | `selfcheck`(3)、`resourcecheck`(7)、`concurrencycheck`(17)、`pilot`(1) | 28 |
+| `selfcheck` | 4 | `selfcheck`(3)、`resourcecheck`(9)、`concurrencycheck`(58)、`pilot`(1) | 71 |
 | `frontend` | 1 | `frontend`（13 Vitest + 24 Playwright） | 37 |
 | `real` | 6 | `integration-ssh`(6)、`integration-remote-agent`(2)、`codesaver`(2)、`docker`(6)、`planning`(9)、`workflow`(7) | 32 |
-| `fault` | 4 | `selfcheck-fault`(3)、`resourcecheck-fault`(2)、`concurrencycheck-fault`(8)、`pilot-fault`(1) | 14 |
+| `fault` | 4 | `selfcheck-fault`(3)、`resourcecheck-fault`(2)、`concurrencycheck-fault`(10)、`pilot-fault`(1) | 16 |
 
 `fault` 分组按设计注入失败，必定以非零退出码结束，不进绿色门禁。
 
@@ -109,20 +113,24 @@ testrunner.Register(testrunner.Case{
   失败用 `c.Fatalf`，跳过用 `c.Skipf` 并给出原因。
 - 用例只声明资源，不自行创建或清理共享资源；句柄从 `c.Resource(name)` 读取（反序列化的
   `agentflow-case-handles/1` 外壳）。
-- 用例主体只在 worker 子进程中执行，因此可以安全地包含 `os.Exit` 风险与包级全局状态。
+- 用例主体只在 worker 子进程中执行，因此可以安全地包含 `os.Exit` 风险与包级全局状态：`panic` 与
+  `os.Exit` 只影响该条用例的那次执行。默认 worker 在用例之间复用并重置工作目录、环境变量与日志文件；
+  会改动包级变量或进程级状态的用例必须声明 `DedicatedWorker: true`，并写明为什么必须独占。
 
 ## 产物与结果
 
 ```text
 .test-artifacts/<run-id>/report.json
 .test-artifacts/<run-id>/cases/<case-id>/{stdout.log,stderr.log,result.json,artifacts/}
+.test-artifacts/<run-id>/workers/<worker-序号>/stderr.log   # 常驻 worker 自身的标准错误
 .test-artifacts/cases-<kind>-output.log         # run-cases.sh 的控制台记录
 .test-artifacts/cases-<kind>-summary.txt        # 机器可读结论
 %TEMP%/lingting-agent-flow-tests/<run-id>/      # 用例工作空间与资源存放目录
 ```
 
 - `report.json` 含选择条件、真实依赖授权结论、用例结论、资源结论、零残留结论、并发与取消记录、
-  退出码；跳过统计只读 `totals.skipped` 与每条 `skip_reason`。
+  worker 池观测（`workers`）、每条用例的 `worker_id` 与退出码；跳过统计只读 `totals.skipped` 与每条
+  `skip_reason`。
 - 用例结论只有六种：`passed` / `failed` / `skipped` / `panic` / `timeout` / `error`。跳过不计为通过。
 - `tests/unit/**` 的包仍以 `testkit.Main` 为入口，把本次运行输出写入用例工作空间下的 `test.log`，
   并在基目录写 `latest-run.txt`：

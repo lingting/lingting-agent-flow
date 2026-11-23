@@ -1,8 +1,10 @@
 // Command agentflow-test 是 AgentFlow 统一测试执行器的命令行入口。
 //
-// 普通调用是编排进程：选择用例、分配资源、启动 worker 并写出统一报告。--exec-case 是
-// worker 内部入口，由编排进程启动，不供人工日常使用；--prepare-real-config 是 CI 的
-// 真实测试配置准备入口（V3 R8），只生成配置后退出，不执行任何用例。
+// 普通调用是编排进程：选择用例、分配资源、把用例派发给 worker 池并写出统一报告。
+// --exec-worker 是常驻 worker 内部入口（复用 worker 按顺序执行多条用例），--exec-case 是
+// 一次性 worker 内部入口（独占用例与单条调试）；两者都由编排进程启动，不供人工日常使用。
+// --prepare-real-config 是 CI 的真实测试配置准备入口（V3 R8），只生成配置后退出，不执行
+// 任何用例。
 package main
 
 import (
@@ -46,7 +48,9 @@ func run(args []string) int {
 	pools := &poolFlags{}
 	flags.Var(pools, "pool", "命名并发池容量，形如 name=limit；可重复声明")
 	realTests := flags.String("real-tests", testrunner.RealTestsAuto, "真实依赖授权：auto/on/off")
-	execCase := flags.String("exec-case", "", "worker 内部参数：执行单个用例")
+	execWorker := flags.Bool("exec-worker", false, "worker 内部参数：常驻 worker 模式，由编排进程启动")
+	workerID := flags.Int("worker-id", 0, "worker 内部参数：编排进程分配的 worker 序号")
+	execCase := flags.String("exec-case", "", "worker 内部参数：执行单个用例（独占用例与单条调试）")
 	resultFile := flags.String("result-file", "", "worker 内部参数：结果文件路径")
 	handleFile := flags.String("handles", "", "worker 内部参数：资源句柄文件")
 	workspaceDir := flags.String("workspace", "", "worker 内部参数：用例工作空间目录")
@@ -86,6 +90,9 @@ func run(args []string) int {
 	if *serve != "" {
 		return runSelfCheckService(*serve)
 	}
+	if *execWorker {
+		return runPersistentWorker(*workerID)
+	}
 	if *execCase != "" {
 		return runWorker(workerArgs{
 			caseID:       *execCase,
@@ -96,6 +103,7 @@ func run(args []string) int {
 			timeout:      *timeout,
 			grant:        *realTestsGrant,
 			reason:       *realTestsReason,
+			workerID:     *workerID,
 		})
 	}
 
@@ -166,6 +174,19 @@ type workerArgs struct {
 	timeout      time.Duration
 	grant        string
 	reason       string
+	workerID     int
+}
+
+// runPersistentWorker 以常驻 worker 模式循环执行被派发的用例，直到编排进程让它退出。
+//
+// 退出码只表达控制通道是否正常收尾：用例结论由每条用例自己的结果文件表达，不由本进程的
+// 退出码表达（一个进程会执行多条用例）。
+func runPersistentWorker(workerID int) int {
+	if err := testrunner.RunPersistentWorker(testrunner.PersistentWorkerOptions{WorkerID: workerID}); err != nil {
+		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+		return testrunner.ExitFailure
+	}
+	return testrunner.ExitOK
 }
 
 // runWorker 以 worker 模式执行单个用例，退出码由用例结论决定。
@@ -188,6 +209,7 @@ func runWorker(args workerArgs) int {
 		Timeout:         args.timeout,
 		RealTests:       allowed,
 		RealTestsReason: args.reason,
+		WorkerID:        args.workerID,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
@@ -210,17 +232,26 @@ func parseGrant(grant string) (bool, error) {
 
 // printCases 以表格列出用例声明，供人工核对注册结果。
 func printCases(cases []testrunner.Case) {
-	fmt.Printf("%-28s %-18s %-9s %-10s %s\n", "ID", "GROUP", "PARALLEL", "TIMEOUT", "RESOURCES")
+	fmt.Printf(
+		"%-40s %-24s %-9s %-10s %-10s %s\n",
+		"ID",
+		"GROUP",
+		"PARALLEL",
+		"DEDICATED",
+		"TIMEOUT",
+		"RESOURCES",
+	)
 	for _, c := range cases {
 		timeout := c.Timeout.String()
 		if c.Timeout == 0 {
 			timeout = "default"
 		}
 		fmt.Printf(
-			"%-28s %-18s %-9t %-10s %s\n",
+			"%-40s %-24s %-9t %-10t %-10s %s\n",
 			c.ID,
 			c.Group,
 			c.Parallel,
+			c.DedicatedWorker,
 			timeout,
 			describeResources(c.Resources),
 		)

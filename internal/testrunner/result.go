@@ -81,8 +81,10 @@ type ArtifactPaths struct {
 
 // CaseResult 是一条用例的执行结论，也是 worker 结果文件的内容。
 type CaseResult struct {
-	ID         string           `json:"id"`
-	Group      string           `json:"group"`
+	ID    string `json:"id"`
+	Group string `json:"group"`
+	// WorkerID 是执行该用例的 worker 序号（V4 R3）：0 表示这次执行没有进入 worker 进程。
+	WorkerID   int              `json:"worker_id,omitempty"`
 	Status     string           `json:"status"`
 	Message    string           `json:"message,omitempty"`
 	SkipReason string           `json:"skip_reason,omitempty"`

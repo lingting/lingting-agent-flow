@@ -35,8 +35,10 @@ type Context struct {
 	workspaceDir    string
 	realTests       bool
 	realTestsReason string
-	ctx             context.Context
-	handles         map[string]Handle
+	// workerID 是执行该用例的 worker 序号（V4 R3）：0 表示这次执行没有进入 worker 进程。
+	workerID int
+	ctx      context.Context
+	handles  map[string]Handle
 
 	mu         sync.Mutex
 	failures   []string
@@ -61,6 +63,7 @@ func newContext(ctx context.Context, c Case, req WorkerRequest, handles []Handle
 		workspaceDir:    req.WorkspaceDir,
 		realTests:       req.RealTests,
 		realTestsReason: req.RealTestsReason,
+		workerID:        req.WorkerID,
 		ctx:             ctx,
 		handles:         byName,
 	}
@@ -69,6 +72,14 @@ func newContext(ctx context.Context, c Case, req WorkerRequest, handles []Handle
 // Name 返回当前用例 ID。
 func (c *Context) Name() string {
 	return c.caseID
+}
+
+// WorkerID 返回执行当前用例的 worker 序号；0 表示这次执行没有进入 worker 进程。
+//
+// 复用 worker 时同一进程会连续执行多条用例，因此它是"哪一条进程执行了这条用例"的凭证，
+// 也是自检里核对复用与独占的依据（V4 R3 / W6）。
+func (c *Context) WorkerID() int {
+	return c.workerID
 }
 
 // ArtifactDir 返回该用例的独占产物目录，目录已存在。

@@ -1,8 +1,9 @@
 // Package testrunner 是统一测试执行器（V3）的编排与执行核心。
 //
-// 编排进程负责选择用例、按作用域分配资源、启动 worker 并把结果汇总成统一报告；每个 Case
-// 都在独立 worker 子进程中执行（同一二进制以 --exec-case 启动），因此 panic、os.Exit 与
-// 包级全局状态都只影响该 Case。并发只由 scheduler.go 的调度器决定（R3），资源分配与
+// 编排进程负责选择用例、按作用域分配资源、把用例派发给 worker 并把结果汇总成统一报告。
+// 一条用例独占"一次执行"：默认由常驻 worker 顺序执行多条用例（V4 R3），声明
+// DedicatedWorker 的用例使用全新的一次性 worker 并在结束后退出。因此 panic、os.Exit 与
+// 包级全局状态只影响该用例的那次执行。并发只由 scheduler.go 的调度器决定，资源分配与
 // 零残留核验由 R2 落地；用例无法通过代码自行扩大并发。
 package testrunner
 
@@ -39,6 +40,13 @@ type Case struct {
 	// false 表示该用例在串行作用域内独占执行（对齐 go test 里未标记 t.Parallel 的用例）；
 	// 并发最终由调度器决定，用例无法自行扩大或缩小。
 	Parallel bool
+	// DedicatedWorker 表示该用例必须独占一个全新的 worker 进程（V4 R3 / W2）。
+	//
+	// 默认 false：常驻 worker 会在用例之间复用，执行完一条继续领下一条。声明为 true 时
+	// 编排进程为该用例启动一次性 worker，执行完即退出、永不复用；适用于关闭服务端、占用
+	// 固定端口、改动进程级状态等会污染复用 worker 的用例。声明需要理由，滥用会退回
+	// "一条用例一个进程"的旧模型，报告里的 isolated_cases 用于核对占比。
+	DedicatedWorker bool
 	// Concurrency 是用例的并发额度声明（V4 R2）：包级上限与参与的命名并发池。
 	//
 	// 声明只表达"这条用例需要多少额度"，实际能否并行仍由调度器决定；同包或同池的不同
