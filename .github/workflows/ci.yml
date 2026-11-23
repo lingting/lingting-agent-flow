@@ -7,12 +7,13 @@
 # - cases-e2e        ：CLI 端到端用例（统一执行器，`e2e-cli`）
 # - cases-selfcheck  ：执行器自检用例（`selfcheck` / `resourcecheck` / `concurrencycheck` / `pilot`）；
 #                       pilot 需要被测服务二进制，Job 里先 `make build`
-# - ui-test          ：前端用例（统一执行器，`frontend`）与格式、lint、类型检查、生产构建门禁
+# - ui-test          ：前端用例（统一执行器，9 个领域矩阵分片）
+# - ui-gates         ：前端格式、lint、类型检查、生产构建与嵌入产物门禁
 #
 # 全部用例（含 unit 面）只有 `agentflow-test` 一个执行器；本地入口与这些 Job 一一对应：
 # `make test` / `make test-cases`（`TEST_KIND` 取 local / e2e / selfcheck / frontend / unit）。
 # 分组归属、选择条件与 Makefile 入口只定义在 `.github/scripts/go-test-groups.sh`，YAML 只传
-# kind 与产物目录；分组遗漏、Case 分组未归类、声明落空或与工作流 / Makefile 漂移时
+# kind、领域分组与产物目录；分组遗漏、Case 分组未归类、声明落空或与工作流 / Makefile 漂移时
 # go-inventory 失败，后续测试 Job 被跳过，ci-summary 因此不会把门禁报告为通过。
 #
 # 并发：每个 Job 独享一台 4 vCPU Runner，因此分组内部只开 `--parallel 4`，不在同一台机器上
@@ -279,15 +280,27 @@ jobs:
 
   # 前端用例由统一执行器运行：dev server 由 frontend-dev-server 提供者启动，端口由 OS 分配；
   # 格式、lint、类型检查与生产构建属于非测试门禁，单独成步骤，不参与用例统计。
+  # 前端按领域拆成 9 个独立 Runner：每个分片仍经统一执行器执行 Case，且各自提供隔离的 dev server。
+  # fail-fast=false 保证单个领域失败不会取消其它领域，ci-summary 会检查整个 matrix 的聚合结论。
   ui-test:
-    name: 前端用例与门禁
+    name: 前端用例（${{ matrix.domain }}）
     needs: [go-inventory]
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    outputs:
-      prepare: ${{ steps.prepare.outcome }}
-      tests: ${{ steps.tests.outcome }}
-      gates: ${{ steps.gates.outcome }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 9
+      matrix:
+        domain:
+          - frontend-shell
+          - frontend-planning
+          - frontend-projects
+          - frontend-requirements
+          - frontend-settings
+          - frontend-task-intake
+          - frontend-task-execution
+          - frontend-task-recovery
+          - frontend-task-resources
     steps:
       - name: 检出代码
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -312,16 +325,52 @@ jobs:
           cache: pnpm
           cache-dependency-path: lingting-agent-flow-ui/pnpm-lock.yaml
       - name: 安装前端依赖
-        id: prepare
         working-directory: lingting-agent-flow-ui
         run: pnpm install --frozen-lockfile
       - name: 安装 Chromium 与系统依赖
         working-directory: lingting-agent-flow-ui
         run: pnpm exec playwright install --with-deps chromium
-      # 24 个 Playwright 文件与 13 个 Vitest 文件各是一条 Case，并发度由调度器决定。
-      - name: 执行前端用例
-        id: tests
-        run: bash .github/scripts/run-cases.sh --kind frontend --artifact-dir "$TEST_ARTIFACT_ROOT/frontend" --parallel 4
+      - name: 执行前端领域用例
+        run: bash .github/scripts/run-cases.sh --kind frontend --group "${{ matrix.domain }}" --artifact-dir "$TEST_ARTIFACT_ROOT/frontend/${{ matrix.domain }}" --parallel 4
+      # 失败时上传该领域自己的报告、用例日志、Playwright 报告与截图。
+      - name: 上传前端领域产物
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ui-test-${{ matrix.domain }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/.test-artifacts/frontend/${{ matrix.domain }}
+          if-no-files-found: warn
+          retention-days: 7
+
+  # 非测试门禁独立运行，与 9 个领域的测试分片并行。
+  ui-gates:
+    name: 前端格式、lint、类型与构建门禁
+    needs: [go-inventory]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      prepare: ${{ steps.prepare.outcome }}
+      gates: ${{ steps.gates.outcome }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: "11.24.0"
+      - name: 安装 Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: lingting-agent-flow-ui/package.json
+          cache: pnpm
+          cache-dependency-path: lingting-agent-flow-ui/pnpm-lock.yaml
+      - name: 安装前端依赖
+        id: prepare
+        working-directory: lingting-agent-flow-ui
+        run: pnpm install --frozen-lockfile
       # vp fmt 与 vp lint --fix 会自动修改文件且不返回失败，因此必须在它们运行之后核验
       # 工作区是否仍有待修复改动；生产构建与产物校验留在同一步骤内。
       - name: 前端格式、lint、类型检查与生产构建
@@ -333,16 +382,6 @@ jobs:
           cd ..
           bash .github/scripts/check-frontend-clean.sh
           make web-verify
-      # 失败时上传执行器产物（报告、用例日志、Playwright 报告与截图）；依赖目录与构建产物不上传。
-      - name: 上传前端用例产物
-        if: failure()
-        continue-on-error: true
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: ui-test-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ github.workspace }}/.test-artifacts/frontend
-          if-no-files-found: warn
-          retention-days: 7
 
   # 真实测试授权判断：只读取仓库变量与 GitHub 事件上下文，不读取任何真实设备凭据，
   # 不建立网络连接（collaborator 模式下的 push 需要查询推送者权限，这是唯一的网络访问），
@@ -475,6 +514,7 @@ jobs:
       - cases-e2e
       - cases-selfcheck
       - ui-test
+      - ui-gates
       - real-tests-gate
       - real-tests
     if: always()
@@ -506,9 +546,9 @@ jobs:
           CASES_SELFCHECK_RESULT: ${{ needs.cases-selfcheck.result }}
           CASES_SELFCHECK_STEP: ${{ needs.cases-selfcheck.outputs.tests }}
           UI_TEST_RESULT: ${{ needs.ui-test.result }}
-          UI_TEST_PREPARE: ${{ needs.ui-test.outputs.prepare }}
-          UI_TEST_STEP: ${{ needs.ui-test.outputs.tests }}
-          UI_TEST_GATES: ${{ needs.ui-test.outputs.gates }}
+          UI_GATES_RESULT: ${{ needs.ui-gates.result }}
+          UI_GATES_PREPARE: ${{ needs.ui-gates.outputs.prepare }}
+          UI_GATES_STEP: ${{ needs.ui-gates.outputs.gates }}
           REAL_GATE_RESULT: ${{ needs.real-tests-gate.result }}
           REAL_GATE_MODE: ${{ needs.real-tests-gate.outputs.mode }}
           REAL_GATE_ENABLED: ${{ needs.real-tests-gate.outputs.enabled }}
