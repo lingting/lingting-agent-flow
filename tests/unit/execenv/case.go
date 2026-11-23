@@ -2,7 +2,7 @@
 // 迁到统一测试执行器。
 //
 // 迁移写法沿用 V3 R4.5 冻结的约定（tests/integration/local/scheduler/doc.go），并按
-// .steps/V4/R5/README.md §2 收敛：
+// V4 R5 试点包的迁移约定收敛：
 //
 //   - 一条既有 func Test* 对应一条 Case，ID 为 "unit-execenv/<原用例名转 kebab-case>"，
 //     顺序与源文件一致，便于按包核对迁移数量；

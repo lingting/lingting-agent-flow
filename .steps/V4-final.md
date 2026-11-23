@@ -1,8 +1,10 @@
 # AgentFlow V4 最终工程状态
 
 > **文档状态**：V4 收口文档（R0 盘点与决策冻结 → R9 门禁、CI 与文档收口）。
-> **核实基线**：R9 收口工作区（`.steps/V4/R8/README.md` 之后）的代码、`Makefile`、
-> `.github/workflows/ci.yml`、`.github/scripts/`、`tests/` 结构与 `.steps/V4/R*/README.md` 的阶段记录。
+> **阶段文档状态**：V4 阶段文档（`.steps/V4/**`，含 `ROADMAP.md` 与 R0–R9 批次记录）已随 V4 收口移除；
+> 本文保留正文与结论，原文中指向阶段文档的链接已改为纯文本，需要细节时用 Git 历史（被删提交之前可查）。
+> **核实基线**：R9 收口工作区（R8 批次记录之后）的代码、`Makefile`、`.github/workflows/ci.yml`、
+> `.github/scripts/`、`tests/` 结构与 R0–R8 的阶段记录。
 > **使用规则**：本文只记录最终状态，不记录逐步开发过程。凡写"已交付"的能力，都能在代码、命令或报告
 > 字段中指向具体位置；证据不足或本次未获授权执行的条目一律列入 §7 遗留事项。
 
@@ -120,10 +122,9 @@ tests/
 
 ### 2.6 迁移可核对性
 
-- 分支阶段的逐包迁移清单（源 `func Test*` 数量 → Case 数量、跳过原因、独占理由）在
-  [R5](V4/R5/README.md)（`execenv` + `lifecycle`）、[R6](V4/R6/README.md)（9 个中小包）、
-  [R7](V4/R7/README.md)（`domain` / `container` / `agent`）、[R8](V4/R8/README.md)
-  （`store` / `httpapi` / `app`）的阶段文档里。
+- 分支阶段的逐包迁移清单（源 `func Test*` 数量 → Case 数量、跳过原因、独占理由）写在 R5（`execenv`
+  + `lifecycle`）、R6（9 个中小包）、R7（`domain` / `container` / `agent`）、R8（`store` / `httpapi` /
+  `app`）的批次记录里；这些阶段文档已随 V4 收口移除，需要时用 Git 历史查。
 - 覆盖对账（清单、`--audit-*`、dropped 登记、盘点工具与 CI 步骤）已按 D-06 删除；迁移完整性证据改为
   "每包清单 + 逐包运行"，终态防丢用例的证据是"仓库里没有 `_test.go`"加上 `--list` 的 1736 条注册项。
 

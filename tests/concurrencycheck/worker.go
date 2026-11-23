@@ -12,8 +12,8 @@ import (
 // 本文件是 V4 R3 的 worker 池自检：复用、独占与状态隔离。
 //
 // 断言主要落在编排进程的报告字段上（workers 分节的 total / reuse / restarts /
-// isolated_cases 与每条 Case 的 worker_id），用例只负责制造场景；探针命令与期望写在
-// .steps/V4/R3/README.md。
+// isolated_cases 与每条 Case 的 worker_id），用例只负责制造场景；探针方式与期望写在各场景的
+// 注释里。
 //
 // 状态隔离用一对用例验证：前一条改动环境变量与工作目录，后一条断言它们已经被重置（W3）。
 // --parallel 1 时两条必然落在同一个 worker 上，报告里相同的 worker_id 是"确实复用"的凭证；

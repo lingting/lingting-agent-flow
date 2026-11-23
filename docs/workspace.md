@@ -15,7 +15,7 @@ lingting-agent-flow-ui/   React + TypeScript 前端（独立 pnpm 工程）
 configs/                  示例配置
 docs/                     工程文档
 tests/                    全部测试代码：Case 定义、注册表与共享辅助（无 `_test.go`）
-.steps/                   规划与阶段性成果文档（V1–V3 收口、V4 阶段规划）
+.steps/                   规划与阶段性成果文档（V1–V4 收口）
 ```
 
 ## 2. 包职责

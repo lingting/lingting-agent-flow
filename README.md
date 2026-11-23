@@ -43,6 +43,7 @@ AgentFlow 是一个本地优先的 AI 编码工作流编排器，使用 Go 实�
 | [.steps/V1-final.md](.steps/V1-final.md) | V1 最终产品状态与遗留事项 |
 | [.steps/V2-final.md](.steps/V2-final.md) | V2 最终产品状态与遗留事项 |
 | [.steps/V3-final.md](.steps/V3-final.md) | V3 最终状态：统一测试执行器、已接受的能力回退与遗留事项（阶段文档已归档删除） |
+| [.steps/V4-final.md](.steps/V4-final.md) | V4 最终状态：唯一测试执行入口、并发额度与 worker 池、遗留事项（阶段文档已归档删除） |
 
 ## 许可证
 许可证将在首次公开发布前确定。
