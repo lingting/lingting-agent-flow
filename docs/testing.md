@@ -1,6 +1,6 @@
 # 测试规范
 
-本文件是 AgentFlow 的测试规则：授权边界、两个执行入口、用例模型、并发与调度、资源与零残留、
+本文件是 AgentFlow 的测试规则：授权边界、唯一执行入口、用例模型、并发与调度、资源与零残留、
 测试工作空间与产物、真实外部依赖、覆盖对账与结果报告。测试目录在仓库中的位置见
 [workspace.md](workspace.md)，用例包与操作细节见 [tests/README.md](../tests/README.md)，前端工程见
 [frontend.md](frontend.md)。执行器内部实现见 [internal/testrunner/](../internal/testrunner/)，
@@ -19,8 +19,8 @@
 
 ```text
 tests/
-├── testkit/                通用测试辅助：工作空间、日志、known_hosts 快照、容器核验与 testkit.Main
-├── unit/                   仍由 go test 执行的单元测试（17 个包）
+├── testkit/                通用测试辅助：工作空间、日志、known_hosts 快照与容器核验
+├── unit/                   unit 用例的来源包路径（V4 R9 起无 `_test.go`，用例由执行器运行）
 ├── registry/               用例包聚合入口（空导入）
 ├── integration/local/      本机集成用例（9 个分组）
 ├── integration/ssh/        真实 SSH 主机用例
@@ -42,17 +42,15 @@ tests/
   步骤、执行记录、会话、事件），不得以方法返回值代替持久化断言。
 - `tests/testkit/` 只存放通用测试辅助代码，不存放产品实现，也不存放需要额外执行的验证脚本。
 
-## 3. 两个执行入口
+## 3. 唯一执行入口
 
 | 范围 | 入口 | 本地命令 | CI Job |
 |---|---|---|---|
-| `tests/unit/**`（17 个包） | `go test` | `make test-unit` | `go-unit` |
-| 其余全部已注册 Case | `agentflow-test` | `make test-cases` / `make test-real` | `cases-local`、`cases-e2e`、`cases-selfcheck`、`ui-test`、`real-tests` |
+| 全部已注册 Case（含 unit 面） | `agentflow-test` | `make test` / `make test-cases` / `make test-real` | `cases-unit`、`cases-local`、`cases-e2e`、`cases-selfcheck`、`ui-test`、`real-tests` |
 
-- 集成测试、E2E 测试与前端浏览器测试只有 `agentflow-test` 一个入口，不得再用 `go test` 执行这些用例，
-  也不得用 `pnpm test:e2e:safe` 一类的平行入口启动 dev server。`tests/unit` 的用例仍由 `go test`
-  执行，其结论按 `go test` 自己的输出统计（路径 C 的既定结果，见
-  [.steps/V3-final.md](../.steps/V3-final.md)）。
+- 集成测试、E2E 测试、前端浏览器测试与从 `tests/unit/**` 迁入的 unit 用例只有 `agentflow-test` 一个
+  入口，不得再用 `go test` 执行任何用例，也不得用 `pnpm test:e2e:safe` 一类的平行入口启动 dev server。
+  仓库里不存在 `_test.go`，因此 `go test` 不是门禁：它不执行任何用例，也不会产生"跑 0 条返回 0"的结论。
 - 前端单元测试 `pnpm test`（`vp test run`）保留为开发者本机入口，不参与 CI 门禁，也不替代执行器的
   `frontend` 分组。
 - `bin/agentflow-test` 由 `make test-runner` 构建；worker 由同一二进制启动，因此入口必须是最新构建，
@@ -105,8 +103,6 @@ tests/
   独占段（`DedicatedWorker`）优先派发，但可复用队列非空时独占派发不得拿走最后一个空闲槽位。派发顺序只
   由 ID 升序与当前占用决定，同一输入两次运行一致。
 - 用例不再自行创建 worker：`--exec-worker` 与 `--exec-case` 都是编排进程的内部入口。
-- `tests/unit/**` 仍由 `go test` 执行，其并发由 `-p` / `-parallel` 控制（`make test-unit` 跟随
-  `PARALLEL`）。
 - 前端浏览器的实际并发等于调度器派发的用例数：`playwright.config.ts` 固定 `workers: 1`，一条 Case
   一次 CLI 调用，不再读取任何 worker 环境变量。
 
@@ -149,9 +145,9 @@ tests/
 - 测试结束禁止删除工作空间与测试产物：不调用 `os.RemoveAll` 删除测试根目录，不使用会在结束时自动清理
   目录的临时目录 API，也不在 `t.Cleanup` 中删除目录。允许关闭数据库连接、终止测试启动的子进程、关闭
   监听端口等运行时资源。
-- `tests/unit/**` 的包仍用 `testkit.Main` 作为入口（`os.Exit(testkit.Main(m))`），由它把本次运行的完整
-  输出写入用例工作空间下的 `test.log`，并在基目录记录 `latest-run.txt`、默认打开 `-test.v`。应用服务
-  日志统一用 `testkit.Logger` / `testkit.Slog` 构造。
+- 应用服务日志统一用 `testkit.Logger` / `testkit.Slog` 构造：它们写当前标准输出，由执行器落到该用例的
+  产物日志（`cases/<case-id>/stdout.log`）。逐条输出、跳过原因与失败现场都在产物目录里，不需要
+  `TestMain` 一类的进程级日志重定向。
 
 ## 8. 真实外部依赖
 
@@ -208,13 +204,13 @@ V4 的 unit 迁移不再用清单对账，改为按包逐条迁移并在批次�
 
 ```bash
 make check                        # gofmt 检查 + go vet + go build，不执行任何测试
-make test                         # test-unit + test-cases（全部普通 Case）
-make test-unit                    # go test ./tests/unit/...
-make test-cases                   # 全部普通 Case（local + e2e + selfcheck + frontend）
+make test                         # 全部普通 Case（等价于 make test-cases TEST_KIND=normal）
+make test-cases                   # 全部普通 Case（local + e2e + selfcheck + frontend + unit）
 make test-cases TEST_KIND=local   # 只跑本机集成分组
 make test-cases TEST_KIND=e2e     # 只跑 CLI 端到端分组
 make test-cases TEST_KIND=selfcheck
 make test-cases TEST_KIND=frontend
+make test-cases TEST_KIND=unit
 AGENTFLOW_REAL_TESTS_GRANTED=true make test-real   # 真实设备分组（需单独授权）
 ./bin/agentflow-test --list                        # 列出已注册用例（不执行）
 ```
@@ -222,8 +218,8 @@ AGENTFLOW_REAL_TESTS_GRANTED=true make test-real   # 真实设备分组（需单
 | CI Job | 内容 | 本地等价入口 |
 |---|---|---|
 | `go-static` | 格式、静态检查与编译 | `make check` |
-| `go-inventory` | 测试分组核验（不执行用例） | `bash .github/scripts/go-test-groups.sh --check ...` |
-| `go-unit` | `./tests/unit/...` | `make test-unit` |
+| `go-inventory` | 测试分组核验（残留 go test 测试包、Case kind 声明，不执行用例） | `bash .github/scripts/go-test-groups.sh --check ...` |
+| `cases-unit` | unit 用例（`tests/unit/**` 迁入） | `make test-cases TEST_KIND=unit` |
 | `cases-local` | 本机集成分组 | `make test-cases TEST_KIND=local` |
 | `cases-e2e` | CLI 端到端分组 | `make test-cases TEST_KIND=e2e` |
 | `cases-selfcheck` | 执行器与资源自检分组 | `make test-cases TEST_KIND=selfcheck` |
@@ -232,10 +228,10 @@ AGENTFLOW_REAL_TESTS_GRANTED=true make test-real   # 真实设备分组（需单
 | `real-tests` | 真实外部依赖分组（授权通过后） | `AGENTFLOW_REAL_TESTS_GRANTED=true make test-real` |
 | `ci-summary` | 汇总各 Job 结论 | 无（仅 CI） |
 
-故障注入分组（`*-fault`，14 条）不进门禁：它们按设计注入失败并以非零退出码结束，需要时按
+故障注入分组（`*-fault`，16 条）不进门禁：它们按设计注入失败并以非零退出码结束，需要时按
 `./bin/agentflow-test selfcheck-fault` 一类的选择条件单独执行。分组声明只有一个来源
-（`.github/scripts/go-test-groups.sh`），`--check` 直接对 `go list` 的测试包、执行器 `--list` 的注册表、
-Makefile 入口与消费脚本核验。
+（`.github/scripts/go-test-groups.sh`），`--check` 直接核验仓库里没有残留 go test 测试包、Makefile 不提供
+go test 入口，并对执行器 `--list` 的注册表、Makefile 入口与消费脚本核验。
 
 ## 11. 结果报告
 
@@ -244,8 +240,7 @@ Makefile 入口与消费脚本核验。
 - 统一报告是 `<artifact-root>/<run-id>/report.json`：选择条件、真实依赖授权结论、用例结论、资源结论、
   零残留结论、并发与取消记录、worker 池观测（`workers`：`total` / `reuse` / `restarts` /
   `isolated_cases`）、每条用例的 `worker_id` 与退出码都在其中，路径可复现。
-- `make test-unit` 的结论来自 `go test`（顶层通过 / 失败 / 跳过的结论行），与 Case 报告的统计口径各自
-  独立，不混算。`report.json` 的跳过统计只读 `totals.skipped` 与每条 `skip_reason`。
+- 全部结论只来自 `report.json`：跳过统计只读 `totals.skipped` 与每条 `skip_reason`，不解析日志文本。
 - 取消或超时会终止 worker 进程树（Windows 用 `taskkill /T /F`，回收失败判 `error`），迟到结果不得覆盖
   已确认结论；被中止的编排进程不会执行零残留终检，残留需要人工核验（见 [runbook.md](runbook.md)）。
 
@@ -255,6 +250,5 @@ Makefile 入口与消费脚本核验。
 |---|---|
 | `go test -race` | 本次重构不保留（R0 §2.3），`test-race` 目标与竞态 Job 已删除；恢复路径是 worker 的 `-race` 变体 + `--race` 选项，目前未实现 |
 | 覆盖率门禁 | 不新增（现状本来没有）；恢复路径同上 |
-| `tests/unit` 仍用 `go test` | 路径 C 的既定结果，不改写断言 |
 | `t.Parallel()` 等价语义 | 不保留：1744 处声明统一映射为调度器属性，并发由调度器决定 |
 | 中止运行后的零残留终检 | 不做：编排进程被中止时残留需人工确认 |

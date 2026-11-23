@@ -14,7 +14,7 @@ internal/                 产品实现与测试执行器实现（见下节包职
 lingting-agent-flow-ui/   React + TypeScript 前端（独立 pnpm 工程）
 configs/                  示例配置
 docs/                     工程文档
-tests/                    全部测试代码：unit/ 由 go test 执行，其余目录是 Case 定义与注册表
+tests/                    全部测试代码：Case 定义、注册表与共享辅助（无 `_test.go`）
 .steps/                   规划与阶段性成果文档（V1–V3 收口、V4 阶段规划）
 ```
 

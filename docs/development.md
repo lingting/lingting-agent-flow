@@ -82,13 +82,13 @@ go mod tidy
 make fmt          # gofmt -w cmd internal tests
 make fmt-check    # 列出未格式化的文件
 make vet          # go vet ./...
-make test         # test-unit + test-cases（全部普通 Case）
-make test-unit    # 单元测试（go test ./tests/unit/...）
-make test-cases   # 全部普通 Case：local + e2e + selfcheck + frontend
+make test         # 全部普通 Case（等价于 make test-cases TEST_KIND=normal）
+make test-cases   # 全部普通 Case：local + e2e + selfcheck + frontend + unit
 make test-cases TEST_KIND=local      # 只跑本机集成分组
 make test-cases TEST_KIND=e2e        # 只跑 CLI 端到端分组
 make test-cases TEST_KIND=selfcheck  # 执行器与资源自检分组
 make test-cases TEST_KIND=frontend   # 前端用例分组
+make test-cases TEST_KIND=unit       # unit 用例分组（tests/unit/** 迁入）
 make test-real    # 真实设备分组（需要 AGENTFLOW_REAL_TESTS_GRANTED=true）
 make test-runner  # 只构建 bin/agentflow-test
 make build        # 构建 bin/agentflow（不重建前端）
@@ -99,12 +99,13 @@ make serve        # 统一服务入口（API + 内嵌页面 + 后台服务）
 make check        # fmt-check + vet + build
 ```
 
-`make test` 由两部分组成：`tests/unit/**` 仍由 `go test` 执行，其余已注册 Case（集成、CLI E2E、
-执行器自检、前端）由统一执行器 `agentflow-test` 执行。真实设备分组不在 `make test` 内：它需要真实
-Pi、SSH 主机与远程 Docker，只能由 `make test-real` 在显式授权后运行（`tests/config/*.yml` 的
-`ssh.enable`、`docker.remote_enabled` 与 `pi.enable` 决定是否真的连设备，未启用时输出 `WARN [SKIP]`，
-CI 中还会额外经过 `AGENTFLOW_REAL_TESTS` 授权门禁）。`PARALLEL` 是唯一并发变量，同时作用于
-`go test` 与执行器 `--parallel`。`TEST_KIND` 为 `normal`、`selfcheck` 或 `fault` 时，`make test-cases`
+`make test` 就是 `make test-cases`：全部普通 Case（本机集成、CLI E2E、执行器自检、前端与 unit 面）
+都由统一执行器 `agentflow-test` 执行。仓库里没有 `_test.go`，因此不存在 `go test` 入口。
+真实设备分组不在 `make test` 内：它需要真实 Pi、SSH 主机与远程 Docker，只能由 `make test-real`
+在显式授权后运行（`tests/config/*.yml` 的 `ssh.enable`、`docker.remote_enabled` 与 `pi.enable`
+决定是否真的连设备，未启用时输出 `WARN [SKIP]`，CI 中还会额外经过 `AGENTFLOW_REAL_TESTS`
+授权门禁）。`PARALLEL` 是唯一并发变量，作用于执行器 `--parallel`。`TEST_KIND` 为 `normal`、
+`selfcheck` 或 `fault` 时，`make test-cases`
 还会先 `make build` 构建 `<repo>/bin/agentflow`：`pilot` 试点用例把它声明为 `service-process` 的可执行
 文件，缺失会让资源分配失败。规则细节见 [testing.md](testing.md)。
 
@@ -113,7 +114,6 @@ CI 中还会额外经过 `AGENTFLOW_REAL_TESTS` 授权门禁）。`PARALLEL` 是
 ```bash
 gofmt -w cmd internal tests
 go vet ./...
-go test -count=1 ./tests/unit/...
 go build -o bin/agentflow-test ./cmd/agentflow-test
 bin/agentflow-test integration-local-...
 go build -o bin/agentflow ./cmd/agentflow

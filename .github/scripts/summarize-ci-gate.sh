@@ -11,9 +11,8 @@
 #   GO_STATIC_RESULT / GO_STATIC_STEP             go-static 的 Job 结论与检查步骤结论
 #   GO_INVENTORY_RESULT                           go-inventory 的 Job 结论
 #   GO_INVENTORY_GROUPS_STEP                      分组核验步骤结论
-#   GO_INVENTORY_PACKAGES / GO_INVENTORY_CASES    测试包数与 Case 分组数
+#   GO_INVENTORY_PACKAGES / GO_INVENTORY_CASES    残留 go test 测试包数与 Case 分组数
 #   GO_GROUPS_SUMMARY                             分组清单表格（Markdown）
-#   GO_UNIT_RESULT / GO_UNIT_STEP                 go test 单元分组的 Job 与测试步骤结论
 #   CASES_UNIT_RESULT / CASES_UNIT_STEP           单元用例（迁移）Case 执行结论
 #   CASES_LOCAL_RESULT / CASES_LOCAL_STEP         本机集成 Case 执行结论
 #   CASES_E2E_RESULT / CASES_E2E_STEP             CLI 端到端 Case 执行结论
@@ -86,7 +85,6 @@ failed=0
 for row in \
     "go-static|${GO_STATIC_RESULT:-}|${GO_STATIC_STEP:-}|-" \
     "go-inventory|${GO_INVENTORY_RESULT:-}|${GO_INVENTORY_GROUPS_STEP:-}|-" \
-    "go-unit|${GO_UNIT_RESULT:-}|${GO_UNIT_STEP:-}|-" \
     "cases-unit|${CASES_UNIT_RESULT:-}|${CASES_UNIT_STEP:-}|-" \
     "cases-local|${CASES_LOCAL_RESULT:-}|${CASES_LOCAL_STEP:-}|-" \
     "cases-e2e|${CASES_E2E_RESULT:-}|${CASES_E2E_STEP:-}|-" \
@@ -140,7 +138,7 @@ if [ -n "${GO_INVENTORY_PACKAGES:-}" ] || [ -n "${GO_GROUPS_SUMMARY:-}" ]; then
         echo "### 测试分组核验"
         echo
         echo "- 分组核验步骤：${GO_INVENTORY_GROUPS_STEP:-（未提供）}"
-        echo "- go test 测试包：${GO_INVENTORY_PACKAGES:-（未提供）}；Case 分组：${GO_INVENTORY_CASES:-（未提供）}"
+        echo "- 残留 go test 测试包：${GO_INVENTORY_PACKAGES:-（未提供）}；Case 分组：${GO_INVENTORY_CASES:-（未提供）}"
         if [ -n "${GO_GROUPS_SUMMARY:-}" ]; then
             echo
             printf '%s\n' "$GO_GROUPS_SUMMARY"

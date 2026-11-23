@@ -1,6 +1,9 @@
 # V4 R9：删除 `go test` 执行路径与收口验收
 
-**状态：** 未开始。
+**状态：** 已完成（2026-11-23）。R9.1 与 R9.2 的静态收口全部落地：仓库无 `_test.go`、
+`testkit.Main` / `make test-unit` / `run-go-group-tests.sh` / `go-unit` Job 已删除、`go-test-groups.sh`
+按"无 go test 分组"语义核验；R9.3 的文档全部按终态重写并产出 [`.steps/V4-final.md`](../../V4-final.md)。
+全量 Case 运行与一次完整 CI 需要单独授权，登记在 §8 与 V4-final §7。
 **上游文档：** [V4 路线总规划](../ROADMAP.md)、[R8 批量 C](../R8/README.md)。
 **下游关系：** 本阶段结束后 V4 收口，产出 [`.steps/V4-final.md`](../../V4-final.md)。
 
@@ -56,7 +59,7 @@
 | `go test ./...` | 不执行任何用例（"仓库里没有测试文件"的必然结果，不是门禁） |
 | `make test-unit` | 不存在（`make` 报无此目标） |
 | CI | 没有 `go-unit` Job；`ci-summary` 不引用它 |
-| `./bin/agentflow-test --list` | 1712 条（含 unit 面）/ 分组数与 R8 一致 |
+| `./bin/agentflow-test --list` | 1736 条（含 unit 面）/ 42 个分组（实测值） |
 | `report.json` | `schema_version=agentflow-test-report/2`，含 quota 与 worker 分节 |
 
 ## 6. 风险
@@ -70,3 +73,44 @@
 ## 7. 不做的事
 
 不恢复 race/覆盖率、不改调度与 worker 模型、不为旧目录或旧入口保留兼容层。
+
+---
+
+## 8. 执行记录（2026-11-23）
+
+### 8.1 删除 `go test` 执行路径
+
+| 对象 | 结果 |
+|---|---|
+| `tests/testkit/main.go` | 删除：`Main`、进程级 stdout/stderr 重定向、运行根目录日志、`latest-run.txt`、默认 `-test.v` |
+| `tests/testkit/logging.go` | `Logger` / `Slog` 直接写当前标准输出，去掉 `runLogSink` 退回逻辑 |
+| `tests/testkit/testkit.go` | 保留 `RunRoot` / `Dir` 的工作空间能力；注释去掉 `Main` 依赖 |
+| `Makefile` | 删除 `test-unit`（含 `.PHONY`）；`test: test-cases` |
+| `run-go-group-tests.sh` | 删除，`.github/scripts/README.md` 条目改为"R9 删除的脚本" |
+| `ci.yml` | 删除 `go-unit` Job、`ci-summary` 对它的依赖、`GO_UNIT_*` 环境变量与上传步骤 |
+| `summarize-ci-gate.sh` | 删除 `GO_UNIT_*` 输入、表格行与报告小节 |
+
+### 8.2 门禁收敛
+
+- `go-test-groups.sh`：`go_test_groups` 输出为空，`group_packages` / `group_make_target` 恒失败；
+  `--check` 的新语义为——仓库不得有任何带 `_test.go` 的包、`Makefile` 不得出现 `go test` 调用或
+  `test-unit` 目标、工作流不得再声明 `--declared-groups`、Case kind 声明与 Makefile 配方仍逐项核验。
+- `ci.yml` 的 `go-inventory` 改为 `--check --declared-case-kinds local,e2e,selfcheck,frontend,unit`。
+
+### 8.3 实测结论
+
+| 探针 | 结果 |
+|---|---|
+| `git ls-files '*_test.go'` | 空 |
+| `gofmt -l cmd internal tests` / `go vet ./...` / `go build ./...` | 全部通过 |
+| `go-test-groups.sh --check --declared-case-kinds ...` | 退出码 0：残留测试包 0、42 个 Case 分组全部分类 |
+| 同上追加 `--declared-groups unit` | 退出码 1：清单已无 go test 分组（门禁不空转的反证） |
+| `make -n test-unit` | No rule to make target |
+| `--list` | 1736 条 / 42 个分组（unit 面 1333 条 / 17 个分组，普通门禁 1688 条） |
+| `go test ./...` | 未执行：仓库里没有测试文件，它不是门禁 |
+
+### 8.4 待授权项
+
+- 普通 Case（`make test`）、unit 面（`make test-cases TEST_KIND=unit`）、真实设备（`make test-real`）
+  的全量运行。
+- 一次完整 CI（需要推送授权）。

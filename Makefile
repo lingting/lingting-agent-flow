@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check vet test test-unit test-cases test-real test-runner build release release-dist release-verify release-notes run web-install web-build web-dev web-verify serve clean check
+.PHONY: fmt fmt-check vet test test-cases test-real test-runner build release release-dist release-verify release-notes run web-install web-build web-dev web-verify serve clean check
 
 VERSION ?= dev
 # 开发构建使用短提交便于阅读；正式发布制品中的提交由 cmd/agentflow-release 写入完整 SHA。
@@ -16,7 +16,7 @@ PARALLEL ?= 8
 # POOLS 形如 "name=limit,name=limit"，逐条透传为 --pool；Makefile 不解释池的含义。
 PACKAGE_LIMIT ?=
 POOLS ?=
-# 统一测试执行器：集成、E2E 与前端用例都经由它执行，tests/unit 仍由 go test 执行（V3 R8）。
+# 统一测试执行器：全部用例（含 unit 面）只有它一个入口，仓库里不允许再有 go test 执行路径。
 # 产物不带扩展名：Windows 下执行器会为 worker 与子进程准备带 .exe 的启动别名，产物本身保持同名。
 TEST_RUNNER := bin/agentflow-test
 # 执行器产物根目录：每次运行落在 <根目录>/<run-id>/，报告与用例日志都在其中。
@@ -51,14 +51,10 @@ fmt-check:
 vet:
 	go vet ./...
 
-# test 是本地全量入口：单元用 go test，其余已注册的普通 Case 用统一执行器。
+# test 是本地普通门禁入口：全部普通 Case 都由统一执行器运行，不再有 go test 入口。
 # 真实设备分组（test-real）与故障注入分组不在 test 范围内：前者需要单独授权，
 # 后者按设计注入失败并以非零退出码结束。
-test: test-unit test-cases
-
-test-unit:
-	go test -count=1 -v -p $(PARALLEL) -parallel $(PARALLEL) ./tests/unit/...
-
+test: test-cases
 # test-runner 构建统一测试执行器：worker 由该二进制重新启动自身，每次都要是最新构建。
 test-runner:
 	go build -o $(TEST_RUNNER) ./cmd/agentflow-test

@@ -175,7 +175,8 @@ Linux 与 macOS 使用 `tar.gz`，Windows 使用 `zip`。每个压缩包是**扁
 
 没有任何一步使用 `continue-on-error`，也不存在"默认成功"的占位值。真实 Pi / SSH / 远程
 Docker 用例仍按既有显式配置规则由 `ci.yml` 决定：未提供配置时输出 `WARN [SKIP]` 并跳过，
-跳过不计为通过，跳过原因保留在 `test.log` 产物里，`ci-summary` 单独标注。
+跳过不计为通过，跳过原因保留在用例产物（`report.json` 与 `cases/<case-id>/`）里，`ci-summary` 单独
+标注。
 
 ### 6.2 发布过程
 

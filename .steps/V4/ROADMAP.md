@@ -1,7 +1,9 @@
 # AgentFlow V4：测试体系收敛、并发额度与批量执行
 
 **文档状态：** 主线规划。R0–R5 已完成（盘点、决策冻结、覆盖对账废弃、残留引用清理与基线复验、并发额度内核与报告 v2、
-worker 池与批量执行、目录收敛）、R6/R7 的 unit 批量迁移 A、B 与 R8（`store` / `httpapi` / `app` 三个子阶段），R9 未开始。本文是阶段划分与设计口径的唯一来源；每个阶段的执行清单与验收探针在 `.steps/V4/R*/README.md`。
+worker 池与批量执行、目录收敛）、R6/R7 的 unit 批量迁移 A、B、R8（`store` / `httpapi` / `app`
+三个子阶段）与 R9（删除 `go test` 执行路径、门禁 / CI / 文档收口）均已完成；V4 已收口，
+最终状态见 [V4-final.md](../V4-final.md)。本文是阶段划分与设计口径的唯一来源；每个阶段的执行清单与验收探针在 `.steps/V4/R*/README.md`。
 **上游输入：** [V3 收口文档](../V3-final.md)、[测试规范](../../docs/testing.md)、
 [R0 盘点与决策冻结](R0/README.md)。
 **适用范围：** 只重组测试代码位置、测试执行入口、测试并发模型与 worker 执行模型；不改产品行为、不改
@@ -86,7 +88,7 @@ tests/
 ├── pilot/             <- tests/runner/pilot
 ├── resourcecheck/     <- tests/runner/resourcecheck
 ├── selfcheck/         <- tests/runner/selfcheck
-└── unit/              unit 用例来源包（目录保留，文件在 R9 之前仍由 go test 执行）
+└── unit/              unit 用例来源包（目录保留，已无 `_test.go`，用例由执行器运行）
 ```
 
 三条命名规则：`tests/testkit` 是共享辅助、`tests/unit/testkit` 是一个 unit 用例包，两者不得合并；用例包
@@ -137,7 +139,7 @@ agentflow-test（编排进程）
 | R6 | 已完成 | unit 批量迁移 A：9 个中小包 101 条 Case，逐包运行通过 | [R6](R6/README.md) |
 | R7 | 已完成 | unit 批量迁移 B：`domain`/`container`/`agent` 313 条 Case，逐包运行通过 | [R7](R7/README.md) |
 | R8 | 已完成（`httpapi` 单包运行待授权） | unit 批量迁移 C：`store` / `httpapi` / `app` 三个子阶段共 895 条 Case（248 / 241 / 406）；`store` 与 `app` 单包运行全部通过，仓库内不再有 `_test.go` | [R8](R8/README.md) |
-| R9 | 未开始 | 删除 `go test` 执行路径、门禁 / CI / 文档收口、全量验收 | [R9](R9/README.md) |
+| R9 | 已完成（全量 Case 运行与一次完整 CI 待授权） | 删除 `go test` 执行路径、门禁 / CI / 文档收口、全量验收 | [R9](R9/README.md) |
 
 ```text
 R0 ──> R1 ──> R2 ──> R3 ──> R4 ──> R5 ──> R6 ──> R7 ──> R8 ──> R9

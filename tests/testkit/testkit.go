@@ -40,8 +40,7 @@ func RunRoot(t Tester) string {
 
 // runRootInternal 创建（或返回已创建的）运行根目录，不依赖 testing.T。
 //
-// 它同时供 RunRoot 与统一的测试入口 Main 使用：Main 在 m.Run 之前就需要根目录
-// 来打开日志文件，此时还没有可用的 *testing.T。
+// 它供 RunRoot 使用：调用点可能没有可用的 *testing.T，因此不能依赖测试辅助接口。
 func runRootInternal() string {
 	rootOnce.Do(func() {
 		rootPath, rootErr = createRunRoot()
@@ -81,8 +80,7 @@ func createRunRoot() (string, error) {
 }
 
 // packageLabel 从测试二进制名称推导当前测试包的标签。
-//
-// go test 生成的二进制名与包目录名一致（例如 store.test），因此不需要额外传参。
+// 标签取自当前进程的可执行文件名（统一测试执行器即 agentflow-test），不需要额外传参。
 func packageLabel() string {
 	name := filepath.Base(os.Args[0])
 	name = strings.TrimSuffix(name, ".exe")

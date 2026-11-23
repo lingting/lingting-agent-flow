@@ -1,17 +1,16 @@
-# AgentFlow 持续集成门禁（V3 R8）。
+# AgentFlow 持续集成门禁（V4 R9）。
 #
 # 必需 Job（任一非成功，ci-summary 一律失败，不会把门禁报告为通过）：
 # - go-static        ：Go 格式、静态检查与编译，最先失败以获得最快反馈
-# - go-inventory     ：测试分组核验（go test 包与已注册 Case 分组），静态核对，不执行任何用例
-# - go-unit          ：`./tests/unit/...`，仍由 `go test` 执行
+# - go-inventory     ：测试分组核验（残留 go test 测试包与已注册 Case 分组），静态核对，不执行任何用例
 # - cases-local      ：本机集成用例（统一执行器，`integration-local-*`）
 # - cases-e2e        ：CLI 端到端用例（统一执行器，`e2e-cli`）
 # - cases-selfcheck  ：执行器自检用例（`selfcheck` / `resourcecheck` / `concurrencycheck` / `pilot`）；
 #                       pilot 需要被测服务二进制，Job 里先 `make build`
 # - ui-test          ：前端用例（统一执行器，`frontend`）与格式、lint、类型检查、生产构建门禁
 #
-# 集成、E2E 与前端用例只有 `agentflow-test` 一个执行器；本地入口与这些 Job 一一对应：
-# `make test-unit`、`make test-cases`（`TEST_KIND` 取 local / e2e / selfcheck / frontend）。
+# 全部用例（含 unit 面）只有 `agentflow-test` 一个执行器；本地入口与这些 Job 一一对应：
+# `make test` / `make test-cases`（`TEST_KIND` 取 local / e2e / selfcheck / frontend / unit）。
 # 分组归属、选择条件与 Makefile 入口只定义在 `.github/scripts/go-test-groups.sh`，YAML 只传
 # kind 与产物目录；分组遗漏、Case 分组未归类、声明落空或与工作流 / Makefile 漂移时
 # go-inventory 失败，后续测试 Job 被跳过，ci-summary 因此不会把门禁报告为通过。
@@ -128,51 +127,12 @@ jobs:
           cache-dependency-path: |
             go.mod
             go.sum
-      # 声明的普通分组与 Case kind 必须与清单一致：新增分组却没有对应 Job 同样算遗漏。
+      # 清单已没有 Go 测试分组，因此只声明普通 Case kind：新增 kind 却没有对应 Job 同样算遗漏。
       - name: 核验测试分组覆盖
         id: groups
-        run: bash .github/scripts/go-test-groups.sh --check --declared-groups unit --declared-case-kinds local,e2e,selfcheck,frontend,unit
+        run: bash .github/scripts/go-test-groups.sh --check --declared-case-kinds local,e2e,selfcheck,frontend,unit
 
-  go-unit:
-    name: Go 单元测试
-    needs: [go-inventory]
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    outputs:
-      tests: ${{ steps.tests.outcome }}
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: 安装 Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: true
-          cache-dependency-path: |
-            go.mod
-            go.sum
-      # tests/unit 仍由 go test 执行：它的跳过统计来自 go test 的顶层结论行，
-      # 集成与 E2E 用例的跳过统计来自 report.json，两者口径都写进 Job 摘要。
-      - name: 执行 Go 单元测试
-        id: tests
-        run: bash .github/scripts/run-go-group-tests.sh --group unit --artifact-dir "$TEST_ARTIFACT_ROOT/unit" --parallel 4
-      # 失败时上传诊断产物：只有控制台输出与摘要，不含测试工作空间里的数据库、Session 与临时私钥。
-      - name: 上传单元测试日志
-        if: failure()
-        continue-on-error: true
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: go-unit-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ github.workspace }}/.test-artifacts/unit/*-output.log
-            ${{ github.workspace }}/.test-artifacts/unit/*-summary.txt
-          if-no-files-found: warn
-          retention-days: 7
-
-  # 单元用例（V4 R5 起）：tests/unit/** 迁移到统一执行器后的 Case 由本 Job 执行。
-  # 尚未迁移的 unit 包仍由 go-unit 的 go test 覆盖，两条入口并存到 R9 删除 go test 执行路径。
+  # 单元用例：tests/unit/** 迁入的 Case 全部由统一执行器运行，不再有 go test 入口。
   cases-unit:
     name: 单元用例（迁移）
     needs: [go-inventory]
@@ -510,7 +470,6 @@ jobs:
     needs:
       - go-static
       - go-inventory
-      - go-unit
       - cases-unit
       - cases-local
       - cases-e2e
@@ -538,8 +497,6 @@ jobs:
           GO_INVENTORY_PACKAGES: ${{ needs.go-inventory.outputs.package_total }}
           GO_INVENTORY_CASES: ${{ needs.go-inventory.outputs.case_total }}
           GO_GROUPS_SUMMARY: ${{ needs.go-inventory.outputs.groups_markdown }}
-          GO_UNIT_RESULT: ${{ needs.go-unit.result }}
-          GO_UNIT_STEP: ${{ needs.go-unit.outputs.tests }}
           CASES_UNIT_RESULT: ${{ needs.cases-unit.result }}
           CASES_UNIT_STEP: ${{ needs.cases-unit.outputs.tests }}
           CASES_LOCAL_RESULT: ${{ needs.cases-local.result }}

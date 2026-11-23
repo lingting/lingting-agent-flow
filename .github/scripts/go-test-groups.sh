@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 #
-# 用途: 测试分组声明的唯一来源（V3 R8）。声明两类分组：
-#       - Go 测试分组：仍由 `go test` 执行的包集合，R8 之后只有 unit（tests/unit/**）；
+# 用途: 测试分组声明的唯一来源。声明两类分组：
+#       - Go 测试分组：仍由 `go test` 执行的包集合；V4 R9 之后一组也没有，仓库里不允许再出现
+#         `_test.go`，本脚本把"零 go test 测试包"当作硬门禁；
 #       - Case 分组：由 `agentflow-test` 执行的已注册 Case，按 kind 归类：
 #           local / e2e / selfcheck / frontend / unit 属于普通门禁，
-#           unit 是 tests/unit/** 用例迁入执行器后的 Case kind（V4 R5 起）：它与同名的
-#           Go 测试分组不是同一件事，Go 测试分组仍覆盖尚未迁移的包，
+#           unit 是 tests/unit/** 用例迁入执行器后的 Case kind（V4 R5 起），
 #           real 是需要真实设备并单独授权的分组，
 #           fault 是按设计注入失败、必定以非零退出码结束的自检分组。
-#       --check 用真实清单核验：Go 测试包无遗漏无重复、Makefile 入口与清单一致、
+#       --check 用真实清单核验：仓库里没有任何 go test 测试包、Makefile 不提供 go test 入口、
 #       已注册 Case 的每个分组恰好被一条声明覆盖、声明不落空、工作流声明的普通 kind 与
 #       清单一致、消费脚本不硬编码测试范围。
 #
 # 参数:
 #   --check [--declared-groups LIST] [--declared-case-kinds LIST]
 #        核验分组完整性。LIST 以逗号分隔：--declared-groups 是工作流实际执行的 Go 测试
-#        分组（unit），--declared-case-kinds 是工作流实际执行的普通 Case kind。
-#   --list-groups          打印 Go 测试分组名，每行一个。
-#   --packages GROUP       打印该 Go 测试分组的包模式，每行一个。
-#   --make-target GROUP    打印该 Go 测试分组的 Makefile 入口。
+#        分组（当前必须为空），--declared-case-kinds 是工作流实际执行的普通 Case kind。
+#   --list-groups          打印 Go 测试分组名，每行一个（当前为空）。
+#   --packages GROUP       打印该 Go 测试分组的包模式，每行一个（当前没有可用分组）。
+#   --make-target GROUP    打印该 Go 测试分组的 Makefile 入口（当前没有可用分组）。
 #   --case-selectors KIND  打印该 kind 的用例选择条件，每行一个（normal 展开为全部普通 kind）。
 #   --describe             打印两张分组清单（Markdown）。
 #
@@ -28,12 +28,12 @@
 #   GITHUB_STEP_SUMMARY  可选。--check 与 --describe 追加摘要到该文件。
 #
 # 输出:
-#   标准输出：分组清单、选择条件或核验结论；核验失败时列出未分组、重复归属、落空声明。
+#   标准输出：分组清单、选择条件或核验结论；核验失败时列出残留测试包、重复归属与落空声明。
 #   GITHUB_OUTPUT / GITHUB_STEP_SUMMARY：仅在设置时写入，内容不含任何凭据。
 #
 # 退出码:
 #   0  查询成功或分组核验通过
-#   1  分组核验失败（遗漏、重复、落空声明、与工作流 / Makefile / 消费脚本不一致）
+#   1  分组核验失败（残留测试包、重复、落空声明、与工作流 / Makefile / 消费脚本不一致）
 #   2  参数缺失或非法
 #
 # 副作用: 只读仓库文件、调用 `go list` 与 `go run ./cmd/agentflow-test --list`（只列用例，
@@ -41,7 +41,7 @@
 set -euo pipefail
 
 usage() {
-    echo "用法: go-test-groups.sh --check [--declared-groups unit] [--declared-case-kinds local,e2e,selfcheck,frontend,unit]"
+    echo "用法: go-test-groups.sh --check [--declared-groups LIST] [--declared-case-kinds local,e2e,selfcheck,frontend,unit]"
     echo "      go-test-groups.sh --list-groups"
     echo "      go-test-groups.sh --packages GROUP"
     echo "      go-test-groups.sh --make-target GROUP"
@@ -49,25 +49,19 @@ usage() {
     echo "      go-test-groups.sh --describe"
 }
 
-# go_test_groups 是仍由 go test 执行的分组；R8 之后只有 unit。
+# go_test_groups 是仍由 go test 执行的分组：V4 R9 之后一组也没有，空输出就是该语义。
 go_test_groups() {
-    printf 'unit\n'
+    :
 }
 
-# group_packages 返回 Go 测试分组的包模式，每行一个。
+# group_packages 返回 Go 测试分组的包模式；没有 Go 测试分组时任何分组名都不认识。
 group_packages() {
-    case "$1" in
-        unit) printf './tests/unit/...\n' ;;
-        *) return 1 ;;
-    esac
+    return 1
 }
 
-# group_make_target 返回 Go 测试分组的 Makefile 入口。
+# group_make_target 返回 Go 测试分组的 Makefile 入口；没有 Go 测试分组时一律失败。
 group_make_target() {
-    case "$1" in
-        unit) printf 'test-unit\n' ;;
-        *) return 1 ;;
-    esac
+    return 1
 }
 
 # normal_case_kinds 是普通门禁执行的 Case kind（不需要真实外部设备）。
@@ -163,29 +157,13 @@ case_selectors_for_kind() {
     done < <(case_declarations)
 }
 
-# pattern_base 把包模式转换成用于归属匹配的包前缀。
-# ./tests/unit/... -> tests/unit
-pattern_base() {
-    local pattern="$1"
-    pattern="${pattern#./}"
-    pattern="${pattern%/...}"
-    printf '%s\n' "$pattern"
-}
 
-# matches_group 判断测试包是否属于给定包模式（包本身或它的子包）。
-matches_group() {
-    local pkg="$1" base="$2"
-    if [ "$pkg" = "$base" ]; then
-        return 0
-    fi
-    [[ "$pkg" == "$base/"* ]]
-}
-
-# list_test_packages 列出仓库中真实存在测试文件的包（按模块内相对路径输出）。
+# list_test_packages 列出仓库中仍带测试文件的包（按模块内相对路径输出）。
+# 终态要求为空：R9 之后仓库里不允许再有任何 `_test.go`。
 list_test_packages() {
     local module_path pkg
     module_path="$(go list -m)"
-    go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./tests/... |
+    go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... |
         while IFS= read -r pkg; do
             [ -n "$pkg" ] || continue
             printf '%s\n' "${pkg#"$module_path"/}"
@@ -210,36 +188,18 @@ group_matches_selector() {
     [ "$group" = "$selector" ]
 }
 
-declare -A package_counts=()
+test_packages=()
 package_total=0
-unmatched_packages=()
-duplicated_packages=()
 
-# load_test_packages 统计每个 Go 测试分组的测试包数量，并记录未分组与重复归属的包。
+# load_test_packages 统计仓库里残留的 go test 测试包：终态必须为 0 个。
 load_test_packages() {
-    local pkg group pattern
-    local -a matches=()
-    package_total=0
-    unmatched_packages=()
-    duplicated_packages=()
-    package_counts=()
+    local pkg
+    test_packages=()
     while IFS= read -r pkg; do
         [ -n "$pkg" ] || continue
-        package_total=$((package_total + 1))
-        matches=()
-        for group in $(go_test_groups); do
-            while IFS= read -r pattern; do
-                if matches_group "$pkg" "$(pattern_base "$pattern")"; then
-                    matches+=("$group")
-                fi
-            done < <(group_packages "$group")
-        done
-        case "${#matches[@]}" in
-            0) unmatched_packages+=("$pkg") ;;
-            1) package_counts["${matches[0]}"]=$(( ${package_counts["${matches[0]}"]:-0} + 1 )) ;;
-            *) duplicated_packages+=("$pkg（${matches[*]}）") ;;
-        esac
+        test_packages+=("$pkg")
     done < <(list_test_packages)
+    package_total="${#test_packages[@]}"
 }
 
 declare -A case_counts=()
@@ -293,15 +253,10 @@ load_case_groups() {
 
 # render_table 输出分组清单表格，供核验结论与 CI 汇总共同使用。
 render_table() {
-    local group target patterns count kind case_total_label
-    echo "| Go 测试分组 | 测试包 | Makefile 入口 | 包模式 |"
-    echo "| --- | --- | --- | --- |"
-    for group in $(go_test_groups); do
-        patterns="$(group_packages "$group" | tr '\n' ' ' | sed 's/ *$//')"
-        count="${package_counts["$group"]:-0}"
-        target="$(group_make_target "$group")"
-        echo "| ${group} | ${count} | ${target} | \`${patterns}\` |"
-    done
+    local kind case_total_label
+    echo "| Go 测试分组 | 残留测试包 |"
+    echo "| --- | --- |"
+    echo "| 无 | ${package_total} |"
     echo
     echo "| Case kind | 门禁归属 | 分组数 | 选择条件 |"
     echo "| --- | --- | --- | --- |"
@@ -325,15 +280,6 @@ emit_summary() {
     fi
 }
 
-# make_target_patterns 从 Makefile 的目标配方里取出包模式，用于发现清单与本地入口不一致。
-make_target_patterns() {
-    local target="$1"
-    awk -v target="$target" '
-        index($0, target ":") == 1 { inside = 1; next }
-        inside && /^\t/ { print; next }
-        inside { exit }
-    ' Makefile | grep -o '\./tests/[^[:space:]]*' | sort
-}
 
 # make_target_body 输出 Makefile 目标配方的原文，用于检查入口调用的是脚本而不是分组名。
 make_target_body() {
@@ -365,24 +311,16 @@ check_consumer() {
 
 run_check() {
     local declared_groups="$1" declared_kinds="$2"
-    local group target expected declared_patterns kind failed=0 body
-    local -a declared_group_list=() declared_kind_list=()
+    local kind failed=0 body table summary
+    local -a declared_kind_list=()
 
     load_test_packages
     load_case_groups
 
-    if [ "${#unmatched_packages[@]}" -gt 0 ]; then
-        echo "错误: 以下测试包没有分组归属（新增测试包必须补充分组清单）:" >&2
-        printf '  %s\n' "${unmatched_packages[@]}" >&2
-        failed=1
-    fi
-    if [ "${#duplicated_packages[@]}" -gt 0 ]; then
-        echo "错误: 以下测试包出现在多个分组（必须只属于一个分组）:" >&2
-        printf '  %s\n' "${duplicated_packages[@]}" >&2
-        failed=1
-    fi
-    if [ "$package_total" -eq 0 ]; then
-        echo "错误: 没有解析到任何测试包，分组核验无法成立" >&2
+    # 终态：仓库里不允许再有 go test 测试包（`_test.go`）；出现的每一个都算门禁失败。
+    if [ "$package_total" -ne 0 ]; then
+        echo "错误: 仓库里不允许再有 go test 测试包（用例必须全部迁入统一执行器）:" >&2
+        printf '  %s\n' "${test_packages[@]}" >&2
         failed=1
     fi
     if [ "${#unmatched_case_groups[@]}" -gt 0 ]; then
@@ -405,22 +343,9 @@ run_check() {
         failed=1
     fi
 
-    # 工作流声明的 Go 测试分组必须与清单完全一致。
-    if [ -z "$declared_groups" ]; then
-        echo "错误: --declared-groups 不能为空" >&2
-        exit 2
-    fi
-    IFS=',' read -r -a declared_group_list <<< "$declared_groups"
-    for group in "${declared_group_list[@]}"; do
-        if ! group_packages "$group" >/dev/null; then
-            echo "错误: 声明的 Go 测试分组 ${group} 不在分组清单中" >&2
-            failed=1
-        fi
-    done
-    if [ "$(printf '%s\n' "${declared_group_list[@]}" | sort)" != "$(go_test_groups | sort)" ]; then
-        echo "错误: 工作流执行的 Go 测试分组与清单不一致" >&2
-        echo "  工作流声明: $(printf '%s' "${declared_group_list[*]}")" >&2
-        echo "  清单定义  : $(go_test_groups | tr '\n' ' ')" >&2
+    # 清单里已经没有 Go 测试分组：工作流还声明分组说明有一侧没有收敛。
+    if [ -n "$declared_groups" ]; then
+        echo "错误: 清单已没有 Go 测试分组，工作流不得再声明 --declared-groups（实际 ${declared_groups}）" >&2
         failed=1
     fi
 
@@ -451,23 +376,15 @@ run_check() {
         failed=1
     fi
 
-    # Go 测试分组的 Makefile 入口必须与本清单的包模式一致，避免本地入口与 CI 分组漂移。
-    for group in $(go_test_groups); do
-        target="$(group_make_target "$group")"
-        expected="$(group_packages "$group" | sort)"
-        declared_patterns="$(make_target_patterns "$target" || true)"
-        if [ -z "$declared_patterns" ]; then
-            echo "错误: Makefile 目标 ${target} 没有声明任何 ./tests 包模式（分组 ${group}）" >&2
-            failed=1
-            continue
-        fi
-        if [ "$declared_patterns" != "$expected" ]; then
-            echo "错误: Makefile 目标 ${target} 的包模式与分组 ${group} 不一致" >&2
-            echo "  分组定义  : $(printf '%s' "$expected" | tr '\n' ' ')" >&2
-            echo "  Makefile  : $(printf '%s' "$declared_patterns" | tr '\n' ' ')" >&2
-            failed=1
-        fi
-    done
+    # Makefile 不得再出现 go test 执行路径：既不能调用 go test，也不能保留 test-unit 目标。
+    if grep -qE '^[[:space:]]*go test([[:space:]]|$)' Makefile; then
+        echo "错误: Makefile 不得出现 go test 调用，全部用例只能经由统一执行器运行" >&2
+        failed=1
+    fi
+    if grep -qE '^test-unit[[:space:]]*:' Makefile; then
+        echo "错误: Makefile 不得再定义 test-unit 目标" >&2
+        failed=1
+    fi
 
     # Case 入口必须经由 run-cases.sh 解析选择条件，不得在 Makefile 里另写分组名。
     for target in test-cases test-real; do
@@ -482,23 +399,21 @@ run_check() {
         fi
     done
 
-    # 执行脚本都从本清单解析范围，禁止各自硬编码。
-    check_consumer "${script_dir}/run-go-group-tests.sh" || failed=1
+    # 执行脚本从本清单解析范围，禁止各自硬编码。
     check_consumer "${script_dir}/run-cases.sh" || failed=1
 
     if [ "$failed" -ne 0 ]; then
-        echo "::error::测试分组核验失败：分组遗漏、重复归属、落空声明或与工作流 / Makefile / 脚本不一致" >&2
+        echo "::error::测试分组核验失败：残留测试包、分组遗漏、重复归属、落空声明或与工作流 / Makefile / 脚本不一致" >&2
         exit 1
     fi
 
-    local table summary
     table="$(render_table)"
     summary="$(
         echo "### 测试分组核验"
         echo
         printf '%s\n' "$table"
         echo
-        echo "分组核验通过：${package_total} 个 go test 测试包、${case_total} 个 Case 分组全部分类，无遗漏、无重复归属、无落空声明。"
+        echo "分组核验通过：仓库里没有 go test 测试包，${case_total} 个 Case 分组全部分类，无遗漏、无重复归属、无落空声明。"
         echo
         echo "- 普通门禁 kind：$(normal_case_kinds | tr '\n' ' ')"
         echo "- 真实外部依赖 kind（仅授权后执行）：$(real_case_kinds | tr '\n' ' ')"

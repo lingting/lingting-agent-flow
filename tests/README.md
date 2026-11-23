@@ -3,7 +3,7 @@
 本目录是 AgentFlow 唯一的测试代码位置。生产源码目录（`internal/`、`cmd/`）不再存放测试文件，
 新增测试一律放在本目录下。
 
-测试的规范条款（授权边界、两个执行入口、用例模型、并发与调度、资源与零残留、真实依赖开关、覆盖
+测试的规范条款（授权边界、唯一执行入口、用例模型、并发与调度、资源与零残留、真实依赖开关、覆盖
 对账、结果报告）以 [`docs/testing.md`](../docs/testing.md) 为准；本文件说明目录结构、入口命令、
 产物布局与各条链路的分层覆盖。
 
@@ -11,13 +11,13 @@
 
 ```text
 tests/
-├── testkit/                    通用测试辅助：工作空间、日志、known_hosts 快照、容器核验、testkit.Main
-├── unit/                       仍由 go test 执行（17 个包，1352 条顶层用例）
+├── testkit/                    通用测试辅助：工作空间、日志、known_hosts 快照、容器核验
+├── unit/                       unit 用例的来源包路径（17 个包，无 `_test.go`；由执行器运行）
 │   ├── agent/ app/ cigate/ container/ domain/ environment/ execenv/ httpapi/
 │   ├── image/ lifecycle/ server/ source/ store/ testkit/ testrunner/
 │   └── ...
 ├── registry/                   用例包聚合入口：新增用例包只需一行空导入；由 agentflow-test 执行
-│                               （25 个分组，403 条 Case）
+│                               （42 个分组，1736 条 Case）
 ├── integration/local/          本机集成：codesaver、environment、execenv、scheduler、
 │                               session、source、ssh、validation、workflow
 ├── integration/ssh/            真实 SSH 主机
@@ -31,18 +31,14 @@ tests/
 └── config/                     真实外部依赖配置（示例文件入库，真实配置不入库）
 ```
 
-## 两个入口
+## 唯一入口
 
 | 范围 | 入口 | 命令 |
 |---|---|---|
-| `tests/unit/**` | `go test` | `make test-unit` |
-| 其余全部 Case | `agentflow-test` | `make test-cases` / `make test-real` |
+| 全部已注册 Case（含 unit 面） | `agentflow-test` | `make test` / `make test-cases` / `make test-real` |
 
 ```bash
-# 单元测试：日常反馈，不访问真实模型与远程网络
-make test-unit
-
-# 全部普通 Case（local + e2e + selfcheck + frontend，共 314 条）
+# 全部普通 Case（local + e2e + selfcheck + frontend + unit，共 1688 条）
 make test-cases
 
 # 只跑一个 kind
@@ -50,6 +46,7 @@ make test-cases TEST_KIND=local
 make test-cases TEST_KIND=e2e
 make test-cases TEST_KIND=selfcheck
 make test-cases TEST_KIND=frontend
+make test-cases TEST_KIND=unit
 
 # 真实设备分组（32 条，需要单独授权与 tests/config 下的真实配置）
 AGENTFLOW_REAL_TESTS_GRANTED=true make test-real
@@ -69,7 +66,7 @@ go run ./cmd/agentflow-ci real-tests-gate \
   -github-output "$GITHUB_OUTPUT" -step-summary "$GITHUB_STEP_SUMMARY"
 ```
 
-- 集成、E2E 与前端浏览器用例不得再用 `go test` 执行；它们只有 `agentflow-test` 一个入口。
+- 集成、E2E、前端浏览器与 unit 用例都不得再用 `go test` 执行；它们只有 `agentflow-test` 一个入口。
 - 前端单元测试 `pnpm test`（`vp test run`）是本机开发入口，不参与 CI 门禁。
 - 执行器是 `cmd/agentflow-test`，`make test-runner` 负责构建 `bin/agentflow-test`；worker 由同一
   二进制启动（常驻 `--exec-worker` 复用执行多条用例，一次性 `--exec-case` 给独占用例与单条调试），因此
@@ -89,6 +86,7 @@ go run ./cmd/agentflow-ci real-tests-gate \
 | `e2e` | 1 | `e2e-cli` | 64 |
 | `selfcheck` | 4 | `selfcheck`(3)、`resourcecheck`(9)、`concurrencycheck`(58)、`pilot`(1) | 71 |
 | `frontend` | 1 | `frontend`（13 Vitest + 24 Playwright） | 37 |
+| `unit` | 17 | `unit-agent`(35)、`app`(406)、`app-planningagent`(9)、`app-planninganalysis`(24)、`cigate`(9)、`container`(29)、`domain`(249)、`environment`(11)、`execenv`(20)、`httpapi`(241)、`image`(10)、`lifecycle`(6)、`server`(13)、`source`(21)、`store`(248)、`testkit`(1)、`testrunner`(1) | 1333 |
 | `real` | 6 | `integration-ssh`(6)、`integration-remote-agent`(2)、`codesaver`(2)、`docker`(6)、`planning`(9)、`workflow`(7) | 32 |
 | `fault` | 4 | `selfcheck-fault`(3)、`resourcecheck-fault`(2)、`concurrencycheck-fault`(10)、`pilot-fault`(1) | 16 |
 
@@ -132,12 +130,8 @@ testrunner.Register(testrunner.Case{
   worker 池观测（`workers`）、每条用例的 `worker_id` 与退出码；跳过统计只读 `totals.skipped` 与每条
   `skip_reason`。
 - 用例结论只有六种：`passed` / `failed` / `skipped` / `panic` / `timeout` / `error`。跳过不计为通过。
-- `tests/unit/**` 的包仍以 `testkit.Main` 为入口，把本次运行输出写入用例工作空间下的 `test.log`，
-  并在基目录写 `latest-run.txt`：
-
-```bash
-cat "$(go env TMPDIR 2>/dev/null || echo /tmp)/lingting-agent-flow-tests/latest-run.txt"
-```
+- 用例的 stdout / stderr 由执行器按用例分流到 `cases/<case-id>/{stdout.log,stderr.log}`，不存在进程级
+  `test.log` 或 `latest-run.txt`。
 
 ## CI 门禁与本地入口的对应关系
 
@@ -147,8 +141,8 @@ cat "$(go env TMPDIR 2>/dev/null || echo /tmp)/lingting-agent-flow-tests/latest-
 | CI Job | 覆盖范围 | 本地等价入口 |
 |---|---|---|
 | `go-static` | `gofmt -l cmd internal tests` 无输出、`go vet ./...`、`go build ./...` | `make check` |
-| `go-inventory` | 分组核验（`go list` 的测试包 + 执行器注册表 + Makefile 入口 + 消费脚本） | `bash .github/scripts/go-test-groups.sh --check --declared-groups unit --declared-case-kinds local,e2e,selfcheck,frontend` |
-| `go-unit` | `./tests/unit/...` | `make test-unit` |
+| `go-inventory` | 分组核验（残留 go test 测试包 + 执行器注册表 + Makefile 入口 + 消费脚本） | `bash .github/scripts/go-test-groups.sh --check --declared-case-kinds local,e2e,selfcheck,frontend,unit` |
+| `cases-unit` | `unit` 分组 | `make test-cases TEST_KIND=unit` |
 | `cases-local` | `local` 分组 | `make test-cases TEST_KIND=local` |
 | `cases-e2e` | `e2e` 分组 | `make test-cases TEST_KIND=e2e` |
 | `cases-selfcheck` | `selfcheck` 分组 | `make test-cases TEST_KIND=selfcheck` |
@@ -276,7 +270,7 @@ Pi Runner 或 Session 管理实现。
 
 数据库结构遵循两条长期规则：**枚举字段不受数据库级封闭取值限制**，**业务 Schema 不声明外键**。
 守点集中在 `tests/unit/store/`：仓储读写、未知枚举值原样保留、逻辑删除、唯一约束与非枚举 `CHECK`
-仍生效、条件更新拒绝迟到结果、并发写入与事务原子性，以及 `migrations_test.go` 对全新数据库初始迁移
+仍生效、条件更新拒绝迟到结果、并发写入与事务原子性，以及迁移用例对全新数据库初始迁移
 与重复打开不重复执行的确认。
 
 `tests/integration/local/database/`（迁移后全量 Schema 审计、旧库升级与数据保留）已删除：Schema 审计
