@@ -17,8 +17,9 @@
 #   CASES_LOCAL_RESULT / CASES_LOCAL_STEP         本机集成 Case 执行结论
 #   CASES_E2E_RESULT / CASES_E2E_STEP             CLI 端到端 Case 执行结论
 #   CASES_SELFCHECK_RESULT / CASES_SELFCHECK_STEP 执行器自检 Case 执行结论
-#   UI_TEST_RESULT / UI_TEST_PREPARE / UI_TEST_STEP / UI_TEST_GATES
-#                                                 前端环境准备、Case 执行与非测试门禁结论
+#   UI_TEST_RESULT                                前端 9 个领域矩阵分片的聚合结论
+#   UI_GATES_RESULT / UI_GATES_PREPARE / UI_GATES_STEP
+#                                                 前端依赖准备与格式、lint、类型、构建门禁结论
 #   REAL_GATE_RESULT / REAL_GATE_MODE / REAL_GATE_ENABLED / REAL_GATE_REASON
 #                                                 真实测试授权判断结论
 #   REAL_TESTS_RESULT                             真实外部依赖测试 Job 结论
@@ -89,47 +90,57 @@ for row in \
     "cases-local|${CASES_LOCAL_RESULT:-}|${CASES_LOCAL_STEP:-}|-" \
     "cases-e2e|${CASES_E2E_RESULT:-}|${CASES_E2E_STEP:-}|-" \
     "cases-selfcheck|${CASES_SELFCHECK_RESULT:-}|${CASES_SELFCHECK_STEP:-}|-" \
-    "ui-test|${UI_TEST_RESULT:-}|${UI_TEST_STEP:-}|${UI_TEST_PREPARE:-}"; do
+    "ui-test|${UI_TEST_RESULT:-}|matrix|-" \
+    "ui-gates|${UI_GATES_RESULT:-}|${UI_GATES_STEP:-}|${UI_GATES_PREPARE:-}"; do
     IFS='|' read -r job result tests prepare <<< "$row"
     if [ -z "$job" ]; then
         continue
     fi
-    case "$result" in
-        success)
-            verdict="成功"
-            ;;
-        failure)
-            if [ "$tests" = "failure" ]; then
-                verdict="失败：测试步骤失败"
-            elif [ "$prepare" = "failure" ]; then
-                verdict="失败：环境准备失败，测试未执行"
-            elif [ "$tests" = "skipped" ] || [ -z "$tests" ]; then
-                verdict="失败：测试步骤未执行"
-            else
-                verdict="失败：测试之外的步骤失败"
-            fi
-            failed=1
-            ;;
-        cancelled)
-            verdict="未完成：运行被取消"
-            failed=1
-            ;;
-        skipped)
-            verdict="未执行：Job 被跳过，不计为通过"
-            failed=1
-            ;;
-        *)
-            verdict="未执行：缺少 Job 结论，不计为通过"
-            failed=1
-            ;;
-    esac
+    if [ "$job" = "ui-test" ]; then
+        case "$result" in
+            success) verdict="成功：9 个领域分片全部通过" ;;
+            failure) verdict="失败：至少一个前端领域分片未通过"; failed=1 ;;
+            cancelled) verdict="未完成：前端矩阵运行被取消"; failed=1 ;;
+            skipped) verdict="未执行：前端矩阵被跳过，不计为通过"; failed=1 ;;
+            *) verdict="未执行：缺少前端矩阵结论，不计为通过"; failed=1 ;;
+        esac
+    else
+        case "$result" in
+            success)
+                verdict="成功"
+                ;;
+            failure)
+                if [ "$job" = "ui-gates" ] && [ "$prepare" = "failure" ]; then
+                    verdict="失败：前端依赖安装失败，门禁未执行"
+                elif [ "$job" = "ui-gates" ] && [ "$tests" = "failure" ]; then
+                    verdict="失败：前端格式 / lint / 类型 / 构建门禁失败"
+                elif [ "$tests" = "failure" ]; then
+                    verdict="失败：测试步骤失败"
+                elif [ "$prepare" = "failure" ]; then
+                    verdict="失败：环境准备失败，测试未执行"
+                elif [ "$tests" = "skipped" ] || [ -z "$tests" ]; then
+                    verdict="失败：测试步骤未执行"
+                else
+                    verdict="失败：测试之外的步骤失败"
+                fi
+                failed=1
+                ;;
+            cancelled)
+                verdict="未完成：运行被取消"
+                failed=1
+                ;;
+            skipped)
+                verdict="未执行：Job 被跳过，不计为通过"
+                failed=1
+                ;;
+            *)
+                verdict="未执行：缺少 Job 结论，不计为通过"
+                failed=1
+                ;;
+        esac
+    fi
     echo "| ${job} | ${result:-（空）} | ${verdict} |" >> "$report_path"
 done
-
-# 前端非测试门禁（格式、lint、类型检查与生产构建）与 Case 执行是两件事，单独列出。
-if [ -n "${UI_TEST_GATES:-}" ]; then
-    echo "| ui-test 非测试门禁 | ${UI_TEST_GATES} | $([ "$UI_TEST_GATES" = "success" ] && echo "成功" || echo "失败：前端格式 / lint / 类型 / 构建门禁未通过") |" >> "$report_path"
-fi
 
 # 测试分组核验：结论来自 go-inventory 的结构化输出，不重新解析测试日志。
 if [ -n "${GO_INVENTORY_PACKAGES:-}" ] || [ -n "${GO_GROUPS_SUMMARY:-}" ]; then

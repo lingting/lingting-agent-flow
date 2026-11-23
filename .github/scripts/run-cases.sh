@@ -8,6 +8,7 @@
 #   --kind KIND         必填。normal / local / e2e / selfcheck / frontend / unit / real。
 #                       normal 展开为全部普通 kind。
 #   --artifact-dir DIR  必填。执行器产物根目录，本次运行落在 DIR/<run-id>/。
+#   --group GROUP       可选。只执行该 kind 下的一个已声明分组（CI matrix 分片使用）。
 #   --parallel N        可选，默认 4。作为执行器的 --parallel。
 #   --timeout DURATION  可选。作为执行器的默认用例上限，单条 Case 声明的 Timeout 优先。
 #   --bin PATH          可选。执行器二进制路径，默认 <仓库>/bin/agentflow-test。
@@ -38,7 +39,7 @@
 set -euo pipefail
 
 usage() {
-    echo "用法: run-cases.sh --kind KIND --artifact-dir DIR [--parallel N] [--timeout D] [--bin PATH]"
+    echo "用法: run-cases.sh --kind KIND --artifact-dir DIR [--group GROUP] [--parallel N] [--timeout D] [--bin PATH]"
     echo "  KIND 取 normal / local / e2e / selfcheck / frontend / unit / real；选择条件由 go-test-groups.sh 定义。"
 }
 
@@ -47,10 +48,11 @@ kind=""
 parallel="4"
 timeout=""
 bin_path=""
+group=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --kind | --artifact-dir | --parallel | --timeout | --bin)
+        --kind | --artifact-dir | --group | --parallel | --timeout | --bin)
             if [ $# -lt 2 ] || [ -z "$2" ]; then
                 echo "错误: $1 缺少取值" >&2
                 exit 2
@@ -58,6 +60,7 @@ while [ $# -gt 0 ]; do
             case "$1" in
                 --kind) kind="$2" ;;
                 --artifact-dir) artifact_dir="$2" ;;
+                --group) group="$2" ;;
                 --parallel) parallel="$2" ;;
                 --timeout) timeout="$2" ;;
                 --bin) bin_path="$2" ;;
@@ -95,9 +98,21 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 groups_script="$script_dir/go-test-groups.sh"
 
-mapfile -t selectors < <(bash "$groups_script" --case-selectors "$kind")
+selector_args=(--case-selectors "$kind")
+if [ -n "$group" ]; then
+    selector_args+=("$group")
+fi
+selector_output="$(bash "$groups_script" "${selector_args[@]}")"
+selectors=()
+while IFS= read -r selector; do
+    [ -n "$selector" ] && selectors+=("$selector")
+done <<< "$selector_output"
 if [ "${#selectors[@]}" -eq 0 ]; then
-    echo "错误: kind ${kind} 没有解析到任何选择条件（kind 只取 normal / local / e2e / selfcheck / frontend / unit / real）" >&2
+    if [ -n "$group" ]; then
+        echo "错误: kind ${kind} 没有分组 ${group}（选择条件只能来自 go-test-groups.sh）" >&2
+    else
+        echo "错误: kind ${kind} 没有解析到任何选择条件（kind 只取 normal / local / e2e / selfcheck / frontend / unit / real）" >&2
+    fi
     exit 2
 fi
 
@@ -129,6 +144,7 @@ record_file="$artifact_dir/cases-${kind}-summary.txt"
 echo "仓库根目录: $repo_root"
 echo "执行器: $bin_path"
 echo "分组类型: ${kind}"
+echo "指定分组: ${group:-（全部）}"
 echo "选择条件: ${selectors[*]}"
 echo "产物根目录: $artifact_dir"
 echo "真实依赖授权: ${real_mode}"

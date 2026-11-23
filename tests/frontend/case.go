@@ -7,8 +7,6 @@ import (
 )
 
 const (
-	// caseGroup 是本包用例的分组名，也是批次验收的执行集合名。
-	caseGroup = "frontend"
 	// uiProjectDir 是前端项目目录（相对仓库根）。
 	uiProjectDir = "lingting-agent-flow-ui"
 	// playwrightSuiteTimeout 是单个 Playwright 文件的执行上限：实测最大文件约 25 秒。
@@ -62,6 +60,32 @@ var vitestFiles = []string{
 	"tasks-page",
 }
 
+// frontendGroup 按产品领域返回 CI 分片组。新增前端测试文件时必须显式归类，避免遗漏门禁。
+func frontendGroup(name string) string {
+	switch name {
+	case "api-connection", "layout":
+		return "frontend-shell"
+	case "planning-analysis-states", "planning-confirm", "planning-states", "planning-workbench", "planning":
+		return "frontend-planning"
+	case "projects":
+		return "frontend-projects"
+	case "requirement-delete", "requirement-actions":
+		return "frontend-requirements"
+	case "settings-environments":
+		return "frontend-settings"
+	case "tasks", "task-create-project-inheritance", "task-create-selectors", "task-launch", "tasks-page":
+		return "frontend-task-intake"
+	case "task-closeout", "task-event-history", "task-execution", "task-progress-auto-refresh", "task-step-timestamps":
+		return "frontend-task-execution"
+	case "task-resume-action", "task-resume-eligibility", "task-retry":
+		return "frontend-task-recovery"
+	case "task-code-save-verification", "task-code-saves", "task-containers", "task-environments":
+		return "frontend-task-resources"
+	default:
+		panic("frontend case has no CI domain mapping: " + name)
+	}
+}
+
 func init() {
 	for _, name := range playwrightSpecs {
 		registerPlaywright(name)
@@ -77,7 +101,7 @@ func init() {
 func registerPlaywright(name string) {
 	file := uiProjectDir + "/tests/e2e/" + name + ".spec.ts"
 	testrunner.Register(testrunner.Case{
-		ID:       caseGroup + "/playwright-" + name,
+		ID:       frontendGroup(name) + "/playwright-" + name,
 		Package:  file,
 		Parallel: true,
 		Timeout:  playwrightSuiteTimeout,
@@ -103,7 +127,7 @@ func registerPlaywright(name string) {
 func registerVitest(name string) {
 	file := uiProjectDir + "/tests/unit/" + name + ".test.ts"
 	testrunner.Register(testrunner.Case{
-		ID:       caseGroup + "/vitest-" + name,
+		ID:       frontendGroup(name) + "/vitest-" + name,
 		Package:  file,
 		Parallel: true,
 		Timeout:  vitestSuiteTimeout,

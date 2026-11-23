@@ -46,13 +46,14 @@ tests/
 
 | 范围 | 入口 | 本地命令 | CI Job |
 |---|---|---|---|
-| 全部已注册 Case（含 unit 面） | `agentflow-test` | `make test` / `make test-cases` / `make test-real` | `cases-unit`、`cases-local`、`cases-e2e`、`cases-selfcheck`、`ui-test`、`real-tests` |
+| 全部已注册 Case（含 unit 面） | `agentflow-test` | `make test` / `make test-cases` / `make test-real` | `cases-unit`、`cases-local`、`cases-e2e`、`cases-selfcheck`、`ui-test`（9 个领域分片）、`ui-gates`、`real-tests` |
 
 - 集成测试、E2E 测试、前端浏览器测试与从 `tests/unit/**` 迁入的 unit 用例只有 `agentflow-test` 一个
   入口，不得再用 `go test` 执行任何用例，也不得用 `pnpm test:e2e:safe` 一类的平行入口启动 dev server。
   仓库里不存在 `_test.go`，因此 `go test` 不是门禁：它不执行任何用例，也不会产生"跑 0 条返回 0"的结论。
 - 前端单元测试 `pnpm test`（`vp test run`）保留为开发者本机入口，不参与 CI 门禁，也不替代执行器的
-  `frontend` 分组。
+  `frontend` kind 下的 9 个领域分组。CI 通过 `--group` 单独启动每个领域，所有 37 条前端文件级 Case 全部保留；
+  `make test-cases TEST_KIND=frontend` 不传 `--group` 时仍会一次执行全部 9 组。
 - `bin/agentflow-test` 由 `make test-runner` 构建；worker 由同一二进制启动，因此入口必须是最新构建，
   `make test-cases` / `make test-real` 会先构建再运行。worker 有两种启动方式：常驻 worker
   （`--exec-worker`，由编排进程复用执行多条用例）与一次性 worker（`--exec-case`，独占用例与单条调试）。
@@ -61,7 +62,7 @@ tests/
   其它 kind 只构建 `bin/agentflow-test`。CI 的 `cases-selfcheck` Job 有同一条前置，缺少该二进制时
   资源分配失败并被记为 `error`，不会被当成跳过。
 
-执行器的选择条件只有三种写法：分组名（如 `frontend`）、精确用例 ID（如
+执行器的选择条件只有三种写法：分组名（如 `frontend-planning`）、精确用例 ID（如
 `integration-local-scheduler/...` 的完整 ID）、以 `...` 结尾的前缀（如 `integration-local-...`）。
 没有排除语法，也没有 `--count`：重复运行即重新执行。
 
@@ -224,7 +225,8 @@ AGENTFLOW_REAL_TESTS_GRANTED=true make test-real   # 真实设备分组（需单
 | `cases-local` | 本机集成分组 | `make test-cases TEST_KIND=local` |
 | `cases-e2e` | CLI 端到端分组 | `make test-cases TEST_KIND=e2e` |
 | `cases-selfcheck` | 执行器与资源自检分组 | `make test-cases TEST_KIND=selfcheck` |
-| `ui-test` | 前端用例分组 + `pnpm check` / `pnpm build` / `make web-verify` | `make test-cases TEST_KIND=frontend` |
+| `ui-test` | 前端用例：9 个领域分片（shell、planning、projects、requirements、settings、task-intake、task-execution、task-recovery、task-resources） | `make test-cases TEST_KIND=frontend`（一次跑全部领域） |
+| `ui-gates` | `pnpm check` / `pnpm build` / `check-frontend-clean.sh` / `make web-verify` | `pnpm check && pnpm build`，再运行 `make web-verify` |
 | `real-tests-gate` | 只读判定真实测试是否授权 | 无本地等价入口 |
 | `real-tests` | 真实外部依赖分组（授权通过后） | `AGENTFLOW_REAL_TESTS_GRANTED=true make test-real` |
 | `ci-summary` | 汇总各 Job 结论 | 无（仅 CI） |

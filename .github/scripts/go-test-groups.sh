@@ -19,7 +19,7 @@
 #   --list-groups          打印 Go 测试分组名，每行一个（当前为空）。
 #   --packages GROUP       打印该 Go 测试分组的包模式，每行一个（当前没有可用分组）。
 #   --make-target GROUP    打印该 Go 测试分组的 Makefile 入口（当前没有可用分组）。
-#   --case-selectors KIND  打印该 kind 的用例选择条件，每行一个（normal 展开为全部普通 kind）。
+#   --case-selectors KIND [GROUP]  打印该 kind 的用例选择条件；可选 GROUP 精确筛选一个分组。
 #   --describe             打印两张分组清单（Markdown）。
 #
 # 环境变量（输入）:
@@ -45,7 +45,7 @@ usage() {
     echo "      go-test-groups.sh --list-groups"
     echo "      go-test-groups.sh --packages GROUP"
     echo "      go-test-groups.sh --make-target GROUP"
-    echo "      go-test-groups.sh --case-selectors KIND"
+    echo "      go-test-groups.sh --case-selectors KIND [GROUP]"
     echo "      go-test-groups.sh --describe"
 }
 
@@ -96,7 +96,15 @@ selfcheck|selfcheck
 selfcheck|resourcecheck
 selfcheck|concurrencycheck
 selfcheck|pilot
-frontend|frontend
+frontend|frontend-shell
+frontend|frontend-planning
+frontend|frontend-projects
+frontend|frontend-requirements
+frontend|frontend-settings
+frontend|frontend-task-intake
+frontend|frontend-task-execution
+frontend|frontend-task-recovery
+frontend|frontend-task-resources
 unit|unit-agent
 unit|unit-app
 unit|unit-app-planningagent
@@ -139,7 +147,7 @@ kind_list() {
 
 # case_selectors_for_kind 打印指定 kind 的用例选择条件，每行一个。
 case_selectors_for_kind() {
-    local kind="$1"
+    local kind="$1" group_filter="${2:-}"
     local declaration_kind selector wanted wanted_kinds_text
     local -a wanted_kinds=()
     if ! wanted_kinds_text="$(kind_list "$kind")"; then
@@ -150,7 +158,7 @@ case_selectors_for_kind() {
     done <<< "$wanted_kinds_text"
     while IFS='|' read -r declaration_kind selector; do
         for wanted in "${wanted_kinds[@]}"; do
-            if [ "$declaration_kind" = "$wanted" ]; then
+            if [ "$declaration_kind" = "$wanted" ] && { [ -z "$group_filter" ] || [ "$selector" = "$group_filter" ]; }; then
                 printf '%s\n' "$selector"
             fi
         done
@@ -435,6 +443,7 @@ run_check() {
 command_name=""
 group_name=""
 kind_name=""
+selector_group=""
 declared_groups=""
 declared_kinds=""
 
@@ -478,6 +487,10 @@ while [ $# -gt 0 ]; do
             command_name="case-selectors"
             kind_name="$2"
             shift 2
+            if [ $# -gt 0 ] && [[ "$1" != --* ]]; then
+                selector_group="$1"
+                shift
+            fi
             ;;
         --declared-groups)
             if [ $# -lt 2 ] || [ -z "$2" ]; then
@@ -542,7 +555,7 @@ case "$command_name" in
         }
         ;;
     case-selectors)
-        case_selectors_for_kind "$kind_name" || {
+        case_selectors_for_kind "$kind_name" "$selector_group" || {
             echo "错误: 未知 Case kind ${kind_name}" >&2
             exit 2
         }
