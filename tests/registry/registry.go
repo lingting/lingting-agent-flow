@@ -26,4 +26,6 @@ import (
 	_ "github.com/lingting/agentflow/tests/pilot"
 	_ "github.com/lingting/agentflow/tests/resourcecheck"
 	_ "github.com/lingting/agentflow/tests/selfcheck"
+	_ "github.com/lingting/agentflow/tests/unit/execenv"
+	_ "github.com/lingting/agentflow/tests/unit/lifecycle"
 )

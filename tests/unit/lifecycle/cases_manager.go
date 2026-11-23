@@ -1,19 +1,20 @@
-package lifecycle_test
+// 本文件是 tests/unit/lifecycle/manager_test.go 的迁移结果：6 条用例主体与受控替身。
+//
+// 本文件验证后台服务的统一生命周期：启动顺序、逆序停止、故障传播与超时边界。
+//
+// 这些行为是进程停止时"取消执行上下文后等待现场收敛"的前提：停止顺序错误会把仍在
+// 使用数据库的服务留在后面，超时缺失会让进程退出被单个服务无限拖住。
+package lifecycle
 
 import (
 	"context"
 	"errors"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/lifecycle"
+	"github.com/lingting/agentflow/internal/testrunner"
 )
-
-// 本文件验证后台服务的统一生命周期：启动顺序、逆序停止、故障传播与超时边界。
-//
-// 这些行为是进程停止时"取消执行上下文后等待现场收敛"的前提：停止顺序错误会把仍在
-// 使用数据库的服务留在后面，超时缺失会让进程退出被单个服务无限拖住。
 
 // eventLog 是启动与停止顺序的记录器。
 type eventLog struct {
@@ -89,9 +90,8 @@ func asServices(services []*testService) []lifecycle.Service {
 	return converted
 }
 
-// TestStopRunsInReverseStartOrder 校验停止顺序与启动顺序相反。
-func TestStopRunsInReverseStartOrder(t *testing.T) {
-	t.Parallel()
+// 原 TestStopRunsInReverseStartOrder 校验停止顺序与启动顺序相反。
+func runStopRunsInReverseStartOrder(t *testrunner.Context) {
 	log := &eventLog{}
 	services := newServices(log, "first", "second", "third")
 	manager := lifecycle.New(lifecycle.Options{StopTimeout: time.Second})
@@ -117,9 +117,8 @@ func TestStopRunsInReverseStartOrder(t *testing.T) {
 	}
 }
 
-// TestStartFailureStopsOnlyStartedServicesInReverse 校验启动失败只回滚已启动的服务。
-func TestStartFailureStopsOnlyStartedServicesInReverse(t *testing.T) {
-	t.Parallel()
+// 原 TestStartFailureStopsOnlyStartedServicesInReverse 校验启动失败只回滚已启动的服务。
+func runStartFailureStopsOnlyStartedServicesInReverse(t *testrunner.Context) {
 	log := &eventLog{}
 	services := newServices(log, "first", "broken", "never-started")
 	services[1].startErr = errors.New("启动失败")
@@ -146,9 +145,8 @@ func TestStartFailureStopsOnlyStartedServicesInReverse(t *testing.T) {
 	}
 }
 
-// TestStopIsIdempotentAndReportsFailures 校验重复停止只执行一次且失败可诊断。
-func TestStopIsIdempotentAndReportsFailures(t *testing.T) {
-	t.Parallel()
+// 原 TestStopIsIdempotentAndReportsFailures 校验重复停止只执行一次且失败可诊断。
+func runStopIsIdempotentAndReportsFailures(t *testrunner.Context) {
 	log := &eventLog{}
 	services := newServices(log, "failing")
 	services[0].stopErr = errors.New("停止失败")
@@ -177,9 +175,8 @@ func TestStopIsIdempotentAndReportsFailures(t *testing.T) {
 	}
 }
 
-// TestStopTimeoutIsBounded 校验不响应的服务不会让停止无限等待。
-func TestStopTimeoutIsBounded(t *testing.T) {
-	t.Parallel()
+// 原 TestStopTimeoutIsBounded 校验不响应的服务不会让停止无限等待。
+func runStopTimeoutIsBounded(t *testrunner.Context) {
 	log := &eventLog{}
 	services := newServices(log, "stuck")
 	services[0].stopBlocks = true
@@ -200,9 +197,8 @@ func TestStopTimeoutIsBounded(t *testing.T) {
 	}
 }
 
-// TestRuntimeFaultIsForwarded 校验运行期致命错误带有服务归属。
-func TestRuntimeFaultIsForwarded(t *testing.T) {
-	t.Parallel()
+// 原 TestRuntimeFaultIsForwarded 校验运行期致命错误带有服务归属。
+func runRuntimeFaultIsForwarded(t *testrunner.Context) {
 	log := &eventLog{}
 	services := newServices(log, "unstable")
 	services[0].faults = make(chan error, 1)
@@ -232,9 +228,8 @@ func TestRuntimeFaultIsForwarded(t *testing.T) {
 	}
 }
 
-// TestRegisterRejectsInvalidServices 校验重复名称与启动后注册被拒绝。
-func TestRegisterRejectsInvalidServices(t *testing.T) {
-	t.Parallel()
+// 原 TestRegisterRejectsInvalidServices 校验重复名称与启动后注册被拒绝。
+func runRegisterRejectsInvalidServices(t *testrunner.Context) {
 	log := &eventLog{}
 	services := newServices(log, "same", "same")
 	manager := lifecycle.New(lifecycle.Options{StopTimeout: time.Second})

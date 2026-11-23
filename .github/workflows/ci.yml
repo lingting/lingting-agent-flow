@@ -131,7 +131,7 @@ jobs:
       # 声明的普通分组与 Case kind 必须与清单一致：新增分组却没有对应 Job 同样算遗漏。
       - name: 核验测试分组覆盖
         id: groups
-        run: bash .github/scripts/go-test-groups.sh --check --declared-groups unit --declared-case-kinds local,e2e,selfcheck,frontend
+        run: bash .github/scripts/go-test-groups.sh --check --declared-groups unit --declared-case-kinds local,e2e,selfcheck,frontend,unit
 
   go-unit:
     name: Go 单元测试
@@ -168,6 +168,41 @@ jobs:
           path: |
             ${{ github.workspace }}/.test-artifacts/unit/*-output.log
             ${{ github.workspace }}/.test-artifacts/unit/*-summary.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+  # 单元用例（V4 R5 起）：tests/unit/** 迁移到统一执行器后的 Case 由本 Job 执行。
+  # 尚未迁移的 unit 包仍由 go-unit 的 go test 覆盖，两条入口并存到 R9 删除 go test 执行路径。
+  cases-unit:
+    name: 单元用例（迁移）
+    needs: [go-inventory]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      tests: ${{ steps.cases.outcome }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 安装 Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      - name: 执行单元用例
+        id: cases
+        run: bash .github/scripts/run-cases.sh --kind unit --artifact-dir "$TEST_ARTIFACT_ROOT/cases-unit" --parallel 4
+      - name: 上传用例产物
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cases-unit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/.test-artifacts/cases-unit
           if-no-files-found: warn
           retention-days: 7
 
@@ -476,6 +511,7 @@ jobs:
       - go-static
       - go-inventory
       - go-unit
+      - cases-unit
       - cases-local
       - cases-e2e
       - cases-selfcheck
@@ -504,6 +540,8 @@ jobs:
           GO_GROUPS_SUMMARY: ${{ needs.go-inventory.outputs.groups_markdown }}
           GO_UNIT_RESULT: ${{ needs.go-unit.result }}
           GO_UNIT_STEP: ${{ needs.go-unit.outputs.tests }}
+          CASES_UNIT_RESULT: ${{ needs.cases-unit.result }}
+          CASES_UNIT_STEP: ${{ needs.cases-unit.outputs.tests }}
           CASES_LOCAL_RESULT: ${{ needs.cases-local.result }}
           CASES_LOCAL_STEP: ${{ needs.cases-local.outputs.tests }}
           CASES_E2E_RESULT: ${{ needs.cases-e2e.result }}

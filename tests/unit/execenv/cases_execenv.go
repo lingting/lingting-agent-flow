@@ -1,22 +1,22 @@
-// Package execenv_test 提供统一执行环境契约的单元测试。
+// 本文件是 tests/unit/execenv/execenv_test.go 的迁移结果：20 条用例主体。
 //
 // 用例只依赖纯类型与受控替身：不访问 Docker、SSH、数据库或任何外部进程，
-// 因此默认测试路径完全在测试工作空间内完成。
-package execenv_test
+// 因此默认执行路径完全在用例工作空间内完成。
+package execenv
 
 import (
 	"context"
 	"errors"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/lingting/agentflow/internal/domain"
 	"github.com/lingting/agentflow/internal/execenv"
+	"github.com/lingting/agentflow/internal/testrunner"
 )
 
 // newEnvironment 构造一个合法的执行环境。
-func newEnvironment(t *testing.T, workDir, sessionDir string) execenv.Environment {
+func newEnvironment(t *testrunner.Context, workDir, sessionDir string) execenv.Environment {
 	t.Helper()
 	workspace, err := execenv.NewWorkspace(workDir, sessionDir, nil)
 	if err != nil {
@@ -43,8 +43,7 @@ func newEnvironment(t *testing.T, workDir, sessionDir string) execenv.Environmen
 	return environment
 }
 
-func TestEnvironmentKindMustBeSupported(t *testing.T) {
-	t.Parallel()
+func runEnvironmentKindMustBeSupported(t *testrunner.Context) {
 	if err := execenv.KindRemoteContainer.RequireSupported(); err != nil {
 		t.Fatalf("远程容器执行环境应当受支持: %v", err)
 	}
@@ -63,8 +62,7 @@ func TestEnvironmentKindMustBeSupported(t *testing.T) {
 	}
 }
 
-func TestWorkspaceRejectsSourceInSessionDir(t *testing.T) {
-	t.Parallel()
+func runWorkspaceRejectsSourceInSessionDir(t *testrunner.Context) {
 	if _, err := execenv.NewWorkspace("/workspace/project", "/workspace/project/tmp", nil); err == nil {
 		t.Fatal("Session 目录位于项目代码目录内时必须被拒绝")
 	}
@@ -80,8 +78,7 @@ func TestWorkspaceRejectsSourceInSessionDir(t *testing.T) {
 	}
 }
 
-func TestManagementWorkspaceDoesNotContainSource(t *testing.T) {
-	t.Parallel()
+func runManagementWorkspaceDoesNotContainSource(t *testrunner.Context) {
 	management, err := execenv.NewManagementWorkspace(
 		"/home/deploy/.lingting/agentflow",
 		"/home/deploy/.lingting/agentflow/projects/demo",
@@ -100,8 +97,7 @@ func TestManagementWorkspaceDoesNotContainSource(t *testing.T) {
 	}
 }
 
-func TestEnsureWorkDirRejectsEscapingPaths(t *testing.T) {
-	t.Parallel()
+func runEnsureWorkDirRejectsEscapingPaths(t *testrunner.Context) {
 	environment := newEnvironment(t, "", "")
 	workDir, err := environment.EnsureWorkDir("")
 	if err != nil {
@@ -120,8 +116,7 @@ func TestEnsureWorkDirRejectsEscapingPaths(t *testing.T) {
 	}
 }
 
-func TestExecSpecResolveDefaults(t *testing.T) {
-	t.Parallel()
+func runExecSpecResolveDefaults(t *testrunner.Context) {
 	environment := newEnvironment(t, "", "")
 	resolved, err := execenv.ExecSpec{
 		Command: "go",
@@ -148,8 +143,7 @@ func TestExecSpecResolveDefaults(t *testing.T) {
 	}
 }
 
-func TestExecSpecRejectsInvalidInput(t *testing.T) {
-	t.Parallel()
+func runExecSpecRejectsInvalidInput(t *testrunner.Context) {
 	environment := newEnvironment(t, "", "")
 	cases := []struct {
 		name string
@@ -170,8 +164,7 @@ func TestExecSpecRejectsInvalidInput(t *testing.T) {
 	}
 }
 
-func TestExecResultDistinguishesOutcomes(t *testing.T) {
-	t.Parallel()
+func runExecResultDistinguishesOutcomes(t *testrunner.Context) {
 	succeeded := execenv.ExecResult{
 		ExitCode: 0,
 		Status:   execenv.ExecStatusSucceeded,
@@ -212,8 +205,7 @@ func TestExecResultDistinguishesOutcomes(t *testing.T) {
 	}
 }
 
-func TestDecideRetentionFollowsLifecyclePolicy(t *testing.T) {
-	t.Parallel()
+func runDecideRetentionFollowsLifecyclePolicy(t *testrunner.Context) {
 	cases := []struct {
 		outcome         domain.ContainerOutcome
 		keepInterrupted bool
@@ -258,8 +250,7 @@ func TestDecideRetentionFollowsLifecyclePolicy(t *testing.T) {
 	}
 }
 
-func TestPreparedRequiresCompleteEnvironment(t *testing.T) {
-	t.Parallel()
+func runPreparedRequiresCompleteEnvironment(t *testrunner.Context) {
 	failed := execenv.Prepared{Err: errors.New("镜像准备失败")}
 	if failed.Succeeded() {
 		t.Fatal("准备失败时不得报告成功")
@@ -281,8 +272,7 @@ func TestPreparedRequiresCompleteEnvironment(t *testing.T) {
 	}
 }
 
-func TestProviderRejectsUnsupportedKind(t *testing.T) {
-	t.Parallel()
+func runProviderRejectsUnsupportedKind(t *testrunner.Context) {
 	workspace, err := execenv.NewWorkspace("", "", nil)
 	if err != nil {
 		t.Fatalf("构造工作区失败: %v", err)
@@ -299,8 +289,7 @@ func TestProviderRejectsUnsupportedKind(t *testing.T) {
 	}
 }
 
-func TestPrepareSpecValidation(t *testing.T) {
-	t.Parallel()
+func runPrepareSpecValidation(t *testrunner.Context) {
 	language, err := domain.NewEnvironmentRef(domain.EnvironmentTypeLanguage, "go")
 	if err != nil {
 		t.Fatalf("构造语言环境失败: %v", err)
@@ -360,8 +349,7 @@ func (f *fakeExecPort) Exec(
 	return f.result, f.err
 }
 
-func TestProviderContractIsImplementable(t *testing.T) {
-	t.Parallel()
+func runProviderContractIsImplementable(t *testrunner.Context) {
 	// 用编译期断言固定契约形态：实现方必须提供这四个方法。
 	var port execenv.ExecPort = &fakeExecPort{}
 	environment := newEnvironment(t, "", "")
@@ -375,8 +363,7 @@ func TestProviderContractIsImplementable(t *testing.T) {
 	var _ execenv.Provider = (execenv.Provider)(nil)
 }
 
-func TestEnvironmentLabelAndAccessors(t *testing.T) {
-	t.Parallel()
+func runEnvironmentLabelAndAccessors(t *testrunner.Context) {
 	environment := newEnvironment(t, "/workspace/project/app", "/tmp/agentflow/sessions")
 	if environment.Kind() != execenv.KindRemoteContainer {
 		t.Fatalf("环境类型不符: %s", environment.Kind())
@@ -403,8 +390,7 @@ func TestEnvironmentLabelAndAccessors(t *testing.T) {
 	}
 }
 
-func TestContainerRefValidation(t *testing.T) {
-	t.Parallel()
+func runContainerRefValidation(t *testrunner.Context) {
 	cases := []struct {
 		name          string
 		container     string
@@ -431,8 +417,7 @@ func TestContainerRefValidation(t *testing.T) {
 	}
 }
 
-func TestPreparedFailedStep(t *testing.T) {
-	t.Parallel()
+func runPreparedFailedStep(t *testrunner.Context) {
 	ok := execenv.StepResult{Step: execenv.StepValidate}
 	failed := execenv.StepResult{
 		Step: execenv.StepImage,
@@ -451,9 +436,8 @@ func TestPreparedFailedStep(t *testing.T) {
 	}
 }
 
-// TestReadOnlyWorkspaceSetsReadOnlyProjectAccess 校验只读工作区的项目代码访问模式。
-func TestReadOnlyWorkspaceSetsReadOnlyProjectAccess(t *testing.T) {
-	t.Parallel()
+// 原 TestReadOnlyWorkspaceSetsReadOnlyProjectAccess 校验只读工作区的项目代码访问模式。
+func runReadOnlyWorkspaceSetsReadOnlyProjectAccess(t *testrunner.Context) {
 	workspace, err := execenv.NewReadOnlyWorkspace(
 		"",
 		"",
@@ -483,9 +467,8 @@ func TestReadOnlyWorkspaceSetsReadOnlyProjectAccess(t *testing.T) {
 	}
 }
 
-// TestReadOnlyWorkspaceRequiresWritableSessionDir 校验 Session 目录必须由显式可写目录覆盖。
-func TestReadOnlyWorkspaceRequiresWritableSessionDir(t *testing.T) {
-	t.Parallel()
+// 原 TestReadOnlyWorkspaceRequiresWritableSessionDir 校验 Session 目录必须由显式可写目录覆盖。
+func runReadOnlyWorkspaceRequiresWritableSessionDir(t *testrunner.Context) {
 	if _, err := execenv.NewReadOnlyWorkspace("", "", nil); !errors.Is(
 		err,
 		execenv.ErrInvalidValue,
@@ -520,9 +503,8 @@ func TestReadOnlyWorkspaceRequiresWritableSessionDir(t *testing.T) {
 	}
 }
 
-// TestReadOnlyWorkspaceRejectsOverlappingProjectDir 校验可写目录不得与项目代码目录重叠。
-func TestReadOnlyWorkspaceRejectsOverlappingProjectDir(t *testing.T) {
-	t.Parallel()
+// 原 TestReadOnlyWorkspaceRejectsOverlappingProjectDir 校验可写目录不得与项目代码目录重叠。
+func runReadOnlyWorkspaceRejectsOverlappingProjectDir(t *testrunner.Context) {
 	cases := []struct {
 		name         string
 		project      string
@@ -543,9 +525,7 @@ func TestReadOnlyWorkspaceRejectsOverlappingProjectDir(t *testing.T) {
 		},
 	}
 	for _, testCase := range cases {
-		testCase := testCase
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
+		t.Run(testCase.name, func(t *testrunner.Context) {
 			if _, err := execenv.NewReadOnlyWorkspace(
 				testCase.project,
 				execenv.DefaultSessionDir,
@@ -557,9 +537,8 @@ func TestReadOnlyWorkspaceRejectsOverlappingProjectDir(t *testing.T) {
 	}
 }
 
-// TestReadOnlyWorkspaceRejectsCaches 校验只读工作区不接受可写缓存卷。
-func TestReadOnlyWorkspaceRejectsCaches(t *testing.T) {
-	t.Parallel()
+// 原 TestReadOnlyWorkspaceRejectsCaches 校验只读工作区不接受可写缓存卷。
+func runReadOnlyWorkspaceRejectsCaches(t *testrunner.Context) {
 	caches := []domain.CacheMount{
 		{
 			Type:          "go-mod",
@@ -579,9 +558,8 @@ func TestReadOnlyWorkspaceRejectsCaches(t *testing.T) {
 	}
 }
 
-// TestReadOnlyWorkspaceKeepsWorkspaceWritable 校验普通任务工作区保持可写语义。
-func TestReadOnlyWorkspaceKeepsWorkspaceWritable(t *testing.T) {
-	t.Parallel()
+// 原 TestReadOnlyWorkspaceKeepsWorkspaceWritable 校验普通任务工作区保持可写语义。
+func runReadOnlyWorkspaceKeepsWorkspaceWritable(t *testrunner.Context) {
 	workspace, err := execenv.NewWorkspace("", "", nil)
 	if err != nil {
 		t.Fatalf("构造可写工作区失败: %v", err)

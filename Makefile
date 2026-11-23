@@ -22,7 +22,7 @@ TEST_RUNNER := bin/agentflow-test
 # 执行器产物根目录：每次运行落在 <根目录>/<run-id>/，报告与用例日志都在其中。
 TEST_ARTIFACT_ROOT ?= .test-artifacts
 # test-cases 的选择集合：normal 为全部普通 Case；也可以只跑一个 kind
-# （local / e2e / selfcheck / frontend）。真实设备分组用 test-real。
+# （local / e2e / selfcheck / frontend / unit）。真实设备分组用 test-real。
 TEST_KIND ?= normal
 # 需要被测服务二进制的 Case kind：pilot 试点用例把 <repo>/bin/agentflow 声明为
 # service-process 的可执行文件，缺失时资源分配失败并被记为 error（不是跳过）。因此只有这些

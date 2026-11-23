@@ -3,7 +3,9 @@
 # 用途: 测试分组声明的唯一来源（V3 R8）。声明两类分组：
 #       - Go 测试分组：仍由 `go test` 执行的包集合，R8 之后只有 unit（tests/unit/**）；
 #       - Case 分组：由 `agentflow-test` 执行的已注册 Case，按 kind 归类：
-#           local / e2e / selfcheck / frontend 属于普通门禁，
+#           local / e2e / selfcheck / frontend / unit 属于普通门禁，
+#           unit 是 tests/unit/** 用例迁入执行器后的 Case kind（V4 R5 起）：它与同名的
+#           Go 测试分组不是同一件事，Go 测试分组仍覆盖尚未迁移的包，
 #           real 是需要真实设备并单独授权的分组，
 #           fault 是按设计注入失败、必定以非零退出码结束的自检分组。
 #       --check 用真实清单核验：Go 测试包无遗漏无重复、Makefile 入口与清单一致、
@@ -39,7 +41,7 @@
 set -euo pipefail
 
 usage() {
-    echo "用法: go-test-groups.sh --check [--declared-groups unit] [--declared-case-kinds local,e2e,selfcheck,frontend]"
+    echo "用法: go-test-groups.sh --check [--declared-groups unit] [--declared-case-kinds local,e2e,selfcheck,frontend,unit]"
     echo "      go-test-groups.sh --list-groups"
     echo "      go-test-groups.sh --packages GROUP"
     echo "      go-test-groups.sh --make-target GROUP"
@@ -70,7 +72,7 @@ group_make_target() {
 
 # normal_case_kinds 是普通门禁执行的 Case kind（不需要真实外部设备）。
 normal_case_kinds() {
-    printf '%s\n' local e2e selfcheck frontend
+    printf '%s\n' local e2e selfcheck frontend unit
 }
 
 # real_case_kinds 是只在真实测试授权通过后执行的 Case kind。
@@ -101,6 +103,8 @@ selfcheck|resourcecheck
 selfcheck|concurrencycheck
 selfcheck|pilot
 frontend|frontend
+unit|unit-execenv
+unit|unit-lifecycle
 real|integration-ssh
 real|integration-remote-...
 fault|selfcheck-fault

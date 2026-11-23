@@ -5,7 +5,7 @@
 #       --artifact-dir 下，跳过统计与零残留结论只读 report.json，不解析日志文本。
 #
 # 参数:
-#   --kind KIND         必填。normal / local / e2e / selfcheck / frontend / real。
+#   --kind KIND         必填。normal / local / e2e / selfcheck / frontend / unit / real。
 #                       normal 展开为全部普通 kind。
 #   --artifact-dir DIR  必填。执行器产物根目录，本次运行落在 DIR/<run-id>/。
 #   --parallel N        可选，默认 4。作为执行器的 --parallel。
@@ -39,7 +39,7 @@ set -euo pipefail
 
 usage() {
     echo "用法: run-cases.sh --kind KIND --artifact-dir DIR [--parallel N] [--timeout D] [--bin PATH]"
-    echo "  KIND 取 normal / local / e2e / selfcheck / frontend / real；选择条件由 go-test-groups.sh 定义。"
+    echo "  KIND 取 normal / local / e2e / selfcheck / frontend / unit / real；选择条件由 go-test-groups.sh 定义。"
 }
 
 artifact_dir=""
@@ -97,7 +97,7 @@ groups_script="$script_dir/go-test-groups.sh"
 
 mapfile -t selectors < <(bash "$groups_script" --case-selectors "$kind")
 if [ "${#selectors[@]}" -eq 0 ]; then
-    echo "错误: kind ${kind} 没有解析到任何选择条件（kind 只取 normal / local / e2e / selfcheck / frontend / real）" >&2
+    echo "错误: kind ${kind} 没有解析到任何选择条件（kind 只取 normal / local / e2e / selfcheck / frontend / unit / real）" >&2
     exit 2
 fi
 

@@ -1,7 +1,7 @@
 # AgentFlow V4：测试体系收敛、并发额度与批量执行
 
-**文档状态：** 主线规划。R0–R4 已完成（盘点、决策冻结、覆盖对账废弃、残留引用清理与基线复验、并发额度内核与报告 v2、
-worker 池与批量执行、目录收敛），R5–R9 未开始。本文是阶段划分与设计口径的唯一来源；每个阶段的执行清单与验收探针在 `.steps/V4/R*/README.md`。
+**文档状态：** 主线规划。R0–R5 已完成（盘点、决策冻结、覆盖对账废弃、残留引用清理与基线复验、并发额度内核与报告 v2、
+worker 池与批量执行、目录收敛），R6–R9 未开始。本文是阶段划分与设计口径的唯一来源；每个阶段的执行清单与验收探针在 `.steps/V4/R*/README.md`。
 **上游输入：** [V3 收口文档](../V3-final.md)、[测试规范](../../docs/testing.md)、
 [R0 盘点与决策冻结](R0/README.md)。
 **适用范围：** 只重组测试代码位置、测试执行入口、测试并发模型与 worker 执行模型；不改产品行为、不改
@@ -56,7 +56,7 @@ V3 解决了"集成 / E2E / 前端用例只有 `agentflow-test` 一个入口"，
 
 | 阶段 | 包（`func Test*`） | 合计 |
 |---|---|---:|
-| R5 试点 | `execenv`(21)、`lifecycle`(7) | 28 |
+| R5 试点 | `execenv`(21)、`lifecycle`(7) | 28（含 2 个 `TestMain`，迁移后 26 条 Case） |
 | R6 批量 A | `testkit`(2)、`testrunner`(4)、`cigate`(10)、`app/planningagent`(10)、`image`(11)、`environment`(12)、`server`(14)、`source`(22)、`app/planninganalysis`(25) | 110 |
 | R7 批量 B | `domain`(250)、`container`(30)、`agent`(36) | 316 |
 | R8 批量 C | `store`(249)、`httpapi`(242)、`app`(407) | 898 |
@@ -133,7 +133,7 @@ agentflow-test（编排进程）
 | R2 | 已完成 | 并发额度内核：包级上限 + 命名池 + 报告 v2 | [R2](R2/README.md) |
 | R3 | 已完成 | worker 池与批量执行：拉取、复用、独占声明、优先级 | [R3](R3/README.md) |
 | R4 | 已完成 | 目录收敛：`tests/testkit` 与 `tests/*` | [R4](R4/README.md) |
-| R5 | 未开始 | unit 迁移试点：`execenv` + `lifecycle` 共 28 条 | [R5](R5/README.md) |
+| R5 | 已完成 | unit 迁移试点：`execenv` + `lifecycle` 共 26 条 Case；新增 `unit` Case kind | [R5](R5/README.md) |
 | R6 | 未开始 | unit 批量迁移 A：9 个中小包 110 条 | [R6](R6/README.md) |
 | R7 | 未开始 | unit 批量迁移 B：`domain`/`container`/`agent` 316 条 | [R7](R7/README.md) |
 | R8 | 未开始 | unit 批量迁移 C：`store`/`httpapi`/`app` 898 条（三个子阶段） | [R8](R8/README.md) |
@@ -321,10 +321,10 @@ Case，则最多 3 条在飞、其余 5 个槽位空闲——这是正确结果�
 | R2 | I5/I6 自检通过；`--parallel 8` 下 `max_in_flight` 不被压到 3；`report.json` 有额度分节 |
 | R3 | 复用计数、独占计数、优先级、崩溃重启、结果归属五类自检通过；unit 试点开销有数据 |
 | R4 | `go build`/`vet`/`gofmt` 干净；`--list` 360/25；`tests/runner` 与 `tests/internal` 不存在 |
-| R5 | 28/28 `passed`；两包无 `_test.go`；登记迁移清单与开销数据 |
-| R6 | 9 包无 `_test.go`；每包单独跑全绿；`--list` 498 |
-| R7 | 3 包无 `_test.go`；每包单独跑全绿；`--list` 814 |
-| R8 | 3 包子阶段全绿；`--list` 1712；`DedicatedWorker` 条目与理由齐备 |
+| R5 | 26/26 `passed`；两包无 `_test.go`；登记迁移清单与开销数据；`unit` kind 与 `cases-unit` Job 落地 |
+| R6 | 9 包无 `_test.go`；每包单独跑全绿；`--list` 530 |
+| R7 | 3 包无 `_test.go`；每包单独跑全绿；`--list` 843 |
+| R8 | 3 包子阶段全绿；`--list` 1738；`DedicatedWorker` 条目与理由齐备 |
 | R9 | `git ls-files '*_test.go'` 为空；无 `go-unit` / `make test-unit`；一次完整 CI 全绿；`V4-final.md` 完成 |
 
 ## 12. 风险登记
