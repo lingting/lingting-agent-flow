@@ -20,6 +20,7 @@ func newServerCommand(a *app.App) *cobra.Command {
 		configPath   string
 		address      string
 		requireWebUI bool
+		background   bool
 	)
 	// 默认端口按构建类型区分：帮助文本必须与启动时实际使用的默认地址一致。
 	defaultAddress := config.DefaultServerHost + ":" + fmt.Sprint(config.ServerPortFor(a.Build().IsRelease()))
@@ -30,14 +31,26 @@ func newServerCommand(a *app.App) *cobra.Command {
 			"随后提供 /api 接口与内嵌的前端页面，默认只监听 " + defaultAddress + "。\n" +
 			"可用 --address 或配置文件的 server 段覆盖监听地址，用 server.shutdown_timeout_seconds\n" +
 			"设置优雅关闭超时。数据库初始化失败时服务不会启动。\n" +
+			"未指定 --config 且 " + config.DefaultPath + " 不存在时全部取值使用内置默认值：\n" +
+			"服务端因此可以在没有配置文件的情况下启动。\n" +
+			"使用 --async（-a）时改为启动独立的后台进程：本命令转发其输出直到健康检查通过后\n" +
+			"退出，服务继续在后台运行，输出追加写入 <database_path>" + server.BackgroundLogSuffix + "。\n" +
 			"同一份数据目录只允许一个服务端进程：它用 <database_path>.server.lock 取得独占文件锁，\n" +
 			"已有实例在运行时立即失败并提示先停止已有服务端。",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if background {
+				return runServerInBackground(cmd, a, configPath, address, requireWebUI)
+			}
 			return runServer(cmd, a, configPath, address, requireWebUI)
 		},
 	}
-	command.Flags().StringVar(&configPath, "config", "", "配置文件路径（默认 "+config.DefaultPath+"）")
+	command.Flags().StringVar(
+		&configPath,
+		"config",
+		"",
+		"配置文件路径（默认 "+config.DefaultPath+"；该文件不存在时使用内置默认值）",
+	)
 	command.Flags().StringVar(
 		&address,
 		"address",
@@ -49,6 +62,13 @@ func newServerCommand(a *app.App) *cobra.Command {
 		"require-web-ui",
 		true,
 		"缺少内嵌前端构建产物时直接启动失败；设为 false 时只提供 API 与诊断页",
+	)
+	command.Flags().BoolVarP(
+		&background,
+		"async",
+		"a",
+		false,
+		"启动独立后台进程：转发其输出直到健康检查通过后本命令退出，服务继续在后台运行",
 	)
 	return command
 }
@@ -302,6 +322,6 @@ func runServer(cmd *cobra.Command, a *app.App, configPath, address string, requi
 		return err
 	}
 	return instance.Run(ctx, func(loadCtx context.Context) (*config.Config, error) {
-		return a.ValidateConfig(loadCtx, configPath)
+		return a.ValidateServerConfig(loadCtx, configPath)
 	})
 }

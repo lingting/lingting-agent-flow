@@ -114,6 +114,26 @@ func (a *App) ValidateConfig(ctx context.Context, path string) (*config.Config, 
 	if err != nil {
 		return nil, err
 	}
+	return a.applyConfig(ctx, cfg)
+}
+
+// ValidateServerConfig 加载并校验服务端配置，成功后按配置调整日志级别。
+//
+// 未指定配置文件且默认路径不存在时全部使用内置默认值，服务端因此可以在没有任何
+// 配置文件的情况下启动；显式指定的路径不存在时仍然报错，不会静默改用默认值。
+func (a *App) ValidateServerConfig(ctx context.Context, path string) (*config.Config, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	cfg, err := config.LoadOrDefault(path)
+	if err != nil {
+		return nil, err
+	}
+	return a.applyConfig(ctx, cfg)
+}
+
+// applyConfig 补齐与构建类型相关的默认值并调整日志级别。
+func (a *App) applyConfig(ctx context.Context, cfg *config.Config) (*config.Config, error) {
 	// 未配置监听端口时按构建类型落为默认端口：本地开发构建与正式发布制品使用不同端口，
 	// 同一台机器上并发运行两者时不会争用同一端口。
 	if cfg.Server.Port <= 0 {

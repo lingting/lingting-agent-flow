@@ -37,6 +37,29 @@ func Load(path string) (*Config, error) {
 	return decode(resolved, data)
 }
 
+// LoadOrDefault 读取并校验配置文件；默认路径不存在时返回内置默认配置。
+//
+// 与 Load 的差别只有一种情况：path 为空且 DefaultPath 指向的文件不存在时，返回
+// config.Default，使服务端可以在没有任何配置文件的情况下启动。显式指定了路径而
+// 文件不存在时仍然报错，不会静默改用默认值。
+func LoadOrDefault(path string) (*Config, error) {
+	if strings.TrimSpace(path) != "" {
+		return Load(path)
+	}
+	data, err := os.ReadFile(DefaultPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			cfg := Default()
+			if validateErr := cfg.Validate(); validateErr != nil {
+				return nil, validateErr
+			}
+			return cfg, nil
+		}
+		return nil, fmt.Errorf("config: 读取配置文件失败: %s: %w", DefaultPath, err)
+	}
+	return decode(DefaultPath, data)
+}
+
 // decode 解析 YAML 内容并执行校验。
 //
 // 未知字段与重复字段都会被拒绝，避免拼写错误被静默忽略。

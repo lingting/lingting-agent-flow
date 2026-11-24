@@ -26,6 +26,17 @@ const (
 	ReleaseServerPort = 26382
 	// DefaultShutdownTimeout 是未配置优雅关闭超时时使用的等待时间。
 	DefaultShutdownTimeout = 10 * time.Second
+
+	// DefaultAppName 是未配置应用名时使用的名称。
+	DefaultAppName = "agentflow"
+	// DefaultDatabasePath 是未配置数据库路径时使用的路径。
+	DefaultDatabasePath = ".agentflow/agentflow.db"
+	// DefaultWorktreeRoot 是未配置工作区根目录时使用的路径。
+	DefaultWorktreeRoot = ".agentflow/worktrees"
+	// DefaultMaxConcurrentTasks 是未配置并发上限时使用的并发数。
+	DefaultMaxConcurrentTasks = 3
+	// DefaultSourcePath 表示配置不是来自文件，而是内置默认值。
+	DefaultSourcePath = "（内置默认值）"
 )
 
 // ServerPortFor 返回给定构建类型下未配置监听端口时使用的默认端口。
@@ -34,6 +45,23 @@ func ServerPortFor(isRelease bool) int {
 		return ReleaseServerPort
 	}
 	return DefaultServerPort
+}
+
+// Default 返回内置默认配置，使程序可以在没有配置文件的情况下启动。
+//
+// 只填无法为空的必需字段，其余字段保持零值：监听地址、端口、优雅关闭超时与 SSH
+// 超时的零值都有各自的默认语义，不在这里重复展开，避免第二份默认值来源。
+func Default() *Config {
+	return &Config{
+		SourcePath: DefaultSourcePath,
+		App: AppConfig{
+			Name:     DefaultAppName,
+			LogLevel: logging.DefaultLevel,
+		},
+		Storage:   StorageConfig{DatabasePath: DefaultDatabasePath},
+		Workspace: WorkspaceConfig{WorktreeRoot: DefaultWorktreeRoot},
+		Scheduler: SchedulerConfig{MaxConcurrentTasks: DefaultMaxConcurrentTasks},
+	}
 }
 
 // Config 是 AgentFlow 的完整配置。
