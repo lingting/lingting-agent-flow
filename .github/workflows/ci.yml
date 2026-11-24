@@ -341,6 +341,11 @@ jobs:
           browser_path="${PLAYWRIGHT_BROWSERS_PATH:-/ms-playwright}"
           test -d "$browser_path"
           find "$browser_path" -maxdepth 1 -type d -name 'chromium-*' -print -quit | grep -q .
+      # 容器用户与 checkout Runner 用户不同；为 Go build 的 VCS stamping 显式信任挂载进来的仓库。
+      - name: 配置容器内 Git 安全目录
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git -C "$GITHUB_WORKSPACE" status --short
       - name: 执行前端领域用例
         run: bash .github/scripts/run-cases.sh --kind frontend --group "${{ matrix.domain }}" --artifact-dir "$TEST_ARTIFACT_ROOT/frontend/${{ matrix.domain }}" --parallel 4
       # 失败时上传该领域自己的报告、用例日志、Playwright 报告与截图。
