@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -79,6 +80,13 @@ func killProcessTree(pid int) error {
 // 端口自证确认，不在这里假装采集到了进程清单。
 func terminateProcessTree(pid int) ([]processInfo, error) {
 	return nil, killProcessTree(pid)
+}
+
+// IsProcessGoneError 判断进程查询是否遇到了进程已退出的错误。
+//
+// Windows 的进程查询不读取 /proc；这里保留跨平台 API，识别标准文件不存在错误。
+func IsProcessGoneError(err error) bool {
+	return err != nil && os.IsNotExist(err)
 }
 
 // describePortOccupied 在端口自证失败后补充占用该端口的进程号。
