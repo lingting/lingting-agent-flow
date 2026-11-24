@@ -7,7 +7,7 @@
 # - cases-e2e        ：CLI 端到端用例（统一执行器，`e2e-cli`）
 # - cases-selfcheck  ：执行器自检用例（`selfcheck` / `resourcecheck` / `concurrencycheck` / `pilot`）；
 #                       pilot 需要被测服务二进制，Job 里先 `make build`
-# - ui-test          ：前端用例（统一执行器，9 个领域矩阵分片）
+# - ui-test          ：前端用例（统一执行器，9 个领域矩阵分片；Playwright 浏览器和系统依赖来自版本固定的预装镜像）
 # - ui-gates         ：前端格式、lint、类型检查、生产构建与嵌入产物门禁
 #
 # 全部用例（含 unit 面）只有 `agentflow-test` 一个执行器；本地入口与这些 Job 一一对应：
@@ -286,6 +286,12 @@ jobs:
     name: 前端用例（${{ matrix.domain }}）
     needs: [go-inventory]
     runs-on: ubuntu-latest
+    # 镜像预装与锁文件完全匹配的 Chromium 及系统依赖，避免每个 Matrix Runner 重复 apt install / 下载浏览器。
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-resolute
+      options: --ipc=host --init
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -324,12 +330,17 @@ jobs:
           node-version-file: lingting-agent-flow-ui/package.json
           cache: pnpm
           cache-dependency-path: lingting-agent-flow-ui/pnpm-lock.yaml
-      - name: 安装前端依赖
+      - name: 安装前端依赖（复用 pnpm store 缓存）
         working-directory: lingting-agent-flow-ui
-        run: pnpm install --frozen-lockfile
-      - name: 安装 Chromium 与系统依赖
+        run: pnpm install --frozen-lockfile --prefer-offline
+      # Playwright Docker 镜像预装 Chromium 与系统依赖；这里验证镜像 / lockfile 版本对齐，不再运行 install。
+      - name: 核验预装 Playwright
         working-directory: lingting-agent-flow-ui
-        run: pnpm exec playwright install --with-deps chromium
+        run: |
+          test "$(pnpm exec playwright --version)" = "Version 1.64.1"
+          browser_path="${PLAYWRIGHT_BROWSERS_PATH:-/ms-playwright}"
+          test -d "$browser_path"
+          find "$browser_path" -maxdepth 1 -type d -name 'chromium-*' -print -quit | grep -q .
       - name: 执行前端领域用例
         run: bash .github/scripts/run-cases.sh --kind frontend --group "${{ matrix.domain }}" --artifact-dir "$TEST_ARTIFACT_ROOT/frontend/${{ matrix.domain }}" --parallel 4
       # 失败时上传该领域自己的报告、用例日志、Playwright 报告与截图。
