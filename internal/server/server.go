@@ -383,6 +383,9 @@ func (s *Server) Run(ctx context.Context, load ConfigLoader) error {
 	if load == nil {
 		return fmt.Errorf("%w: 缺少配置加载器", ErrStartup)
 	}
+	// 启动提示先于任何可能耗时的步骤输出：配置加载与文件锁在慢速磁盘上可能明显延迟，
+	// 用户不应在第一条日志出现之前误以为进程卡死。
+	s.report("正在启动 AgentFlow 服务…")
 	cfg, err := load(ctx)
 	if err != nil {
 		return errors.Join(ErrStartup, err)
@@ -425,6 +428,8 @@ func (s *Server) acquireProcessLock(cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
+	// 先输出锁文件位置再尝试获取：锁被占用时用户能立刻看到是哪个锁文件阻止了启动。
+	s.report(fmt.Sprintf("正在获取服务端进程锁: %s", lock.Path()))
 	if err := lock.TryAcquire(); err != nil {
 		return err
 	}
