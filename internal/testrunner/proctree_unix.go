@@ -194,7 +194,7 @@ func processAlive(pid int) (bool, error) {
 // 内核此时返回 ESRCH（而不是通常的 ENOENT）。两者都表示该 PID 已不存在，
 // 调用方应继续用 signal 0 做最终确认，而不是把正常退出竞态判为查询故障。
 func IsProcessGoneError(err error) bool {
-	return err != nil && (os.IsNotExist(err) || errors.Is(err, syscall.ESRCH))
+	return err != nil && (errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH))
 }
 
 // processZombie 报告进程是否已经结束、只等父进程回收。
