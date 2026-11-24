@@ -13,6 +13,7 @@ import (
 
 	"github.com/lingting/agentflow/internal/config"
 	"github.com/lingting/agentflow/internal/logging"
+	"github.com/lingting/agentflow/internal/release"
 )
 
 // BuildInfo 是通过构建变量注入的版本信息。
@@ -32,6 +33,14 @@ func (b BuildInfo) String() string {
 		runtime.Version(),
 		runtime.GOOS+"/"+runtime.GOARCH,
 	)
+}
+
+// IsRelease 报告当前是否为正式发布构建。
+//
+// 判定沿用发布流程的版本号规则：只有注入 vMAJOR.MINOR.PATCH 才是正式制品，缺省构建变量
+// 与本地 `make build` 都属于本地开发构建。
+func (b BuildInfo) IsRelease() bool {
+	return release.IsReleaseVersion(b.Version)
 }
 
 // Options 是构造应用实例所需的运行期选项。
@@ -104,6 +113,11 @@ func (a *App) ValidateConfig(ctx context.Context, path string) (*config.Config, 
 	cfg, err := config.Load(path)
 	if err != nil {
 		return nil, err
+	}
+	// 未配置监听端口时按构建类型落为默认端口：本地开发构建与正式发布制品使用不同端口，
+	// 同一台机器上并发运行两者时不会争用同一端口。
+	if cfg.Server.Port <= 0 {
+		cfg.Server.Port = config.ServerPortFor(a.build.IsRelease())
 	}
 	if err := a.logger.SetLevel(cfg.App.LogLevel); err != nil {
 		return nil, fmt.Errorf("应用日志级别失败: %w", err)

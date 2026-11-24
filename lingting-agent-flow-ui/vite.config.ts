@@ -17,7 +17,7 @@ const DEV_API_TARGET = process.env.AGENTFLOW_DEV_API_TARGET ?? "http://127.0.0.1
 // 开发服务器监听地址：由执行器的 frontend-dev-server 提供者通过环境变量注入（R6 D7），
 // 独立运行时退回本地默认值。strictPort 保留：端口被占用时直接失败，不静默换端口。
 const DEV_HOST = process.env.AGENTFLOW_UI_HOST ?? "127.0.0.1";
-const DEV_PORT = Number(process.env.AGENTFLOW_UI_PORT ?? "26390");
+const DEV_PORT = Number(process.env.AGENTFLOW_UI_PORT ?? "26381");
 
 // 前端生产构建产物目录，即 Go 的嵌入包目录。
 const WEBUI_DIST_DIR = resolve(import.meta.dirname, "..", "internal", "webui", "dist");

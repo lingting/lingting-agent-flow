@@ -21,12 +21,13 @@ func newServerCommand(a *app.App) *cobra.Command {
 		address      string
 		requireWebUI bool
 	)
+	// 默认端口按构建类型区分：帮助文本必须与启动时实际使用的默认地址一致。
+	defaultAddress := config.DefaultServerHost + ":" + fmt.Sprint(config.ServerPortFor(a.Build().IsRelease()))
 	command := &cobra.Command{
 		Use:   "server",
 		Short: "启动 AgentFlow 服务（HTTP API、内嵌 Web 页面与后台服务）",
 		Long: "启动 AgentFlow 完整应用服务。同一个进程内依次初始化配置、数据库与后台服务，\n" +
-			"随后提供 /api 接口与内嵌的前端页面，默认只监听 " + config.DefaultServerHost + ":" +
-			fmt.Sprint(config.DefaultServerPort) + "。\n" +
+			"随后提供 /api 接口与内嵌的前端页面，默认只监听 " + defaultAddress + "。\n" +
 			"可用 --address 或配置文件的 server 段覆盖监听地址，用 server.shutdown_timeout_seconds\n" +
 			"设置优雅关闭超时。数据库初始化失败时服务不会启动。\n" +
 			"同一份数据目录只允许一个服务端进程：它用 <database_path>.server.lock 取得独占文件锁，\n" +
@@ -37,7 +38,12 @@ func newServerCommand(a *app.App) *cobra.Command {
 		},
 	}
 	command.Flags().StringVar(&configPath, "config", "", "配置文件路径（默认 "+config.DefaultPath+"）")
-	command.Flags().StringVar(&address, "address", "", "监听地址，覆盖配置文件的 server 段（例如 127.0.0.1:26380）")
+	command.Flags().StringVar(
+		&address,
+		"address",
+		"",
+		"监听地址，覆盖配置文件的 server 段（例如 "+defaultAddress+"）",
+	)
 	command.Flags().BoolVar(
 		&requireWebUI,
 		"require-web-ui",

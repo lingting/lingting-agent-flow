@@ -156,6 +156,28 @@ make release                                         # 单文件生产构建：�
 取得一把锁。锁文件属于运行期数据，`*.server.lock` 已被 `.gitignore` 忽略；排查"服务端启动失败"时先确认没有
 遗留的服务端进程，而不是删除锁文件。
 
+## 默认端口
+
+| 端口 | 用途 | 覆盖方式 |
+|---|---|---|
+| 26380 | 本地开发构建（未注入正式版本号）的 `agentflow server` HTTP 监听端口：API 与内嵌 Web 页面同源，默认只绑定 `127.0.0.1` | 配置 `server.host` / `server.port`，或启动参数 `--address` |
+| 26382 | 正式发布构建的默认 HTTP 监听端口（默认值见 `internal/config/config.go` 的 `DefaultServerHost` / `DefaultServerPort` / `ReleaseServerPort`） | 同上 |
+| 26381 | 前端 Vite 开发服务器（`pnpm dev` / `make web-dev`）；也是 Playwright 独立运行时的默认 `baseURL` | `AGENTFLOW_UI_HOST` / `AGENTFLOW_UI_PORT`，Playwright 另可用 `AGENTFLOW_UI_BASE_URL` 直接指定 |
+| 22 | SSH 执行主机的默认端口 | 主机配置的 `port`（0 表示使用 22） |
+
+几个共同点：
+
+- 服务端默认端口按构建类型区分：`version` 为 `dev`（缺省构建变量、`make build`）时用 26380，注入
+  `vMAJOR.MINOR.PATCH` 的正式制品用 26382，同一台机器上的开发服务与已发布服务因此不会争用同一端口。
+  默认值只在配置文件省略 `server.port` 时生效；示例配置 `configs/example.yaml` 不写死端口。
+- 前后端端口分开，开发时前端 dev server 与 Go 服务各占一个端口，互不争用；前端把 `/api`
+  代理到开发构建的 26380，目标可用 `AGENTFLOW_DEV_API_TARGET` 覆盖。
+- 前端 dev server 开启 `strictPort`：26381 被占用时直接失败，不会静默改用其他端口。执行器启动
+  dev server 时改为分配空闲端口并通过 `AGENTFLOW_UI_PORT` 注入，因此并发执行不使用 26381。
+- 测试执行器 `agentflow-test` 的 `service-process`、`frontend-dev-server` 与 HTTP/SSH 夹具一律用
+  `127.0.0.1:0` 由系统分配端口（`--serve 127.0.0.1:{port}` 中的 `{port}` 即分配结果），不占固定端口；
+  端口冲突表现为分配或就绪失败，而不是复用别人的进程。
+
 ## 改动流程
 
 1. 确认改动属于哪一层，按 [workspace.md](workspace.md) 的依赖方向选择位置。

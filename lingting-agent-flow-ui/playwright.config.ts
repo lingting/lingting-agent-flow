@@ -16,7 +16,7 @@ import { TEST_ARTIFACT_DIR } from "./tests/internal/artifacts";
 process.stdout.write(`TEST_ARTIFACT_DIR=${TEST_ARTIFACT_DIR}\n`);
 
 // 执行器注入的 dev server 地址；独立运行退回本地默认端口，此时需要自己先启动 dev server。
-const baseURL = (process.env.AGENTFLOW_UI_BASE_URL ?? "http://127.0.0.1:26390").trim();
+const baseURL = (process.env.AGENTFLOW_UI_BASE_URL ?? "http://127.0.0.1:26381").trim();
 
 const jsonReport = (process.env.AGENTFLOW_UI_JSON_REPORT ?? "").trim();
 

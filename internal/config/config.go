@@ -15,15 +15,26 @@ import (
 
 // HTTP 服务默认监听地址与端口。
 //
-// 默认端口与前端开发服务器（26390）分开，避免开发时两个进程争用同一端口。
+// 默认端口按构建类型区分：本地开发构建与前端开发服务器（26381）分开，正式发布构建再用另一个
+// 端口，避免同一台机器上的开发服务与已发布服务争用同一端口。
 const (
 	// DefaultServerHost 是未配置监听地址时使用的回环地址。
 	DefaultServerHost = "127.0.0.1"
-	// DefaultServerPort 是未配置监听端口时使用的端口。
+	// DefaultServerPort 是本地开发构建（未注入正式版本号）的默认监听端口。
 	DefaultServerPort = 26380
+	// ReleaseServerPort 是正式发布构建的默认监听端口。
+	ReleaseServerPort = 26382
 	// DefaultShutdownTimeout 是未配置优雅关闭超时时使用的等待时间。
 	DefaultShutdownTimeout = 10 * time.Second
 )
+
+// ServerPortFor 返回给定构建类型下未配置监听端口时使用的默认端口。
+func ServerPortFor(isRelease bool) int {
+	if isRelease {
+		return ReleaseServerPort
+	}
+	return DefaultServerPort
+}
 
 // Config 是 AgentFlow 的完整配置。
 type Config struct {
