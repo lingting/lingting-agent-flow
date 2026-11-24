@@ -1,6 +1,6 @@
 import { PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import type { ActionType } from "@ant-design/pro-components";
-import { Alert, Flex, Space, Typography } from "antd";
+import { Flex, Modal, Space, Tooltip, Typography, message } from "antd";
 import {
   Button,
   DictTag,
@@ -53,11 +53,9 @@ export function MachinesPage() {
   const [selected, setSelected] = useState<Host>();
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<Host>();
-  const [loadError, setLoadError] = useState<string>();
-  const [actionError, setActionError] = useState<string>();
 
   const reload = useCallback(() => {
-    // ProTable 的 reload 返回 Promise；这里不需要等待结果，失败由 request 内部记录。
+    // ProTable 的 reload 返回 Promise；这里不需要等待结果，失败由 request 内部提示。
     void actionRef.current?.reload();
   }, []);
 
@@ -68,13 +66,12 @@ export function MachinesPage() {
 
   const handleRevalidate = useCallback(
     async (host: Host) => {
-      setActionError(undefined);
       try {
         const { data } = await validateHost(host.id);
         setSelected(data);
         reload();
       } catch (cause) {
-        setActionError(describeError(cause));
+        message.error(`重新校验失败：${describeError(cause)}`);
       }
     },
     [reload],
@@ -82,13 +79,12 @@ export function MachinesPage() {
 
   const handleDelete = useCallback(
     async (host: Host) => {
-      setActionError(undefined);
       try {
         await deleteHost(host.id);
         if (selected?.id === host.id) setSelected(undefined);
         reload();
       } catch (cause) {
-        setActionError(describeError(cause));
+        message.error(`删除执行节点失败：${describeError(cause)}`);
       }
     },
     [reload, selected?.id],
@@ -126,13 +122,16 @@ export function MachinesPage() {
       {
         dataIndex: "validation_message",
         render: (_dom, record) => (
-          <Typography.Text
-            ellipsis
-            style={{ maxWidth: 320 }}
-            type={record.validation_status === "abnormal" ? "danger" : "secondary"}
-          >
-            {record.validation_message || "—"}
-          </Typography.Text>
+          // 摘要可能很长，列内截断显示，悬浮时用 Tooltip 查看完整内容
+          <Tooltip placement="topLeft" title={record.validation_message}>
+            <Typography.Text
+              ellipsis
+              style={{ maxWidth: 320 }}
+              type={record.validation_status === "abnormal" ? "danger" : "secondary"}
+            >
+              {record.validation_message || "—"}
+            </Typography.Text>
+          </Tooltip>
         ),
         search: false,
         title: "校验摘要",
@@ -189,44 +188,21 @@ export function MachinesPage() {
   /**
    * 列表请求。
    *
-   * 请求失败时清空数据并记录错误，由页面顶部提示给出重试入口，不把失败伪装成空列表。
+   * 请求失败时清空数据并用轻提示说明原因，重试入口是工具栏的刷新按钮，
+   * 不把失败伪装成空列表。
    */
   const request = useCallback(async () => {
-    setLoadError(undefined);
     try {
       const { data } = await fetchHosts();
       return { records: data.records, total: data.total };
     } catch (cause) {
-      setLoadError(describeError(cause));
+      message.error(`加载执行节点失败：${describeError(cause)}`);
       return { records: [], total: 0 };
     }
   }, []);
 
   return (
     <Flex gap="middle" vertical style={{ width: "100%" }}>
-      {loadError && (
-        <Alert
-          action={<Button onClick={reload} size="small" text="重试" />}
-          description={loadError}
-          showIcon
-          title="加载执行节点失败"
-          type="error"
-        />
-      )}
-      {actionError && (
-        <Alert closable description={actionError} showIcon title="操作失败" type="error" />
-      )}
-
-      {selected && (
-        <Flex gap="small" vertical>
-          <Flex align="center" gap="small" justify="space-between">
-            <Typography.Text strong>节点详情</Typography.Text>
-            <Button onClick={() => setSelected(undefined)} size="small" text="关闭" type="text" />
-          </Flex>
-          <HostValidationPanel host={selected} />
-        </Flex>
-      )}
-
       <ExTable<Host & Record<string, unknown>>
         actionRef={actionRef}
         columns={columns}
@@ -249,6 +225,22 @@ export function MachinesPage() {
           />,
         ]}
       />
+
+      <Modal
+        destroyOnHidden
+        footer={null}
+        onCancel={() => setSelected(undefined)}
+        open={selected !== undefined}
+        title="节点详情"
+        width={720}
+      >
+        {selected && (
+          <Flex gap="small" vertical>
+            <Typography.Text strong>{selected.name || selected.host}</Typography.Text>
+            <HostValidationPanel host={selected} />
+          </Flex>
+        )}
+      </Modal>
 
       <HostFormModal
         host={editing}

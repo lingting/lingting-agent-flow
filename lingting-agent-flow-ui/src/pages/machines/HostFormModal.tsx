@@ -1,5 +1,5 @@
 import { Form, Input, InputNumber, Modal, Space, Switch, Typography } from "antd";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   ApiError,
@@ -89,10 +89,15 @@ export function HostFormModal({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
 
-  useEffect(() => {
-    if (!open) return;
-    setError(undefined);
-    form.setFieldsValue({
+  /**
+   * 表单初始值。
+   *
+   * 弹窗开启后表单内容才会挂载（`destroyOnHidden`），在父组件里用 effect 调
+   * `setFieldsValue` 的时机早于字段注册，重新打开时会被表单挂载时的初始值覆盖回空。
+   * 因此改为按当前记录计算 initialValues，并让表单随记录重新挂载。
+   */
+  const initialValues = useMemo<HostFormValues>(
+    () => ({
       default: host?.is_default ?? false,
       enabled: host?.enabled ?? true,
       host: host?.host ?? "",
@@ -101,8 +106,14 @@ export function HostFormModal({
       private_key_path: host?.private_key_path ?? "",
       username: host?.username ?? "",
       workspace_root: host?.workspace_root ?? "",
-    });
-  }, [form, host, open]);
+    }),
+    [host],
+  );
+
+  useEffect(() => {
+    if (!open) return;
+    setError(undefined);
+  }, [open]);
 
   const handleSubmit = async () => {
     const values = await form.validateFields();
@@ -130,7 +141,13 @@ export function HostFormModal({
       open={open}
       title={host ? "修改执行节点" : "新增执行节点"}
     >
-      <Form form={form} layout="vertical" preserve={false}>
+      <Form
+        form={form}
+        initialValues={initialValues}
+        key={host?.id ?? "create"}
+        layout="vertical"
+        preserve={false}
+      >
         <Form.Item label="节点名称" name="name">
           <Input placeholder="省略时使用主机地址" />
         </Form.Item>

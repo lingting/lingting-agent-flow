@@ -1,4 +1,4 @@
-import { Alert, Descriptions, Flex, Space, Typography } from "antd";
+import { Descriptions, Flex, Space, Typography } from "antd";
 import { DictTag, type DictItem } from "lingting-react-ui";
 
 import type { Host, ValidationCheck } from "@/lib/api";
@@ -119,29 +119,20 @@ export function HostValidationPanel({ host }: { host: Host }) {
             <CheckBlock check={check} key={check.name} />
           ))}
           {details.capabilities.length > 0 && (
-            <Alert
-              description={
-                <Flex gap={2} vertical>
-                  {details.capabilities.map((capability) => (
-                    <Typography.Text key={capability} type="secondary">
-                      {capability}
-                    </Typography.Text>
-                  ))}
-                </Flex>
-              }
-              showIcon
-              title="校验能力边界"
-              type="info"
-            />
+            <Flex gap={2} vertical>
+              <Typography.Text strong>校验能力边界</Typography.Text>
+              {details.capabilities.map((capability) => (
+                <Typography.Text key={capability} type="secondary">
+                  {capability}
+                </Typography.Text>
+              ))}
+            </Flex>
           )}
         </>
       ) : (
-        <Alert
-          description="当前没有可用的校验详情。可能尚未完成校验，或详情无法解析；请重新校验后再查看。"
-          showIcon
-          title="校验详情不可用"
-          type="warning"
-        />
+        <Typography.Text type="warning">
+          当前没有可用的校验详情。可能尚未完成校验，或详情无法解析；请重新校验后再查看。
+        </Typography.Text>
       )}
     </Flex>
   );
