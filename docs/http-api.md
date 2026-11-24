@@ -107,12 +107,16 @@
 - 请求体只接受 `host_id`、`dockerfile`、`parent_version`、`extra_files`、`version`、`no_cache` 与
   `with_languages`；不接受 Session 路径、本机/远程工作目录、日志路径、命令行参数或任何凭据。
   Dockerfile 与构建上下文（额外文件的相对路径、权限位、大小）由服务端二次校验，请求体上限 8 MiB。
-- 语言环境版本必须记录已构建成功的父基础环境版本；父版本不可用时拒绝创建。
+- 语言环境版本必须记录父基础环境版本：父版本尚未构建成功时同样允许创建，因为版本只记录父版本标签
+  与父镜像引用；构建语言镜像时才要求父镜像已经构建成功。
 - 构建是长操作：`POST .../build` 只返回 `202` 与 `in_progress`，表示服务端已受理并在后台执行，
   **不代表构建成功**。同一节点同一环境同时只允许一个构建，重复请求返回 409。构建结论只能由
   `GET .../build-status` 读取真实记录得出。
 - 构建日志与 Dockerfile 的路径由服务端从已验证的节点、环境与版本记录推导，文件缺失返回 404，
   不会被伪造成空内容。
+- 初始化失败不折叠为通用内部错误：参数非法、目标不存在与预检未通过仍按下表返回，其余远程执行失败
+  统一返回 `environment_init_failed`，`message` 给出失败步骤的具体原因（SSH 连接、远程路径解析、
+  目录或文件写入、版本记录）。
 
 错误语义：
 
@@ -125,6 +129,7 @@
 | 执行节点未通过环境预检 | 412 | `precondition_failed` |
 | 构建已执行且确定失败 | 500 | `environment_build_failed` |
 | 构建被中断、结果无法确认 | 500 | `environment_build_uncertain` |
+| 环境工作空间初始化在远程执行阶段失败（SSH 连接、远程路径、目录或文件写入、版本记录） | 500 | `environment_init_failed` |
 | 环境管理或后台构建服务未装配/已停止 | 503 | `environment_management_unavailable` |
 
 构建中与成功由状态码区分：`GET .../build-status` 在 `pending` / `building` 时返回 `202`（`in_progress`

@@ -958,7 +958,8 @@ func environmentVersionResponse(version domain.EnvironmentVersion) EnvironmentVe
 // writeServiceError 把环境服务错误映射为统一错误响应。
 //
 // 映射依据错误类别而不是文本：参数非法 400、目标不存在 404、构建进行中或状态冲突
-// 409、节点未通过预检 412、服务未装配或已停止 503，其余按服务内部错误返回 500。
+// 409、节点未通过预检 412、服务未装配或已停止 503；初始化失败虽然同属 500，但带
+// environment_init_failed 与失败步骤的具体原因。其余错误按服务内部错误返回 500。
 // 存储错误不会被伪装成成功的空列表。
 func (h *environmentHandler) writeServiceError(
 	w http.ResponseWriter,
@@ -968,6 +969,7 @@ func (h *environmentHandler) writeServiceError(
 	status := http.StatusInternalServerError
 	code := CodeInternal
 	message := "服务内部错误"
+	var initFailure *app.EnvironmentInitError
 	switch {
 	case errors.Is(err, app.ErrEnvironmentInvalidInput),
 		errors.Is(err, domain.ErrInvalidValue),
@@ -1000,6 +1002,12 @@ func (h *environmentHandler) writeServiceError(
 	case errors.Is(err, app.ErrEnvironmentBuildStopped):
 		status = http.StatusServiceUnavailable
 		code = CodeEnvironmentUnavailable
+		message = strings.TrimSpace(err.Error())
+	case errors.As(err, &initFailure):
+		// 初始化失败的远程原因各不相同（SSH、远程路径、写入、版本记录），统一返回
+		// 专有错误码与具体原因，避免使用者只看到"服务内部错误"。
+		status = http.StatusInternalServerError
+		code = CodeEnvironmentInitFailed
 		message = strings.TrimSpace(err.Error())
 	}
 	if status == http.StatusInternalServerError {

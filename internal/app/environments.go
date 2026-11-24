@@ -103,6 +103,33 @@ func (s *EnvironmentService) Preflight(
 	return result, nil
 }
 
+// EnvironmentInitError 表示环境工作空间的远程初始化失败。
+//
+// 初始化会连接远程节点并创建目录与版本文件，失败可能发生在 SSH 连接、远程路径解析、
+// 目录或文件写入以及版本记录上。Error 直接返回失败步骤的原因，不叠加"初始化失败"这类
+// 前缀：调用方本来就知道这是一次初始化请求，需要的是可定位的原因而不是通用内部错误。
+// 底层错误通过 Unwrap 暴露，HTTP 层仍可继续按类别映射。
+type EnvironmentInitError struct {
+	// Cause 是导致初始化失败的原始错误。
+	Cause error
+}
+
+// Error 返回失败步骤的原因文本。
+func (e *EnvironmentInitError) Error() string {
+	if e == nil || e.Cause == nil {
+		return ""
+	}
+	return e.Cause.Error()
+}
+
+// Unwrap 暴露底层错误，保留其错误类别。
+func (e *EnvironmentInitError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
 // Init 检查远程 Docker 环境并初始化 AgentFlow 工作空间目录。
 //
 // 只有在预检通过后才会创建目录与默认基础环境版本，避免在无法运行 Docker 的
@@ -131,7 +158,8 @@ func (s *EnvironmentService) Init(ctx context.Context, options InitOptions) (Ini
 			result.Preflight = preflight
 			if !preflight.Ready() {
 				return fmt.Errorf(
-					"远程 Docker 环境预检未通过(%s): %s",
+					"%w: 远程 Docker 环境预检未通过(%s): %s",
+					ErrHostValidationUnavailable,
 					preflight.ErrorCode,
 					preflight.Detail,
 				)
@@ -140,7 +168,7 @@ func (s *EnvironmentService) Init(ctx context.Context, options InitOptions) (Ini
 		},
 	)
 	if err != nil {
-		return result, err
+		return result, &EnvironmentInitError{Cause: err}
 	}
 	s.debug(ctx, "远程环境目录初始化完成", slog.String("machine", options.MachineID))
 	return result, nil
@@ -241,11 +269,7 @@ func (s *EnvironmentService) ensureDefaultLanguageVersion(
 	if err != nil {
 		return "", err
 	}
-	baseRef, err := domain.NewEnvironmentRef(domain.EnvironmentTypeBase, "")
-	if err != nil {
-		return "", err
-	}
-	baseVersion, err := s.currentUsableVersion(ctx, session.host.ID, baseRef)
+	baseVersion, err := s.latestBaseVersion(ctx, session.host.ID)
 	if err != nil {
 		return "", fmt.Errorf("语言环境 %s 缺少可用的基础环境版本: %w", ref.Name, err)
 	}
@@ -423,6 +447,8 @@ func (s *EnvironmentService) createVersionLocked(
 }
 
 // resolveParentVersion 校验语言环境依赖的父基础环境版本并返回其镜像引用。
+//
+// 只校验父版本存在与版本标签合法，不要求它已经构建成功：镜像引用在创建版本时就已确定。
 func (s *EnvironmentService) resolveParentVersion(
 	ctx context.Context,
 	hostID domain.ID,
@@ -446,12 +472,8 @@ func (s *EnvironmentService) resolveParentVersion(
 	if err != nil {
 		return "", fmt.Errorf("创建环境版本失败: 父基础环境版本不存在: %w", err)
 	}
-	if !parent.Usable() {
-		return "", fmt.Errorf(
-			"创建环境版本失败: 父基础环境版本 %s 尚未构建成功",
-			parent.Label(),
-		)
-	}
+	// 不要求父基础版本已经构建成功：语言环境版本在创建时只记录父版本标签与父镜像
+	// 引用，二者都由既有版本记录确定；构建语言镜像时才要求父镜像真实存在。
 	return parent.ImageRef, nil
 }
 
@@ -561,24 +583,29 @@ func versionNumbers(versions []domain.EnvironmentVersion) []int {
 	return numbers
 }
 
-// currentUsableVersion 返回指定环境当前最新的可用版本。
-func (s *EnvironmentService) currentUsableVersion(
+// latestBaseVersion 返回指定节点上最新的基础环境版本，不要求它已经构建成功。
+//
+// 语言环境版本在创建时就固定了父版本标签与父镜像引用，二者都来自既有的基础版本记录，
+// 因此父基础环境尚未构建完成也可以创建语言环境；只有构建语言镜像时才需要父镜像真实存在。
+func (s *EnvironmentService) latestBaseVersion(
 	ctx context.Context,
 	hostID domain.ID,
-	ref domain.EnvironmentRef,
 ) (domain.EnvironmentVersion, error) {
-	versions, err := s.store.ListEnvironmentVersions(ctx, storage.EnvironmentVersionFilter{
-		HostID:   hostID,
-		Ref:      &ref,
-		Statuses: []domain.BuildStatus{domain.BuildStatusSucceeded},
-	})
+	baseRef, err := domain.NewEnvironmentRef(domain.EnvironmentTypeBase, "")
 	if err != nil {
 		return domain.EnvironmentVersion{}, err
 	}
+	versions, err := s.store.ListEnvironmentVersions(ctx, storage.EnvironmentVersionFilter{
+		HostID: hostID,
+		Ref:    &baseRef,
+	})
+	if err != nil {
+		return domain.EnvironmentVersion{}, fmt.Errorf("读取基础环境版本失败: %w", err)
+	}
 	if len(versions) == 0 {
 		return domain.EnvironmentVersion{}, fmt.Errorf(
-			"环境 %s 没有构建成功的版本",
-			ref.Label(),
+			"%w: 节点上还没有任何基础环境版本",
+			ErrEnvironmentVersionNotFound,
 		)
 	}
 	return versions[len(versions)-1], nil

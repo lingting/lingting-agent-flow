@@ -25,6 +25,25 @@ export function environmentTypeLabel(type: string): string {
   return ENVIRONMENT_TYPE_LABEL[type as EnvironmentType] ?? type;
 }
 
+/**
+ * 内置语言环境模板选项。
+ *
+ * 服务端把模板定义在 `docker.DefaultLanguageTemplates()`，目前没有对外暴露模板列表
+ * 的接口，因此前端在这里对齐一份取值：服务端新增、改名或删除模板时必须同步改这张表，
+ * 否则下拉里会出现服务端拒绝的名称。
+ */
+export const LANGUAGE_TEMPLATE_OPTIONS: {
+  /** 模板名称，也是初始化请求 `with_languages` 的取值 */
+  label: string;
+  /** 模板说明，作为下拉项的悬浮提示 */
+  title: string;
+  value: string;
+}[] = [
+  { label: "node", title: "Node.js 22 运行与依赖缓存", value: "node" },
+  { label: "python", title: "Python 3.12 运行与依赖缓存", value: "python" },
+  { label: "go", title: "Go 1.24 工具链与模块缓存", value: "go" },
+];
+
 /** 构建状态的展示元数据 */
 export type BuildStatusMeta = {
   label: string;

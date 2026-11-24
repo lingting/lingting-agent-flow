@@ -41,6 +41,11 @@ const (
 	//
 	// 它不等于失败：镜像可能已经生成。调用方必须显式重建或人工核验后才有结论。
 	CodeEnvironmentBuildUncertain = "environment_build_uncertain"
+	// CodeEnvironmentInitFailed 表示环境工作空间的远程初始化失败。
+	//
+	// 响应里带着失败步骤的具体原因：SSH 连接、远程目录、写入与版本记录失败需要使用者
+	// 判断后续操作，不能折叠成通用内部错误。
+	CodeEnvironmentInitFailed = "environment_init_failed"
 )
 
 // ErrorBody 是统一的错误描述。
