@@ -86,7 +86,7 @@ bash .github/scripts/resolve-release-version.sh --require-tag   # 需要 REF_TYP
 - 每个 Runner 独享一台 4 vCPU Runner，执行器只用 `--parallel 4`；
 - `cases-unit`、`cases-local`、`cases-e2e`、`cases-selfcheck`、前端 9 个 `ui-test` matrix 分片与 `ui-gates`
   之间没有依赖，由 GitHub Actions 并行调度；它们都依赖 `go-inventory`，分组核验失败时不会运行测试；
-- 前端 matrix 使用 `fail-fast: false`，一个领域失败不会取消其余分片；Playwright Job 固定使用 `mcr.microsoft.com/playwright:v1.64.1-resolute`，镜像预装与 lockfile 匹配的 Chromium 和 Linux 系统依赖，跳过逐 Runner 的 `playwright install --with-deps`；`ci-summary` 等待 matrix 全部结束并检查聚合结果；
+- 前端 matrix 使用 `fail-fast: false`，一个领域失败不会取消其余分片；Playwright Job 固定使用 `mcr.microsoft.com/playwright:v1.64.1-resolute`，镜像预装与 lockfile 匹配的 Chromium 和 Linux 系统依赖，跳过逐 Runner 的 `playwright install --with-deps`；容器内显式配置 checkout workspace 为 Git `safe.directory`，保留 Go build VCS stamping；`ci-summary` 等待 matrix 全部结束并检查聚合结果；
 - 真实分组固定 `--parallel 1`：全部真实套件共用同一台远程机器与同一个 Docker Engine；
 - 共用同一台设备的真实分组在包内保持串行（`remote/docker`）；前端 Playwright 固定 `workers: 1`，每个领域内部的 Case 并发由执行器 `--parallel 4` 控制。
 
