@@ -188,13 +188,22 @@ func processAlive(pid int) (bool, error) {
 	}
 }
 
+// IsProcessGoneError 判断进程查询是否遇到了进程已退出的错误。
+//
+// Linux 读取 /proc/<pid>/stat 时，目标进程可能恰好在目录项解析后退出，
+// 内核此时返回 ESRCH（而不是通常的 ENOENT）。两者都表示该 PID 已不存在，
+// 调用方应继续用 signal 0 做最终确认，而不是把正常退出竞态判为查询故障。
+func IsProcessGoneError(err error) bool {
+	return err != nil && (os.IsNotExist(err) || errors.Is(err, syscall.ESRCH))
+}
+
 // processZombie 报告进程是否已经结束、只等父进程回收。
 //
 // 只有 Linux 的 /proc 提供这个状态；其它平台读不到该文件时返回 false，由 signal 0 判定。
 func processZombie(pid int) (bool, error) {
 	content, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
 	if err != nil {
-		if os.IsNotExist(err) {
+		if IsProcessGoneError(err) {
 			return false, nil
 		}
 		return false, fmt.Errorf("读取进程 %d 的状态失败: %w", pid, err)
