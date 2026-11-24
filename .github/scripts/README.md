@@ -86,13 +86,14 @@ bash .github/scripts/resolve-release-version.sh --require-tag   # 需要 REF_TYP
 - 每个 Runner 独享一台 4 vCPU Runner，执行器只用 `--parallel 4`；
 - `cases-unit`、`cases-local`、`cases-e2e`、`cases-selfcheck`、前端 9 个 `ui-test` matrix 分片与 `ui-gates`
   之间没有依赖，由 GitHub Actions 并行调度；它们都依赖 `go-inventory`，分组核验失败时不会运行测试；
-- 前端 matrix 使用 `fail-fast: false`，一个领域失败不会取消其余分片；`ci-summary` 等待 matrix 全部结束并检查聚合结果；
+- 前端 matrix 使用 `fail-fast: false`，一个领域失败不会取消其余分片；Playwright Job 固定使用 `mcr.microsoft.com/playwright:v1.64.1-resolute`，镜像预装与 lockfile 匹配的 Chromium 和 Linux 系统依赖，跳过逐 Runner 的 `playwright install --with-deps`；`ci-summary` 等待 matrix 全部结束并检查聚合结果；
 - 真实分组固定 `--parallel 1`：全部真实套件共用同一台远程机器与同一个 Docker Engine；
 - 共用同一台设备的真实分组在包内保持串行（`remote/docker`）；前端 Playwright 固定 `workers: 1`，每个领域内部的 Case 并发由执行器 `--parallel 4` 控制。
 
 缓存策略（集中在 `ci.yml` 的 `actions/setup-go` 步骤，不额外引入缓存系统）：
 
 - `cache: true` 同时缓存 Go Module 下载缓存（`GOMODCACHE`）与编译 / 测试包缓存（`GOCACHE`）；
+- `actions/setup-node` 的 `cache: pnpm` 按 `pnpm-lock.yaml` 缓存 pnpm store，安装使用 `--prefer-offline` 优先复用缓存；Playwright 浏览器二进制和 OS 依赖不使用 Actions cache，统一由版本固定的官方镜像预装（官方文档也不建议在 Linux CI 缓存浏览器，因为恢复开销与下载相近，且系统依赖不可缓存）；
 - 缓存键由 setup-go 生成，包含 Go 版本、Runner 镜像、架构以及 `go.mod` + `go.sum` 的内容哈希；
 - 缓存里只有依赖与编译产物，不含测试数据库、Session、测试工作空间、真实测试凭据或用户配置。
 
