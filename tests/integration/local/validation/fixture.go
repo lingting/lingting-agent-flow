@@ -418,19 +418,25 @@ func httpStatusText(status int) string {
 	}
 }
 
-// dockerHelpText 返回覆盖全部实际使用参数的帮助文本。
+// dockerHelpText 返回用于模拟 docker <command> --help 的帮助文本。
 //
-// 内容必须与 internal/docker 的 RequiredCLICommands 保持一致：真实校验会逐项核对这些
-// 选项，缺少任一项都会被判定为 abnormal，因此这里不能裁剪生产代码要求核验的参数。
+// 文本由 docker.RequiredCLICommands 生成，不手抄选项清单：手抄时假数据与生产清单会一起
+// 漂移而始终"通过"（真实发生过 docker stop 的 --time 改名为 --timeout 却没被发现），
+// 夹具因此只负责验证判定逻辑本身，清单与真实 CLI 的一致性由真机用例核对。
 func dockerHelpText() string {
-	return strings.Join([]string{
-		"Options:",
-		"--name --detach --workdir --label --mount --read-only --tmpfs",
-		"--time --force --interactive --env --tail",
-		"--rm --entrypoint --all --filter --format",
-		"--tag --file --build-arg --no-cache --progress",
-		"",
-	}, "\n")
+	lines := []string{"Options:"}
+	seen := make(map[string]struct{})
+	for _, command := range docker.RequiredCLICommands() {
+		for _, option := range command.Options {
+			if _, ok := seen[option.Name]; ok {
+				continue
+			}
+			seen[option.Name] = struct{}{}
+			lines = append(lines, option.Name)
+		}
+	}
+	lines = append(lines, "")
+	return strings.Join(lines, "\n")
 }
 
 // removeOption 从帮助文本中删除指定选项。

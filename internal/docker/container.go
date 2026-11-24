@@ -610,7 +610,7 @@ func (r *Runner) StopContainer(ctx context.Context, dockerID string, timeoutSeco
 	if timeoutSeconds <= 0 {
 		timeoutSeconds = 10
 	}
-	command, err := dockerCommand("stop", "--time", fmt.Sprintf("%d", timeoutSeconds), dockerID)
+	command, err := dockerCommand("stop", "--timeout", fmt.Sprintf("%d", timeoutSeconds), dockerID)
 	if err != nil {
 		return err
 	}

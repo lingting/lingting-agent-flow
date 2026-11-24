@@ -27,6 +27,11 @@ import (
 // remoteOpTimeout 是单次远程操作的超时上限。
 const remoteOpTimeout = 5 * time.Minute
 
+// cliHelpTimeout 是单条 docker <command> --help 的超时上限。
+//
+// 取生产校验使用的同一取值，使真机用例覆盖的等待时间与真实校验一致。
+const cliHelpTimeout = time.Duration(docker.ValidationCLIHelpTimeoutSeconds) * time.Second
+
 // testImageRepository 是测试镜像的仓库名。
 //
 // 该仓库只由测试使用，与生产环境的 agentflow-* 镜像命名空间区分开。

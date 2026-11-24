@@ -34,7 +34,7 @@ const (
 
 // CLIOption 是一条 Docker 命令实际使用的参数选项。
 type CLIOption struct {
-	// Name 是选项写法，例如 --label 或 --time。
+	// Name 是选项写法，例如 --label 或 --timeout。
 	Name string
 	// Source 是使用该选项的代码位置说明，便于定位需求来源。
 	Source string
@@ -93,7 +93,7 @@ func RequiredCLICommands() []CLICommand {
 		{
 			Subcommand: "stop",
 			Options: []CLIOption{
-				{Name: "--time", Source: "StopContainer"},
+				{Name: "--timeout", Source: "StopContainer"},
 			},
 			Source: "StopContainer",
 		},

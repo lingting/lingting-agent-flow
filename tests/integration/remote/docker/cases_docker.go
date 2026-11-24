@@ -49,6 +49,18 @@ func runRemoteDockerPreflight(t *testrunner.Context) {
 	if preflight.CLIVersion == "" || preflight.EngineVersion == "" {
 		t.Fatalf("预检应返回 Docker 版本信息: %+v", preflight)
 	}
+	// CLI 帮助校验是唯一拿真实 docker 输出核对 docker.RequiredCLICommands 的环节：
+	// 夹具用例只验证判定逻辑，无法发现真实 CLI 改名或移除参数，因此这里必须真跑一遍。
+	help := runner.CheckCLIHelp(ctx, docker.RequiredCLICommands(), cliHelpTimeout)
+	t.Logf("CLI_HELP=%+v", help)
+	if !help.Succeeded() {
+		t.Fatalf(
+			"真实远程 Docker CLI 帮助校验未通过(%s): %s（缺少 %v）",
+			help.Status,
+			help.Message,
+			help.MissingOptions,
+		)
+	}
 }
 
 // 原 TestRemoteDockerContainerLifecycle 在真实远程机器上验证容器完整生命周期。

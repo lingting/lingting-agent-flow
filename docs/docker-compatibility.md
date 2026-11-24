@@ -117,7 +117,7 @@ AgentFlow 会把它作为明确失败上报。不修改远端用户的 Shell 配
 |---|---|---|
 | `create` | `--name`、`--workdir`、`--label`、`--mount` | `CreateContainer` |
 | `start` | — | `StartContainer` |
-| `stop` | `--time` | `StopContainer` |
+| `stop` | `--timeout` | `StopContainer` |
 | `rm` | `--force` | `RemoveContainer` |
 | `inspect` | — | `InspectContainer` |
 | `exec` | `--workdir`、`--env`、`--interactive` | `ExecCommandIn` |

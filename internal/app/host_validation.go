@@ -241,7 +241,7 @@ func (v *HostValidator) runChecks(
 		return details
 	}
 
-	versionCheck := v.checkDockerVersion(ctx, runner, startedAt)
+	versionCheck, cliVersion := v.checkDockerVersion(ctx, runner, startedAt)
 	details.Checks = append(details.Checks, versionCheck)
 	if !versionCheck.Status.Passed() {
 		details.Checks = append(
@@ -257,7 +257,7 @@ func (v *HostValidator) runChecks(
 
 	details.Checks = append(
 		details.Checks,
-		v.checkDockerCLIHelp(ctx, runner, startedAt),
+		v.checkDockerCLIHelp(ctx, runner, startedAt, cliVersion),
 	)
 	return details
 }
@@ -266,11 +266,14 @@ func (v *HostValidator) runChecks(
 //
 // 检查通过 docker.Preflight 的版本部分完成：CLI 版本与 Engine 版本分别检查，
 // API 基准通过只读的 GET /v1.52/version 验证。该检查不创建容器、不拉取镜像。
+//
+// 第二个返回值是探测到的实际 Docker CLI 版本，供 CLI 帮助检查在失败说明里补充版本环境；
+// 版本探测失败时为空字符串。
 func (v *HostValidator) checkDockerVersion(
 	ctx context.Context,
 	runner *docker.Runner,
 	startedAt time.Time,
-) domain.ValidationCheck {
+) (domain.ValidationCheck, string) {
 	check := domain.ValidationCheck{
 		Name:      domain.ValidationCheckDockerVersion,
 		Title:     "Docker 版本与 API 兼容性",
@@ -305,14 +308,14 @@ func (v *HostValidator) checkDockerVersion(
 	if probe.Succeeded() {
 		check.Status = domain.CheckStatusPassed
 		check.Message = probe.Message
-		return check
+		return check, probe.CLIVersion
 	}
 	check.ErrorCode = probe.Status
 	check.Message = probe.Message
 	if probe.TimedOut {
 		check.Status = domain.CheckStatusTimedOut
 	}
-	return check
+	return check, probe.CLIVersion
 }
 
 // checkDockerCLIHelp 执行 Docker CLI 帮助检查。
@@ -320,6 +323,7 @@ func (v *HostValidator) checkDockerCLIHelp(
 	ctx context.Context,
 	runner *docker.Runner,
 	startedAt time.Time,
+	cliVersion string,
 ) domain.ValidationCheck {
 	check := domain.ValidationCheck{
 		Name:      domain.ValidationCheckDockerCLIHelp,
@@ -344,6 +348,10 @@ func (v *HostValidator) checkDockerCLIHelp(
 		check.Status = domain.CheckStatusTimedOut
 	}
 	check.Message = result.Message
+	if cliVersion != "" {
+		// 缺少参数往往是 CLI 版本差异导致的改名或移除，报错时必须带上实际版本。
+		check.Message += "（实际 Docker CLI " + cliVersion + "）"
+	}
 	for _, item := range result.Checks {
 		if item.Succeeded() {
 			continue
