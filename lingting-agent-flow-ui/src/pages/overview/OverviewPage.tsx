@@ -6,7 +6,6 @@
  */
 import { Flex } from "antd";
 
-import { PagePlaceholder } from "@/components/page-placeholder";
 import { StatCardsSection } from "@/components/stat-cards";
 
 import { ConnectionPanel } from "./ConnectionPanel";
@@ -21,7 +20,6 @@ import {
 export function OverviewPage() {
   return (
     <Flex gap="middle" vertical style={{ width: "100%" }}>
-      <PagePlaceholder description="AgentFlow 的总览入口，用于汇总需求、任务与执行状态。" />
       <StatCardsSection
         emptyText="还没有需求：需求在方案确认后生成"
         request={loadRequirementStats}

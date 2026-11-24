@@ -6,7 +6,7 @@
  * - 消息提交、两阶段分析、重试与放弃经由 `usePlanningWorkbench` 的写操作入口；
  * - Revision 预览只展示落库快照，本阶段不提供确认方案与生成正式任务的入口。
  */
-import { Alert, Flex } from "antd";
+import { Flex } from "antd";
 
 import { PlanningContextPanel } from "@/pages/planning/components/PlanningContextPanel";
 import { PlanningMessageComposer } from "@/pages/planning/components/PlanningMessageComposer";
@@ -40,19 +40,6 @@ export function PlanningWorkbenchPage() {
 
   return (
     <Flex gap="large" style={{ width: "100%" }} vertical>
-      <Alert
-        description={
-          "选择项目并打开一个规划会话后，提交需求会先追加用户消息，再显式执行两阶段分析" +
-          "（需求分析师 → 方案规划师）。分析成功并完成持久化后，页面展示新的方案版本；" +
-          "历史版本只读保留。消息提交成功不等于分析成功，失败摘要与冲突都会如实展示，" +
-          "页面不自动重试。会话待确认时可以选择一版方案确认：服务端会在同一个事务内生成" +
-          "1 条正式需求与全部正式任务，任务保持待执行，本阶段不提供开始执行入口。"
-        }
-        showIcon
-        title="需求工作台"
-        type="info"
-      />
-
       <PlanningContextPanel
         createError={workbench.sessions.createError}
         creating={workbench.sessions.creating}

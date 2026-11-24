@@ -217,17 +217,6 @@ export function MachinesPage() {
         <Alert closable description={actionError} showIcon title="操作失败" type="error" />
       )}
 
-      <Alert
-        description={
-          "环境预检依次检查 SSH 连接、Docker CLI 帮助信息与基础 Dockerfile 的外部 FROM 镜像元数据。" +
-          "第一版 Docker 检查只基于 CLI 帮助信息，不创建或启动容器，也不拉取镜像层，" +
-          "因此「正常」不代表该 Docker Engine 一定能成功创建并运行 AgentFlow 所需的容器。"
-        }
-        showIcon
-        title="校验范围说明"
-        type="info"
-      />
-
       {selected && (
         <Flex gap="small" vertical>
           <Flex align="center" gap="small" justify="space-between">

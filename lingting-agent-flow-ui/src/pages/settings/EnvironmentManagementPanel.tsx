@@ -2,18 +2,19 @@
  * 设置中心「环境管理」面板。
  *
  * 职责：
- *   - 让用户显式选择执行节点（环境属于具体节点，前端不猜默认值）；
+ *   - 默认选中第一个执行节点，允许切换：环境属于具体节点，查询只针对所选节点；
  *   - 展示该节点上真实存在的环境与版本，可用性只来自服务端；
  *   - 提供初始化工作空间、编辑 Dockerfile 生成新版本、构建与查看构建日志的入口；
  *   - 所有写操作都要先满足"节点允许远程操作"这一服务端事实，前端禁用只是提示。
  */
-import { Alert, Flex, Select, Space, Tag, Typography } from "antd";
-import { useCallback, useMemo, useState } from "react";
+import { Flex, Select, Space, Tag, Typography } from "antd";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { Environment, EnvironmentType } from "@/lib/api";
 import { Button, type ExTableColumn, ExTable } from "lingting-react-ui";
 
 import { useEnvironments } from "@/pages/tasks/useEnvironments";
+import { DisabledActionHint } from "@/pages/tasks/DisabledActionHint";
 import { EnvironmentDetailPanel } from "@/pages/settings/EnvironmentDetailPanel";
 import { EnvironmentInitModal } from "@/pages/settings/EnvironmentInitModal";
 import { useEnvironmentHosts } from "@/pages/settings/useEnvironmentHosts";
@@ -34,6 +35,12 @@ export function EnvironmentManagementPanel() {
   const [hostID, setHostID] = useState<string>();
   const [selected, setSelected] = useState<{ name: string; type: EnvironmentType }>();
   const [initOpen, setInitOpen] = useState(false);
+
+  /** 默认选中第一个执行节点：节点列表就绪后立即查询该节点上的环境，用户仍可切换 */
+  const firstHostID = hosts.hosts[0]?.id;
+  useEffect(() => {
+    if (hostID === undefined && firstHostID !== undefined) setHostID(firstHostID);
+  }, [firstHostID, hostID]);
 
   const environments = useEnvironments(hostID);
   const selectedHost = hosts.hosts.find((host) => host.id === hostID);
@@ -130,28 +137,39 @@ export function EnvironmentManagementPanel() {
     [selected?.name, selected?.type],
   );
 
+  /** 表格空态：查询失败与空列表是两种不同状态，不能都显示成"没有环境记录" */
+  let emptyText = "该节点还没有环境记录";
+  if (environments.status === "loading") {
+    emptyText = "正在查询该节点上的环境…";
+  } else if (environments.status === "error") {
+    emptyText = "环境查询失败";
+  }
+
+  /**
+   * 执行节点工具行尾部的单条提示。
+   *
+   * 一次只提示一个问题：节点加载失败时后续状态都不可信，优先级最高；其次是节点不可写，
+   * 最后是环境查询失败。
+   */
+  let notice: { text: string; type: "danger" | "warning" } | undefined;
+  if (hosts.status === "error") {
+    notice = { text: `加载执行节点失败：${hosts.error}`, type: "danger" };
+  } else if (blockedReason) {
+    notice = { text: `该节点当前不能执行远程环境操作：${blockedReason}`, type: "warning" };
+  } else if (environments.status === "error") {
+    notice = { text: `环境查询失败：${environments.error}`, type: "danger" };
+  }
+
+  /** 初始化入口不可用的原因：按钮禁用时必须能说明为什么 */
+  let initBlockedReason = "";
+  if (!hostID) {
+    initBlockedReason = "尚未选中执行节点";
+  } else if (!canManageEnvironments(selectedHost)) {
+    initBlockedReason = blockedReason || "该节点当前不允许远程环境操作";
+  }
+
   return (
     <Flex gap="middle" vertical style={{ width: "100%" }}>
-      <Alert
-        showIcon
-        description={
-          "环境属于具体执行节点。请先选择节点：环境定义、版本与构建状态都来自该节点上的真实记录，" +
-          "构建由服务端在后台执行，可用性只能由服务端判定。"
-        }
-        title="环境按执行节点隔离"
-        type="info"
-      />
-
-      {hosts.status === "error" && (
-        <Alert
-          action={<Button onClick={hosts.reload} size="small" text="重试" />}
-          description={hosts.error}
-          showIcon
-          title="加载执行节点失败"
-          type="error"
-        />
-      )}
-
       <Flex align="center" gap="small" wrap>
         <Typography.Text>执行节点</Typography.Text>
         <Select
@@ -167,56 +185,23 @@ export function EnvironmentManagementPanel() {
             setSelected(undefined);
           }}
         />
-        <Button disabled={!hostID} onClick={reloadAll} text="刷新" />
-        <Button
-          disabled={!hostID || !canManageEnvironments(selectedHost)}
-          onClick={() => setInitOpen(true)}
-          text="初始化环境工作空间"
-          type="primary"
-        />
+        <Button onClick={reloadAll} text="刷新" />
+        <DisabledActionHint label="初始化环境工作空间" reason={initBlockedReason}>
+          <Button
+            disabled={!hostID || !canManageEnvironments(selectedHost)}
+            onClick={() => setInitOpen(true)}
+            text="初始化环境工作空间"
+            type="primary"
+          />
+        </DisabledActionHint>
+        {notice && <Typography.Text type={notice.type}>{notice.text}</Typography.Text>}
       </Flex>
 
-      {!hostID && (
-        <Alert
-          showIcon
-          description="选择执行节点后会查询该节点上真实存在的环境与版本。"
-          type="info"
-        />
-      )}
-      {hostID && blockedReason && (
-        <Alert
-          showIcon
-          description={`${blockedReason} 你仍然可以查看已存在的环境与版本，但不能发起写操作。`}
-          title="该节点当前不能执行远程环境操作"
-          type="warning"
-        />
-      )}
-      {hostID && environments.status === "loading" && environments.environments.length === 0 && (
-        <Alert showIcon title="正在查询该节点上的环境…" type="info" />
-      )}
-      {hostID && environments.status === "error" && (
-        <Alert
-          action={<Button onClick={environments.reload} size="small" text="重试" />}
-          description={environments.error}
-          showIcon
-          title="环境查询失败"
-          type="error"
-        />
-      )}
-      {hostID && environments.status === "ready" && environments.environments.length === 0 && (
-        <Alert
-          showIcon
-          description="该节点上还没有任何环境版本。可以先初始化环境工作空间，再编辑 Dockerfile 生成新版本并构建。"
-          title="没有环境记录"
-          type="warning"
-        />
-      )}
-
-      {hostID && environments.environments.length > 0 && (
+      {hostID && (
         <ExTable<EnvironmentRow>
           columns={columns}
           dataSource={rows}
-          locale={{ emptyText: "该节点还没有环境记录" }}
+          locale={{ emptyText }}
           pagination={false}
           rowKey="rowKey"
           search={false}

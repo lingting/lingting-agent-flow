@@ -5,6 +5,7 @@
  * 数据全部来自 `GET /api/v1/settings/config`：加载中、请求失败与成功是三种不同状态，
  * 失败时展示服务端原因，不用默认值或空字符串伪装成功。
  */
+import { ReloadOutlined } from "@ant-design/icons";
 import { Alert, Descriptions, Flex, Typography } from "antd";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -68,24 +69,19 @@ export function BasicConfigPanel() {
 
   return (
     <Flex gap="middle" vertical style={{ width: "100%" }}>
-      <Alert
-        showIcon
-        description={
-          "展示服务启动时实际生效的运行配置，其中监听地址已包含启动参数覆盖。修改配置需要" +
-          "编辑配置文件并重启服务，这里不提供编辑、保存或重启入口。"
-        }
-        title="只读查看"
-        type="info"
-      />
-
-      <Flex align="center" gap="small" wrap>
-        <Button onClick={reload} text="重新读取" />
-        <Typography.Text type="secondary">
-          取值来自服务端启动时的配置快照，请求时不会重新读取配置文件。
-        </Typography.Text>
+      <Flex align="center" gap="small">
+        <Typography.Title level={5} style={{ margin: 0 }}>
+          基础配置
+        </Typography.Title>
+        <Button
+          icon={<ReloadOutlined />}
+          loading={state.status === "loading"}
+          onClick={reload}
+          size="small"
+          text="刷新"
+          type="text"
+        />
       </Flex>
-
-      {state.status === "loading" && <Alert showIcon title="正在读取基础配置…" type="info" />}
 
       {state.status === "error" && (
         <Alert

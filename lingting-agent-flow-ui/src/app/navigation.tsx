@@ -5,6 +5,7 @@ import {
   ProfileOutlined,
   ProjectOutlined,
   SettingOutlined,
+  TeamOutlined,
   UnorderedListOutlined,
 } from "@ant-design/icons";
 import type { MenuRouteDefinition } from "lingting-react-ui";
@@ -14,6 +15,7 @@ import { OverviewPage } from "@/pages/overview";
 import { PlanningWorkbenchPage } from "@/pages/planning";
 import { ProjectsPage } from "@/pages/projects";
 import { RequirementsPage } from "@/pages/requirements";
+import { RolesPage } from "@/pages/roles";
 import { SettingsPage } from "@/pages/settings";
 import { TasksPage } from "@/pages/tasks";
 
@@ -54,6 +56,12 @@ export const navigationRoutes: readonly MenuRouteDefinition[] = [
     icon: <DeploymentUnitOutlined />,
     path: "machines",
     title: "机器",
+  },
+  {
+    component: RolesPage,
+    icon: <TeamOutlined />,
+    path: "roles",
+    title: "角色",
   },
   {
     component: SettingsPage,

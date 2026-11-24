@@ -11,8 +11,6 @@ import {
   describeProjectCaches,
   describeProjectDefaultHost,
   describeProjectEnvironment,
-  PROJECT_CACHES_FALLBACK,
-  PROJECT_VERSION_FALLBACK,
 } from "@/pages/projects/projects";
 import { useHosts } from "@/pages/tasks/useHosts";
 
@@ -210,19 +208,6 @@ export function ProjectsPage() {
       {actionError && (
         <Alert closable description={actionError} showIcon title="操作失败" type="error" />
       )}
-
-      <Alert
-        description={
-          "项目把仓库地址、基础分支、语言环境与版本、缓存类型、容器内工作目录登记一次。" +
-          "任务必须关联项目，创建任务时未填写的字段从项目继承；" +
-          "项目标识同时决定项目级缓存的共享范围与远程管理工作目录，因此创建后不可修改。" +
-          `环境版本留空表示使用${PROJECT_VERSION_FALLBACK}，不等于某个具体版本；` +
-          `缓存类型为空显示为「${PROJECT_CACHES_FALLBACK}」。`
-        }
-        showIcon
-        title="项目的作用"
-        type="info"
-      />
 
       <ExTable<Project & Record<string, unknown>>
         actionRef={actionRef}

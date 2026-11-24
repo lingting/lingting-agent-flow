@@ -200,18 +200,6 @@ export function RequirementsPage() {
 
   return (
     <Flex gap="middle" vertical style={{ width: "100%" }}>
-      <Alert
-        description={
-          "需求由方案确认生成，进度只按关联任务的真实状态计算：全部任务完成才是已完成，" +
-          "存在失败、待核验、取消或暂停的任务时不会被判定为完成，也不会自动领取后续任务。" +
-          "任务顺序在确认方案时固定，本页不提供调整顺序或提前启动后续任务的入口；" +
-          "停止任务复用任务取消接口，删除需求只做逻辑删除，不回滚 Git、不处置容器。"
-        }
-        showIcon
-        title="需求与真实进度"
-        type="info"
-      />
-
       <Flex align="end" gap="small" wrap>
         <Flex gap={4} vertical>
           <Typography.Text type="secondary">项目</Typography.Text>

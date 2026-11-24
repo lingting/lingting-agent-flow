@@ -23,6 +23,7 @@ import {
 } from "@/lib/api";
 import { Button, type ExTableColumn, ExTable } from "lingting-react-ui";
 
+import { DisabledActionHint } from "@/pages/tasks/DisabledActionHint";
 import { EnvironmentVersionModal } from "@/pages/settings/EnvironmentVersionModal";
 import {
   buildStatusMeta,
@@ -303,19 +304,23 @@ export function EnvironmentDetailPanel({
                 size="small"
                 text="选中"
               />
-              <Button
-                disabled={Boolean(blockedReason) || !canSubmitBuild(record) || building}
-                onClick={() => void handleBuild(record)}
-                size="small"
-                text={building ? "构建中…" : "构建"}
-              />
-              <Button
-                // 历史版本永远不可改写：这里的编辑动作只生成新版本。
-                disabled={Boolean(blockedReason)}
-                onClick={() => setEditing(record)}
-                size="small"
-                text="编辑为新版本"
-              />
+              <DisabledActionHint label="构建" reason={blockedReason ?? ""}>
+                <Button
+                  disabled={Boolean(blockedReason) || !canSubmitBuild(record) || building}
+                  onClick={() => void handleBuild(record)}
+                  size="small"
+                  text={building ? "构建中…" : "构建"}
+                />
+              </DisabledActionHint>
+              <DisabledActionHint label="编辑为新版本" reason={blockedReason ?? ""}>
+                <Button
+                  // 历史版本永远不可改写：这里的编辑动作只生成新版本。
+                  disabled={Boolean(blockedReason)}
+                  onClick={() => setEditing(record)}
+                  size="small"
+                  text="编辑为新版本"
+                />
+              </DisabledActionHint>
             </Space>
           );
         },
@@ -337,9 +342,6 @@ export function EnvironmentDetailPanel({
 
   return (
     <Flex gap="middle" vertical style={{ width: "100%" }}>
-      {blockedReason && (
-        <Alert showIcon description={blockedReason} title="当前节点不可写" type="warning" />
-      )}
       {actionError && (
         <Alert
           closable

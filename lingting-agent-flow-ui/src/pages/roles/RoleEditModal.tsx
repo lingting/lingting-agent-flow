@@ -18,7 +18,7 @@ import {
   roleDutyLabel,
   toolLabel,
   toolsSummary,
-} from "@/pages/settings/settings-roles";
+} from "@/pages/roles/roles";
 import { roleTypeLabel } from "@/pages/tasks/selectors";
 
 export type RoleEditModalProps = {

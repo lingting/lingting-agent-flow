@@ -1,5 +1,5 @@
 /**
- * 设置中心「角色管理」面板。
+ * 角色页面：固定四角色的列表与编辑入口。
  *
  * 职责：
  *   - 展示四个固定角色及其名称、职责、模型与启用状态；
@@ -10,10 +10,10 @@ import { Alert, Flex, Tag, Typography } from "antd";
 import { useCallback, useMemo, useState } from "react";
 
 import type { Role } from "@/lib/api";
-import { Button, type ExTableColumn, ExTable } from "lingting-react-ui";
+import { Button, type ExTableColumn, ExTable, LinkButton } from "lingting-react-ui";
 
-import { RoleEditModal } from "@/pages/settings/RoleEditModal";
-import { fixedRoleRows, roleDutyLabel } from "@/pages/settings/settings-roles";
+import { RoleEditModal } from "@/pages/roles/RoleEditModal";
+import { fixedRoleRows, roleDutyLabel } from "@/pages/roles/roles";
 import { roleTypeLabel } from "@/pages/tasks/selectors";
 import { useRoles } from "@/pages/tasks/useRoles";
 
@@ -23,7 +23,7 @@ type RoleRow = Role & Record<string, unknown>;
 /** 固定角色数量：服务端初始化时保证存在这四个角色 */
 const FIXED_ROLE_TOTAL = 4;
 
-export function RoleManagementPanel() {
+export function RolesPage() {
   const roles = useRoles();
   const [editing, setEditing] = useState<Role>();
 
@@ -83,7 +83,7 @@ export function RoleManagementPanel() {
       {
         dataIndex: "option",
         render: (_dom, record) => (
-          <Button onClick={() => setEditing(record)} size="small" text="编辑" />
+          <LinkButton onClick={() => setEditing(record)} size="small" text="编辑" />
         ),
         search: false,
         title: "操作",
@@ -95,17 +95,6 @@ export function RoleManagementPanel() {
 
   return (
     <Flex gap="middle" vertical style={{ width: "100%" }}>
-      <Alert
-        showIcon
-        description={
-          "角色集合固定为四个，不能新增或删除。可以修改系统 Prompt、模型、启用状态与工具策略，" +
-          "保存后立即对新的调用生效；工具策略只能在角色能力上限内收紧，超出上限的能力与工具" +
-          "由服务端拒绝，MCP 与扩展不会加载。"
-        }
-        title="固定四角色"
-        type="info"
-      />
-
       {roles.status === "error" && (
         <Alert
           action={<Button onClick={roles.reload} size="small" text="重试" />}
@@ -123,9 +112,6 @@ export function RoleManagementPanel() {
         </Typography.Text>
       </Flex>
 
-      {roles.status === "loading" && rows.length === 0 && (
-        <Alert showIcon title="正在查询角色…" type="info" />
-      )}
       {roles.status === "ready" && rows.length < FIXED_ROLE_TOTAL && (
         <Alert
           showIcon
