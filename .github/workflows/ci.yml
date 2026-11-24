@@ -378,10 +378,10 @@ jobs:
           node-version-file: lingting-agent-flow-ui/package.json
           cache: pnpm
           cache-dependency-path: lingting-agent-flow-ui/pnpm-lock.yaml
-      - name: 安装前端依赖
+      - name: 安装前端依赖（复用 pnpm store 缓存）
         id: prepare
         working-directory: lingting-agent-flow-ui
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --prefer-offline
       # vp fmt 与 vp lint --fix 会自动修改文件且不返回失败，因此必须在它们运行之后核验
       # 工作区是否仍有待修复改动；生产构建与产物校验留在同一步骤内。
       - name: 前端格式、lint、类型检查与生产构建
