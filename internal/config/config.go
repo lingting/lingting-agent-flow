@@ -5,7 +5,10 @@
 package config
 
 import (
+	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -29,10 +32,14 @@ const (
 
 	// DefaultAppName 是未配置应用名时使用的名称。
 	DefaultAppName = "agentflow"
-	// DefaultDatabasePath 是未配置数据库路径时使用的路径。
-	DefaultDatabasePath = ".agentflow/agentflow.db"
-	// DefaultWorktreeRoot 是未配置工作区根目录时使用的路径。
-	DefaultWorktreeRoot = ".agentflow/worktrees"
+	// HomeEnv 是指定数据主目录的环境变量名：测试环境用它替换默认位置。
+	HomeEnv = "AGENTFLOW_HOME"
+	// DefaultHomeDirName 是未设置 AGENTFLOW_HOME 时相对用户主目录的数据主目录。
+	DefaultHomeDirName = ".lingting/agentflow"
+	// DefaultDatabaseFileName 是数据主目录下的数据库文件名。
+	DefaultDatabaseFileName = "agentflow.db"
+	// DefaultWorktreeDirName 是数据主目录下的工作区目录名。
+	DefaultWorktreeDirName = "worktrees"
 	// DefaultMaxConcurrentTasks 是未配置并发上限时使用的并发数。
 	DefaultMaxConcurrentTasks = 3
 	// DefaultSourcePath 表示配置不是来自文件，而是内置默认值。
@@ -47,21 +54,77 @@ func ServerPortFor(isRelease bool) int {
 	return DefaultServerPort
 }
 
+// HomeDir 返回数据主目录：数据库、工作区、Session 与后台日志都落在它下面。
+//
+// AGENTFLOW_HOME 设置时优先使用它（测试环境据此替换默认位置），相对值按当前工作目录解析；
+// 未设置时使用 <用户主目录>/.lingting/agentflow。
+func HomeDir() (string, error) {
+	if value := strings.TrimSpace(os.Getenv(HomeEnv)); value != "" {
+		absolute, err := filepath.Abs(value)
+		if err != nil {
+			return "", fmt.Errorf("config: 解析 %s 失败: %q: %w", HomeEnv, value, err)
+		}
+		return absolute, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("config: 解析用户主目录失败（可用 %s 指定数据主目录）: %w", HomeEnv, err)
+	}
+	return filepath.Join(home, filepath.FromSlash(DefaultHomeDirName)), nil
+}
+
 // Default 返回内置默认配置，使程序可以在没有配置文件的情况下启动。
 //
-// 只填无法为空的必需字段，其余字段保持零值：监听地址、端口、优雅关闭超时与 SSH
+// 只填无法为空的必需字段与数据路径，其余字段保持零值：监听地址、端口、优雅关闭超时与 SSH
 // 超时的零值都有各自的默认语义，不在这里重复展开，避免第二份默认值来源。
-func Default() *Config {
-	return &Config{
+func Default() (*Config, error) {
+	home, err := HomeDir()
+	if err != nil {
+		return nil, err
+	}
+	cfg := &Config{
 		SourcePath: DefaultSourcePath,
 		App: AppConfig{
 			Name:     DefaultAppName,
 			LogLevel: logging.DefaultLevel,
 		},
-		Storage:   StorageConfig{DatabasePath: DefaultDatabasePath},
-		Workspace: WorkspaceConfig{WorktreeRoot: DefaultWorktreeRoot},
 		Scheduler: SchedulerConfig{MaxConcurrentTasks: DefaultMaxConcurrentTasks},
 	}
+	cfg.applyDataDefaults(home)
+	return cfg, nil
+}
+
+// applyDataDefaults 把未配置的数据路径补成数据主目录下的默认位置。
+//
+// 与 server.host、server.port 一样，空值表示使用默认位置：配置文件不必重复写默认路径。
+func (c *Config) applyDataDefaults(home string) {
+	if strings.TrimSpace(c.Storage.DatabasePath) == "" {
+		c.Storage.DatabasePath = filepath.Join(home, DefaultDatabaseFileName)
+	}
+	if strings.TrimSpace(c.Workspace.WorktreeRoot) == "" {
+		c.Workspace.WorktreeRoot = filepath.Join(home, DefaultWorktreeDirName)
+	}
+}
+
+// resolvePaths 把配置中的相对路径按数据主目录解析为绝对路径。
+//
+// 相对路径不再按进程工作目录解析：这样无论从哪个目录启动服务，数据都落在同一个数据主目录下。
+// 绝对路径保持原样，空值保持为空（各字段的零值语义由使用方决定）。
+func (c *Config) resolvePaths(home string) {
+	c.Storage.DatabasePath = resolvePath(home, c.Storage.DatabasePath)
+	c.Workspace.WorktreeRoot = resolvePath(home, c.Workspace.WorktreeRoot)
+	c.SSH.KnownHostsPath = resolvePath(home, c.SSH.KnownHostsPath)
+}
+
+// resolvePath 按数据主目录解析单个配置路径。
+func resolvePath(home, value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	if filepath.IsAbs(value) {
+		return filepath.Clean(value)
+	}
+	return filepath.Join(home, value)
 }
 
 // Config 是 AgentFlow 的完整配置。
@@ -97,11 +160,17 @@ type ServerConfig struct {
 
 // StorageConfig 描述持久化位置。
 type StorageConfig struct {
+	// DatabasePath 是数据库文件路径。
+	//
+	// 未配置时使用数据主目录下的 agentflow.db；相对路径按数据主目录解析。
 	DatabasePath string `yaml:"database_path"`
 }
 
 // WorkspaceConfig 描述任务工作区的存放位置。
 type WorkspaceConfig struct {
+	// WorktreeRoot 是任务工作区根目录。
+	//
+	// 未配置时使用数据主目录下的 worktrees；相对路径按数据主目录解析。
 	WorktreeRoot string `yaml:"worktree_root"`
 }
 
@@ -116,7 +185,7 @@ type SchedulerConfig struct {
 // 这里只保存文件路径与超时，不保存任何凭据：密码与私钥口令只能在连接时
 // 通过内存中的凭据提供器传入。
 type SSHConfig struct {
-	// KnownHostsPath 是只读 known_hosts 文件路径。
+	// KnownHostsPath 是只读 known_hosts 文件路径，相对路径按数据主目录解析。
 	//
 	// 为空时复用本机用户 OpenSSH 的 known_hosts；该文件只读取，不会被修改。
 	KnownHostsPath string `yaml:"known_hosts_path"`

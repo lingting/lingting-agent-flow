@@ -21,9 +21,10 @@
 
 | 项 | 说明 |
 |---|---|
-| 数据库路径 | 配置项 `storage.database_path`，默认 `.agentflow/agentflow.db` |
+| 数据目录 | 默认 `<用户主目录>/.lingting/agentflow`，可用环境变量 `AGENTFLOW_HOME` 替换（测试环境用它隔离数据） |
+| 数据库路径 | 配置项 `storage.database_path`，默认 `<数据目录>/agentflow.db` |
 | 进程锁文件 | `<database_path>.server.lock`，与服务端进程同生命周期 |
-| 工作目录 | 配置项 `workspace.worktree_root`，默认 `.agentflow/worktrees` |
+| 工作目录 | 配置项 `workspace.worktree_root`，默认 `<数据目录>/worktrees` |
 | 日志级别 | 配置项 `app.log_level`（`debug` / `info` / `warn` / `error`） |
 
 迁移行为固定如下，运行者不需要手工执行迁移：

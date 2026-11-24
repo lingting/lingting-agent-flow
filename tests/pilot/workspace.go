@@ -7,10 +7,10 @@ import (
 	"strings"
 )
 
-// 试点在注册期就能确定的固定约定：被测二进制、示例配置与工作空间内的相对路径。
+// 试点在注册期就能确定的固定约定：被测二进制、示例配置与服务日志目录。
 //
-// 用例工作空间要到运行期才由编排进程分配，因此这里只解析仓库内路径；工作空间内的文件位置
-// 用相对路径表达，服务进程与用例都以工作空间为工作目录解析同一个相对路径。
+// 用例工作空间与数据主目录（AGENTFLOW_HOME）都要到运行期才由编排进程分配，因此这里只解析
+// 仓库内路径与相对工作空间的日志位置。
 const (
 	// serverBinaryName 是被测服务可执行文件名。
 	serverBinaryName = "agentflow"
@@ -18,11 +18,9 @@ const (
 	serverBinaryNameWindows = "agentflow.exe"
 	// exampleConfigPath 是仓库内示例配置的相对路径。
 	//
-	// 示例配置中的数据库、工作区与会话路径都是相对路径，写入位置因此由服务进程的工作目录
-	// （用例工作空间）决定：用例按同样的相对路径回读，不需要在注册期拼绝对路径。
+	// 示例配置不声明数据库与工作区路径：两者都由服务进程按 AGENTFLOW_HOME 解析，该变量是
+	// 编排进程按 worker 槽位注入的临时数据目录，用例读同一个变量定位数据库。
 	exampleConfigPath = "configs/example.yaml"
-	// databaseRelativePath 是示例配置里 storage.database_path 的取值。
-	databaseRelativePath = ".agentflow/agentflow.db"
 	// healthPath 是被测服务的健康检查路径。
 	healthPath = "/api/v1/health"
 	// gracefulShutdownMarker 是服务走完优雅关闭时写入标准输出的标记。

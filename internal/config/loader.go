@@ -49,7 +49,10 @@ func LoadOrDefault(path string) (*Config, error) {
 	data, err := os.ReadFile(DefaultPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			cfg := Default()
+			cfg, defaultErr := Default()
+			if defaultErr != nil {
+				return nil, defaultErr
+			}
 			if validateErr := cfg.Validate(); validateErr != nil {
 				return nil, validateErr
 			}
@@ -60,7 +63,7 @@ func LoadOrDefault(path string) (*Config, error) {
 	return decode(DefaultPath, data)
 }
 
-// decode 解析 YAML 内容并执行校验。
+// decode 解析 YAML 内容，补齐数据目录默认值、执行校验并把相对路径按数据主目录解析。
 //
 // 未知字段与重复字段都会被拒绝，避免拼写错误被静默忽略。
 func decode(path string, data []byte) (*Config, error) {
@@ -82,8 +85,14 @@ func decode(path string, data []byte) (*Config, error) {
 		return nil, fmt.Errorf("config: 解析配置文件失败: %s: %w", path, err)
 	}
 	cfg.SourcePath = path
-	if err := cfg.Validate(); err != nil {
+	home, err := HomeDir()
+	if err != nil {
 		return nil, err
 	}
+	cfg.applyDataDefaults(home)
+	if validateErr := cfg.Validate(); validateErr != nil {
+		return nil, validateErr
+	}
+	cfg.resolvePaths(home)
 	return &cfg, nil
 }

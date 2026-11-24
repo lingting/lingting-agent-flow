@@ -6,21 +6,30 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/lingting/agentflow/internal/config"
 	"github.com/lingting/agentflow/internal/storage/sqlite"
 	"github.com/lingting/agentflow/internal/testrunner"
 
 	_ "modernc.org/sqlite" // 只读核对迁移版本表时使用的纯 Go 驱动
 )
 
-// databasePath 返回用例工作空间内的数据库文件路径。
-func databasePath(workspace string) string {
-	return filepath.Join(workspace, filepath.FromSlash(databaseRelativePath))
+// databasePath 返回被测服务实际使用的数据库文件路径。
+//
+// 示例配置不再声明数据库路径：服务按 AGENTFLOW_HOME 解析数据主目录，数据库落在该目录的
+// 默认文件名上。用例读的是编排进程注入的同一个变量，因此能核对服务是否真的落在测试数据目录里。
+func databasePath(c *testrunner.Context) string {
+	home := strings.TrimSpace(os.Getenv(testrunner.WorkerHomeEnv))
+	if home == "" {
+		c.Fatalf("worker 没有注入 %s，无法定位服务进程的数据库", testrunner.WorkerHomeEnv)
+	}
+	return filepath.Join(home, config.DefaultDatabaseFileName)
 }
 
-// assertDatabaseCreated 确认服务进程真的在工作空间内建了库。
+// assertDatabaseCreated 确认服务进程真的在数据主目录内建了库。
 //
-// 它是"服务以工作空间为工作目录"的直接证据：配置里的数据库路径是相对路径，写错位置就找不到文件。
+// 它是"服务使用注入的数据主目录"的直接证据：配置里没有数据库路径，写错位置就找不到文件。
 func assertDatabaseCreated(c *testrunner.Context, path string) {
 	info, err := os.Stat(path)
 	if err != nil {

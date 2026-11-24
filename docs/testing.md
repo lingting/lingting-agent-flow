@@ -131,18 +131,23 @@ tests/
 <artifact-root>/<run-id>/workers/<worker-序号>/stderr.log  常驻 worker 自身的标准错误（用例输出不在这里）
 <os.TempDir()>/lingting-agent-flow-tests/<run-id>/<case-id>/           用例工作空间
 <os.TempDir()>/lingting-agent-flow-tests/<run-id>/shard_<type>_<id>/   资源存放目录
+<os.TempDir()>/lingting-agent-flow-tests/<run-id>/homes/slot-<序号>/      该槽位 worker 的数据主目录（AGENTFLOW_HOME）
 ```
 
 - `<artifact-root>` 默认 `.test-artifacts`（`agentflow-test --artifact-dir`，Make 入口为
   `TEST_ARTIFACT_ROOT`）；`<run-id>` 形如 `20260101t120000z-1a2b`，历史运行目录不会被覆盖，失败的运行
   保留全部产物。
-- 用例的数据库、WAL/SHM、Session、日志、配置与生成文件必须落在该用例的工作空间内，不得写入真实项目
-  目录、用户默认数据目录或其他用例的工作空间。
+- 数据主目录由编排进程按 worker 槽位注入为 `AGENTFLOW_HOME`：共享 worker 的所有用例共用
+  `<run-id>/homes/slot-<序号>`，`DedicatedWorker` 用例另开 `<run-id>/homes/isolated__<case-id>`。
+  由编排进程启动的被测服务（`service-process` / `child-process`）与执行用例主体的 worker 收到同一个值，
+  因此不会写进真实用户主目录（`<用户主目录>/.lingting/agentflow`）。
+- 用例的数据库、WAL/SHM、Session、日志、配置与生成文件必须落在该用例的工作空间或它所在槽位的数据主目录
+  内，不得写入真实项目目录、用户默认数据目录或其他用例的工作空间。
 - 使用 `tests/testkit` 提供的 `testkit.New(t)` 与 `testkit.Dir(t)`，不要用 `t.TempDir()`，也
   不要用 `t.Setenv` 切换全局数据目录；路径通过结构体、构造参数或子进程独立环境变量传入。
-- 配置文件中的数据库与工作区路径必须是工作空间内的绝对路径：相对路径会按进程工作目录解析，把 SQLite
-  文件写进仓库。配置模板中的路径一律使用占位符，由统一的辅助函数替换为绝对路径。
-- 仓库忽略任意层级的 `.agentflow/` 目录，作为误用相对路径时的兜底；不得把运行期数据文件提交进版本库。
+- 配置模板中的数据库与工作区路径一律使用绝对路径占位符，由统一的辅助函数替换为工作空间内的绝对路径：
+  产品会把配置里的相对路径解析到数据主目录，模板写相对值会让落点依赖运行环境。
+- 仓库忽略任意层级的 `.agentflow/` 目录，作为误用旧默认路径时的兜底；不得把运行期数据文件提交进版本库。
 - 测试结束禁止删除工作空间与测试产物：不调用 `os.RemoveAll` 删除测试根目录，不使用会在结束时自动清理
   目录的临时目录 API，也不在 `t.Cleanup` 中删除目录。允许关闭数据库连接、终止测试启动的子进程、关闭
   监听端口等运行时资源。

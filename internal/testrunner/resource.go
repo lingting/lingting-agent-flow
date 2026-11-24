@@ -310,6 +310,23 @@ func caseWorkspaceOf(ctx context.Context) string {
 	return dir
 }
 
+// caseHomeKey 是编排进程传给提供者的数据主目录的上下文键。
+type caseHomeKey struct{}
+
+// withCaseHome 把当前用例的数据主目录放进资源分配上下文。
+//
+// 提供者据此给子进程注入 AGENTFLOW_HOME：由编排进程启动的被测服务与执行用例主体的 worker
+// 必须落在同一份数据目录上，否则服务会退回真实用户主目录。
+func withCaseHome(ctx context.Context, dir string) context.Context {
+	return context.WithValue(ctx, caseHomeKey{}, dir)
+}
+
+// caseHomeOf 返回资源分配上下文里的数据主目录，未设置时为空字符串。
+func caseHomeOf(ctx context.Context) string {
+	dir, _ := ctx.Value(caseHomeKey{}).(string)
+	return dir
+}
+
 // resourceShardDir 返回某个资源在运行工作空间内的存放目录（V3 R4 §5 D6）。
 //
 // 需要独立目录的提供者把资源文件放在 <root>/shard_<资源类型>_<声明名> 下：目录名同时表达

@@ -60,7 +60,7 @@ func runServerShutdown(c *testrunner.Context) {
 		c.Fatalf("编排进程没有下发用例工作空间目录")
 	}
 	baseURL := handle.PayloadValue("base_url")
-	database := databasePath(workspace)
+	database := databasePath(c)
 	c.Logf("服务进程就绪：pid=%d base_url=%s 工作空间=%s", pid, baseURL, workspace)
 
 	assertIsServerBinary(c, handle)

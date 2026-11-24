@@ -121,6 +121,27 @@ func (l RunLayout) CaseWorkspaceDir(caseID string) string {
 	return filepath.Join(l.WorkspaceRoot(), flattenCaseID(caseID))
 }
 
+// WorkerHomeEnv 是被测程序读取数据主目录的环境变量名。
+//
+// 编排进程按 worker 槽位注入它：被测服务与执行用例主体的 worker 落在同一份临时数据目录里，
+// 既不会写进真实用户主目录，也不会互相覆盖。
+const WorkerHomeEnv = "AGENTFLOW_HOME"
+
+// SlotHomeDir 返回共享 worker 槽位的数据主目录（AGENTFLOW_HOME）。
+//
+// 槽位是执行位，常驻 worker 在它上面复用：同一槽位上所有用例默认共用这一份数据目录。
+// 它落在运行工作空间里，与产物目录分开，运行结束随临时目录一并收敛。
+func (l RunLayout) SlotHomeDir(slot int) string {
+	return filepath.Join(l.WorkspaceRoot(), "homes", fmt.Sprintf("slot-%02d", slot+1))
+}
+
+// IsolatedHomeDir 返回独占用例一次性 worker 的数据主目录。
+//
+// 独占用例不复用槽位 worker，因此也不复用槽位的数据目录；用例标识保证同一运行内互不重叠。
+func (l RunLayout) IsolatedHomeDir(caseID string) string {
+	return filepath.Join(l.WorkspaceRoot(), "homes", "isolated__"+flattenCaseID(caseID))
+}
+
 // CreateCaseWorkspace 创建用例工作空间目录并返回其绝对路径。
 //
 // 调用发生在分配资源之前：需要工作目录的提供者（例如 service-process 的子进程）据此

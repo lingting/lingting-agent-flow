@@ -39,7 +39,10 @@ type persistentWorker struct {
 //
 // stderrPath 是该 worker 自己的标准错误日志：用例的标准流由 worker 自己分流到用例产物，
 // 这里的日志只承载进程级输出（例如 Go 运行时 panic 栈）。
-func startPersistentWorker(executable string, workerID int, stderrPath string) (*persistentWorker, error) {
+//
+// home 是该槽位的数据主目录，以 AGENTFLOW_HOME 注入进程环境：worker 内所有用例共用它，
+// 用例主体据此与服务进程落在同一份数据目录上。
+func startPersistentWorker(executable string, workerID int, home string, stderrPath string) (*persistentWorker, error) {
 	commandIn, stdin, err := os.Pipe()
 	if err != nil {
 		return nil, fmt.Errorf("创建 worker 指令管道失败: %w", err)
@@ -59,6 +62,9 @@ func startPersistentWorker(executable string, workerID int, stderrPath string) (
 	command.Stdout = commandOut
 	command.Stderr = stderr
 	command.SysProcAttr = processGroupAttr()
+	if home != "" {
+		command.Env = append(os.Environ(), WorkerHomeEnv+"="+home)
+	}
 	spawnAt := time.Now()
 	startErr := command.Start()
 	// 父进程只保留自己那一端：子进程已经继承，父端不关闭就等不到 EOF。

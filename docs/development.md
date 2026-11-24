@@ -178,6 +178,23 @@ make release                                         # 单文件生产构建：�
   `127.0.0.1:0` 由系统分配端口（`--serve 127.0.0.1:{port}` 中的 `{port}` 即分配结果），不占固定端口；
   端口冲突表现为分配或就绪失败，而不是复用别人的进程。
 
+## 默认数据目录
+
+数据库、任务工作区、Session 与后台日志统一落在数据主目录下：
+
+| 项 | 默认值 | 覆盖方式 |
+|---|---|---|
+| 数据主目录 | `<用户主目录>/.lingting/agentflow`（`config.HomeDir`） | 环境变量 `AGENTFLOW_HOME`；相对值按当前工作目录解析 |
+| 数据库 | `<数据主目录>/agentflow.db` | 配置 `storage.database_path` |
+| 任务工作区 | `<数据主目录>/worktrees` | 配置 `workspace.worktree_root` |
+| Session 与后台日志 | `<数据库目录>/sessions` 与 `<database_path>` + `.background.log` | 由数据库路径派生，不单独配置 |
+
+- 配置里的路径是相对值时按数据主目录解析，不再相对进程工作目录；绝对路径原样使用。
+  `storage.database_path` 与 `workspace.worktree_root` 可以直接省略。
+- `AGENTFLOW_HOME` 是测试环境隔离数据的手段：测试执行器按 worker 槽位注入它（见
+  [testing.md](testing.md)），本地开发要换数据位置时同样只设这一个变量。
+- 旧的仓库内 `.agentflow/` 数据目录不再被使用，也不做迁移：需要保留旧数据时自行移动文件。
+
 ## 改动流程
 
 1. 确认改动属于哪一层，按 [workspace.md](workspace.md) 的依赖方向选择位置。

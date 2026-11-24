@@ -21,11 +21,13 @@ server:
   # 优雅关闭的最长等待秒数，0 表示使用默认值 10 秒
   shutdown_timeout_seconds: 0
 
+# 数据目录：默认 <用户主目录>/.lingting/agentflow，可用 AGENTFLOW_HOME 环境变量替换。
+# 下面的路径都可以省略：省略时使用 <数据目录>/agentflow.db 与 <数据目录>/worktrees；
+# 写成相对路径时按数据目录解析，绝对路径原样使用。
 storage:
-  database_path: .agentflow/agentflow.db
-
+  # 数据库文件，省略时使用 <数据目录>/agentflow.db
 workspace:
-  worktree_root: .agentflow/worktrees
+  # 任务工作区根目录，省略时使用 <数据目录>/worktrees
 
 scheduler:
   # 必须大于 0

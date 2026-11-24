@@ -45,11 +45,13 @@ version.json         版本、提交、构建时间、Go 版本与目标平台
 ./agentflow server --address 127.0.0.1:26381
 ```
 
-可执行文件可以放在任意目录并从该目录启动，不依赖源码目录、前端产物或当前工作目录。
+可执行文件可以放在任意目录并从该目录启动，不依赖源码目录、前端产物或当前工作目录；数据库、任务工作区、
+Session 与后台日志都落在数据主目录下，与本目录无关。
 
 ## 4. 配置文件
 
-首次启动会在数据目录创建默认配置与 SQLite 数据库。需要指定配置时：
+首次启动会在数据主目录创建 SQLite 数据库：默认 `<用户主目录>/.lingting/agentflow`，可用环境变量
+`AGENTFLOW_HOME` 替换。需要指定配置时：
 
 ```bash
 ./agentflow server --config ./agentflow.yaml

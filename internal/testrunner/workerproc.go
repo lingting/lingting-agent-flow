@@ -28,6 +28,8 @@ type workerInvocation struct {
 	LogPaths        ArtifactPaths
 	RealTests       bool
 	RealTestsReason string
+	// Home 是这次用例的数据主目录，以 AGENTFLOW_HOME 注入 worker 进程。
+	Home string
 	// OnStart 在用例真正开始执行后回调（一次性 worker 是进程启动之后），空值表示不关心。
 	OnStart func()
 }
@@ -93,6 +95,10 @@ func runWorkerProcess(ctx context.Context, inv workerInvocation) (workerObservat
 	command.Stdout = stdout
 	command.Stderr = stderr
 	command.SysProcAttr = processGroupAttr()
+	// 数据主目录按槽位指定一次：共享 worker 的所有用例共用它，独占 worker 用自己那份。
+	if inv.Home != "" {
+		command.Env = append(os.Environ(), WorkerHomeEnv+"="+inv.Home)
+	}
 	if err := command.Start(); err != nil {
 		return observation, fmt.Errorf("启动 worker 失败: %w", err)
 	}

@@ -140,6 +140,7 @@ func newWorkerPool(options runCaseOptions, parallel int, output io.Writer) *work
 				logDir:     pool.logDir,
 				nextID:     pool.assignWorkerID,
 			},
+			homeDir: options.Layout.SlotHomeDir(index),
 		}
 	}
 	return pool
@@ -185,6 +186,8 @@ type workerSlot struct {
 	assign   chan slotAssignment
 	done     chan<- slotOutcome
 	executor *pooledExecutor
+	// homeDir 是该槽位的数据主目录：常驻 worker 在用例之间复用它，独占用例另开一份。
+	homeDir string
 }
 
 // loop 顺序执行派发到本槽位的用例，直到运行结束关闭派发通道。
@@ -204,6 +207,11 @@ func (s *workerSlot) run(ctx context.Context, assignment slotAssignment) (outcom
 	outcome = slotOutcome{slot: s.id, index: assignment.index, reserved: assignment.reserved}
 	options := s.options
 	options.Case = assignment.Case
+	options.Home = s.homeDir
+	if assignment.Case.DedicatedWorker {
+		// 独占用例不复用槽位 worker，也不复用槽位的数据目录。
+		options.Home = options.Layout.IsolatedHomeDir(assignment.Case.ID)
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			outcome.result = CaseResult{
@@ -247,7 +255,7 @@ func (e *pooledExecutor) execute(
 		if err != nil {
 			return workerObservation{}, err
 		}
-		session, err := startPersistentWorker(e.executable, workerID, stderrPath)
+		session, err := startPersistentWorker(e.executable, workerID, inv.Home, stderrPath)
 		if err != nil {
 			return workerObservation{}, err
 		}

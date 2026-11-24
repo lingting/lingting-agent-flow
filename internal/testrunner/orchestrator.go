@@ -187,6 +187,8 @@ type runCaseOptions struct {
 	Grace          time.Duration
 	RunID          string
 	RealTests      RealTestsDecision
+	// Home 是这次用例的数据主目录：注入 worker 与由提供者启动的子进程（AGENTFLOW_HOME）。
+	Home string
 	// OnCaseStart 在用例真正开始执行后回调，用于触发取消自检。
 	OnCaseStart func(caseID string)
 }
@@ -214,7 +216,13 @@ func runCase(
 		result.Message = err.Error()
 		return result, caseObservation{}
 	}
-	handles, resources, err := acquireCaseResources(withCaseWorkspace(ctx, workspaceDir), opts)
+	// 数据主目录同样在分配资源之前建好：由提供者启动的服务进程与 worker 必须共用同一条
+	// AGENTFLOW_HOME，否则服务会退回真实用户主目录。
+	if err := os.MkdirAll(opts.Home, 0o750); err != nil {
+		result.Message = fmt.Sprintf("创建数据主目录 %s 失败: %v", opts.Home, err)
+		return result, caseObservation{}
+	}
+	handles, resources, err := acquireCaseResources(withCaseHome(withCaseWorkspace(ctx, workspaceDir), opts.Home), opts)
 	result.Resources = resources
 	if err != nil {
 		if ctx.Err() != nil {
@@ -251,6 +259,7 @@ func runCase(
 		OnStart:         startObserver(opts.OnCaseStart, c.ID),
 		ArtifactDir:     paths.ArtifactDir,
 		WorkspaceDir:    workspaceDir,
+		Home:            opts.Home,
 		LogPaths:        paths,
 		RealTests:       opts.RealTests.Allowed,
 		RealTestsReason: opts.RealTests.Reason,

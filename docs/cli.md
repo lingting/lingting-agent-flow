@@ -8,6 +8,9 @@
 - 全局参数：`--help`、`--version`。`agentflow version` 输出构建信息。
 - `host`、`project`、`task` 等命令组接受 `--config`，未指定时读取 `configs/agentflow.yaml`；
   `config validate` 在该文件不存在时直接报错，不回退到内置默认值。
+- 数据路径的相对值按数据主目录解析：默认 `<用户主目录>/.lingting/agentflow`，可用环境变量
+  `AGENTFLOW_HOME` 替换；`storage.database_path` 与 `workspace.worktree_root` 省略时分别落在
+  该目录的 `agentflow.db` 与 `worktrees` 下。
 - 命令层只做参数解析、结果输出与退出码转换，不包含校验规则，也不收集任何凭据：SSH 认证只使用节点
   配置中的本机私钥文件。
 - 任务执行命令是 HTTP 客户端：它们调用 `agentflow server` 的接口并轮询真实进度，不在 CLI 进程内装配

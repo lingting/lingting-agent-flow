@@ -18,6 +18,17 @@ import (
 	"time"
 )
 
+// caseHomeEnv 返回注入给资源子进程的数据主目录变量；上下文没有下发时返回空。
+//
+// 自证与清理都不需要它：只有启动被测进程时才用它把数据目录固定在用例的临时目录里。
+func caseHomeEnv(ctx context.Context) []string {
+	home := caseHomeOf(ctx)
+	if home == "" {
+		return nil
+	}
+	return []string{WorkerHomeEnv + "=" + home}
+}
+
 // processStartupWindow 是新起子进程的存活观察窗口：窗口内退出视为启动失败。
 const processStartupWindow = 300 * time.Millisecond
 
@@ -307,6 +318,7 @@ func (p *ChildProcessProvider) Acquire(ctx context.Context, decl ResourceDecl) (
 		args:       args,
 		dir:        caseWorkspaceOf(ctx),
 		logPath:    logPath,
+		env:        caseHomeEnv(ctx),
 	})
 	if err != nil {
 		return Handle{}, err
@@ -464,6 +476,7 @@ func (p *ServiceProcessProvider) Acquire(ctx context.Context, decl ResourceDecl)
 		args:       args,
 		dir:        caseWorkspaceOf(ctx),
 		logPath:    logPath,
+		env:        caseHomeEnv(ctx),
 	})
 	if err != nil {
 		return Handle{}, err

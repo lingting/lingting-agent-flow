@@ -34,14 +34,14 @@
 
 ```json
 {
-  "database_path": ".agentflow/agentflow.db",
+  "database_path": "C:\\Users\\example\\.lingting\\agentflow\\agentflow.db",
   "listen_address": "127.0.0.1:26380",
   "max_concurrent_tasks": 3,
-  "session_root": "D:\\code\\example\\.agentflow\\sessions"
+  "session_root": "C:\\Users\\example\\.lingting\\agentflow\\sessions"
 }
 ```
 
-- 响应只有这四个字段：`database_path` 是数据库实际使用的路径表达式（相对路径按进程工作目录解析，
+- 响应只有这四个字段：`database_path` 是数据库实际使用的绝对路径（配置里的相对路径已按数据主目录解析，
   与打开数据库时一致）；`listen_address` 是最终生效的 `host:port`，已包含 `--address` 覆盖；
   `max_concurrent_tasks` 是任务调度的并发上限；`session_root` 是 Session 文件实际写入的绝对目录
   （由数据库目录派生的 `sessions` 目录，与 `workspace.worktree_root` 无关）。
