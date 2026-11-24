@@ -1,0 +1,28 @@
+/* 值卡片分组：外层只负责布局，视觉层次由内层的值卡片承担 */
+.stat-cards-group__values {
+  width: 100%;
+}
+
+/*
+ * 值卡片平铺整行：以 128px 为基准宽度按剩余空间等比放大，空间不足时换行，
+ * 换行后每行同样铺满整行宽度。
+ */
+.stat-cards-group__card {
+  flex: 1 1 128px;
+  min-width: 128px;
+}
+
+.stat-cards-group__label {
+  font-size: 12px;
+}
+
+.stat-cards-group__value {
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.3;
+}
+
+.stat-cards-group__hint,
+.stat-cards-group__footer {
+  font-size: 12px;
+}

@@ -315,6 +315,16 @@ func (s taskStore) ListTaskPage(
 	return page, nil
 }
 
+// CountTasksByStatus 按任务状态统计未删除的任务数量。
+//
+// 统计只读：不读取步骤、尝试、会话或工作流记录，也不推导执行结论。状态取值原样作为
+// 结果键，未知状态不会被丢弃或并入某个已知状态。
+func (s taskStore) CountTasksByStatus(ctx context.Context) (storage.StatusCounts, error) {
+	const statement = `SELECT status, COUNT(*) FROM tasks
+		WHERE deleted_at IS NULL GROUP BY status`
+	return queryStatusCounts(ctx, s.q, "统计任务状态", statement)
+}
+
 // DeleteTask 逻辑删除任务。
 //
 // 只写入 deleted_at 与 updated_at：任务行、步骤、尝试、会话等历史记录全部保留。

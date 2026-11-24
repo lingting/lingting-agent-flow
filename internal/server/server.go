@@ -1191,6 +1191,12 @@ func (s *Server) startHTTP(ctx context.Context) error {
 	if _, projectErr := s.projectService(); projectErr != nil {
 		return projectErr
 	}
+	// 概览汇总只依赖已打开的数据库：它只做只读计数，不接触 SSH、Docker 或 Pi，
+	// 因此在这些能力缺失时仍然要装配，否则概览页会整体变成"服务不可用"。
+	overview, err := app.NewOverviewService(s.store)
+	if err != nil {
+		return fmt.Errorf("初始化概览汇总服务失败: %w", err)
+	}
 	// 基础运行配置快照只在启动阶段生成一次：它绑定已加载并完成 --address 覆盖的真实
 	// 配置，HTTP 请求期间不重新读取配置文件，也不重新计算 Session 目录。
 	runtimeConfig := app.NewRuntimeConfig(s.cfg, s.address)
@@ -1199,6 +1205,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		RuntimeConfig:     runtimeConfig,
 		Roles:             s.roleQuery,
 		Projects:          s.projects,
+		Overview:          overview,
 		Health:            app.NewHealthService(s.store),
 		SystemInfo:        s.systemInfo,
 		Tasks:             tasks,

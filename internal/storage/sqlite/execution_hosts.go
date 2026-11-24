@@ -199,6 +199,17 @@ func (s executionHostStore) ListExecutionHosts(ctx context.Context) ([]domain.Ex
 	return hosts, nil
 }
 
+// CountExecutionHostsByValidationStatus 按校验状态统计未删除的执行节点数量。
+//
+// 统计只读：不读取凭据字段，也不触发校验、SSH 连接或默认节点切换。
+func (s executionHostStore) CountExecutionHostsByValidationStatus(
+	ctx context.Context,
+) (storage.StatusCounts, error) {
+	const statement = `SELECT validation_status, COUNT(*) FROM execution_hosts
+		WHERE deleted_at IS NULL GROUP BY validation_status`
+	return queryStatusCounts(ctx, s.q, "统计执行节点校验状态", statement)
+}
+
 // SetDefaultExecutionHost 在单个事务内切换默认节点。
 //
 // 先清除原默认节点再设置新节点，两步必须同时成功或同时回滚；数据库的部分唯一索引

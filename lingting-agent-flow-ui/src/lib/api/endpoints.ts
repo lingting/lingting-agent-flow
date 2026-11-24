@@ -47,6 +47,8 @@ import type {
   HealthResponse,
   Host,
   HostListResponse,
+  OverviewProjectCountsResponse,
+  OverviewStatusCountsResponse,
   SystemInfoResponse,
   Task,
   TaskListQuery,
@@ -86,6 +88,51 @@ export const SETTINGS_CONFIG_PATH = `${API_PREFIX}/settings/config`;
  */
 export function fetchSettingsConfig(options: ApiRequestOptions = {}) {
   return apiRequest<SettingsConfigResponse>(SETTINGS_CONFIG_PATH, options);
+}
+
+/** 概览汇总接口前缀，与 Go 端 `httpapi.PathOverview` 一致 */
+export const OVERVIEW_PATH = `${API_PREFIX}/overview`;
+
+/** 概览汇总中需求计数的路径 */
+export const OVERVIEW_REQUIREMENTS_PATH = `${OVERVIEW_PATH}/requirements`;
+
+/** 概览汇总中项目计数的路径 */
+export const OVERVIEW_PROJECTS_PATH = `${OVERVIEW_PATH}/projects`;
+
+/** 概览汇总中任务计数的路径 */
+export const OVERVIEW_TASKS_PATH = `${OVERVIEW_PATH}/tasks`;
+
+/** 概览汇总中执行节点计数的路径 */
+export const OVERVIEW_HOSTS_PATH = `${OVERVIEW_PATH}/hosts`;
+
+/**
+ * 查询未删除需求按状态的数量分布。
+ *
+ * 只读：服务端只统计持久化的状态列，不推导完成度、不读取需求正文，也不建立 SSH /
+ * Docker 会话。失败时调用方会收到 `ApiError`，不得把失败当成"数量为 0"。
+ */
+export function fetchOverviewRequirements(options: ApiRequestOptions = {}) {
+  return apiRequest<OverviewStatusCountsResponse>(OVERVIEW_REQUIREMENTS_PATH, options);
+}
+
+/** 查询未删除项目的数量与配置维度计数 */
+export function fetchOverviewProjects(options: ApiRequestOptions = {}) {
+  return apiRequest<OverviewProjectCountsResponse>(OVERVIEW_PROJECTS_PATH, options);
+}
+
+/**
+ * 查询未删除任务按状态的数量分布。
+ *
+ * `counts` 的键是服务端持久化的状态原值：未知状态原样返回，调用方不得就地丢弃或
+ * 改名成某个已知状态。
+ */
+export function fetchOverviewTasks(options: ApiRequestOptions = {}) {
+  return apiRequest<OverviewStatusCountsResponse>(OVERVIEW_TASKS_PATH, options);
+}
+
+/** 查询未删除执行节点按校验状态的数量分布 */
+export function fetchOverviewHosts(options: ApiRequestOptions = {}) {
+  return apiRequest<OverviewStatusCountsResponse>(OVERVIEW_HOSTS_PATH, options);
 }
 
 /** 任务集合路径 */

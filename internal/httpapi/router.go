@@ -27,6 +27,10 @@ type Deps struct {
 	// 项目是任务必填的关联对象，因此它不是可选能力：服务未装配时接口返回 503，
 	// 而不是伪造空列表。
 	Projects *app.ProjectService
+	// Overview 是概览汇总服务，为空时概览接口返回服务不可用。
+	//
+	// 它只依赖存储：概览汇总只读计数，不建立 SSH / Docker 会话，也不触发校验。
+	Overview *app.OverviewService
 	// Health 提供健康检查结果，为空时健康检查返回服务不可用。
 	Health *app.HealthService
 	// SystemInfo 返回系统信息，为空时接口返回服务不可用。
@@ -139,6 +143,7 @@ func NewHandler(deps Deps) http.Handler {
 	router := &router{
 		roles:    newRoleHandler(deps.Roles, logger),
 		projects: newProjectHandler(deps.Projects, logger),
+		overview: newOverviewHandler(deps.Overview, logger),
 		environments: newEnvironmentHandler(
 			deps.Environments,
 			deps.EnvironmentWrites,
@@ -194,7 +199,9 @@ type router struct {
 	// roles 处理角色配置的查询与更新；服务未初始化时接口返回 503。
 	roles *roleHandler
 	// projects 处理项目管理接口；服务未初始化时接口返回 503。
-	projects   *projectHandler
+	projects *projectHandler
+	// overview 处理概览汇总的只读计数接口；服务未初始化时接口返回 503。
+	overview   *overviewHandler
 	health     *app.HealthService
 	systemInfo func() app.SystemInfo
 	// runtimeConfig 是启动阶段生成的运行配置快照，为空时该接口返回服务不可用。

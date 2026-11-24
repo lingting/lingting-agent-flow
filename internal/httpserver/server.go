@@ -39,6 +39,10 @@ type Options struct {
 	//
 	// 项目是任务必填的关联对象，因此它不是可选能力。
 	Projects *app.ProjectService
+	// Overview 是概览汇总服务，为空时概览接口报告服务不可用。
+	//
+	// 它只依赖存储：概览汇总只读计数，不建立 SSH / Docker 会话。
+	Overview *app.OverviewService
 	// Health 是健康检查服务，为空时健康检查接口报告服务不可用。
 	Health *app.HealthService
 	// SystemInfo 返回系统信息，为空时该接口报告服务不可用。
@@ -152,6 +156,7 @@ func New(options Options) (*Server, error) {
 		Shutdown:          streamShutdown,
 		Roles:             options.Roles,
 		Projects:          options.Projects,
+		Overview:          options.Overview,
 		Health:            options.Health,
 		SystemInfo:        options.SystemInfo,
 		RuntimeConfig:     options.RuntimeConfig,

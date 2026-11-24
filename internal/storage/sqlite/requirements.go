@@ -168,6 +168,18 @@ func (s requirementStore) ListRequirements(
 	return requirements, nil
 }
 
+// CountRequirementsByStatus 按需求状态统计未删除的需求数量。
+//
+// 统计只读：不读取需求正文，也不推导进度。状态取值原样作为结果键，未删除条件是唯一
+// 过滤条件，与项目关联无关（历史手工需求没有项目，同样参与统计）。
+func (s requirementStore) CountRequirementsByStatus(
+	ctx context.Context,
+) (storage.StatusCounts, error) {
+	const statement = `SELECT status, COUNT(*) FROM requirements
+		WHERE deleted_at IS NULL GROUP BY status`
+	return queryStatusCounts(ctx, s.q, "统计需求状态", statement)
+}
+
 // buildRequirementQuery 构造需求查询语句与参数。
 //
 // 条件全部通过占位符绑定，不拼接用户输入。

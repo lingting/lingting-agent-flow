@@ -32,6 +32,21 @@ var (
 	ErrBusy = errors.New("storage: 数据库忙")
 )
 
+// StatusCounts 是按状态分组统计的未删除记录条数。
+//
+// 键是持久化的状态原值：不认识的取值原样保留，既不归一化为已知状态，也不并入
+// 某个"其他"分组。调用方据此展示服务端真实状态分布，而不是自己补齐状态清单。
+type StatusCounts map[string]int
+
+// Total 返回各组条数之和，即参与统计的记录总数。
+func (c StatusCounts) Total() int {
+	total := 0
+	for _, count := range c {
+		total += count
+	}
+	return total
+}
+
 // RoleSeed 是角色初始化的最小定义：由内置的固定角色默认值转换为存储定义后传入。
 type RoleSeed struct {
 	ID           domain.ID
@@ -87,6 +102,10 @@ type ExecutionHostStore interface {
 		ctx context.Context,
 		status domain.ValidationStatus,
 	) ([]domain.ExecutionHost, error)
+	// CountExecutionHostsByValidationStatus 按校验状态统计未删除的执行节点数量。
+	//
+	// 它只做计数：不读取凭据字段，也不触发校验、SSH 连接或默认节点切换。
+	CountExecutionHostsByValidationStatus(ctx context.Context) (StatusCounts, error)
 }
 
 // RequirementFilter 约束需求查询条件，零值表示不限制。
@@ -108,6 +127,10 @@ type RequirementStore interface {
 	UpdateRequirement(ctx context.Context, requirement domain.Requirement) error
 	GetRequirement(ctx context.Context, id domain.ID) (*domain.Requirement, error)
 	ListRequirements(ctx context.Context, filter RequirementFilter) ([]domain.Requirement, error)
+	// CountRequirementsByStatus 按需求状态统计未删除的需求数量。
+	//
+	// 它只做计数：不读取需求正文，也不推导完成度或进度。
+	CountRequirementsByStatus(ctx context.Context) (StatusCounts, error)
 	// DeleteRequirement 逻辑删除需求：只写 deleted_at 与 updated_at。
 	//
 	// 它是条件写入而不是"先读取再整行更新"：只有未被删除的记录会被命中，影响行数为 0
@@ -128,6 +151,19 @@ type ProjectFilter struct {
 	IncludeDeleted bool
 }
 
+// ProjectCounts 是未删除项目在配置维度上的计数。
+//
+// 三个数字都是"已登记的配置事实"，不代表环境可用：设置了默认执行节点的项目仍可能
+// 指向已删除或无响应的节点，配置了缓存类型的项目也可能从未挂载过缓存卷。
+type ProjectCounts struct {
+	// Total 是未删除的项目总数。
+	Total int
+	// WithDefaultHost 是设置了默认执行节点的项目数量。
+	WithDefaultHost int
+	// WithCaches 是配置了至少一种缓存类型的项目数量。
+	WithCaches int
+}
+
 // ProjectStore 保存项目登记信息。
 //
 // 项目标识由调用方给出并与缓存卷共享范围、远程管理工作目录名绑定，因此读取必须
@@ -141,6 +177,11 @@ type ProjectStore interface {
 	DeleteProject(ctx context.Context, id domain.ID) error
 	GetProject(ctx context.Context, id domain.ID) (*domain.Project, error)
 	ListProjects(ctx context.Context, filter ProjectFilter) ([]domain.Project, error)
+	// CountProjects 统计未删除项目的数量与配置维度计数。
+	//
+	// 它只做计数：默认执行节点当前是否可用、缓存是否真实存在于远程环境，都不由
+	// 计数判断。
+	CountProjects(ctx context.Context) (ProjectCounts, error)
 }
 
 // ProjectExecutionState 是项目执行意图的持久化记录。
@@ -500,6 +541,10 @@ type TaskStore interface {
 	//
 	// 总数与分页参数无关，调用方不需要另外实现一次 COUNT 查询。
 	ListTaskPage(ctx context.Context, filter TaskFilter) (TaskPage, error)
+	// CountTasksByStatus 按任务状态统计未删除的任务数量。
+	//
+	// 它只做计数：不读取步骤、尝试、会话或工作流记录，也不推导执行结论。
+	CountTasksByStatus(ctx context.Context) (StatusCounts, error)
 	// DeleteTask 逻辑删除任务：只标记 deleted_at，不删除任务行与历史记录。
 	//
 	// 条件更新保证并发安全：数据库中的任务必须未被删除且仍处于 expected

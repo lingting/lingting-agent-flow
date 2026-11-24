@@ -177,6 +177,28 @@ func (s projectStore) ListProjects(
 	return projects, nil
 }
 
+// CountProjects 统计未删除项目的总数与配置维度计数。
+//
+// 默认执行节点用 NULL 表达"未设置"，空字符串同样不计入；缓存类型以 JSON 数组长度判断，
+// 不使用字符串比较，避免格式差异把"没有缓存"统计成"有缓存"。
+func (s projectStore) CountProjects(ctx context.Context) (storage.ProjectCounts, error) {
+	const statement = `SELECT COUNT(*),
+			COUNT(CASE WHEN default_host_id IS NOT NULL AND trim(default_host_id) <> ''
+				THEN 1 END),
+			COUNT(CASE WHEN json_array_length(caches_json) > 0 THEN 1 END)
+		FROM projects WHERE deleted_at IS NULL`
+	var counts storage.ProjectCounts
+	err := s.q.QueryRowContext(ctx, statement).Scan(
+		&counts.Total,
+		&counts.WithDefaultHost,
+		&counts.WithCaches,
+	)
+	if err != nil {
+		return storage.ProjectCounts{}, wrapError("统计项目数量", err)
+	}
+	return counts, nil
+}
+
 // projectScanner 抽象单行与多行查询结果。
 type projectScanner interface {
 	Scan(dest ...any) error

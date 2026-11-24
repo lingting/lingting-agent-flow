@@ -90,6 +90,12 @@ const (
 	matchProjectExecution    = matchProject + "/" + projectExecutionSegment
 	matchProjectTasks        = matchProject + "/" + projectTasksSegment
 	matchRequirementProgress = matchRequirement + "/" + requirementProgressSegment
+
+	matchOverview             = PathOverview
+	matchOverviewRequirements = matchOverview + "/" + overviewRequirementsSegment
+	matchOverviewProjects     = matchOverview + "/" + overviewProjectsSegment
+	matchOverviewTasks        = matchOverview + "/" + overviewTasksSegment
+	matchOverviewHosts        = matchOverview + "/" + overviewHostsSegment
 )
 
 // apiRouteMethod 是路由上允许的一个 HTTP 方法及其处理函数。
@@ -178,6 +184,10 @@ func (rt *router) routes() []apiRoute {
 		rt.projectExecution.execution != nil,
 		"项目执行服务未初始化",
 	)
+	overviewService := rt.availabilityGuard(
+		rt.overview.overview != nil,
+		"概览汇总服务未初始化",
+	)
 
 	// 环境接口在判定方法之前只校验段值：非法环境类型、名称或版本号按参数错误返回
 	// 400，不伪装成"资源不存在"，也不因为方法不匹配而改变结论。
@@ -200,6 +210,36 @@ func (rt *router) routes() []apiRoute {
 		{
 			pattern:          PathSettingsConfig,
 			methods:          get(rt.settingsConfigHandler),
+			allow:            "GET, HEAD",
+			methodNotAllowed: "该接口只支持 GET 请求",
+		},
+
+		// 概览汇总：只读计数，四类实体各自一个接口，任一接口失败不影响其他接口。
+		{
+			pattern:          matchOverviewRequirements,
+			methods:          get(rt.overview.requirements),
+			guard:            overviewService,
+			allow:            "GET, HEAD",
+			methodNotAllowed: "该接口只支持 GET 请求",
+		},
+		{
+			pattern:          matchOverviewProjects,
+			methods:          get(rt.overview.projects),
+			guard:            overviewService,
+			allow:            "GET, HEAD",
+			methodNotAllowed: "该接口只支持 GET 请求",
+		},
+		{
+			pattern:          matchOverviewTasks,
+			methods:          get(rt.overview.tasks),
+			guard:            overviewService,
+			allow:            "GET, HEAD",
+			methodNotAllowed: "该接口只支持 GET 请求",
+		},
+		{
+			pattern:          matchOverviewHosts,
+			methods:          get(rt.overview.hosts),
+			guard:            overviewService,
 			allow:            "GET, HEAD",
 			methodNotAllowed: "该接口只支持 GET 请求",
 		},

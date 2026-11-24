@@ -57,6 +57,34 @@ export type SettingsConfigResponse = {
 };
 
 /**
+ * 概览汇总中按状态分组的计数，与 Go 端 `httpapi.OverviewStatusCountsResponse` 一致。
+ *
+ * `counts` 的键是服务端持久化的状态原值：未知取值原样出现。缺失的键表示该状态确实
+ * 没有记录；响应里多出来的键需要原样展示，不得丢弃或改名成已知状态。
+ */
+export type OverviewStatusCountsResponse = {
+  /** 参与统计的未删除记录总数 */
+  total: number;
+  /** 状态到记录条数的映射 */
+  counts: Record<string, number>;
+};
+
+/**
+ * 概览汇总中的项目计数，与 Go 端 `httpapi.OverviewProjectCountsResponse` 一致。
+ *
+ * 三个数字都是已登记的配置事实：设置了默认执行节点的项目仍可能指向已删除的节点，
+ * 配置了缓存类型的项目也可能从未挂载过缓存卷。
+ */
+export type OverviewProjectCountsResponse = {
+  /** 未删除的项目总数 */
+  total: number;
+  /** 设置了默认执行节点的项目数量 */
+  with_default_host: number;
+  /** 配置了至少一种缓存类型的项目数量 */
+  with_caches: number;
+};
+
+/**
  * 任务状态。
  *
  * 取值与 Go 端 `domain.TaskStatus` 完全一致，不在前端维护第二套状态名称。
